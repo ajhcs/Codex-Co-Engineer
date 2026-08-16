@@ -19,5 +19,8 @@ jobs:
       - run: npm install --global @modelcontextprotocol/inspector@2.2.0
       - run: node scripts/validate-release.mjs
       - run: npm --prefix plugins/plumbob-harness-control test
+      - run: npm --prefix plugins/cursor-cloud-control test
       - run: node scripts/inspector-preflight.mjs
+      - run: node scripts/cursor-inspector-preflight.mjs
       - run: npm pack ./plugins/plumbob-harness-control --dry-run --json
+      - run: npm pack ./plugins/cursor-cloud-control --dry-run --json

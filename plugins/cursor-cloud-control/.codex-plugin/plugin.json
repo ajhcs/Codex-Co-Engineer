@@ -1,0 +1,38 @@
+{
+  "name": "cursor-cloud-control",
+  "version": "0.1.0",
+  "description": "A typed, safety-first control plane for Cursor Cloud Agents API v1.",
+  "author": {
+    "name": "Plumbob"
+  },
+  "license": "MIT",
+  "keywords": [
+    "cursor",
+    "cloud-agents",
+    "cloud-agents-api",
+    "mcp",
+    "control-plane",
+    "safety"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cursor Cloud Control",
+    "shortDescription": "Safely operate Cursor Cloud Agents.",
+    "longDescription": "Use a typed MCP control plane for Cursor Cloud Agents API v1: discover resources, create and follow up runs, stream bounded progress, inspect usage and artifacts, cancel runs, and archive or delete agents with explicit safety barriers.",
+    "developerName": "Plumbob",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Show Cursor Cloud Control status.",
+      "Discover Cursor models and repositories.",
+      "Create a plan-mode Cursor Cloud Agent with safe defaults.",
+      "Monitor a Cursor run through bounded SSE or polling."
+    ],
+    "brandColor": "#2D2D2D"
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -4,6 +4,7 @@ import { access, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVER_IDENTITY } from '../plugins/plumbob-harness-control/mcp/preflight.mjs';
+import { SERVER_IDENTITY as CURSOR_SERVER_IDENTITY } from '../plugins/cursor-cloud-control/mcp/server.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const required = [
@@ -14,7 +15,13 @@ const required = [
   'docs/release.md', 'docs/target-contract.md',
   'plugins/plumbob-harness-control/.codex-plugin/plugin.json',
   'plugins/plumbob-harness-control/.mcp.json',
-  'scripts/inspector-preflight.mjs', 'scripts/target-fingerprint.mjs',
+  'plugins/cursor-cloud-control/.codex-plugin/plugin.json',
+  'plugins/cursor-cloud-control/.mcp.json',
+  'plugins/cursor-cloud-control/package.json',
+  'plugins/cursor-cloud-control/README.md',
+  'plugins/cursor-cloud-control/mcp/server.mjs',
+  'plugins/cursor-cloud-control/skills/control-cursor-cloud-agents/SKILL.md',
+  'scripts/inspector-preflight.mjs', 'scripts/cursor-inspector-preflight.mjs', 'scripts/target-fingerprint.mjs',
 ];
 for (const relative of required) await access(path.join(ROOT, relative));
 
@@ -22,10 +29,16 @@ const manifest = JSON.parse(await readFile(path.join(ROOT, 'plugins/plumbob-harn
 const packageJson = JSON.parse(await readFile(path.join(ROOT, 'plugins/plumbob-harness-control/package.json'), 'utf8'));
 const configurationSchema = JSON.parse(await readFile(path.join(ROOT, 'config/configuration.schema.json'), 'utf8'));
 const configurationExample = JSON.parse(await readFile(path.join(ROOT, 'config/configuration.example.json'), 'utf8'));
+const cursorManifest = JSON.parse(await readFile(path.join(ROOT, 'plugins/cursor-cloud-control/.codex-plugin/plugin.json'), 'utf8'));
+const cursorPackage = JSON.parse(await readFile(path.join(ROOT, 'plugins/cursor-cloud-control/package.json'), 'utf8'));
 if (manifest.version !== packageJson.version || packageJson.version !== SERVER_IDENTITY.version) {
   throw new Error('Manifest, package, and MCP server versions must match.');
 }
 if (manifest.interface.displayName !== 'Codex-Co-Engineer') throw new Error('Public display name mismatch.');
+if (cursorManifest.version !== cursorPackage.version || cursorPackage.version !== CURSOR_SERVER_IDENTITY.version) {
+  throw new Error('Cursor manifest, package, and MCP server versions must match.');
+}
+if (cursorManifest.interface.displayName !== 'Cursor Cloud Control') throw new Error('Cursor public display name mismatch.');
 for (const section of ['transport', 'runtime', 'credentials', 'target', 'deadlines']) {
   if (configurationSchema.properties?.[section]?.additionalProperties !== false) {
     throw new Error(`Configuration schema section ${section} must reject unknown fields.`);

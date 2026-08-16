@@ -11,3 +11,8 @@ The release gate runs dependency-free validation, the Node test suite, a real
 MCP Inspector preflight, and an npm package inventory. A retry does not erase a
 first-pass failure.
 
+The candidate also validates and tests `plugins/cursor-cloud-control`, runs its
+focused stdio MCP preflight without a credential or network request, and checks
+its npm dry-run inventory. The existing Co-Engineer inspector remains
+unchanged because its target contract is intentionally specific to that
+plugin.

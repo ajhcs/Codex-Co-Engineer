@@ -1,0 +1,23 @@
+{
+  "name": "cursor-cloud-control",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Cursor Cloud Control: a typed MCP control plane for Cursor Cloud Agents API v1.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "type": "module",
+  "files": [
+    ".codex-plugin",
+    ".mcp.json",
+    "README.md",
+    "mcp",
+    "skills",
+    "test",
+    "package.json"
+  ],
+  "scripts": {
+    "test": "node --no-warnings --test"
+  }
+}

@@ -38,3 +38,21 @@ repository contents, or unredacted payloads.
 
 If an invariant is violated, stop using the affected checkout, preserve only
 the minimum redacted evidence, and report it privately.
+
+## Cursor Cloud Control boundary
+
+The sibling `cursor-cloud-control` plugin sends explicitly selected prompts,
+repository references, model settings, and requested run inputs to the
+administrator-selected Cursor Cloud Agents API origin. Its default origin is
+the official `https://api.cursor.com` service; HTTP overrides are accepted only
+for loopback or `.test` test origins. It does not expose a generic HTTP or
+shell tool.
+
+Cursor Cloud Control credentials are process-level only (`CURSOR_API_KEY` or a
+protected owner-only config file). Its ledger stores request/configuration
+hashes and opaque lifecycle IDs, never prompt text, image bytes, environment
+variable values, MCP credentials, or full transcripts. Cloud artifacts are
+untrusted: downloads require an administrator-configured root, reject
+traversal and symlink escape, default to no overwrite, and are never executed.
+Permanent agent deletion is irreversible and requires an exact ID-bound
+confirmation value; archive is the reversible alternative.

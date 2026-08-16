@@ -25,3 +25,12 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 
 Future changes should document protocol, target-contract, lifecycle, and
 compatibility effects before implementation details.
+
+### Added
+
+- Cursor Cloud Control plugin with typed Cursor Cloud Agents API v1 lifecycle,
+  bounded SSE/polling, usage, artifact, and archive/delete operations.
+- Owner-only credential handling, durable mutation ledger, redacted receipts,
+  and artifact path/overwrite protections.
+- Cursor MCP preflight, plugin validation, unit coverage, and package inventory
+  checks alongside the existing Co-Engineer release gate.
