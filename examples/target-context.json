@@ -1,0 +1,12 @@
+{
+  "schema_version": "codex-co-engineer.target.v1",
+  "working_directory": "/absolute/path/to/local/checkouts/example",
+  "expected_git_root": "/absolute/path/to/local/checkouts/example",
+  "expected_head": "0123456789abcdef0123456789abcdef01234567",
+  "allowed_paths": [
+    "src",
+    "tests"
+  ],
+  "role": "review",
+  "expected_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

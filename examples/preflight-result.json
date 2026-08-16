@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "target_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "resolved_workspace": "/absolute/path/to/dsh-runtime-workspace",
+  "resolved_cwd": "/absolute/path/to/local/checkouts/example",
+  "configuration_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "transport": "stdio",
+  "protocol_version": "2025-11-25",
+  "server_identity": {
+    "name": "plumbob-harness-control",
+    "display_name": "Codex-Co-Engineer",
+    "version": "1.0.0"
+  },
+  "available_tools": ["status", "runtime", "run", "jobs", "cancel"]
+}

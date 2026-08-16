@@ -1,0 +1,11 @@
+interface:
+  display_name: "Codex-Co-Engineer"
+  short_description: "Control target-bound DeepSeek jobs from Codex"
+  default_prompt: "Use $control-plumbob-agents to preflight a target and show Codex-Co-Engineer status."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "plumbob-harness-control"
+      description: "Bounded target, lifecycle, and monitoring control for the standalone DeepSeek Harness runtime"
+policy:
+  allow_implicit_invocation: true

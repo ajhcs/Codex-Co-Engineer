@@ -1,0 +1,25 @@
+{
+  "name": "plumbob-harness-control",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Codex-Co-Engineer: a bounded MCP control plane for DeepSeek Harness jobs.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "type": "module",
+  "files": [
+    ".codex-plugin",
+    ".mcp.json",
+    "README.md",
+    "assets",
+    "bin",
+    "mcp",
+    "skills",
+    "package.json"
+  ],
+  "scripts": {
+    "test": "node --no-warnings --test",
+    "validate:release": "node ../../scripts/validate-release.mjs"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "./configuration.schema.json",
+  "schema_version": "codex-co-engineer.config.v1",
+  "transport": {
+    "kind": "stdio",
+    "protocol_versions": ["2025-11-25", "2024-11-05"]
+  },
+  "runtime": {
+    "workspace": "/absolute/path/to/dsh-runtime-workspace",
+    "state_directory": "${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer",
+    "allowed_roots": ["/absolute/path/to/local/checkouts"],
+    "enable_prime_agent": false
+  },
+  "credentials": {
+    "api_key_env": "MODEL_API_KEY",
+    "api_key_file_env": "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE"
+  },
+  "target": {
+    "schema_version": "codex-co-engineer.target.v1",
+    "mode": "explicit",
+    "working_directory": "/absolute/path/to/local/checkouts/example",
+    "expected_git_root": "/absolute/path/to/local/checkouts/example",
+    "expected_head": "0123456789abcdef0123456789abcdef01234567",
+    "allowed_paths": ["src", "tests"],
+    "role": "review",
+    "expected_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "deadlines": {
+    "heartbeat_seconds": 15,
+    "absolute_timeout_seconds": 3600
+  }
+}

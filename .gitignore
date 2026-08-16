@@ -1,0 +1,52 @@
+# Public release boundary: these paths belong to a private local checkout.
+Secrets/
+prime-intellect-lab/
+docs/research/
+
+# Codex and local orchestration state.
+.codex/*
+!.codex/release-gate.toml
+.agents/
+.serena/
+.claude/
+.cursor/
+.opencode/
+.prime/
+.dsh/
+state/
+logs/
+outputs/
+**/.codex-state/
+**/.control-state/
+
+# Credentials and environment files. Keep examples in config/ instead.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.secrets.*
+
+# Generated runtimes and build/test output.
+**/node_modules/
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/coverage/
+**/dist/
+**/build/
+*.log
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,29 @@
+version = 1
+authority = "local-exact-tree"
+
+[[stages]]
+name = "release-validation"
+kind = "preflight"
+command = ["node", "scripts/validate-release.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 60
+
+[[stages]]
+name = "unit"
+kind = "unit_tests"
+command = ["npm", "--prefix", "plugins/plumbob-harness-control", "test"]
+timeout_seconds = 120
+quiet_seconds = 15
+
+[[stages]]
+name = "mcp-inspector"
+kind = "integration_tests"
+command = ["node", "scripts/inspector-preflight.mjs"]
+timeout_seconds = 60
+quiet_seconds = 15
+
+[[stages]]
+name = "package-inventory"
+kind = "artifact_verification"
+command = ["npm", "--cache", "/tmp/codex-co-engineer-npm-cache", "pack", "./plugins/plumbob-harness-control", "--dry-run", "--json"]
+timeout_seconds = 60

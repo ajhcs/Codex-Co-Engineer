@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex-Co-Engineer configuration",
+  "type": "object",
+  "required": ["schema_version", "transport", "runtime", "credentials", "target", "deadlines"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": "codex-co-engineer.config.v1" },
+    "transport": {
+      "type": "object",
+      "required": ["kind", "protocol_versions"],
+      "properties": {
+        "kind": { "const": "stdio" },
+        "protocol_versions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["2025-11-25", "2024-11-05"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["workspace", "state_directory", "allowed_roots", "enable_prime_agent"],
+      "properties": {
+        "workspace": { "type": "string", "minLength": 1 },
+        "state_directory": { "type": "string", "minLength": 1 },
+        "allowed_roots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "enable_prime_agent": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "credentials": {
+      "type": "object",
+      "required": ["api_key_env", "api_key_file_env"],
+      "properties": {
+        "api_key_env": { "const": "MODEL_API_KEY" },
+        "api_key_file_env": { "const": "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE" }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "mode",
+        "working_directory",
+        "expected_git_root",
+        "expected_head",
+        "allowed_paths",
+        "role",
+        "expected_fingerprint"
+      ],
+      "properties": {
+        "schema_version": { "const": "codex-co-engineer.target.v1" },
+        "mode": { "const": "explicit" },
+        "working_directory": { "type": "string", "pattern": "^/", "minLength": 2 },
+        "expected_git_root": { "type": "string", "pattern": "^/", "minLength": 2 },
+        "expected_head": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "role": { "enum": ["review", "implement", "verify"] },
+        "expected_fingerprint": {
+          "type": "string",
+          "pattern": "^(sha256:)?[0-9a-fA-F]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "deadlines": {
+      "type": "object",
+      "required": ["heartbeat_seconds", "absolute_timeout_seconds"],
+      "properties": {
+        "heartbeat_seconds": { "type": "integer", "minimum": 10, "maximum": 30 },
+        "absolute_timeout_seconds": { "type": "integer", "minimum": 60, "maximum": 21600 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

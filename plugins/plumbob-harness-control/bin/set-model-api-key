@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_home="${XDG_CONFIG_HOME:-${HOME:?}/.config}"
+default_file="${config_home}/codex-co-engineer/model-api-key"
+secret_file="${CODEX_CO_ENGINEER_MODEL_API_KEY_FILE:-${PLUMBOB_HARNESS_MODEL_API_KEY_FILE:-${default_file}}}"
+secret_dir="$(dirname -- "${secret_file}")"
+
+umask 077
+mkdir -p "${secret_dir}"
+temporary_file="$(mktemp "${secret_file}.tmp.XXXXXX")"
+cleanup() {
+  rm -f -- "${temporary_file}"
+}
+trap cleanup EXIT
+
+IFS= read -r -s -p "Model API key: " model_api_key
+printf '\n'
+if [[ ${#model_api_key} -lt 10 || "${model_api_key}" =~ [[:space:]] ]]; then
+  printf 'The key was empty, too short, or contained whitespace. Nothing was changed.\n' >&2
+  exit 1
+fi
+
+printf '%s\n' "${model_api_key}" > "${temporary_file}"
+chmod 600 "${temporary_file}"
+mv -- "${temporary_file}" "${secret_file}"
+chmod 600 "${secret_file}"
+trap - EXIT
+unset model_api_key
+printf 'Saved the provider key to the configured user-secret path.\n'
