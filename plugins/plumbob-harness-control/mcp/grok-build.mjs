@@ -1,0 +1,432 @@
+import { spawnSync } from 'node:child_process';
+
+/**
+ * The Grok Build CLI is intentionally kept behind this small adapter.  The
+ * control plane passes an argv vector to spawn(2); it never joins these
+ * values into a shell command.
+ */
+export const GROK_OUTPUT_FORMATS = Object.freeze([
+  'plain',
+  'json',
+  'streaming-json',
+  'streaming-messages-json',
+]);
+export const GROK_REASONING_EFFORTS = Object.freeze([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+export const GROK_SANDBOX_PROFILES = Object.freeze([
+  'off',
+  'workspace',
+  'devbox',
+  'read-only',
+  'strict',
+]);
+export const GROK_PERMISSION_MODES = Object.freeze([
+  'default',
+  'acceptEdits',
+  'auto',
+  'dontAsk',
+  'bypassPermissions',
+  'plan',
+]);
+
+const MAX_TEXT = 8000;
+const MAX_TOKEN = 128;
+const MAX_RULE = 240;
+const MAX_RULES = 32;
+const MAX_JSON_SCHEMA_BYTES = 16_384;
+const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,127}$/;
+const SAFE_RULE = /^[^\u0000-\u001f\u007f]{1,240}$/;
+const CONTROL_FREE_TEXT = /^[^\u0000-\u001f\u007f]{1,8000}$/;
+const WRITE_WORDS = /(?:^|[\s:()[\],])(?:bash|shell|exec|command|edit|write|delete|remove|move|copy|mkdir|apply_patch|patch)(?:$|[\s:()[\],])/i;
+const READ_ONLY_TOOLS = new Set([
+  'read',
+  'grep',
+  'glob',
+  'ls',
+  'find',
+  'webfetch',
+  'websearch',
+]);
+
+export class GrokBuildError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function invalid(field, message) {
+  throw new GrokBuildError('invalid_grok_configuration', `${field} ${message}`);
+}
+
+function boundedText(value, field, maximum = MAX_TEXT) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > maximum) {
+    invalid(field, `must contain 1 to ${maximum} characters.`);
+  }
+  const pattern = maximum <= MAX_RULE ? SAFE_RULE : CONTROL_FREE_TEXT;
+  if (!pattern.test(value)) invalid(field, 'contains a control character or invalid empty value.');
+  if (value.startsWith('-')) invalid(field, 'must not start with a dash.');
+  return value;
+}
+
+function optionalText(value, field, maximum = MAX_TOKEN) {
+  if (value === undefined || value === null) return null;
+  return boundedText(value, field, maximum);
+}
+
+function list(value, field) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_RULES) {
+    invalid(field, `must contain at most ${MAX_RULES} values.`);
+  }
+  const result = value.map((item, index) => {
+    if (typeof item !== 'string' || item.length < 1 || item.length > MAX_RULE
+      || !SAFE_RULE.test(item) || item.startsWith('-')) {
+      invalid(`${field}[${index}]`, `must be 1 to ${MAX_RULE} characters without control characters or a leading dash.`);
+    }
+    return item;
+  });
+  if (new Set(result).size !== result.length) invalid(field, 'must not contain duplicates.');
+  return result;
+}
+
+function tools(value, field) {
+  const result = list(value, field);
+  for (const item of result) {
+    if (!SAFE_TOKEN.test(item)) invalid(`${field} item`, 'contains unsupported characters.');
+  }
+  return result;
+}
+
+function normalizeJsonSchema(value) {
+  if (typeof value === 'boolean') return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    invalid('json_schema', 'must be a JSON Schema object or boolean.');
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    invalid('json_schema', 'must be JSON-serializable.');
+  }
+  if (!serialized || Buffer.byteLength(serialized, 'utf8') > MAX_JSON_SCHEMA_BYTES) {
+    invalid('json_schema', `must serialize to at most ${MAX_JSON_SCHEMA_BYTES} bytes.`);
+  }
+  try {
+    return JSON.parse(serialized);
+  } catch {
+    invalid('json_schema', 'must be JSON-serializable.');
+  }
+}
+
+function hasWriteCapability(value) {
+  return WRITE_WORDS.test(value);
+}
+
+function readOnlyToolList(value) {
+  return value.every((item) => READ_ONLY_TOOLS.has(item.toLowerCase().replaceAll('_', '')));
+}
+
+/**
+ * Validate and normalize the Grok-specific MCP fields.  The returned object
+ * is safe to persist in a receipt (it contains no prompt or credential).
+ */
+export function normalizeGrokConfiguration(input = {}, role = 'review') {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    invalid('grok configuration', 'must be an object.');
+  }
+  const allowed = new Set([
+    'model',
+    'output_format',
+    'json_schema',
+    'verbatim',
+    'include_partial_messages',
+    'session_id',
+    'resume',
+    'continue_session',
+    'reasoning_effort',
+    'max_turns',
+    'sandbox_profile',
+    'permission_mode',
+    'rules',
+    'allowed_tools',
+    'disallowed_tools',
+    'allow_rules',
+    'deny_rules',
+    'always_approve',
+    'no_auto_update',
+    'no_plan',
+    'no_subagents',
+    'no_memory',
+    'disable_web_search',
+    'experimental_memory',
+    'fork_session',
+  ]);
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) invalid(`grok.${key}`, 'is not supported.');
+  }
+
+  const model = optionalText(input.model, 'model', 200);
+  const hasJsonSchema = Object.hasOwn(input, 'json_schema');
+  const jsonSchema = hasJsonSchema ? normalizeJsonSchema(input.json_schema) : null;
+  const requestedOutputFormat = input.output_format ?? null;
+  const outputFormat = requestedOutputFormat ?? (jsonSchema !== null ? 'json' : 'streaming-json');
+  if (!GROK_OUTPUT_FORMATS.includes(outputFormat)) {
+    invalid('output_format', `must be one of ${GROK_OUTPUT_FORMATS.join(', ')}.`);
+  }
+  if (jsonSchema !== null && outputFormat !== 'json') {
+    invalid('output_format', 'must be json when json_schema is provided.');
+  }
+  const sessionId = optionalText(input.session_id, 'session_id', MAX_TOKEN);
+  if (sessionId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
+    invalid('session_id', 'must be a valid UUID for a new Grok session.');
+  }
+  const resume = input.resume === undefined || input.resume === null
+    ? null
+    : input.resume === true
+      ? true
+      : input.resume === false
+        ? invalid('resume', 'must be true or a session ID/title string when provided.')
+        : optionalText(input.resume, 'resume', MAX_TOKEN);
+  const continueSession = input.continue_session === true;
+  if (input.continue_session !== undefined && typeof input.continue_session !== 'boolean') {
+    invalid('continue_session', 'must be a boolean.');
+  }
+  const forkSession = input.fork_session === true;
+  if (sessionId !== null && (resume !== null || continueSession) && !forkSession) {
+    invalid('session_id', 'can combine with resume or continue_session only when fork_session is true.');
+  }
+  if (resume !== null && continueSession) {
+    invalid('resume', 'cannot be combined with continue_session.');
+  }
+  const reasoningEffort = input.reasoning_effort ?? null;
+  if (reasoningEffort !== null && !GROK_REASONING_EFFORTS.includes(reasoningEffort)) {
+    invalid('reasoning_effort', `must be one of ${GROK_REASONING_EFFORTS.join(', ')}.`);
+  }
+  const maxTurns = input.max_turns === undefined || input.max_turns === null
+    ? null
+    : input.max_turns;
+  if (maxTurns !== null && (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 100)) {
+    invalid('max_turns', 'must be an integer from 1 to 100.');
+  }
+  const sandboxProfile = input.sandbox_profile ?? null;
+  if (sandboxProfile !== null && !GROK_SANDBOX_PROFILES.includes(sandboxProfile)) {
+    invalid('sandbox_profile', `must be one of ${GROK_SANDBOX_PROFILES.join(', ')}; custom profiles are not verifiable by the connector.`);
+  }
+  const permissionMode = input.permission_mode ?? null;
+  if (permissionMode !== null && !GROK_PERMISSION_MODES.includes(permissionMode)) {
+    invalid('permission_mode', `must be one of ${GROK_PERMISSION_MODES.join(', ')}.`);
+  }
+  const rules = input.rules === undefined || input.rules === null
+    ? null
+    : boundedText(input.rules, 'rules', MAX_TEXT);
+  const allowedTools = tools(input.allowed_tools, 'allowed_tools');
+  const disallowedTools = tools(input.disallowed_tools, 'disallowed_tools');
+  const allowRules = list(input.allow_rules, 'allow_rules');
+  const denyRules = list(input.deny_rules, 'deny_rules');
+  const alwaysApprove = input.always_approve === undefined ? false : input.always_approve;
+  if (typeof alwaysApprove !== 'boolean') invalid('always_approve', 'must be a boolean.');
+  const noAutoUpdate = input.no_auto_update === undefined ? true : input.no_auto_update;
+  if (typeof noAutoUpdate !== 'boolean') invalid('no_auto_update', 'must be a boolean.');
+  const bools = [
+    'no_plan', 'no_subagents', 'no_memory', 'disable_web_search',
+    'experimental_memory', 'fork_session', 'verbatim', 'include_partial_messages',
+  ];
+  for (const field of bools) {
+    if (input[field] !== undefined && typeof input[field] !== 'boolean') invalid(field, 'must be a boolean.');
+  }
+  if (input.experimental_memory === true && input.no_memory === true) {
+    invalid('experimental_memory', 'cannot be combined with no_memory.');
+  }
+  const includePartialMessages = input.include_partial_messages === true;
+  if (includePartialMessages && outputFormat !== 'streaming-messages-json') {
+    invalid('include_partial_messages', 'is only valid with output_format=streaming-messages-json.');
+  }
+  const noPlan = input.no_plan === true;
+  if (forkSession && resume === null && !continueSession) {
+    invalid('fork_session', 'requires resume or continue_session.');
+  }
+
+  const effectiveRole = role ?? 'review';
+  if (!['review', 'verify', 'implement'].includes(effectiveRole)) invalid('role', 'is unsupported.');
+  const requestedSandbox = sandboxProfile;
+  if (effectiveRole === 'review' || effectiveRole === 'verify') {
+    if (noPlan) {
+      invalid('no_plan', 'review and verify roles must retain the forced plan policy.');
+    }
+    if (alwaysApprove || ['acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'].includes(permissionMode)) {
+      invalid('permission_mode', 'read-only roles cannot enable write-capable or automatic approval modes.');
+    }
+    if (requestedSandbox && requestedSandbox !== 'read-only') {
+      invalid('sandbox_profile', 'review and verify roles require the read-only sandbox; strict still permits CWD writes.');
+    }
+    if (allowedTools.length > 0 && !readOnlyToolList(allowedTools)) {
+      invalid('allowed_tools', 'read-only roles may only allow read-only tools.');
+    }
+    if (allowRules.some(hasWriteCapability)) {
+      invalid('allow_rules', 'read-only roles cannot allow write-capable tools or commands.');
+    }
+  } else {
+    if (['dontAsk', 'bypassPermissions'].includes(permissionMode)) {
+      invalid('permission_mode', 'implement roles cannot bypass the bounded permission policy.');
+    }
+    if (requestedSandbox === 'off' || requestedSandbox === 'devbox') {
+      invalid('sandbox_profile', 'implement roles cannot widen the bounded workspace sandbox.');
+    }
+  }
+  const effectiveSandbox = effectiveRole === 'review' || effectiveRole === 'verify'
+    ? 'read-only'
+    : requestedSandbox ?? 'workspace';
+  const effectivePermission = effectiveRole === 'review' || effectiveRole === 'verify'
+    ? 'plan'
+    : permissionMode ?? 'default';
+
+  return Object.freeze({
+    model,
+    output_format: outputFormat,
+    json_schema: jsonSchema,
+    verbatim: input.verbatim === true,
+    include_partial_messages: includePartialMessages,
+    session_id: sessionId,
+    resume,
+    continue_session: continueSession,
+    reasoning_effort: reasoningEffort,
+    max_turns: maxTurns,
+    sandbox_profile: effectiveSandbox,
+    permission_mode: effectivePermission,
+    rules,
+    allowed_tools: allowedTools,
+    disallowed_tools: disallowedTools,
+    allow_rules: allowRules,
+    deny_rules: denyRules,
+    always_approve: alwaysApprove,
+    no_auto_update: noAutoUpdate,
+    no_plan: noPlan,
+    no_subagents: input.no_subagents === true,
+    no_memory: input.no_memory === true,
+    disable_web_search: input.disable_web_search === true,
+    experimental_memory: input.experimental_memory === true,
+    fork_session: forkSession,
+    role: effectiveRole,
+  });
+}
+
+function addFlag(args, flag, value) {
+  if (value === undefined || value === null || value === false) return;
+  if (value === true) args.push(flag);
+  else args.push(flag, String(value));
+}
+
+/** Build the exact, shell-free argv passed to the official grok executable. */
+export function buildGrokArgs({ prompt, cwd, configuration }) {
+  if (typeof prompt !== 'string' || prompt.length < 1) throw new TypeError('prompt is required.');
+  if (typeof cwd !== 'string' || cwd.length < 1) throw new TypeError('cwd is required.');
+  if (/[\u0000\u007f]/.test(prompt)) throw new TypeError('prompt contains an unsupported control character.');
+  if (/[\u0000\u007f]/.test(cwd)) throw new TypeError('cwd contains an unsupported control character.');
+  const requestedRole = configuration?.role;
+  const normalizedInput = configuration && typeof configuration === 'object'
+    ? Object.fromEntries(Object.entries(configuration)
+      .filter(([key, value]) => key !== 'role' && !(key === 'json_schema' && value === null)))
+    : configuration;
+  const config = normalizeGrokConfiguration(normalizedInput, requestedRole ?? 'review');
+  const args = [];
+  if (config.no_auto_update) args.push('--no-auto-update');
+  args.push('-p', prompt, '--cwd', cwd, '--output-format', config.output_format);
+  if (config.json_schema !== null) args.push('--json-schema', JSON.stringify(config.json_schema));
+  if (config.verbatim) args.push('--verbatim');
+  if (config.include_partial_messages) args.push('--include-partial-messages');
+  addFlag(args, '-m', config.model);
+  addFlag(args, '-s', config.session_id);
+  if (config.resume !== null) addFlag(args, '--resume', config.resume);
+  if (config.continue_session) args.push('--continue');
+  if (config.fork_session) args.push('--fork-session');
+  addFlag(args, '--reasoning-effort', config.reasoning_effort);
+  addFlag(args, '--max-turns', config.max_turns);
+
+  const role = config.role;
+  const sandbox = config.sandbox_profile
+    ?? (role === 'implement' ? 'workspace' : 'read-only');
+  args.push('--sandbox', sandbox);
+  const permission = role === 'implement'
+    ? (config.permission_mode ?? 'default')
+    : 'plan';
+  args.push('--permission-mode', permission);
+  if (config.always_approve && role === 'implement') args.push('--always-approve');
+  addFlag(args, '--rules', config.rules);
+  if (config.allowed_tools.length > 0) args.push('--tools', config.allowed_tools.join(','));
+  if (config.disallowed_tools.length > 0) args.push('--disallowed-tools', config.disallowed_tools.join(','));
+  for (const rule of config.allow_rules) args.push('--allow', rule);
+  for (const rule of config.deny_rules) args.push('--deny', rule);
+  if (config.no_plan) args.push('--no-plan');
+  if (config.no_subagents) args.push('--no-subagents');
+  if (config.no_memory) args.push('--no-memory');
+  if (config.disable_web_search) args.push('--disable-web-search');
+  if (config.experimental_memory) args.push('--experimental-memory');
+  return args;
+}
+
+export function grokVersionProbe(command, cwd, env = process.env) {
+  const result = spawnSync(command, ['--version'], {
+    cwd,
+    env,
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // Some sandboxed hosts attach an EPERM diagnostic even when the child ran
+  // to completion and returned status 0. A successful exit plus version
+  // output is authoritative; genuine spawn failures have no successful exit.
+  if (result.status === 0) {
+    return {
+      executable_state: 'installed',
+      version: output || null,
+      exit_code: 0,
+      detail: null,
+    };
+  }
+  if (result.error?.code === 'ENOENT') {
+    return { executable_state: 'missing', version: null, exit_code: null, detail: 'grok executable was not found on PATH.' };
+  }
+  if (result.error) {
+    return { executable_state: 'unavailable', version: null, exit_code: result.status ?? null, detail: result.error.message };
+  }
+  return {
+    executable_state: 'unavailable',
+    version: output || null,
+    exit_code: result.status,
+    detail: output || 'grok --version failed.',
+  };
+}
+
+/**
+ * Parse only explicit failures from streaming-json.  Grok has intentionally
+ * left event names extensible; unknown and incomplete records are retained in
+ * the bounded log and do not turn a successful process into an adapter error.
+ */
+export function grokBuildFailure(text) {
+  let failure = null;
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('{')) continue;
+    let event;
+    try { event = JSON.parse(trimmed); } catch { continue; }
+    const error = event?.error ?? event?.failure ?? event?.exception;
+    const status = String(event?.status ?? event?.state ?? event?.type ?? '').toLowerCase();
+    if (error) {
+      const detail = typeof error === 'string' ? error : error.message ?? error.detail ?? JSON.stringify(error);
+      failure ??= String(detail).slice(0, 2000);
+    } else if (status === 'error' || status === 'failed' || status === 'failure' || status === 'exception'
+      || status === 'fatal' || status.endsWith('.error') || status.endsWith('_error')) {
+      const detail = event.message ?? event.detail ?? event.reason ?? status;
+      failure ??= String(detail).slice(0, 2000);
+    }
+  }
+  return failure;
+}

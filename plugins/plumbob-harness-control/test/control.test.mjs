@@ -85,6 +85,22 @@ test('DeepSeek rejects Prime-only inputs instead of silently ignoring them', asy
   );
 });
 
+test('non-Grok runs reject Grok-only fields instead of silently ignoring them', async () => {
+  const { dispatchControl, ToolError } = await import(`../mcp/control.mjs?grok-fields=${Date.now()}`);
+  await assert.rejects(
+    dispatchControl('run', {
+      schema_version: 'codex-co-engineer.config.v1',
+      kind: 'deepseek_agent',
+      request_id: 'grok-field-reject-1',
+      prompt: 'Bounded review prompt.',
+      model: 'grok-4.6',
+    }),
+    (error) => error instanceof ToolError
+      && error.code === 'invalid_argument'
+      && /model/.test(error.message),
+  );
+});
+
 test('explicit targets are not limited to the default workspace and allow implement contracts', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-target-policy-test-'));
   context.after(async () => rm(directory, { recursive: true, force: true }));

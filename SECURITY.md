@@ -32,9 +32,23 @@ repository contents, or unredacted payloads.
   exactly once.
 - Credentials arrive through the process environment or an external secret
   manager, never through tool arguments, prompts, logs, or Git.
+- Grok Build uses the official `grok` executable directly. `XAI_API_KEY` and
+  Grok OAuth/session state are process/user-home concerns; `MODEL_API_KEY` is
+  not required for `grok_build`, and no xAI credential is accepted in MCP
+  input.
 - Logs retain bounded redacted diagnostics, not full prompts or payloads.
 - Implement jobs are limited to declared relative paths and independently
   checked before a patch artifact is released.
+
+Grok role policy is fail-closed: review and verify force the `plan` permission
+mode plus the `read-only` sandbox (the official `strict` profile still permits
+CWD writes), reject automatic approval and write-capable allow rules, and
+reject every user option that would widen that read-only ceiling. Implement
+jobs reject the unbounded `off`/`devbox` sandboxes and bypass permission modes,
+use the bounded workspace sandbox by default, and remain subject to the final
+Git scope verifier. Even when an operator explicitly requests
+`--always-approve`, the verifier withholds a patch on any out-of-scope or
+read-only mutation.
 
 If an invariant is violated, stop using the affected checkout, preserve only
 the minimum redacted evidence, and report it privately.

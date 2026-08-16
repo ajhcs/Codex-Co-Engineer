@@ -481,3 +481,87 @@ test('detached runner permits scoped implement targets and records a patch artif
   assert.equal(job.patch_artifact, patchFile);
   assert.match(await readFile(patchFile, 'utf8'), /updated/);
 });
+
+test('grok runner invokes a fake executable with exact argv and OAuth-only environment', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-grok-runner-test-'));
+  const stateDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-grok-state-test-'));
+  context.after(async () => Promise.all([
+    rm(directory, { recursive: true, force: true }),
+    rm(stateDirectory, { recursive: true, force: true }),
+  ]));
+
+  assert.equal(spawnSync('git', ['init', '-q', directory]).status, 0);
+  await writeFile(path.join(directory, 'note.txt'), 'initial\n');
+  assert.equal(spawnSync('git', ['-C', directory, 'add', 'note.txt']).status, 0);
+  assert.equal(spawnSync('git', [
+    '-C', directory,
+    '-c', 'user.name=Codex-Co-Engineer Test',
+    '-c', 'user.email=codex-co-engineer@example.invalid',
+    'commit', '-qm', 'initial',
+  ]).status, 0);
+  const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const databaseFile = path.join(stateDirectory, 'control.sqlite3');
+  const logFile = path.join(stateDirectory, 'job.log');
+  const cancelFile = path.join(stateDirectory, 'job.cancel');
+  const specFile = path.join(stateDirectory, 'job.spec.json');
+  const argvFile = path.join(stateDirectory, 'argv.json');
+  const fake = path.join(stateDirectory, 'grok');
+  await writeFile(fake, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify({ argv: process.argv.slice(2), model: process.env.MODEL_API_KEY ?? null, xai: process.env.XAI_API_KEY ?? null }));
+console.log(JSON.stringify({ type: 'future_event', text: 'hello' }));
+console.log(JSON.stringify({ type: 'completion', status: 'completed' }));
+setTimeout(() => process.exit(0), 25);
+`, { mode: 0o755 });
+
+  const createdAt = new Date().toISOString();
+  const database = openStore(databaseFile);
+  insertJob(database, {
+    id: 'grok-runner-1234',
+    kind: 'grok_build',
+    status: 'queued',
+    summary: 'Grok argv test',
+    created_at: createdAt,
+    updated_at: createdAt,
+    log_file: logFile,
+    cancel_file: cancelFile,
+  });
+  database.close();
+  const prompt = 'single prompt with $(not-shell-expanded)';
+  await writeFile(specFile, JSON.stringify({
+    id: 'grok-runner-1234',
+    database_file: databaseFile,
+    log_file: logFile,
+    cancel_file: cancelFile,
+    command: fake,
+    args: ['--no-auto-update', '-p', prompt, '--cwd', directory, '--output-format', 'streaming-json'],
+    env: { XAI_API_KEY: 'xai-fake', FAKE_RECORD_FILE: argvFile },
+    cwd: directory,
+    timeout_seconds: 60,
+    kind: 'grok_build',
+    result_format: 'grok_streaming_json',
+    redactions: [prompt],
+    target_context: {
+      working_directory: directory,
+      expected_git_root: directory,
+      expected_head: head,
+      git_common_directory: path.join(directory, '.git'),
+      allowed_paths: ['.'],
+      role: 'review',
+    },
+  }));
+
+  const runner = spawn(process.execPath, ['--no-warnings', path.join(ROOT, 'mcp', 'runner.mjs'), specFile], {
+    env: { ...process.env, MODEL_API_KEY: 'model-secret', XAI_API_KEY: 'runner-xai-secret' },
+    stdio: 'ignore',
+  });
+  assert.equal(await new Promise((resolve) => runner.once('exit', resolve)), 0);
+  const completedStore = openStore(databaseFile);
+  const job = getStoredJob(completedStore, 'grok-runner-1234');
+  completedStore.close();
+  assert.equal(job.status, 'succeeded');
+  const recorded = JSON.parse(await readFile(argvFile, 'utf8'));
+  assert.deepEqual(recorded.argv, ['--no-auto-update', '-p', prompt, '--cwd', directory, '--output-format', 'streaming-json']);
+  assert.equal(recorded.model, null);
+  assert.equal(recorded.xai, 'xai-fake');
+});

@@ -23,5 +23,18 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- First-class `grok_build` run kind using the official Grok Build CLI directly
+  in noninteractive headless mode with typed, validated controls.
+- Grok model, output, session, reasoning, sandbox, permission, tool, and
+  bounded policy fields with role ceilings, streaming-log parsing, OAuth-aware
+  status diagnostics, and fake-CLI coverage.
+- Bounded typed JSON Schema structured output, exact prompt transport, and
+  partial Messages-format streaming controls; review/verify retain forced plan
+  mode.
+- Documentation for official installation/authentication prerequisites and the
+  deliberate ACP, worktree, prompt-file, and system-prompt-override omissions.
+
 Future changes should document protocol, target-contract, lifecycle, and
 compatibility effects before implementation details.

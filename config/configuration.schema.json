@@ -32,7 +32,8 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "enable_prime_agent": { "type": "boolean" }
+        "enable_prime_agent": { "type": "boolean" },
+        "grok_command": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },
@@ -41,7 +42,8 @@
       "required": ["api_key_env", "api_key_file_env"],
       "properties": {
         "api_key_env": { "const": "MODEL_API_KEY" },
-        "api_key_file_env": { "const": "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE" }
+        "api_key_file_env": { "const": "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE" },
+        "grok_api_key_env": { "const": "XAI_API_KEY" }
       },
       "additionalProperties": false
     },

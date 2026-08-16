@@ -1,10 +1,11 @@
 # Codex-Co-Engineer
 
 Codex-Co-Engineer is a public, Codex-first control plane for the standalone
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Codex is
-the chief engineer and operator; DeepSeek Harness is the bounded peer worker.
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the
+official [Grok Build CLI](https://docs.x.ai/build/cli/headless-scripting). Codex is
+the chief engineer and operator; these are bounded peer workers.
 Prime Agent and Prime Lab support are optional adapters, not required for the
-main release.
+main release. `grok_build` is a first-class target-bound headless run kind.
 
 The stable plugin and MCP identifier is `plumbob-harness-control`. The public
 product name is **Codex-Co-Engineer**. Keeping the technical identifier stable
@@ -30,7 +31,11 @@ The root ignore policy is intentionally fail-closed for `Secrets/`,
 ## Quick start
 
 1. Install Node.js 24 or newer.
-2. Install and configure DeepSeek Harness using its upstream documentation.
+2. Install and configure DeepSeek Harness using its upstream documentation when
+   using DeepSeek jobs. For Grok Build, install the official CLI and
+   authenticate it separately (`grok login` or device auth); the MCP server
+   never automates installation/login or accepts xAI credentials as tool
+   arguments.
 3. Clone this repository and register
    `plugins/plumbob-harness-control` as a local Codex plugin.
 4. Set the provider credential and runtime workspace in the MCP server
@@ -43,6 +48,7 @@ Example environment (replace placeholders locally; never commit the values):
 
 ```bash
 export MODEL_API_KEY='provided-by-your-secret-manager'
+export XAI_API_KEY='optional-xai-key-for-grok-cli'
 export CODEX_CO_ENGINEER_RUNTIME_WORKSPACE='/absolute/path/to/dsh-runtime-workspace'
 export CODEX_CO_ENGINEER_ALLOWED_ROOTS='/absolute/path/to/checkouts'
 export CODEX_CO_ENGINEER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer"
@@ -53,6 +59,18 @@ authority. A job must carry one strict target contract with an absolute cwd,
 expected Git root and HEAD, allowed paths, role, and caller-supplied expected
 fingerprint. Prompt-level `cd` is never authoritative, and an invalid
 explicit target never falls back to a default workspace.
+
+For Grok Build, the server invokes the configured `grok` executable directly
+(`CODEX_CO_ENGINEER_GROK_COMMAND` may select an administrator-approved binary)
+with typed model, session, reasoning, sandbox, permission, tool, and rules
+options. Headless prompts use `-p` (the official `--single` alias). It defaults to
+`--no-auto-update` and `streaming-json`; raw argv,
+shell strings, environment maps, prompt-file/prompt-JSON input,
+restore/worktree/ref controls, debug files, leader sockets, login/update
+commands, agent bundles, raw output schemas, and system-prompt overrides are
+not exposed. Bounded typed `json_schema` input is supported for structured JSON
+output; ACP (`grok agent stdio`) is documented but intentionally deferred until
+it can preserve the same target and lifecycle guarantees.
 
 ## Reliability contract
 

@@ -13,6 +13,7 @@ import {
   transitionJob,
   updateJob,
 } from './store.mjs';
+import { grokBuildFailure } from './grok-build.mjs';
 
 const specPath = process.argv[2];
 
@@ -39,6 +40,7 @@ function outputRedactions(spec) {
   const values = [
     ...(Array.isArray(spec.redactions) ? spec.redactions : []),
     process.env.MODEL_API_KEY ?? '',
+    process.env.XAI_API_KEY ?? '',
   ];
   const fragments = new Set();
   for (const value of values) {
@@ -507,7 +509,7 @@ async function main() {
       'LC_ALL',
       'TERM',
       'TMPDIR',
-      'MODEL_API_KEY',
+      ...(spec.kind === 'grok_build' ? ['XAI_API_KEY'] : ['MODEL_API_KEY']),
     ];
     const inheritedEnvironment = Object.fromEntries(
       inheritedNames
@@ -570,7 +572,10 @@ async function main() {
       || timedOutAt === null || !Number.isFinite(cancelTimestamp) || cancelTimestamp <= timedOutAt);
     const semanticError = spec.result_format === 'prime_agent_json' && !cancellationWins && !timedOut
       ? await primeAgentFailure(spec.log_file)
-      : null;
+      : (spec.result_format === 'grok_streaming_json' || spec.result_format === 'grok_json')
+        && !cancellationWins && !timedOut
+        ? grokBuildFailure((await readFile(spec.log_file, 'utf8').catch(() => '')).slice(-1_048_576))
+        : null;
     const bytes = await fileSize(spec.log_file);
     if (bytes !== lastLogBytes) {
       lastLogBytes = bytes;
