@@ -19,3 +19,8 @@ as `expected_target_fingerprint`. A mismatch is fatal.
 Prompts are task content only. A prompt-level `cd`, path, or claimed HEAD never
 changes target authority.
 
+This same contract applies to `grok_build`: the target cwd is passed as
+`--cwd`, the target preamble is included in the task prompt, and Grok's
+filesystem/permission settings cannot replace the connector's final Git scope
+verification. Review and verify are read-only; implement jobs may emit a patch
+only when every changed path remains under `allowed_paths`.

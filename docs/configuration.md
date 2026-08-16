@@ -19,7 +19,15 @@ input. Portable `CODEX_CO_ENGINEER_*` names are preferred. Legacy
 | `CODEX_CO_ENGINEER_DSH_COMMAND` | DSH executable name or absolute path. |
 | `CODEX_CO_ENGINEER_PRIME_COMMAND` | Optional Prime executable. |
 | `CODEX_CO_ENGINEER_PRIME_AGENT_COMMAND` | Optional Prime Agent executable. |
+| `CODEX_CO_ENGINEER_GROK_COMMAND` | Direct official Grok executable; defaults to `grok` and is passed without a shell. |
+| `XAI_API_KEY` | Optional xAI API key consumed by the official Grok CLI. OAuth/session state is owned by Grok under the normal user home. |
 
 Defaults follow `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, and `PATH`; no public code
 contains a personal home, workspace, or credential path.
 
+`grok_build` does not call `requireCredential()` for `MODEL_API_KEY`. The
+official CLI owns OAuth/session state; use `grok login` or device auth outside
+the MCP request, or set `XAI_API_KEY` in the daemon process environment. The
+daemon allowlist carries only this process-level credential and the explicit
+`CODEX_CO_ENGINEER_GROK_COMMAND`; no MCP field can set an executable, provider
+URL, environment map, or credential.

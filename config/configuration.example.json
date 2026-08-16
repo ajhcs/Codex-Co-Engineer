@@ -9,11 +9,13 @@
     "workspace": "/absolute/path/to/dsh-runtime-workspace",
     "state_directory": "${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer",
     "allowed_roots": ["/absolute/path/to/local/checkouts"],
-    "enable_prime_agent": false
+    "enable_prime_agent": false,
+    "grok_command": "grok"
   },
   "credentials": {
     "api_key_env": "MODEL_API_KEY",
-    "api_key_file_env": "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE"
+    "api_key_file_env": "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE",
+    "grok_api_key_env": "XAI_API_KEY"
   },
   "target": {
     "schema_version": "codex-co-engineer.target.v1",

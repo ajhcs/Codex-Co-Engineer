@@ -34,6 +34,11 @@ import {
   sha256Digest,
   targetIdentityDigest,
 } from './preflight.mjs';
+import {
+  buildGrokArgs,
+  grokVersionProbe,
+  normalizeGrokConfiguration,
+} from './grok-build.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const USER_HOME = process.env.HOME ?? '';
@@ -58,6 +63,19 @@ const PRIME_AGENT_MODELS = process.env.CODEX_CO_ENGINEER_PRIME_AGENT_MODELS
 const PRIME = process.env.CODEX_CO_ENGINEER_PRIME_COMMAND ?? 'prime';
 const DSH = process.env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
 const PRIME_AGENT = process.env.CODEX_CO_ENGINEER_PRIME_AGENT_COMMAND ?? 'prime-agent';
+const GROK = process.env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
+const GROK_ENVIRONMENT_NAMES = Object.freeze([
+  'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR',
+  'XAI_API_KEY',
+]);
+
+function grokEnvironment() {
+  return Object.fromEntries(
+    GROK_ENVIRONMENT_NAMES
+      .filter((name) => process.env[name] !== undefined)
+      .map((name) => [name, process.env[name]]),
+  );
+}
 const RUNNER = path.join(PLUGIN_ROOT, 'mcp', 'runner.mjs');
 const DEEPSEEK_LAUNCHER = path.join(PLUGIN_ROOT, 'mcp', 'deepseek-launcher.mjs');
 const WEB_HOST = '127.0.0.1';
@@ -164,7 +182,8 @@ function publicJobKind(kind) {
 }
 
 function isAgentJobKind(kind) {
-  return kind === 'deepseek_agent' || kind === 'dsh_agent' || kind === 'prime_agent';
+  return kind === 'deepseek_agent' || kind === 'dsh_agent'
+    || kind === 'prime_agent' || kind === 'grok_build';
 }
 
 function jobExecutionScope(job) {
@@ -726,14 +745,19 @@ async function portOpen() {
 let versionCache;
 function versions() {
   if (versionCache) return versionCache;
-  const run = (command, args) => {
-    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 5000 });
+  const run = (command, args, env = undefined) => {
+    const result = spawnSync(command, args, {
+      encoding: 'utf8',
+      timeout: 5000,
+      ...(env ? { env } : {}),
+    });
     return concise(result.stdout || result.stderr || 'unavailable', 80);
   };
   versionCache = {
     deepseek_harness: run(DSH, ['--version']),
     prime: run(PRIME, ['--version']),
     prime_agent: run(PRIME_AGENT, ['--version']),
+    grok: run(GROK, ['--version'], grokEnvironment()),
   };
   versionCache.compatible = {
     deepseek_harness: versionCache.deepseek_harness.includes(TESTED_DSH_VERSION),
@@ -910,6 +934,7 @@ async function statusTool(args) {
   const web = jobs.find((job) => job.kind === 'dsh_web' && ACTIVE_STATES.has(job.status));
   const listening = await portOpen();
   const detectedVersions = versions();
+  const grokStatus = grokVersionProbe(GROK, WORKSPACE, grokEnvironment());
   const deepseekConfigured = await exists(DSH_WRAPPER) && await exists(ENDPOINTS);
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
@@ -923,6 +948,23 @@ async function statusTool(args) {
       configured: deepseekConfigured,
       kind: 'deepseek_agent',
       version_compatible: detectedVersions.compatible.deepseek_harness && detectedVersions.compatible.prime,
+    },
+    grok_build: {
+      kind: 'grok_build',
+      availability: grokStatus.executable_state === 'missing'
+        ? 'missing'
+        : grokStatus.executable_state === 'installed'
+          ? 'installed'
+          : 'unavailable',
+      executable: GROK,
+      version: grokStatus.version,
+      executable_state: grokStatus.executable_state,
+      auth_state: 'unknown',
+      ready: false,
+      auth_note: grokStatus.executable_state === 'missing'
+        ? 'Install the official Grok Build CLI and authenticate it with `grok login` (or provide XAI_API_KEY) before dispatch.'
+        : 'Auth remains unknown in the default status path; call status with diagnostics=true to run the documented read-only `grok models` probe. Status never opens a browser or starts a coding request.',
+      api_key_available: Boolean(process.env.XAI_API_KEY),
     },
     targeting: {
       mode: configuredTargetRoots() ? 'administrator-allowlisted' : 'explicit-target-any-git-root',
@@ -954,6 +996,7 @@ async function statusTool(args) {
       prime_agent_configured: await exists(PRIME_AGENT_MODELS),
       prime_agent_enabled: PRIME_AGENT_ENABLED,
       prime_agent_model: 'meta-model-api/muse-spark-1.2-contributor',
+      grok_command: GROK,
     },
     versions: detectedVersions,
     jobs: {
@@ -965,9 +1008,45 @@ async function statusTool(args) {
     result.diagnostics = {
       prime_lab: await primeLabDoctor(),
       prime_agent: primeAgentDoctor(),
+      grok_build: grokAuthDoctor(),
     };
   }
   return result;
+}
+
+function grokAuthDoctor() {
+  const executable = grokVersionProbe(GROK, WORKSPACE, grokEnvironment());
+  if (executable.executable_state === 'missing') {
+    return {
+      ok: false,
+      auth_state: 'unavailable',
+      executable_state: 'missing',
+      note: 'Install the official Grok Build CLI before checking authentication.',
+    };
+  }
+  // `grok models` is the CLI's documented non-mutating availability/auth
+  // probe. It may perform a read-only provider request, but it never starts a
+  // coding session or invokes browser/device login.
+  const result = spawnSync(GROK, ['models'], {
+    cwd: WORKSPACE,
+    env: grokEnvironment(),
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+  const output = redactLog(concise(`${result.stdout ?? ''}\n${result.stderr ?? ''}`, 240));
+  const unauthenticated = /(?:login|auth|credential|unauthori[sz]ed|token)/i.test(output);
+  return {
+    ok: result.status === 0,
+    auth_state: result.status === 0 ? 'ready' : unauthenticated ? 'unauthenticated' : 'unknown',
+    executable_state: executable.executable_state,
+    exit_code: result.status,
+    detail: output || null,
+    note: result.status === 0
+      ? 'The official Grok models probe completed without starting a coding task.'
+      : unauthenticated
+        ? 'Authenticate with `grok login` or provide XAI_API_KEY; status never opens a browser.'
+        : 'Authentication could not be determined without starting a coding request.',
+  };
 }
 
 async function primeLabDoctor() {
@@ -1142,7 +1221,16 @@ function targetPreamble(target) {
   ].join('\n');
 }
 
-function agentConfiguration({ kind, id, prompt, timeoutSeconds, cwd, target, autonomy = null }) {
+function agentConfiguration({
+  kind,
+  id,
+  prompt,
+  timeoutSeconds,
+  cwd,
+  target,
+  autonomy = null,
+  grokConfiguration = null,
+}) {
   const configuration = {
     schema_version: CONFIG_SCHEMA_VERSION,
     kind,
@@ -1181,9 +1269,55 @@ function agentConfiguration({ kind, id, prompt, timeoutSeconds, cwd, target, aut
           : { continuations: 3, turns: 12, max_tokens: 80000 },
       }
       : {}),
+    ...(kind === 'grok_build' ? { grok_configuration: grokConfiguration } : {}),
   };
   configuration.configuration_digest = sha256Digest(configuration);
   return configuration;
+}
+
+const GROK_CONFIGURATION_FIELDS = new Set([
+  'model',
+  'output_format',
+  'json_schema',
+  'verbatim',
+  'include_partial_messages',
+  'session_id',
+  'resume',
+  'continue_session',
+  'reasoning_effort',
+  'max_turns',
+  'sandbox_profile',
+  'permission_mode',
+  'rules',
+  'allowed_tools',
+  'disallowed_tools',
+  'allow_rules',
+  'deny_rules',
+  'always_approve',
+  'no_auto_update',
+  'no_plan',
+  'no_subagents',
+  'no_memory',
+  'disable_web_search',
+  'experimental_memory',
+  'fork_session',
+]);
+
+function grokInput(args) {
+  return Object.fromEntries([...GROK_CONFIGURATION_FIELDS]
+    .filter((field) => Object.hasOwn(args, field))
+    .map((field) => [field, args[field]]));
+}
+
+function normalizeGrokForTool(args, role) {
+  try {
+    return normalizeGrokConfiguration(grokInput(args), role);
+  } catch (error) {
+    if (error?.code === 'invalid_grok_configuration') {
+      throw new ToolError(error.code, error.message);
+    }
+    throw error;
+  }
 }
 
 function preflightAllowedFields(args) {
@@ -1201,6 +1335,7 @@ function preflightAllowedFields(args) {
     'timeout_seconds',
     'target_context',
     'expected_target_fingerprint',
+    ...GROK_CONFIGURATION_FIELDS,
   ]);
   for (const field of Object.keys(args)) {
     if (!allowed.has(field)) {
@@ -1222,15 +1357,17 @@ async function preflightTool(args) {
   assertTargetFingerprint(expectedFingerprint, targetFingerprint);
 
   let kind = args.kind ?? 'preflight';
-  if (kind !== 'preflight' && !['deepseek_agent', 'prime_agent', 'prime_eval'].includes(kind)) {
-    throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent, prime_agent, or prime_eval.');
+  if (kind !== 'preflight' && !['deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build'].includes(kind)) {
+    throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent, prime_agent, prime_eval, or grok_build.');
   }
   const commonFields = new Set(['schema_version', 'kind', 'request_id', 'prompt', 'timeout_seconds', 'target_context', 'expected_target_fingerprint']);
   const kindFields = kind === 'prime_agent'
     ? new Set(['autonomy'])
     : kind === 'prime_eval'
       ? new Set(['environment', 'examples', 'rollouts', 'concurrency', 'max_tokens'])
-      : new Set();
+      : kind === 'grok_build'
+        ? GROK_CONFIGURATION_FIELDS
+        : new Set();
   for (const field of Object.keys(args)) {
     if (!commonFields.has(field) && !kindFields.has(field)) {
       throw new ToolError('invalid_argument', `preflight.${field} is not supported for kind=${kind}.`);
@@ -1270,6 +1407,9 @@ async function preflightTool(args) {
     configuration.concurrency = clampInteger(args.concurrency, 2, 1, 16, 'concurrency');
     configuration.max_tokens = clampInteger(args.max_tokens, 2048, 128, 32768, 'max_tokens');
   }
+  if (kind === 'grok_build') {
+    configuration.grok_configuration = normalizeGrokForTool(args, target.role);
+  }
   configuration.configuration_digest = sha256Digest(configuration);
   return {
     ok: true,
@@ -1292,12 +1432,93 @@ async function runTool(args) {
   if (args.schema_version !== CONFIG_SCHEMA_VERSION) {
     throw new ToolError('invalid_configuration', `schema_version must be ${CONFIG_SCHEMA_VERSION}.`);
   }
-  const supportedKinds = new Set(['deepseek_agent', 'prime_agent', 'prime_eval']);
+  const supportedKinds = new Set(['deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build']);
   if (!supportedKinds.has(args.kind)) {
-    throw new ToolError('invalid_kind', 'run.kind must be deepseek_agent, prime_agent, or prime_eval.');
+    throw new ToolError('invalid_kind', 'run.kind must be deepseek_agent, prime_agent, prime_eval, or grok_build.');
   }
   const id = requestId(args.request_id);
   const timeoutSeconds = clampInteger(args.timeout_seconds, 3600, 60, 21600, 'timeout_seconds');
+  if (args.kind === 'grok_build') {
+    const allowed = new Set([
+      'schema_version',
+      'kind',
+      'request_id',
+      'prompt',
+      'timeout_seconds',
+      'target_context',
+      'expected_target_fingerprint',
+      ...GROK_CONFIGURATION_FIELDS,
+    ]);
+    rejectUnsupportedRunFields(args, allowed, args.kind);
+    if (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000
+      || /[\u0000\u007f]/.test(args.prompt)) {
+      throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters without NUL or DEL control characters.');
+    }
+    if (!Object.hasOwn(args, 'target_context')) {
+      throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
+    }
+    const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
+    const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
+    assertTargetFingerprint(expectedFingerprint, targetFingerprint);
+    const grokConfiguration = normalizeGrokForTool(args, target.role);
+    const effectiveConfiguration = agentConfiguration({
+      kind: args.kind,
+      id,
+      prompt: args.prompt,
+      timeoutSeconds,
+      cwd,
+      target,
+      grokConfiguration,
+    });
+    const fingerprint = requestFingerprint({
+      kind: args.kind,
+      prompt: args.prompt,
+      effective_configuration: effectiveConfiguration,
+    });
+    const existing = await findRequest(id, fingerprint);
+    if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
+    const activeTask = [
+      'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
+      targetPreamble(target),
+      '',
+      args.prompt,
+    ].join('\n');
+    const grokArgs = buildGrokArgs({
+      prompt: activeTask,
+      cwd,
+      configuration: grokConfiguration,
+    });
+    const job = await startAgentJob({
+      working_directory: cwd,
+      expected_git_root: target?.expected_git_root ?? null,
+      git_common_directory: target?.git_common_directory ?? null,
+    }, () => startJob({
+      kind: 'grok_build',
+      summary: `Grok Build task ${id}`,
+      command: GROK,
+      args: grokArgs,
+      requestId: id,
+      requestFingerprint: fingerprint,
+      timeoutSeconds,
+      resultFormat: grokConfiguration.output_format === 'streaming-json'
+        ? 'grok_streaming_json'
+        : grokConfiguration.output_format === 'streaming-messages-json'
+          ? 'grok_streaming_json'
+          : grokConfiguration.output_format === 'json'
+            ? 'grok_json'
+            : null,
+      cwd,
+      targetContext: target,
+      effectiveConfiguration,
+      redactions: [args.prompt, activeTask],
+    }));
+    return {
+      ok: true,
+      job: publicJob(job),
+      effective_configuration: effectiveConfiguration,
+      next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
+    };
+  }
   if (args.kind === 'deepseek_agent' || args.kind === 'prime_agent') {
     const allowed = new Set([
       'schema_version',

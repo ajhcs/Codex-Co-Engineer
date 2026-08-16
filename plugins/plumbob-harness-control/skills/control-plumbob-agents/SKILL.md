@@ -1,6 +1,6 @@
 ---
 name: control-plumbob-agents
-description: Use Codex-Co-Engineer to control and monitor target-bound DeepSeek Harness jobs from Codex through compact MCP tools. Use when the user asks to preflight a target, run a DeepSeek task, follow lifecycle progress, inspect redacted logs, or cancel a managed job. Prime Agent and Prime Lab are optional adapters.
+description: Use Codex-Co-Engineer to control and monitor target-bound DeepSeek Harness or Grok Build jobs from Codex through compact MCP tools. Use when the user asks to preflight a target, run a bounded task, follow lifecycle progress, inspect redacted logs, or cancel a managed job. Prime Agent and Prime Lab are optional adapters.
 ---
 
 # Codex-Co-Engineer
@@ -12,6 +12,11 @@ cancellation. The stable MCP server identifier is `plumbob-harness-control`.
 2. Complete the MCP Inspector preflight before dispatching work.
 3. Validate one strict target contract for every dispatch.
 4. Call `run` with a stable `request_id` and the caller's expected fingerprint.
+   Select `kind: "grok_build"` for the official Grok CLI; use only the typed
+   Grok fields in its schema, including bounded `json_schema` only with JSON
+   output and `include_partial_messages` only with Messages-format streaming.
+   The server passes OAuth/session state through Grok's normal user environment
+   and does not accept xAI credentials.
 5. Use `jobs` with `until: "terminal"` to monitor a long-running job.
 6. Use `cancel` only after the user explicitly requests cancellation.
 
@@ -50,6 +55,9 @@ tool arguments, logs, or job metadata. The configured model provider is an
 external service; follow the repository data-handling policy before sending
 private material.
 
-Do not present DeepSeek Harness, Prime Agent, or Prime Lab as Codex subagents.
+Grok Build uses its documented headless prompt interface. The ACP
+`grok agent stdio` interface is intentionally deferred until a proxy can
+preserve the same target and lifecycle guarantees. Do not present DeepSeek
+Harness, Grok Build, Prime Agent, or Prime Lab as Codex subagents.
 Codex remains the chief control-plane agent; external runtimes are bounded
 peer workers.

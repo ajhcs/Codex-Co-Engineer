@@ -62,6 +62,7 @@ function daemonEnvironment() {
     'TERM',
     'TMPDIR',
     'MODEL_API_KEY',
+    'XAI_API_KEY',
     'CODEX_CO_ENGINEER_RUNTIME_WORKSPACE',
     'CODEX_CO_ENGINEER_ALLOWED_ROOTS',
     'CODEX_CO_ENGINEER_STATE_DIR',
@@ -72,6 +73,7 @@ function daemonEnvironment() {
     'CODEX_CO_ENGINEER_PRIME_COMMAND',
     'CODEX_CO_ENGINEER_PRIME_AGENT_COMMAND',
     'CODEX_CO_ENGINEER_PRIME_AGENT_MODELS',
+    'CODEX_CO_ENGINEER_GROK_COMMAND',
     'PLUMBOB_HARNESS_WORKSPACE',
     'PLUMBOB_HARNESS_ALLOWED_ROOTS',
     'PLUMBOB_HARNESS_STATE_DIR',
@@ -224,6 +226,130 @@ const TARGET_CONTEXT_SCHEMA = {
   ],
 };
 
+const GROK_CONFIGURATION_PROPERTIES = {
+  model: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 200,
+    pattern: '^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]{0,199}$',
+    description: 'Optional Grok model ID; it is passed as -m/--model.',
+  },
+  output_format: {
+    type: 'string',
+    enum: ['plain', 'json', 'streaming-json', 'streaming-messages-json'],
+    default: 'streaming-json',
+    description: 'Grok headless output format. streaming-json is the default for durable logs.',
+  },
+  json_schema: {
+    oneOf: [
+      { type: 'boolean' },
+      { type: 'object', maxProperties: 256 },
+    ],
+    description: 'Bounded JSON Schema object or boolean for structured output; implies output_format=json and is capped at 16 KiB after serialization.',
+  },
+  verbatim: {
+    type: 'boolean',
+    default: false,
+    description: 'Pass Grok --verbatim so the prompt is sent exactly as supplied.',
+  },
+  include_partial_messages: {
+    type: 'boolean',
+    default: false,
+    description: 'Pass --include-partial-messages; valid only with streaming-messages-json.',
+  },
+  session_id: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 128,
+    pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+    description: 'Valid UUID for a new session; resume/continue require fork_session when combined.',
+  },
+  resume: {
+    oneOf: [
+      { const: true },
+      { type: 'string', minLength: 1, maxLength: 128, pattern: '^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]{0,127}$' },
+    ],
+    description: 'Pass --resume, optionally with a session ID/title; mutually exclusive with continue_session.',
+  },
+  continue_session: {
+    type: 'boolean',
+    default: false,
+    description: 'Continue the most recent session in the target directory; mutually exclusive with session_id and resume.',
+  },
+  reasoning_effort: {
+    type: 'string',
+    enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    description: 'Maps to stable --reasoning-effort (with --effort as the CLI alias).',
+  },
+  max_turns: {
+    type: 'integer',
+    minimum: 1,
+    maximum: 100,
+    description: 'Maximum Grok agent turns.',
+  },
+  sandbox_profile: {
+    type: 'string',
+    enum: ['off', 'workspace', 'devbox', 'read-only', 'strict'],
+    description: 'Built-in Grok sandbox profile. Unverifiable custom profiles are rejected by the connector.',
+  },
+  permission_mode: {
+    type: 'string',
+    enum: ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions', 'plan'],
+    description: 'Grok permission mode. Review/verify force plan; implement rejects dontAsk and bypassPermissions.',
+  },
+  rules: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 8000,
+    pattern: '^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]{0,7999}$',
+    description: 'Extra Grok rules appended to the system prompt; system-prompt override is intentionally unavailable.',
+  },
+  allowed_tools: {
+    type: 'array',
+    maxItems: 32,
+    uniqueItems: true,
+    items: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,127}$' },
+    description: 'Typed Grok built-in tool names mapped to --tools comma-list.',
+  },
+  disallowed_tools: {
+    type: 'array',
+    maxItems: 32,
+    uniqueItems: true,
+    items: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,127}$' },
+    description: 'Typed Grok built-in tool names mapped to --disallowed-tools comma-list.',
+  },
+  allow_rules: {
+    type: 'array',
+    maxItems: 32,
+    uniqueItems: true,
+    items: { type: 'string', minLength: 1, maxLength: 240, pattern: '^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]{0,239}$' },
+    description: 'Repeatable Grok --allow rules; deny rules still win and role ceilings are enforced.',
+  },
+  deny_rules: {
+    type: 'array',
+    maxItems: 32,
+    uniqueItems: true,
+    items: { type: 'string', minLength: 1, maxLength: 240, pattern: '^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]{0,239}$' },
+    description: 'Repeatable Grok --deny rules; useful for narrowing a role policy.',
+  },
+  always_approve: {
+    type: 'boolean',
+    default: false,
+    description: 'Explicitly request --always-approve for an implement run; rejected for review/verify.',
+  },
+  no_auto_update: {
+    type: 'boolean',
+    default: true,
+    description: 'Suppress Grok background update checks; defaults true for managed jobs.',
+  },
+  no_plan: { type: 'boolean', default: false, description: 'Pass Grok --no-plan for implement only; review/verify retain the forced plan policy.' },
+  no_subagents: { type: 'boolean', default: false, description: 'Pass Grok --no-subagents.' },
+  no_memory: { type: 'boolean', default: false, description: 'Pass Grok --no-memory.' },
+  disable_web_search: { type: 'boolean', default: false, description: 'Pass Grok --disable-web-search.' },
+  experimental_memory: { type: 'boolean', default: false, description: 'Pass Grok --experimental-memory; mutually exclusive with no_memory.' },
+  fork_session: { type: 'boolean', default: false, description: 'Pass Grok --fork-session when resuming or continuing a session.' },
+};
+
 const TOOLS = [
   {
     name: 'preflight',
@@ -232,9 +358,9 @@ const TOOLS = [
       type: 'object',
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
-        kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'prime_agent', 'prime_eval'], default: 'preflight' },
+        kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build'], default: 'preflight' },
         request_id: { type: 'string', minLength: 8, maxLength: 128 },
-        prompt: { type: 'string', minLength: 1, maxLength: 12000, description: 'Hashed for the configuration digest; never returned.' },
+        prompt: { type: 'string', minLength: 1, maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$', description: 'Hashed for the configuration digest; never returned.' },
         autonomy: { type: 'string', enum: ['standard', 'high'], default: 'high' },
         timeout_seconds: { type: 'integer', minimum: 60, maximum: 21600, default: 3600 },
         target_context: TARGET_CONTEXT_SCHEMA,
@@ -243,6 +369,7 @@ const TOOLS = [
           pattern: '^(sha256:)?[0-9a-fA-F]{64}$',
           description: 'Caller assertion for the resolved target fingerprint.',
         },
+        ...GROK_CONFIGURATION_PROPERTIES,
       },
       required: ['schema_version', 'target_context', 'expected_target_fingerprint'],
       additionalProperties: false,
@@ -295,14 +422,14 @@ const TOOLS = [
   },
   {
     name: 'run',
-    description: 'Queue a kind-specific Co-Engineer task and return effective_configuration plus a stable job ID. DeepSeek accepts prompt, timeout_seconds, and optional review/verify target_context only; Prime Agent additionally accepts autonomy; Prime evaluation accepts environment, examples, rollouts, concurrency, and max_tokens.',
+    description: 'Queue a kind-specific Co-Engineer task and return effective_configuration plus a stable job ID. Grok Build uses the official direct headless CLI with typed model, session, reasoning, sandbox, permission, tool, and bounded policy controls.',
     inputSchema: {
       type: 'object',
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
-        kind: { type: 'string', enum: ['deepseek_agent', 'prime_agent', 'prime_eval'] },
+        kind: { type: 'string', enum: ['deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build'] },
         request_id: { type: 'string', minLength: 8, maxLength: 128 },
-        prompt: { type: 'string', maxLength: 12000 },
+        prompt: { type: 'string', maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$' },
         autonomy: {
           type: 'string',
           enum: ['standard', 'high'],
@@ -340,6 +467,7 @@ const TOOLS = [
           pattern: '^(sha256:)?[0-9a-fA-F]{64}$',
           description: 'Caller assertion for the resolved target fingerprint; mismatch is fatal.',
         },
+        ...GROK_CONFIGURATION_PROPERTIES,
       },
       required: ['schema_version', 'kind', 'request_id', 'target_context', 'expected_target_fingerprint'],
       additionalProperties: false,

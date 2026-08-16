@@ -153,6 +153,8 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.equal(statusBody.credentials.model_api_key_available, false);
   assert.equal(statusBody.workspace.prime_agent_model, 'meta-model-api/muse-spark-1.2-contributor');
   assert.equal(statusBody.workspace.prime_agent_enabled, false);
+  assert.equal(statusBody.grok_build.kind, 'grok_build');
+  assert.equal(statusBody.grok_build.auth_state, 'unknown');
 
   const preflight = responses.get(4).result.structuredContent;
   assert.equal(preflight.target_fingerprint, fingerprint);
@@ -167,6 +169,19 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   const denied = responses.get(5);
   assert.equal(denied.result.isError, true);
   assert.equal(JSON.parse(denied.result.content[0].text).code, 'capability_disabled');
+
+  const runTool = responses.get(2).result.tools.find((tool) => tool.name === 'run');
+  assert.ok(runTool.inputSchema.properties.kind.enum.includes('grok_build'));
+  assert.deepEqual(
+    runTool.inputSchema.properties.output_format.enum,
+    ['plain', 'json', 'streaming-json', 'streaming-messages-json'],
+  );
+  assert.equal(runTool.inputSchema.properties.verbatim.type, 'boolean');
+  assert.equal(runTool.inputSchema.properties.include_partial_messages.type, 'boolean');
+  assert.deepEqual(
+    runTool.inputSchema.properties.json_schema.oneOf.map((schema) => schema.type),
+    ['boolean', 'object'],
+  );
 
   await stopDaemon(path.join(state, 'control.sock'));
 });
