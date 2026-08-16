@@ -15,6 +15,7 @@ allows existing Codex configurations to migrate without a server-name break.
 
 ```text
 plugins/plumbob-harness-control/   Codex plugin, MCP facade, skill, and tests
+plugins/cursor-cloud-control/      Typed Cursor Cloud Agents API v1 control plane
 config/                            non-secret configuration examples
 docs/                              target, preflight, data, and release policy
 examples/                          redacted contract and receipt examples
@@ -96,6 +97,7 @@ and client failures remain distinct.
 See:
 
 - [`plugins/plumbob-harness-control/README.md`](plugins/plumbob-harness-control/README.md)
+- [`plugins/cursor-cloud-control/README.md`](plugins/cursor-cloud-control/README.md)
 - [`docs/target-contract.md`](docs/target-contract.md)
 - [`docs/preflight-inspector.md`](docs/preflight-inspector.md)
 - [`docs/configuration.md`](docs/configuration.md)
@@ -108,11 +110,18 @@ See:
 cd plugins/plumbob-harness-control
 npm test
 cd ../..
+cd plugins/cursor-cloud-control
+npm test
+cd ../..
 node scripts/validate-release.mjs
 ```
 
 Tests use local fixtures and temporary Git repositories. CI must not send
 repository contents or prompts to an external model provider.
+
+Cursor Cloud Control uses only the official Cursor Cloud Agents API v1 through
+typed MCP tools. Credentials stay in the MCP process environment or an
+owner-only file; creation defaults to plan mode, a new branch, and no PR.
 
 ## License
 

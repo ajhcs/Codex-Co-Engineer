@@ -16,6 +16,13 @@ timeout_seconds = 120
 quiet_seconds = 15
 
 [[stages]]
+name = "cursor-cloud-unit"
+kind = "unit_tests"
+command = ["npm", "--prefix", "plugins/cursor-cloud-control", "test"]
+timeout_seconds = 120
+quiet_seconds = 15
+
+[[stages]]
 name = "mcp-inspector"
 kind = "integration_tests"
 command = ["node", "scripts/inspector-preflight.mjs"]
@@ -23,7 +30,20 @@ timeout_seconds = 60
 quiet_seconds = 15
 
 [[stages]]
+name = "cursor-mcp-preflight"
+kind = "integration_tests"
+command = ["node", "scripts/cursor-inspector-preflight.mjs"]
+timeout_seconds = 60
+quiet_seconds = 15
+
+[[stages]]
 name = "package-inventory"
 kind = "artifact_verification"
 command = ["npm", "--cache", "/tmp/codex-co-engineer-npm-cache", "pack", "./plugins/plumbob-harness-control", "--dry-run", "--json"]
+timeout_seconds = 60
+
+[[stages]]
+name = "cursor-package-inventory"
+kind = "artifact_verification"
+command = ["npm", "--cache", "/tmp/codex-co-engineer-npm-cache", "pack", "./plugins/cursor-cloud-control", "--dry-run", "--json"]
 timeout_seconds = 60

@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "cursor-cloud-control": {
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "--no-warnings",
+        "./mcp/server.mjs",
+        "--stdio"
+      ],
+      "env_vars": [
+        "CURSOR_API_KEY",
+        "CURSOR_API_KEY_FILE",
+        "CURSOR_API_ORIGIN",
+        "CURSOR_API_AUTH_SCHEME",
+        "CURSOR_CLOUD_CONTROL_STATE_DIR",
+        "CURSOR_ARTIFACT_ROOT",
+        "CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS",
+        "CURSOR_CLOUD_CONTROL_MAX_RESPONSE_BYTES",
+        "CURSOR_CLOUD_CONTROL_MAX_ARTIFACT_BYTES"
+      ],
+      "tool_timeout_sec": 65
+    }
+  }
+}
