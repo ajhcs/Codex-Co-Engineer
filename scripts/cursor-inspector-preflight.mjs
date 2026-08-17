@@ -49,6 +49,24 @@ assert.equal(repositorySchema.items.properties.startingRef.pattern, undefined);
 assert.equal(repositorySchema.items.properties.prUrl.type, 'string');
 assert.equal(repositorySchema.items.properties.prUrl.format, 'uri');
 assert.equal(repositorySchema.items.properties.prUrl.maxLength, 2048);
+const mcpServerSchema = agentsTool.inputSchema.properties.mcpServers.items;
+const authEnvSchema = mcpServerSchema.properties.authEnv;
+assert.deepEqual(authEnvSchema.required, ['CLIENT_ID']);
+assert.equal(authEnvSchema.additionalProperties, false);
+assert.deepEqual(authEnvSchema.properties.CLIENT_ID, {
+  type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,254}$',
+});
+assert.deepEqual(authEnvSchema.properties.scopes, {
+  type: 'array', minItems: 1, maxItems: 50,
+  items: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,254}$' },
+});
+assert.equal(mcpServerSchema.properties.headerEnv.type, 'object');
+assert.equal(mcpServerSchema.properties.headerEnv.maxProperties, 50);
+assert.deepEqual(mcpServerSchema.properties.headerEnv.patternProperties, {
+  "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$": {
+    type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,254}$',
+  },
+});
 const agentIdPattern = '^bc-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 assert.deepEqual(agentsTool.inputSchema.properties.agentId, { type: 'string', pattern: agentIdPattern });
 for (const branch of agentsTool.inputSchema.oneOf) {

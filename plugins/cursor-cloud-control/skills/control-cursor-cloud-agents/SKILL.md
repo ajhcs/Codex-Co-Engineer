@@ -49,6 +49,12 @@ Use `runs` with `action=followup` only for a known agent ID. Follow-ups are
 non-idempotent and are never automatically retried. A stable request ID is
 required so transport failures remain reconcilable.
 
+Remote MCP servers may use the typed `authEnv` and `headerEnv` wrappers. These
+fields contain only environment variable names, not credential values. The
+MCP process resolves them for Cursor's documented remote `auth` shape and
+credential-bearing headers immediately before create/follow-up. Do not put
+literal credentials in `headers`; stdio servers cannot use these wrappers.
+
 ## Observe and stop
 
 Use `runs` `action=stream` with bounded `timeoutMs`, `maxEvents`, and

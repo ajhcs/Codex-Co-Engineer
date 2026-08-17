@@ -15,6 +15,7 @@ import {
   TOOL_SCHEMAS,
   assertSafeArtifactPath,
   isTerminalRunStatus,
+  materializeMcpServers,
   validateToolInput,
 } from './validation.mjs';
 
@@ -131,6 +132,13 @@ function mapCreateBody(value, agentId) {
   return body;
 }
 
+function withMaterializedMcpServers(value, env, addSecrets) {
+  const materialized = materializeMcpServers(value.mcpServers, env);
+  if (materialized.secrets.length > 0) addSecrets(materialized.secrets);
+  if (materialized.servers === undefined) return value;
+  return { ...value, mcpServers: materialized.servers };
+}
+
 function mapFollowupBody(value) {
   const body = { prompt: value.prompt };
   if (value.mcpServers !== undefined) body.mcpServers = value.mcpServers;
@@ -153,6 +161,7 @@ function errorResult(error, secrets = []) {
 }
 
 function transientSecrets(value, key = '', sensitiveContext = false) {
+  if (key === 'authEnv' || key === 'headerEnv') return [];
   if (typeof value === 'string') {
     if (sensitiveContext || key === 'text' || key === 'data' || key === 'prompt' || /env|header|secret|token|password/i.test(key)) return value ? [value] : [];
     return [];
@@ -163,6 +172,19 @@ function transientSecrets(value, key = '', sensitiveContext = false) {
     return Object.entries(value).flatMap(([childKey, childValue]) => transientSecrets(childValue, childKey, childContext));
   }
   return [];
+}
+
+function createOperationContext(rawArguments) {
+  return { transientSecrets: transientSecrets(rawArguments ?? {}) };
+}
+
+function addOperationSecrets(operation, values) {
+  if (!operation) return;
+  for (const value of values ?? []) {
+    if (typeof value === 'string' && value.length > 0 && !operation.transientSecrets.includes(value)) {
+      operation.transientSecrets.push(value);
+    }
+  }
 }
 
 function successResult(payload) {
@@ -177,7 +199,6 @@ export class CursorCloudService {
     const state = resolveStateDirectory(env);
     this.ledger = ledger ?? new SubmissionLedger({ stateDir: state.directory, source: state.source, reason: state.reason });
     this.apiKey = undefined;
-    this.transientSecrets = [];
   }
 
   async getClient() {
@@ -197,9 +218,12 @@ export class CursorCloudService {
     return this.client;
   }
 
-  secrets() { return [...(this.client?.secrets ?? (this.apiKey ? [this.apiKey] : [])), ...this.transientSecrets]; }
-
-  clearTransientSecrets() { this.transientSecrets = []; }
+  secrets(operation) {
+    return [
+      ...(this.client?.secrets ?? (this.apiKey ? [this.apiKey] : [])),
+      ...(operation?.transientSecrets ?? []),
+    ];
+  }
 
   async requireDurableState() {
     const readiness = await this.ledger.readiness();
@@ -209,7 +233,7 @@ export class CursorCloudService {
     return readiness;
   }
 
-  async status(value) {
+  async status(value, operation) {
     const action = value.action ?? 'local';
     const configuredByEnvironment = typeof this.env.CURSOR_API_KEY === 'string' && this.env.CURSOR_API_KEY.trim().length > 0;
     let configuredFile = false;
@@ -247,11 +271,11 @@ export class CursorCloudService {
     if (action === 'local') return successResult({ status: local });
     const client = await this.getClient();
     if (action === 'identity') return successResult({ identity: projectIdentity(await client.me()) });
-    if (action === 'models') return successResult({ models: redactValue(pageResult(await client.models(), value.limit), this.secrets()) });
+    if (action === 'models') return successResult({ models: redactValue(pageResult(await client.models(), value.limit), this.secrets(operation)) });
     if (action === 'repositories') {
       try {
         return successResult({
-          repositories: redactValue(pageResult(await client.repositories(), value.limit), this.secrets()),
+          repositories: redactValue(pageResult(await client.repositories(), value.limit), this.secrets(operation)),
           available: true,
         });
       } catch (error) {
@@ -270,24 +294,25 @@ export class CursorCloudService {
     throw new InputError('invalid_input', `Unsupported status action ${action}.`);
   }
 
-  async agents(value) {
+  async agents(value, operation) {
     if (value.action === 'list') {
       const client = await this.getClient();
       const response = await client.listAgents({ limit: value.limit, cursor: value.cursor, prUrl: value.prUrl, includeArchived: value.includeArchived });
-      return successResult({ agents: redactValue(pageResult(response, value.limit), this.secrets()) });
+      return successResult({ agents: redactValue(pageResult(response, value.limit), this.secrets(operation)) });
     }
     if (value.action === 'get') {
       const client = await this.getClient();
-      return successResult({ agent: redactValue(await client.getAgent(value.agentId), this.secrets()) });
+      return successResult({ agent: redactValue(await client.getAgent(value.agentId), this.secrets(operation)) });
     }
 
+    const input = withMaterializedMcpServers(value, this.env, (values) => addOperationSecrets(operation, values));
     const client = await this.getClient();
     const requestId = value.requestId;
     const previous = await this.ledger.lookup(requestId);
     const agentId = value.envVars !== undefined
       ? undefined
       : (value.agentId ?? previous?.agentId ?? `bc-${randomUUID()}`);
-    const body = mapCreateBody(value, agentId);
+    const body = mapCreateBody(input, agentId);
     // The generated agent ID is a submission detail, not caller intent. Keep
     // it out of the request digest so concurrent identical requests share one
     // idempotency key; an explicit caller-supplied ID remains part of intent.
@@ -323,31 +348,32 @@ export class CursorCloudService {
     }
     return successResult({
       receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: finalized.agentId, runId: finalized.runId, effectiveConfiguration: effectiveCreateConfiguration(value) },
-      agent: redactValue(agent, this.secrets()),
-      run: redactValue(run, this.secrets()),
+      agent: redactValue(agent, this.secrets(operation)),
+      run: redactValue(run, this.secrets(operation)),
     });
   }
 
-  async runs(value) {
+  async runs(value, operation) {
     if (value.action === 'list') {
       const client = await this.getClient();
       const response = await client.listRuns(value.agentId, { limit: value.limit, cursor: value.cursor });
-      return successResult({ runs: redactValue(pageResult(response, value.limit), this.secrets()) });
+      return successResult({ runs: redactValue(pageResult(response, value.limit), this.secrets(operation)) });
     }
     if (value.action === 'get') {
       const client = await this.getClient();
-      return successResult({ run: redactValue(await client.getRun(value.agentId, value.runId), this.secrets()) });
+      return successResult({ run: redactValue(await client.getRun(value.agentId, value.runId), this.secrets(operation)) });
     }
     if (value.action === 'cancel') {
       await this.requireDurableState();
       const client = await this.getClient();
-      return successResult({ cancelled: redactValue(await client.cancelRun(value.agentId, value.runId), this.secrets()), agentId: value.agentId, runId: value.runId });
+      return successResult({ cancelled: redactValue(await client.cancelRun(value.agentId, value.runId), this.secrets(operation)), agentId: value.agentId, runId: value.runId });
     }
     if (value.action === 'followup') {
+      const input = withMaterializedMcpServers(value, this.env, (values) => addOperationSecrets(operation, values));
       const client = await this.getClient();
       const requestId = value.requestId;
-      const body = mapFollowupBody(value);
-      const digest = requestDigest('followup-run', { agentId: value.agentId, body });
+      const body = mapFollowupBody(input);
+      const digest = requestDigest('followup-run', { agentId: value.agentId, body: mapFollowupBody(value) });
       const began = await this.ledger.begin({ requestId, kind: 'followup-run', digest, agentId: value.agentId });
       if (began.duplicate) return successResult({ receipt: { requestId, requestDigest: digest, duplicate: true, status: began.record.status, agentId: began.record.agentId, runId: began.record.runId ?? null } });
       let response;
@@ -373,7 +399,7 @@ export class CursorCloudService {
           finalized,
         );
       }
-      return successResult({ receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: finalized.agentId, runId: finalized.runId }, run: redactValue(run, this.secrets()) });
+      return successResult({ receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: finalized.agentId, runId: finalized.runId }, run: redactValue(run, this.secrets(operation)) });
     }
     if (value.action === 'wait') {
       const client = await this.getClient();
@@ -385,27 +411,27 @@ export class CursorCloudService {
         await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
         run = await client.getRun(value.agentId, value.runId);
       }
-      return successResult({ agentId: value.agentId, runId: value.runId, timedOut: !isTerminalRunStatus(run?.status), run: redactValue(run, this.secrets()) });
+      return successResult({ agentId: value.agentId, runId: value.runId, timedOut: !isTerminalRunStatus(run?.status), run: redactValue(run, this.secrets(operation)) });
     }
     try {
       const client = await this.getClient();
       const response = await client.streamRun(value.agentId, value.runId, { lastEventId: value.lastEventId, timeoutMs: value.timeoutMs ?? 30_000 });
-      const parsed = await consumeSse(response, { maxEvents: value.maxEvents ?? 200, maxBytes: value.maxBytes ?? 500_000, timeoutMs: value.timeoutMs ?? 30_000, secrets: this.secrets() });
+      const parsed = await consumeSse(response, { maxEvents: value.maxEvents ?? 200, maxBytes: value.maxBytes ?? 500_000, timeoutMs: value.timeoutMs ?? 30_000, secrets: this.secrets(operation) });
       return successResult({ agentId: value.agentId, runId: value.runId, stream: parsed, resumedFrom: value.lastEventId ?? null });
     } catch (error) {
       if (error?.code === 'stream_expired') {
         const run = await client.getRun(value.agentId, value.runId);
-        return successResult({ agentId: value.agentId, runId: value.runId, streamExpired: true, reconciled: true, run: redactValue(run, this.secrets()) });
+        return successResult({ agentId: value.agentId, runId: value.runId, streamExpired: true, reconciled: true, run: redactValue(run, this.secrets(operation)) });
       }
       throw error;
     }
   }
 
-  async artifacts(value) {
+  async artifacts(value, operation) {
     const client = await this.getClient();
     const listed = await client.artifacts(value.agentId);
     const items = Array.isArray(listed?.items) ? listed.items : [];
-    if (value.action === 'list') return successResult({ agentId: value.agentId, artifacts: redactValue({ items: items.slice(0, 200) }, this.secrets()) });
+    if (value.action === 'list') return successResult({ agentId: value.agentId, artifacts: redactValue({ items: items.slice(0, 200) }, this.secrets(operation)) });
     const requestedPath = assertSafeArtifactPath(value.path);
     const found = items.find((entry) => entry?.path === requestedPath);
     if (!found) throw new CursorApiError('artifact_not_found', 'The requested artifact was not present in Cursor metadata.');
@@ -416,28 +442,27 @@ export class CursorCloudService {
     return successResult({ agentId: value.agentId, artifact: { path: requestedPath, sizeBytes: found.sizeBytes ?? bytes.byteLength, downloadedBytes: bytes.byteLength, destination: saved } });
   }
 
-  async usage(value) {
+  async usage(value, operation) {
     const client = await this.getClient();
-    return successResult({ agentId: value.agentId, ...(value.runId ? { runId: value.runId } : {}), usage: redactValue(await client.usage(value.agentId, value.runId), this.secrets()) });
+    return successResult({ agentId: value.agentId, ...(value.runId ? { runId: value.runId } : {}), usage: redactValue(await client.usage(value.agentId, value.runId), this.secrets(operation)) });
   }
 
-  async lifecycle(value) {
+  async lifecycle(value, operation) {
     await this.requireDurableState();
     const client = await this.getClient();
-    if (value.action === 'archive') return successResult({ action: value.action, agentId: value.agentId, result: redactValue(await client.archive(value.agentId), this.secrets()) });
-    if (value.action === 'unarchive') return successResult({ action: value.action, agentId: value.agentId, result: redactValue(await client.unarchive(value.agentId), this.secrets()) });
-    return successResult({ action: value.action, agentId: value.agentId, irreversible: true, result: redactValue(await client.deleteAgent(value.agentId), this.secrets()) });
+    if (value.action === 'archive') return successResult({ action: value.action, agentId: value.agentId, result: redactValue(await client.archive(value.agentId), this.secrets(operation)) });
+    if (value.action === 'unarchive') return successResult({ action: value.action, agentId: value.agentId, result: redactValue(await client.unarchive(value.agentId), this.secrets(operation)) });
+    return successResult({ action: value.action, agentId: value.agentId, irreversible: true, result: redactValue(await client.deleteAgent(value.agentId), this.secrets(operation)) });
   }
 
-  async call(name, rawArguments) {
-    this.transientSecrets = transientSecrets(rawArguments ?? {});
+  async call(name, rawArguments, operation = createOperationContext(rawArguments)) {
     const value = validateToolInput(name, rawArguments ?? {});
-    if (name === 'status') return this.status(value);
-    if (name === 'agents') return this.agents(value);
-    if (name === 'runs') return this.runs(value);
-    if (name === 'artifacts') return this.artifacts(value);
-    if (name === 'usage') return this.usage(value);
-    if (name === 'lifecycle') return this.lifecycle(value);
+    if (name === 'status') return this.status(value, operation);
+    if (name === 'agents') return this.agents(value, operation);
+    if (name === 'runs') return this.runs(value, operation);
+    if (name === 'artifacts') return this.artifacts(value, operation);
+    if (name === 'usage') return this.usage(value, operation);
+    if (name === 'lifecycle') return this.lifecycle(value, operation);
     throw new InputError('unknown_tool', `Unknown tool ${name}.`);
   }
 }
@@ -470,14 +495,12 @@ function uncertainSubmissionError(message, fields) {
 }
 
 export async function handleToolCall(name, rawArguments, service = new CursorCloudService()) {
+  const operation = createOperationContext(rawArguments);
   try {
-    const payload = await service.call(name, rawArguments);
-    const result = { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload };
-    service.clearTransientSecrets();
-    return result;
+    const payload = await service.call(name, rawArguments, operation);
+    return { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload };
   } catch (error) {
-    const payload = errorResult(error, service.secrets());
-    service.clearTransientSecrets();
+    const payload = errorResult(error, service.secrets(operation));
     return { isError: true, content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload };
   }
 }

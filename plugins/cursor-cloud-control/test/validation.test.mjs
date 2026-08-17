@@ -159,6 +159,47 @@ test('sensitive MCP headers and unsafe destinations are rejected', () => {
   assert.equal(assertSafeArtifactPath('artifacts/log.txt'), 'artifacts/log.txt');
 });
 
+test('remote MCP secret references are typed, non-overlapping, and never accepted for stdio', () => {
+  const value = validateToolInput('agents', {
+    action: 'create', requestId: 'mcp-secret-refs-1', prompt: { text: 'use a server' },
+    mcpServers: [{
+      name: 'remote', type: 'http', url: 'https://example.test/mcp',
+      authEnv: { CLIENT_ID: 'MCP_CLIENT_ID', CLIENT_SECRET: 'MCP_CLIENT_SECRET', scopes: ['MCP_SCOPE_READ'] },
+      headerEnv: { Authorization: 'MCP_AUTHORIZATION' },
+    }],
+  });
+  assert.equal(value.mcpServers[0].authEnv.CLIENT_ID, 'MCP_CLIENT_ID');
+  assert.deepEqual(TOOL_SCHEMAS.agents.properties.mcpServers.items.properties.authEnv, {
+    type: 'object',
+    properties: {
+      CLIENT_ID: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,254}$' },
+      CLIENT_SECRET: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,254}$' },
+      scopes: {
+        type: 'array', minItems: 1, maxItems: 50,
+        items: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,254}$' },
+      },
+    },
+    required: ['CLIENT_ID'],
+    additionalProperties: false,
+  });
+  assert.throws(() => validateToolInput('agents', {
+    action: 'create', requestId: 'mcp-secret-refs-2', prompt: { text: 'use a server' },
+    mcpServers: [{ name: 'local', type: 'stdio', command: 'node', authEnv: { CLIENT_ID: 'MCP_CLIENT_ID' } }],
+  }), /not valid for a stdio/);
+  assert.throws(() => validateToolInput('agents', {
+    action: 'create', requestId: 'mcp-secret-refs-3', prompt: { text: 'use a server' },
+    mcpServers: [{ name: 'remote', type: 'http', url: 'https://example.test/mcp', headerEnv: { 'X-Trace': 'MCP_TOKEN' }, headers: { 'x-trace': 'literal' } }],
+  }), /conflicts with a literal header/);
+  assert.throws(() => validateToolInput('agents', {
+    action: 'create', requestId: 'mcp-secret-refs-4', prompt: { text: 'use a server' },
+    mcpServers: [{ name: 'remote', type: 'http', url: 'https://example.test/mcp', authEnv: { CLIENT_ID: 'MCP_TOKEN', CLIENT_SECRET: 'MCP_TOKEN' } }],
+  }), /duplicates another secret environment reference/);
+  assert.throws(() => validateToolInput('agents', {
+    action: 'create', requestId: 'mcp-secret-refs-5', prompt: { text: 'use a server' },
+    mcpServers: [{ name: 'remote', type: 'http', url: 'https://example.test/mcp', authEnv: { CLIENT_ID: 'CURSOR_API_KEY' } }],
+  }), /reserved/);
+});
+
 test('delete confirmation is tied exactly to the target ID', () => {
   assert.throws(() => validateToolInput('lifecycle', { action: 'delete', agentId, confirmation: agentId }), /exactly/);
   const value = validateToolInput('lifecycle', { action: 'delete', agentId, confirmation: `delete:${agentId}` });

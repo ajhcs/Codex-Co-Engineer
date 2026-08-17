@@ -5,6 +5,7 @@ export const MAX_IMAGES = 5;
 export const MAX_REPOS = 20;
 export const MAX_ENV_VARS = 50;
 export const MAX_MCP_SERVERS = 50;
+export const MAX_MCP_SCOPES = 50;
 export const MAX_SUBAGENTS = 20;
 export const MAX_PAGE_SIZE = 100;
 export const AGENT_ID_PATTERN = /^bc-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -18,6 +19,12 @@ export const RESERVED_SUBAGENT_NAMES = Object.freeze([
   'computerUse',
   'cursorGuide',
 ]);
+
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,254}$/;
+// OAuth 2.0 scope-token: printable ASCII except DQUOTE and backslash. The
+// reference schema still carries only environment variable names; this check
+// applies after the MCP process resolves each value.
+const SCOPE_PATTERN = /^[\x21\x23-\x5B\x5D-\x7E]{1,256}$/;
 
 export class InputError extends Error {
   constructor(code, message, details = undefined) {
@@ -187,6 +194,62 @@ function safeHeaderName(value, path) {
   }
 }
 
+function headerName(value, path) {
+  string(value, path, { min: 1, max: 128 });
+  if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value)) fail(`${path} is not a valid header name.`);
+  return value;
+}
+
+function envReference(value, path) {
+  string(value, path, { min: 1, max: 255, pattern: ENV_NAME_PATTERN });
+  if (value.startsWith('CURSOR_')) fail(`${path} uses a reserved environment variable name.`);
+  return value;
+}
+
+function authEnv(value, path) {
+  object(value, path);
+  unknown(value, ['CLIENT_ID', 'CLIENT_SECRET', 'scopes'], path);
+  required(value, ['CLIENT_ID'], path);
+  envReference(value.CLIENT_ID, `${path}.CLIENT_ID`);
+  if (value.CLIENT_SECRET !== undefined) envReference(value.CLIENT_SECRET, `${path}.CLIENT_SECRET`);
+  if (value.scopes !== undefined) {
+    if (!Array.isArray(value.scopes) || value.scopes.length < 1 || value.scopes.length > MAX_MCP_SCOPES) {
+      fail(`${path}.scopes must contain 1-${MAX_MCP_SCOPES} environment variable references.`);
+    }
+    value.scopes.forEach((scope, index) => envReference(scope, `${path}.scopes[${index}]`));
+  }
+}
+
+function headerEnv(value, path) {
+  object(value, path);
+  const names = Object.keys(value);
+  if (names.length > 50) fail(`${path} is too large.`);
+  const seen = new Set();
+  for (const [headerNameValue, envName] of Object.entries(value)) {
+    headerName(headerNameValue, `${path}.${headerNameValue}`);
+    const normalized = headerNameValue.toLowerCase();
+    if (seen.has(normalized)) fail(`${path} contains duplicate header names.`);
+    seen.add(normalized);
+    envReference(envName, `${path}.${headerNameValue}`);
+  }
+}
+
+function mcpEnvironmentReferences(entry, path) {
+  const refs = new Set();
+  const add = (value, refPath) => {
+    if (refs.has(value)) fail(`${refPath} duplicates another secret environment reference.`);
+    refs.add(value);
+  };
+  if (entry.authEnv) {
+    add(entry.authEnv.CLIENT_ID, `${path}.authEnv.CLIENT_ID`);
+    if (entry.authEnv.CLIENT_SECRET !== undefined) add(entry.authEnv.CLIENT_SECRET, `${path}.authEnv.CLIENT_SECRET`);
+    for (const [index, scope] of (entry.authEnv.scopes ?? []).entries()) add(scope, `${path}.authEnv.scopes[${index}]`);
+  }
+  for (const [headerNameValue, envName] of Object.entries(entry.headerEnv ?? {})) {
+    add(envName, `${path}.headerEnv.${headerNameValue}`);
+  }
+}
+
 function mcpServers(value, path = 'arguments.mcpServers') {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > MAX_MCP_SERVERS) fail(`${path} must contain at most ${MAX_MCP_SERVERS} servers.`);
@@ -194,7 +257,7 @@ function mcpServers(value, path = 'arguments.mcpServers') {
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
     object(entry, base);
-    unknown(entry, ['name', 'type', 'url', 'command', 'args', 'env', 'headers'], base);
+    unknown(entry, ['name', 'type', 'url', 'command', 'args', 'env', 'headers', 'authEnv', 'headerEnv'], base);
     required(entry, ['name'], base);
     string(entry.name, `${base}.name`, { min: 1, max: 100 });
     if (names.has(entry.name)) fail(`${base}.name must be unique.`);
@@ -206,6 +269,8 @@ function mcpServers(value, path = 'arguments.mcpServers') {
       string(entry.command, `${base}.command`, { min: 1, max: 512 });
       if (entry.url !== undefined) fail(`${base}.url is not valid for a stdio server.`);
       if (entry.headers !== undefined) fail(`${base}.headers is not valid for a stdio server.`);
+      if (entry.authEnv !== undefined) fail(`${base}.authEnv is not valid for a stdio server.`);
+      if (entry.headerEnv !== undefined) fail(`${base}.headerEnv is not valid for a stdio server.`);
       if (entry.args !== undefined) {
         if (!Array.isArray(entry.args) || entry.args.length > 100) fail(`${base}.args is too large.`);
         entry.args.forEach((arg, argIndex) => string(arg, `${base}.args[${argIndex}]`, { max: 1000 }));
@@ -220,16 +285,89 @@ function mcpServers(value, path = 'arguments.mcpServers') {
       if (entry.headers !== undefined) {
         object(entry.headers, `${base}.headers`);
         if (Object.keys(entry.headers).length > 50) fail(`${base}.headers is too large.`);
+        const literalHeaderNames = new Set();
         for (const [headerName, headerValue] of Object.entries(entry.headers)) {
           safeHeaderName(headerName, `${base}.headers.${headerName}`);
+          const normalizedHeaderName = headerName.toLowerCase();
+          if (literalHeaderNames.has(normalizedHeaderName)) fail(`${base}.headers contains duplicate header names.`);
+          literalHeaderNames.add(normalizedHeaderName);
           string(headerValue, `${base}.headers.${headerName}`, { max: 4096 });
           if (/bearer\s|basic\s|token|secret|password|api[-_]?key|crsr_/i.test(headerValue)) {
             fail(`${base}.headers contains a likely credential.`);
           }
         }
       }
+      if (entry.authEnv !== undefined) authEnv(entry.authEnv, `${base}.authEnv`);
+      if (entry.headerEnv !== undefined) {
+        headerEnv(entry.headerEnv, `${base}.headerEnv`);
+        const literalHeaders = new Set(Object.keys(entry.headers ?? {}).map((name) => name.toLowerCase()));
+        for (const headerNameValue of Object.keys(entry.headerEnv)) {
+          if (literalHeaders.has(headerNameValue.toLowerCase())) {
+            fail(`${base}.headerEnv.${headerNameValue} conflicts with a literal header.`);
+          }
+        }
+      }
+      if (entry.authEnv !== undefined || entry.headerEnv !== undefined) mcpEnvironmentReferences(entry, base);
     }
   });
+}
+
+function resolveEnvironmentValue(name, env, path) {
+  const value = env?.[name];
+  if (typeof value !== 'string' || !value.trim()) fail(`${path} references a missing or empty environment variable.`);
+  return value;
+}
+
+function resolveScopeValue(name, env, path) {
+  const value = resolveEnvironmentValue(name, env, path);
+  if (!SCOPE_PATTERN.test(value)) fail(`${path} resolved to an invalid OAuth scope.`);
+  return value;
+}
+
+/**
+ * Resolve the intentionally small secret-reference wrapper into Cursor's
+ * documented remote MCP shape. The input is already structurally validated;
+ * this function only reads the MCP process environment and returns a copy.
+ */
+export function materializeMcpServers(value, env = process.env) {
+  if (value === undefined) return { servers: undefined, secrets: [] };
+  const secrets = [];
+  const addSecret = (secret) => { if (!secrets.includes(secret)) secrets.push(secret); };
+  const servers = value.map((entry, index) => {
+    const base = `arguments.mcpServers[${index}]`;
+    if (entry.type === 'stdio' || (!entry.type && !entry.url)) return { ...entry };
+    const materialized = { ...entry };
+    delete materialized.authEnv;
+    delete materialized.headerEnv;
+    if (entry.authEnv !== undefined) {
+      const auth = {
+        CLIENT_ID: resolveEnvironmentValue(entry.authEnv.CLIENT_ID, env, `${base}.authEnv.CLIENT_ID`),
+      };
+      addSecret(auth.CLIENT_ID);
+      if (entry.authEnv.CLIENT_SECRET !== undefined) {
+        auth.CLIENT_SECRET = resolveEnvironmentValue(entry.authEnv.CLIENT_SECRET, env, `${base}.authEnv.CLIENT_SECRET`);
+        addSecret(auth.CLIENT_SECRET);
+      }
+      if (entry.authEnv.scopes !== undefined) {
+        auth.scopes = entry.authEnv.scopes.map((name, scopeIndex) => {
+          const scope = resolveScopeValue(name, env, `${base}.authEnv.scopes[${scopeIndex}]`);
+          addSecret(scope);
+          return scope;
+        });
+      }
+      materialized.auth = auth;
+    }
+    if (entry.headerEnv !== undefined) {
+      materialized.headers = { ...(entry.headers ?? {}) };
+      for (const [headerNameValue, envName] of Object.entries(entry.headerEnv)) {
+        const headerValue = resolveEnvironmentValue(envName, env, `${base}.headerEnv.${headerNameValue}`);
+        addSecret(headerValue);
+        materialized.headers[headerNameValue] = headerValue;
+      }
+    }
+    return materialized;
+  });
+  return { servers, secrets };
 }
 
 function repo(value, path) {
@@ -428,6 +566,26 @@ const HEADER_SCHEMA = {
   additionalProperties: false,
 };
 
+const ENV_REFERENCE_SCHEMA = { type: 'string', minLength: 1, maxLength: 255, pattern: ENV_NAME_PATTERN.source };
+
+const AUTH_ENV_SCHEMA = {
+  type: 'object',
+  properties: {
+    CLIENT_ID: ENV_REFERENCE_SCHEMA,
+    CLIENT_SECRET: ENV_REFERENCE_SCHEMA,
+    scopes: { type: 'array', minItems: 1, maxItems: MAX_MCP_SCOPES, items: ENV_REFERENCE_SCHEMA },
+  },
+  required: ['CLIENT_ID'],
+  additionalProperties: false,
+};
+
+const HEADER_ENV_SCHEMA = {
+  type: 'object',
+  maxProperties: 50,
+  patternProperties: { "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$": ENV_REFERENCE_SCHEMA },
+  additionalProperties: false,
+};
+
 const MCP_SERVER_SCHEMA = {
   type: 'object',
   properties: {
@@ -438,6 +596,8 @@ const MCP_SERVER_SCHEMA = {
     args: { type: 'array', maxItems: 100, items: { type: 'string', maxLength: 1000 } },
     env: ENV_VARS_SCHEMA,
     headers: HEADER_SCHEMA,
+    authEnv: AUTH_ENV_SCHEMA,
+    headerEnv: HEADER_ENV_SCHEMA,
   },
   required: ['name'],
   additionalProperties: false,

@@ -76,6 +76,26 @@ class FakeClient {
   async deleteAgent(id) { this.calls.push(['delete', id]); return { id }; }
 }
 
+class ConcurrentSecretClient extends FakeClient {
+  constructor() {
+    super();
+    this.firstCreateStarted = new Promise((resolve) => { this.resolveFirstCreateStarted = resolve; });
+    this.releaseFirstCreate = null;
+  }
+
+  async createAgent(body) {
+    this.calls.push(['createAgent', body]);
+    const secret = body.mcpServers?.[0]?.headers?.Authorization;
+    if (secret === 'resolved-secret-a') {
+      this.resolveFirstCreateStarted();
+      await new Promise((resolve) => { this.releaseFirstCreate = resolve; });
+      return { agent: { id: body.agentId, detail: secret }, run: { id: runId, agentId: body.agentId, status: 'CREATING' } };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    throw new CursorApiError('bad_request', `provider rejected ${secret}`);
+  }
+}
+
 async function serviceFixture(context) {
   const state = await mkdtemp(path.join(os.tmpdir(), 'cursor-cloud-state-'));
   context.after(() => rm(state, { recursive: true, force: true }));
@@ -375,6 +395,128 @@ test('create forwards explicit empty repositories and image dimensions unchanged
   assert.deepEqual(createCall[1].repos, []);
   assert.deepEqual(createCall[1].prompt, args.prompt);
   assert.deepEqual(createCall[1].prompt.images[0].dimension, { width: 640, height: 480 });
+});
+
+test('remote MCP env references materialize official auth and credential headers without leaking values', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  service.env = {
+    ...service.env,
+    MCP_CLIENT_ID: 'client-id-value',
+    MCP_CLIENT_SECRET: 'client-secret-value',
+    MCP_SCOPE_READ: 'file_content:read',
+    MCP_AUTHORIZATION: 'Bearer remote-secret-value',
+  };
+  const args = {
+    action: 'create', requestId: 'mcp-materialize-create-1', prompt: { text: 'use the remote server' },
+    mcpServers: [{
+      name: 'remote', type: 'http', url: 'https://example.test/mcp',
+      headers: { 'X-Trace': 'safe-trace' },
+      headerEnv: { Authorization: 'MCP_AUTHORIZATION' },
+      authEnv: { CLIENT_ID: 'MCP_CLIENT_ID', CLIENT_SECRET: 'MCP_CLIENT_SECRET', scopes: ['MCP_SCOPE_READ'] },
+    }],
+  };
+  const result = await handleToolCall('agents', args, service);
+  assert.equal(result.structuredContent.ok, true);
+  const body = client.calls.find((call) => call[0] === 'createAgent')[1];
+  assert.deepEqual(body.mcpServers, [{
+    name: 'remote', type: 'http', url: 'https://example.test/mcp',
+    headers: { 'X-Trace': 'safe-trace', Authorization: 'Bearer remote-secret-value' },
+    auth: { CLIENT_ID: 'client-id-value', CLIENT_SECRET: 'client-secret-value', scopes: ['file_content:read'] },
+  }]);
+  const serialized = JSON.stringify(result);
+  for (const secret of ['client-id-value', 'client-secret-value', 'file_content:read', 'Bearer remote-secret-value']) {
+    assert.equal(serialized.includes(secret), false, `result leaked ${secret}`);
+  }
+  const ledger = await readFile(path.join(service.ledger.stateDir, 'submissions.json'), 'utf8');
+  for (const secret of ['client-id-value', 'client-secret-value', 'file_content:read', 'Bearer remote-secret-value']) {
+    assert.equal(ledger.includes(secret), false, `ledger leaked ${secret}`);
+  }
+  assert.equal(result.structuredContent.receipt.requestDigest.length, 64);
+  assert.equal(result.structuredContent.receipt.effectiveConfiguration.mcpServerCount, 1);
+  const digest = result.structuredContent.receipt.requestDigest;
+  service.env.MCP_AUTHORIZATION = 'Bearer changed-secret-value';
+  const duplicate = await handleToolCall('agents', args, service);
+  assert.equal(duplicate.structuredContent.receipt.duplicate, true);
+  assert.equal(duplicate.structuredContent.receipt.requestDigest, digest);
+  assert.equal(JSON.stringify(duplicate).includes('changed-secret-value'), false);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('missing or invalid MCP secret references fail before reservation and provider calls', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const result = await handleToolCall('agents', {
+    action: 'create', requestId: 'mcp-materialize-missing-1', prompt: { text: 'use the remote server' },
+    mcpServers: [{ name: 'remote', url: 'https://example.test/mcp', headerEnv: { Authorization: 'MCP_MISSING' } }],
+  }, service);
+  assert.equal(result.structuredContent.error.code, 'invalid_input');
+  assert.match(result.structuredContent.error.message, /missing or empty/);
+  assert.deepEqual(client.calls, []);
+  await assert.rejects(readFile(path.join(service.ledger.stateDir, 'submissions.json'), 'utf8'), { code: 'ENOENT' });
+
+  service.env.MCP_BAD_CLIENT_ID = 'client-id-for-invalid-scope';
+  service.env.MCP_BAD_SCOPE = 'scope with spaces';
+  const invalidScope = await handleToolCall('agents', {
+    action: 'create', requestId: 'mcp-materialize-invalid-scope', prompt: { text: 'use the remote server' },
+    mcpServers: [{ name: 'remote', url: 'https://example.test/mcp', authEnv: { CLIENT_ID: 'MCP_BAD_CLIENT_ID', scopes: ['MCP_BAD_SCOPE'] } }],
+  }, service);
+  assert.equal(invalidScope.structuredContent.error.code, 'invalid_input');
+  assert.match(invalidScope.structuredContent.error.message, /invalid OAuth scope/);
+  assert.deepEqual(client.calls, []);
+});
+
+test('follow-up MCP env references are materialized while the digest retains only caller references', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  service.env.MCP_FOLLOWUP_AUTH = 'Bearer followup-secret-value';
+  const args = {
+    action: 'followup', requestId: 'mcp-materialize-followup-1', agentId,
+    prompt: { text: 'continue with the remote server' },
+    mcpServers: [{ name: 'remote', url: 'https://example.test/mcp', headerEnv: { Authorization: 'MCP_FOLLOWUP_AUTH' } }],
+  };
+  const result = await handleToolCall('runs', args, service);
+  assert.equal(result.structuredContent.ok, true);
+  const body = client.calls.find((call) => call[0] === 'createRun')[2];
+  assert.deepEqual(body.mcpServers[0].headers, { Authorization: 'Bearer followup-secret-value' });
+  assert.equal(JSON.stringify(result).includes('followup-secret-value'), false);
+  const ledger = await readFile(path.join(service.ledger.stateDir, 'submissions.json'), 'utf8');
+  assert.equal(ledger.includes('followup-secret-value'), false);
+  assert.equal(result.structuredContent.receipt.requestDigest.length, 64);
+});
+
+test('concurrent MCP secret resolution cannot cross-contaminate delayed success and error redaction', async (context) => {
+  const state = await mkdtemp(path.join(os.tmpdir(), 'cursor-cloud-concurrent-secrets-'));
+  context.after(() => rm(state, { recursive: true, force: true }));
+  const client = new ConcurrentSecretClient();
+  const service = new CursorCloudService({
+    env: {
+      HOME: state,
+      CURSOR_API_AUTH_SCHEME: 'bearer',
+      MCP_SECRET_A: 'resolved-secret-a',
+      MCP_SECRET_B: 'resolved-secret-b',
+    },
+    client,
+    ledger: new SubmissionLedger({ stateDir: state }),
+  });
+  const args = (requestId, envName) => ({
+    action: 'create', requestId, prompt: { text: 'submit once' },
+    mcpServers: [{ name: 'remote', type: 'http', url: 'https://example.test/mcp', headerEnv: { Authorization: envName } }],
+  });
+
+  const firstPromise = handleToolCall('agents', args('concurrent-secret-a', 'MCP_SECRET_A'), service);
+  await client.firstCreateStarted;
+  const second = await handleToolCall('agents', args('concurrent-secret-b', 'MCP_SECRET_B'), service);
+  client.releaseFirstCreate();
+  const first = await firstPromise;
+
+  for (const result of [first, second]) {
+    const structured = JSON.stringify(result.structuredContent);
+    const text = result.content.map((entry) => entry.text ?? '').join('\n');
+    assert.equal(structured.includes('resolved-secret-a'), false, 'structured response leaked secret A');
+    assert.equal(structured.includes('resolved-secret-b'), false, 'structured response leaked secret B');
+    assert.equal(text.includes('resolved-secret-a'), false, 'text response leaked secret A');
+    assert.equal(text.includes('resolved-secret-b'), false, 'text response leaked secret B');
+  }
+  assert.equal(first.structuredContent.ok, true);
+  assert.equal(second.structuredContent.error.message, 'provider rejected [REDACTED]');
 });
 
 test('concurrent identical generated-ID creates share one submission and preserve duplicate receipt', async (context) => {

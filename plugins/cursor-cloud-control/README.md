@@ -9,8 +9,10 @@ unarchive, or permanently delete agents.
 
 The implementation is intentionally a control plane, not a generic HTTP
 proxy. Every operation is mapped to a documented v1 endpoint and every tool
-schema rejects unknown fields. There is no tool argument for a URL, method,
-headers, raw JSON payload, shell command, filesystem root, or environment map.
+schema rejects unknown fields. It does not expose a raw HTTP method, JSON
+payload, shell command, filesystem root, or credential value. Remote MCP
+headers are typed; credential-bearing headers and OAuth values can only be
+referenced by administrator-provided environment variable names.
 
 ## API contract checked
 
@@ -31,11 +33,14 @@ reaches Codex. Identity status contains only `authenticated`, an opaque
 avatars, organizations, unknown fields, and credential-shaped fields are never
 returned. There is no model-facing full-identity escape hatch.
 
-Cursor's reference names an OAuth `auth` option for remote MCP servers but does
-not define a safe secret-reference schema there. This plugin therefore exposes
-credential-free remote headers and stdio environment inputs only after its
-strict checks, and rejects an `auth` escape hatch until Cursor documents its
-shape and secret handling.
+Cursor's reference defines remote MCP OAuth as `auth` with `CLIENT_ID`, an
+optional `CLIENT_SECRET`, and `scopes`. The tool-facing wrapper uses
+`authEnv` and `headerEnv` so callers provide only environment variable names;
+the MCP process resolves those values immediately before create/follow-up,
+materializes Cursor's official shape, and keeps the resolved values out of
+digests, receipts, ledgers, and returned results. Stdio servers cannot use
+these remote-only reference fields. Literal credential-bearing headers remain
+rejected.
 
 The endpoint-specific mappings are kept literal: usage calls
 `GET /v1/agents/{id}/usage` and adds the optional `runId` query parameter,
@@ -72,8 +77,8 @@ When neither setting is provided, the process checks the prepared default
 `$XDG_CONFIG_HOME/cursor-cloud-control/api-key` or
 `$HOME/.config/cursor-cloud-control/api-key` path. The file must be a regular
 owner-only file (mode `0600` or stricter), and the value is read only by the
-MCP process. Credentials are never accepted in tool
-arguments, prompts, the durable ledger, logs, or error responses. API keys are
+MCP process. Credential values are never accepted as literal tool arguments,
+prompts, the durable ledger, logs, or error responses. API keys are
 created in the Cursor Dashboard API Keys page; account and repository access
 remain governed by Cursor and GitHub.
 
@@ -101,7 +106,26 @@ Optional administrator settings:
 Do not place credentials in a repository, commit, prompt, MCP server
 definition, or issue report. Inline MCP stdio environment values and session
 environment variables are sent to Cursor only for the requested run and are
-represented locally by counts and a configuration digest.
+represented locally by counts and a configuration digest. For remote MCP
+OAuth or credential-bearing headers, use the compact reference form:
+
+```json
+{
+  "name": "linear",
+  "url": "https://mcp.example.test/sse",
+  "authEnv": {
+    "CLIENT_ID": "MCP_CLIENT_ID",
+    "CLIENT_SECRET": "MCP_CLIENT_SECRET",
+    "scopes": ["MCP_SCOPE_READ"]
+  },
+  "headerEnv": { "Authorization": "MCP_AUTHORIZATION" }
+}
+```
+
+Each reference must be a valid non-reserved environment name with a non-empty
+value in the MCP process. References are unique within one server and cannot
+conflict with literal headers. OAuth scope values must be one non-whitespace
+scope token. The values are never part of the request digest or durable state.
 
 ### Durable local state
 
@@ -138,8 +162,9 @@ Create defaults are deliberately conservative:
 Cursor Cloud Agents run on a durable Cursor-managed VM/workspace. A durable
 agent persists conversation and workspace state across runs. Repository URLs,
 starting references, current-branch behavior, PR creation, environment
-variables, MCP servers, and custom subagents are sent to Cursor exactly as
-requested within the documented bounds. The plugin does not mutate the local
+variables, MCP servers (including safe `authEnv` and `headerEnv` references),
+and custom subagents are sent to Cursor exactly as requested within the
+documented bounds. The plugin does not mutate the local
 checkout and does not merge or execute returned artifacts.
 
 ## Tools and recipes
@@ -158,8 +183,9 @@ one-attempt transport bound.
 
 `agents` supports `list`, `get`, and `create`. A create call supplies a
 prompt and may select a model, environment, repositories, prompt images,
-session environment variables, inline MCP servers, custom subagents, and
-`agent`/`plan` mode. The result includes an effective configuration and opaque
+session environment variables, inline MCP servers (including remote `authEnv`
+and `headerEnv` references), custom subagents, and `agent`/`plan` mode. The
+result includes an effective configuration and opaque
 agent/run receipts rather than plaintext sensitive inputs.
 
 `runs` supports `list`, `get`, `followup`, `wait`, `stream`, and `cancel`.
