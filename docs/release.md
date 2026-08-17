@@ -16,3 +16,10 @@ focused stdio MCP preflight without a credential or network request, and checks
 its npm dry-run inventory. The existing Co-Engineer inspector remains
 unchanged because its target contract is intentionally specific to that
 plugin.
+
+The gate also runs `scripts/plugin-activation-fixture.mjs`. This is a
+repository-owned, temporary-directory-only model of immutable staging, atomic
+activation, task leases, rollback, crash recovery, and conservative garbage
+collection. It does not touch the real Codex cache or catalog: catalog refresh,
+real task leases, and fresh-task schema/skill acceptance remain Codex app-owned
+integration checks.

@@ -10,6 +10,7 @@
       ],
       "env_vars": [
         "DSH_HOME",
+        "CODEX_CO_ENGINEER_DSH_HOME",
         "MODEL_API_KEY",
         "XAI_API_KEY",
         "CODEX_CO_ENGINEER_RUNTIME_WORKSPACE",

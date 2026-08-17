@@ -39,6 +39,14 @@ import {
   grokVersionProbe,
   normalizeGrokConfiguration,
 } from './grok-build.mjs';
+import {
+  DEFAULT_DSH_PATCH_FILE,
+  dshChildEnvironment,
+  dshReadinessMessage,
+  dshVersionProbe,
+  inspectDsh,
+  resolveDshHome,
+} from './dsh.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const USER_HOME = process.env.HOME ?? '';
@@ -57,6 +65,11 @@ const STATE_DIR = path.resolve(
 const JOBS_DIR = path.join(STATE_DIR, 'jobs');
 const DATABASE_FILE = path.join(STATE_DIR, 'control.sqlite3');
 const DSH = process.env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
+const DSH_HOME_CONFIG = resolveDshHome({ env: process.env, stateDirectory: STATE_DIR });
+const DSH_HOME = DSH_HOME_CONFIG.path;
+const DSH_PATCH_FILE = DSH_HOME_CONFIG.source === 'managed-state'
+  ? DEFAULT_DSH_PATCH_FILE
+  : null;
 const GROK = process.env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
 const GROK_ENVIRONMENT_NAMES = Object.freeze([
   'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR',
@@ -86,7 +99,6 @@ const ACTIVE_STATES = new Set([
   'accepted', 'started', 'working',
   'queued', 'starting', 'running', 'cancelling',
 ]);
-const TESTED_DSH_VERSION = '0.1.0-rc.6';
 const PLUGIN_VERSION = SERVER_IDENTITY.version;
 const WAIT_LIMITS = Object.freeze({
   list_limit: { minimum: 1, maximum: 25, default: 10 },
@@ -740,24 +752,61 @@ function versions() {
     });
     return concise(result.stdout || result.stderr || 'unavailable', 80);
   };
+  const dshVersion = dshVersionProbe(DSH, process.env, DSH_HOME);
   versionCache = {
-    deepseek_harness: run(DSH, ['--version']),
+    deepseek_harness: dshVersion.version ?? dshVersion.detail ?? 'unavailable',
     grok: run(GROK, ['--version'], grokEnvironment()),
   };
   versionCache.compatible = {
-    deepseek_harness: versionCache.deepseek_harness.includes(TESTED_DSH_VERSION),
+    deepseek_harness: dshVersion.compatible,
   };
   return versionCache;
 }
 
-function requireDeepSeekCompatible() {
-  const current = versions();
-  if (!current.compatible.deepseek_harness) {
-    throw new ToolError(
-      'unsupported_runtime_version',
-      `DeepSeek jobs require DeepSeek Harness ${TESTED_DSH_VERSION}; inspect status for the detected version.`,
-    );
+let dshReadinessCache;
+function deepseekReadiness() {
+  // Keep only a compact identity snapshot between calls.  Every call still
+  // lstat-checks the home/profile and compares it with the snapshot, so a
+  // replaced directory or profile cannot remain trusted for daemon lifetime.
+  const status = inspectDsh({
+    command: DSH,
+    home: DSH_HOME,
+    source: DSH_HOME_CONFIG.source,
+    patchFile: DSH_PATCH_FILE,
+    cwd: PLUGIN_ROOT,
+    env: process.env,
+    initialize: !dshReadinessCache?.ok,
+    expectedIdentity: dshReadinessCache?.ok ? dshReadinessCache.identity : null,
+  });
+  if (status.ok) dshReadinessCache = status;
+  else dshReadinessCache = null;
+  return status;
+}
+
+function requireDeepSeekReady() {
+  const prepared = deepseekReadiness();
+  if (!prepared.ok) {
+    throw new ToolError('dsh_unavailable', dshReadinessMessage(prepared));
   }
+  // This second, initialization-free check is deliberately adjacent to the
+  // caller's spawn.  It catches home/profile replacement after status or
+  // preflight succeeded without rerunning the DSH provider-free setup.
+  const status = inspectDsh({
+    command: DSH,
+    home: DSH_HOME,
+    source: DSH_HOME_CONFIG.source,
+    patchFile: DSH_PATCH_FILE,
+    cwd: PLUGIN_ROOT,
+    env: process.env,
+    initialize: false,
+    expectedIdentity: prepared.identity,
+  });
+  if (!status.ok) {
+    dshReadinessCache = null;
+    throw new ToolError('dsh_unavailable', dshReadinessMessage(status));
+  }
+  dshReadinessCache = status;
+  return status;
 }
 
 async function startJob({
@@ -890,21 +939,29 @@ async function statusTool(args) {
   const listening = await portOpen();
   const detectedVersions = versions();
   const grokStatus = grokVersionProbe(GROK, PLUGIN_ROOT, grokEnvironment());
+  const deepseekStatus = deepseekReadiness();
   // The default path deliberately avoids a provider request.  When the
   // caller explicitly asks for diagnostics, use that bounded read-only probe
   // as the source of truth for the summary returned in this same response.
   const grokDiagnostic = args.diagnostics === true ? grokAuthDoctor() : null;
   const deepseekConfigured = detectedVersions.compatible.deepseek_harness;
+  const deepseekReady = deepseekConfigured && deepseekStatus.ok;
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
     ok: true,
     integration: 'control-only',
     control_plane: { health: 'healthy', version: PLUGIN_VERSION, transport: 'unix_socket', ledger: 'sqlite_wal' },
     headless_agent: {
-      availability: deepseekConfigured ? 'available' : 'unavailable',
-      configured: deepseekConfigured,
+      availability: deepseekReady ? 'available' : 'unavailable',
+      configured: deepseekConfigured && deepseekStatus.configured,
+      usable: deepseekReady,
       kind: 'deepseek_agent',
       version_compatible: detectedVersions.compatible.deepseek_harness,
+      readiness_reason: deepseekReady ? null : deepseekStatus.reason,
+      readiness_detail: deepseekReady ? null : deepseekStatus.detail,
+      dsh_home: deepseekStatus.home,
+      dsh_home_source: deepseekStatus.source,
+      profile: deepseekStatus.profile,
     },
     grok_build: {
       kind: 'grok_build',
@@ -950,9 +1007,14 @@ async function statusTool(args) {
     credential_setup: { protected_file: MODEL_API_KEY_FILE },
     workspace: {
       path: WORKSPACE,
-      deepseek_configured: deepseekConfigured,
+      deepseek_configured: deepseekReady,
+      deepseek_executable_compatible: deepseekConfigured,
       dsh_command: DSH,
-      dsh_home_configured: Boolean(process.env.DSH_HOME),
+      dsh_home: deepseekStatus.home,
+      dsh_home_configured: deepseekStatus.configured,
+      dsh_home_source: deepseekStatus.source,
+      dsh_profile: deepseekStatus.profile,
+      dsh_ready: deepseekReady,
       grok_command: GROK,
     },
     versions: detectedVersions,
@@ -1013,19 +1075,28 @@ async function runtimeTool(args) {
     const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
-    requireDeepSeekCompatible();
+    requireDeepSeekReady();
     const managed = await activeWebJob();
     const listening = await portOpen();
     if (managed && listening) return { ok: true, already_running: true, job: publicJob(managed) };
     if (listening) {
       throw new ToolError('port_occupied', `Port ${WEB_PORT} is occupied by an unmanaged process.`);
     }
+    requireDeepSeekReady();
     const job = await startJob({
       kind: 'dsh_web',
       summary: 'DeepSeek Harness web UI',
       command: DSH,
-      args: ['--profile', 'web', '--host', WEB_HOST, '--port', String(WEB_PORT)],
-      env: { DSH_PERMISSION_MODE: 'workspace-write', DSH_TELEMETRY_MODE: 'DISABLED' },
+      args: [
+        '--profile', 'web',
+        ...(DSH_PATCH_FILE ? ['--patch', DSH_PATCH_FILE] : []),
+        '--host', WEB_HOST,
+        '--port', String(WEB_PORT),
+      ],
+      env: {
+        ...dshChildEnvironment(DSH_HOME),
+        DSH_PERMISSION_MODE: 'workspace-write',
+      },
       url: `http://${WEB_HOST}:${WEB_PORT}`,
       timeoutSeconds,
       cwd,
@@ -1272,6 +1343,9 @@ async function preflightTool(args) {
     && (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000)) {
     throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters.');
   }
+  if (kind === 'deepseek_agent') {
+    requireDeepSeekReady();
+  }
   if (args.request_id !== undefined) requestId(args.request_id);
   const configuration = {
     schema_version: CONFIG_SCHEMA_VERSION,
@@ -1433,7 +1507,7 @@ async function runTool(args) {
     const existing = await findRequest(id, fingerprint);
     if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
     requireCredential();
-    requireDeepSeekCompatible();
+    requireDeepSeekReady();
     const activeTask = [
       'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
       targetPreamble(target),
@@ -1444,23 +1518,30 @@ async function runTool(args) {
       working_directory: cwd,
       expected_git_root: target?.expected_git_root ?? null,
       git_common_directory: target?.git_common_directory ?? null,
-    }, () => startJob({
-      kind: 'deepseek_agent',
-      summary: `DeepSeek task ${id}`,
-      command: DSH,
-      args: ['--profile', 'headless', activeTask],
-      env: {
-        DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
-        DSH_TELEMETRY_MODE: 'DISABLED',
-      },
-      requestId: id,
-      requestFingerprint: fingerprint,
-      timeoutSeconds,
-      cwd,
-      targetContext: target,
-      effectiveConfiguration,
-      redactions: [args.prompt],
-    }));
+    }, () => {
+      requireDeepSeekReady();
+      return startJob({
+        kind: 'deepseek_agent',
+        summary: `DeepSeek task ${id}`,
+        command: DSH,
+        args: [
+          '--profile', 'headless',
+          ...(DSH_PATCH_FILE ? ['--patch', DSH_PATCH_FILE] : []),
+          activeTask,
+        ],
+        env: {
+          ...dshChildEnvironment(DSH_HOME),
+          DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
+        },
+        requestId: id,
+        requestFingerprint: fingerprint,
+        timeoutSeconds,
+        cwd,
+        targetContext: target,
+        effectiveConfiguration,
+        redactions: [args.prompt],
+      });
+    });
     return {
       ok: true,
       job: publicJob(job),
@@ -1630,6 +1711,7 @@ export async function dispatchControl(name, args = {}) {
 export const __testing = Object.freeze({
   configuredTargetRoots,
   executionScopesOverlap,
+  deepseekReadiness,
   prepareTarget,
 });
 

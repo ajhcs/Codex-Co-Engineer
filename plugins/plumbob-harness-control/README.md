@@ -40,7 +40,10 @@ ports, provider URLs, or environment maps as tool arguments.
 4. Clone this repository and register
    `plugins/plumbob-harness-control` as a local Codex plugin.
 5. Set the runtime environment described below before Codex starts the MCP
-   server.
+   server. If the task sandbox makes the normal home directory read-only,
+   provide a writable `CODEX_CO_ENGINEER_STATE_DIR` or
+   `CODEX_CO_ENGINEER_DSH_HOME`; status reports the exact readiness reason and
+   dispatch fails before a DSH worker is submitted when neither root is usable.
 
 The plugin has no runtime npm dependencies. DeepSeek Harness and Grok Build are
 installed and authenticated independently. The public repository deliberately
@@ -55,10 +58,11 @@ portable example is in [`config/configuration.example.json`](../../config/config
 | --- | --- |
 | `MODEL_API_KEY` | Provider credential, supplied by the environment or a secret manager. |
 | `XAI_API_KEY` | Optional xAI API key for the official Grok CLI; OAuth/session state remains under the normal user home. Never pass it as an MCP argument. |
-| `DSH_HOME` | Optional DeepSeek Harness profile home. When omitted, DSH uses its normal per-user default. |
+| `DSH_HOME` | Optional absolute DeepSeek Harness profile/state home. When omitted, Co-Engineer uses its managed `dsh-home` beneath the configured state directory and never falls back to the protected per-user DSH home. |
+| `CODEX_CO_ENGINEER_DSH_HOME` | Preferred explicit absolute DeepSeek Harness profile/state home. Relative paths fail closed. |
 | `CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` | Default Git workspace selected only by an explicit `target_context.mode: "default"`; it is not prompt-derived authority. |
 | `CODEX_CO_ENGINEER_ALLOWED_ROOTS` | Optional path-delimited administrator allowlist for local Git roots. |
-| `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only state, SQLite ledger, cancellation markers, and redacted logs. |
+| `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only state, SQLite ledger, cancellation markers, redacted logs, and the default managed DSH profile/state root. |
 | `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Optional protected file containing only the provider key; keep it outside the clone. |
 | `CODEX_CO_ENGINEER_DSH_COMMAND` | Optional DeepSeek Harness executable override; defaults to `dsh`; passed to `spawn` without a shell. |
 | `CODEX_CO_ENGINEER_GROK_COMMAND` | Optional direct Grok executable override; defaults to `grok`; passed to `spawn` without a shell. |

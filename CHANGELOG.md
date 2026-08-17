@@ -58,6 +58,10 @@ All notable public changes to Codex-Co-Engineer are recorded here.
   explicit unavailable result.
 - DeepSeek Harness is invoked directly in the attested target checkout and is
   validated independently through its own CLI version.
+- DeepSeek headless and web jobs use a managed absolute DSH profile/state root,
+  materialize the bundled Muse Spark 1.2 Contributor overlay without reading a
+  provider key, and fail closed with a readiness reason instead of falling
+  back to a protected `~/.dsh` path.
 - Root and plugin documentation now describe every MCP tool, accepted worker
   kind, required target fields, monitoring call, and credential boundary.
 

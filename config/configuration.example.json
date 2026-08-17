@@ -7,7 +7,7 @@
   },
   "runtime": {
     "workspace": "/absolute/path/to/default/git-workspace",
-    "dsh_home": "${DSH_HOME:-$HOME/.dsh}",
+    "dsh_home": "${CODEX_CO_ENGINEER_DSH_HOME:-${DSH_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer/dsh-home}}",
     "state_directory": "${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer",
     "allowed_roots": ["/absolute/path/to/local/checkouts"],
     "grok_command": "grok"

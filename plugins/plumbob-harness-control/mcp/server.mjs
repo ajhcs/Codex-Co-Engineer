@@ -62,6 +62,7 @@ function daemonEnvironment() {
     'TERM',
     'TMPDIR',
     'DSH_HOME',
+    'CODEX_CO_ENGINEER_DSH_HOME',
     'MODEL_API_KEY',
     'XAI_API_KEY',
     'CODEX_CO_ENGINEER_RUNTIME_WORKSPACE',
@@ -714,17 +715,11 @@ async function handle(message) {
 }
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-const inflight = new Set();
-input.on('line', (line) => {
-  if (!line.trim()) return;
+for await (const line of input) {
+  if (!line.trim()) continue;
   try {
-    const request = handle(JSON.parse(line));
-    inflight.add(request);
-    void request.finally(() => inflight.delete(request));
+    await handle(JSON.parse(line));
   } catch {
     send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
   }
-});
-input.on('close', () => {
-  void Promise.allSettled([...inflight]);
-});
+}
