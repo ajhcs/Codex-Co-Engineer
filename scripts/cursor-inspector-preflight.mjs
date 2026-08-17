@@ -100,6 +100,10 @@ const statusBranch = (action) => statusBranches.find((branch) => branch.properti
 assert.equal(statusBranch('local').properties.limit, undefined);
 assert.equal(statusBranch('identity').properties.limit, undefined);
 assert.deepEqual(statusBranch('models').properties.limit, { type: 'integer', minimum: 1, maximum: 100 });
+assert.deepEqual(statusBranch('models').properties.detail, { type: 'boolean' });
+assert.deepEqual(statusBranch('models').properties.refresh, { type: 'boolean' });
+assert.equal(statusBranch('repositories').properties.detail, undefined);
+assert.equal(statusBranch('repositories').properties.refresh, undefined);
 assert.deepEqual(statusBranch('repositories').properties.limit, { type: 'integer', minimum: 1, maximum: 100 });
 assert.equal(responses[2].result.structuredContent.ok, true);
 assert.equal(responses[2].result.structuredContent.status.credentials.configured, false);

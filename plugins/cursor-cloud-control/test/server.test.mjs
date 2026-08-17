@@ -22,6 +22,15 @@ class FakeClient {
     this.afterCreateAgent = null;
     this.failFollowup = false;
     this.failRepositories = null;
+    this.modelCatalog = {
+      items: [{
+        id: 'provider-model-dynamic',
+        displayName: 'Provider Dynamic',
+        aliases: ['provider-latest'],
+        parameters: [{ id: 'reasoning', values: [{ value: 'deep' }] }],
+        variants: [{ params: [{ id: 'reasoning', value: 'deep' }], displayName: 'Deep', isDefault: true }],
+      }],
+    };
     this.requestTimeoutMs = 30_000;
     this.repositoryTimeoutMs = 60_000;
     this.identity = {
@@ -64,6 +73,7 @@ class FakeClient {
   }
 
   async me() { this.calls.push(['me']); return this.identity; }
+  async models(options) { this.calls.push(['models', options]); return this.modelCatalog; }
 
   async listAgents(query) { this.calls.push(['listAgents', query]); return { items: [{ id: agentId }], nextCursor: 'next' }; }
   async getAgent(id) { this.calls.push(['getAgent', id]); return { id, latestRunId: runId }; }
@@ -299,6 +309,30 @@ test('identity projection fails closed when upstream has no safe opaque identifi
   });
 });
 
+test('model status defaults to a compact dynamic summary and preserves truncation truth', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.modelCatalog = {
+    items: Array.from({ length: 3 }, (_, index) => ({ id: `provider-${index}`, displayName: `Provider ${index}`, parameters: [{ id: 'mode', values: [{ value: 'fast' }] }] })),
+    truncated: true,
+  };
+  const result = await handleToolCall('status', { action: 'models', limit: 1 }, service);
+  assert.equal(result.structuredContent.ok, true);
+  assert.deepEqual(result.structuredContent.models.items, [{ id: 'provider-0', displayName: 'Provider 0' }]);
+  assert.equal(result.structuredContent.models.modelCount, null);
+  assert.equal(result.structuredContent.models.truncated, true);
+  assert.equal(result.structuredContent.models.pageTruncated, true);
+  assert.deepEqual(client.calls.find((call) => call[0] === 'models')[1], { forceRefresh: false });
+});
+
+test('model status exposes bounded detail and explicit refresh only when requested', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const result = await handleToolCall('status', { action: 'models', detail: true, refresh: true }, service);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.models.items[0].parameters[0].values[0].value, 'deep');
+  assert.equal(result.structuredContent.models.items[0].variants[0].isDefault, true);
+  assert.deepEqual(client.calls.find((call) => call[0] === 'models')[1], { forceRefresh: true });
+});
+
 test('transient repository discovery failure degrades without retries or blocking direct repository use', async (context) => {
   const { client, service } = await serviceFixture(context);
   client.failRepositories = 'network_error';
@@ -373,6 +407,22 @@ test('create maps official fields, safe defaults, redacted receipts, and dedupli
   assert.equal(pr.structuredContent.receipt.effectiveConfiguration.skipReviewerRequest, true);
   const prCall = client.calls.find((call) => call[1]?.autoCreatePR === true);
   assert.equal(prCall[1].skipReviewerRequest, true);
+});
+
+test('create receipts separate requested model while leaving effective model unknown', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const requested = { id: 'provider-requested', params: [{ id: 'reasoning', value: 'deep' }] };
+  const result = await handleToolCall('agents', {
+    action: 'create', requestId: 'create-model-unknown-effective', prompt: { text: 'use the requested model' }, model: requested,
+  }, service);
+  assert.deepEqual(result.structuredContent.receipt.effectiveConfiguration.model, {
+    requested,
+    requestedSource: 'caller',
+    effective: null,
+    effectiveKnown: false,
+    effectiveSource: 'unknown',
+  });
+  assert.deepEqual(client.calls.find((call) => call[0] === 'createAgent')[1].model, requested);
 });
 
 test('create forwards explicit empty repositories and image dimensions unchanged', async (context) => {

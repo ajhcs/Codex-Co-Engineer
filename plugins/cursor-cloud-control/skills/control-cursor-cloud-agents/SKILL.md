@@ -27,6 +27,11 @@ or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
    Identity status is intentionally compact and privacy-preserving: it returns
    only authentication/key status and an opaque user identifier when one is
    available. Personal identity fields from Cursor are not exposed.
+   Model status is a compact ID/display-name/alias summary by default; add
+   `detail=true` only when parameters or variants are needed, and
+   `refresh=true` only when an immediate authenticated catalog refresh is
+   required. Cursor's official API does not document a resolved-model field,
+   so create receipts leave effective model unknown rather than inferring it.
    Repository discovery is slow and strictly rate-limited; if it returns
    `available=false`, continue with a separately confirmed GitHub URL rather
    than repeatedly polling it.

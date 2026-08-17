@@ -147,8 +147,9 @@ the configured account.
 
 The plugin must not hard-code Grok 4.6, Composer, Claude, Gemini, or other model
 IDs. It should cache and expose the account catalog compactly, pass an explicit
-selection unchanged, and report an omitted selection as `account-default` with
-effective model `unknown` unless Cursor reports it.
+selection unchanged, and report an omitted selection as `account-default`.
+The current official API documents no resolved-model response field, so
+effective model remains `unknown` for now; do not infer it from the request.
 
 Cloud API v1 supports:
 

@@ -144,9 +144,12 @@ test('Cursor v1 custom subagents enforce documented limits and built-in names', 
 
 test('status limit is a local cap only for model and repository discovery', () => {
   assert.equal(validateToolInput('status', { action: 'models', limit: 3 }).limit, 3);
+  assert.equal(validateToolInput('status', { action: 'models', detail: true, refresh: true }).detail, true);
   assert.equal(validateToolInput('status', { action: 'repositories', limit: 3 }).limit, 3);
   assert.throws(() => validateToolInput('status', { action: 'local', limit: 3 }), /not supported/);
   assert.throws(() => validateToolInput('status', { action: 'identity', limit: 3 }), /not supported/);
+  assert.throws(() => validateToolInput('status', { action: 'repositories', refresh: true }), /not supported/);
+  assert.throws(() => validateToolInput('status', { action: 'identity', detail: true }), /not supported/);
 });
 
 test('sensitive MCP headers and unsafe destinations are rejected', () => {

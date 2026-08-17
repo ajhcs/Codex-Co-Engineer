@@ -10,6 +10,7 @@ import { saveArtifact, maxArtifactBytes } from './artifacts.mjs';
 import { SubmissionLedger, requestDigest, resolveStateDirectory } from './ledger.mjs';
 import { redactError, redactValue } from './redaction.mjs';
 import { consumeSse } from './sse.mjs';
+import { summarizeModelCatalog, summarizeModelSelection } from './models.mjs';
 import {
   InputError,
   TOOL_SCHEMAS,
@@ -107,7 +108,7 @@ function effectiveCreateConfiguration(value) {
       ...(repo.prUrl ? { prUrl: repo.prUrl } : {}),
     })) ?? [],
     prompt: { textChars: value.prompt.text.length, imageCount: value.prompt.images?.length ?? 0 },
-    model: value.model ? { id: value.model.id, parameterCount: value.model.params?.length ?? 0 } : null,
+    model: summarizeModelSelection(value.model),
     envVarCount: value.envVars ? Object.keys(value.envVars).length : 0,
     mcpServerCount: value.mcpServers?.length ?? 0,
     customSubagentCount: value.customSubagents?.length ?? 0,
@@ -148,8 +149,15 @@ function mapFollowupBody(value) {
 
 function pageResult(response, limit) {
   if (!response || typeof response !== 'object') return { items: [] };
-  const items = Array.isArray(response.items) ? response.items.slice(0, limit ?? 100) : [];
-  return { items, ...(typeof response.nextCursor === 'string' ? { nextCursor: response.nextCursor } : {}) };
+  const sourceItems = Array.isArray(response.items) ? response.items : [];
+  const pageLimit = limit ?? 100;
+  const items = sourceItems.slice(0, pageLimit);
+  return {
+    items,
+    ...(typeof response.nextCursor === 'string' ? { nextCursor: response.nextCursor } : {}),
+    ...(response.truncated === true ? { truncated: true } : {}),
+    ...(response.pageTruncated === true || sourceItems.length > pageLimit ? { pageTruncated: true } : {}),
+  };
 }
 
 function errorResult(error, secrets = []) {
@@ -271,7 +279,13 @@ export class CursorCloudService {
     if (action === 'local') return successResult({ status: local });
     const client = await this.getClient();
     if (action === 'identity') return successResult({ identity: projectIdentity(await client.me()) });
-    if (action === 'models') return successResult({ models: redactValue(pageResult(await client.models(), value.limit), this.secrets(operation)) });
+    if (action === 'models') {
+      const catalog = await client.models({ forceRefresh: value.refresh === true });
+      const models = value.detail === true
+        ? pageResult(catalog, value.limit)
+        : summarizeModelCatalog(catalog, { limit: value.limit });
+      return successResult({ models: redactValue(models, this.secrets(operation)) });
+    }
     if (action === 'repositories') {
       try {
         return successResult({

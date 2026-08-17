@@ -2,6 +2,11 @@ import { lstat, readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { redactText } from './redaction.mjs';
+import {
+  DEFAULT_MODEL_CATALOG_MAX_ITEMS,
+  DEFAULT_MODEL_CATALOG_TTL_MS,
+  ModelCatalogCache,
+} from './models.mjs';
 
 export const DEFAULT_API_ORIGIN = 'https://api.cursor.com';
 export const API_VERSION = 'v1';
@@ -282,6 +287,8 @@ export class CursorApiClient {
     requestTimeoutMs = integerEnv('CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS', DEFAULT_REQUEST_TIMEOUT_MS, 250, 60_000),
     repositoryTimeoutMs = integerEnv('CURSOR_CLOUD_CONTROL_REPOSITORY_TIMEOUT_MS', DEFAULT_REPOSITORY_TIMEOUT_MS, 1_000, 60_000),
     maxResponseBytes = integerEnv('CURSOR_CLOUD_CONTROL_MAX_RESPONSE_BYTES', DEFAULT_MAX_RESPONSE_BYTES, 1024, 20_000_000),
+    modelCatalogTtlMs = DEFAULT_MODEL_CATALOG_TTL_MS,
+    modelCatalogMaxItems = DEFAULT_MODEL_CATALOG_MAX_ITEMS,
   } = {}) {
     this.apiKey = apiKey ?? null;
     this.authScheme = String(authScheme).toLowerCase();
@@ -290,6 +297,9 @@ export class CursorApiClient {
     this.requestTimeoutMs = requestTimeoutMs;
     this.repositoryTimeoutMs = repositoryTimeoutMs;
     this.maxResponseBytes = maxResponseBytes;
+    // Keep discovery cache instance-owned: an instance is bound to one API
+    // origin and credential, so catalogs can never cross client boundaries.
+    this.modelCatalog = new ModelCatalogCache({ ttlMs: modelCatalogTtlMs, maxItems: modelCatalogMaxItems });
     this.secrets = this.apiKey ? [this.apiKey] : [];
     if (typeof this.fetchImpl !== 'function') throw new CursorApiError('fetch_unavailable', 'Node fetch is unavailable.');
   }
@@ -442,7 +452,10 @@ export class CursorApiClient {
   }
 
   me() { return this.json('/v1/me'); }
-  models() { return this.json('/v1/models'); }
+  models(options = {}) {
+    return this.modelCatalog.get(() => this.json('/v1/models'), options);
+  }
+  clearModelCatalog() { this.modelCatalog.clear(); }
   // Cursor documents this endpoint as slow and rate-limited to one call per
   // user per minute. Give it one longer attempt instead of applying the
   // generic three-attempt GET retry policy.

@@ -633,11 +633,13 @@ export const TOOL_SCHEMAS = Object.freeze({
     properties: {
       action: { type: 'string', enum: ['local', 'identity', 'models', 'repositories'] },
       limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE },
+      detail: { type: 'boolean' },
+      refresh: { type: 'boolean' },
     },
     oneOf: [
       { properties: { action: { const: 'local' } }, required: [], additionalProperties: false },
       { properties: { action: { const: 'identity' } }, required: ['action'], additionalProperties: false },
-      { properties: { action: { const: 'models' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE } }, required: ['action'], additionalProperties: false },
+      { properties: { action: { const: 'models' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE }, detail: { type: 'boolean' }, refresh: { type: 'boolean' } }, required: ['action'], additionalProperties: false },
       { properties: { action: { const: 'repositories' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE } }, required: ['action'], additionalProperties: false },
     ],
     additionalProperties: false,
@@ -725,7 +727,12 @@ export function validateToolInput(toolName, raw) {
   if (toolName === 'status') {
     value.action ??= 'local';
     validateAction(value, ['local', 'identity', 'models', 'repositories']);
-    if (value.action === 'models' || value.action === 'repositories') {
+    if (value.action === 'models') {
+      unknown(value, ['action', 'limit', 'detail', 'refresh'], 'arguments');
+      integer(value.limit, 'arguments.limit', { min: 1, max: MAX_PAGE_SIZE, optional: true });
+      boolean(value.detail, 'arguments.detail', true);
+      boolean(value.refresh, 'arguments.refresh', true);
+    } else if (value.action === 'repositories') {
       unknown(value, ['action', 'limit'], 'arguments');
       integer(value.limit, 'arguments.limit', { min: 1, max: MAX_PAGE_SIZE, optional: true });
     } else {

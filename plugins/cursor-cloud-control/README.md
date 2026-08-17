@@ -180,6 +180,12 @@ Use `{"action":"identity"}`, `{"action":"models"}`, or
 `{"action":"repositories"}` for explicit safe discovery.
 Identity discovery returns only the compact, privacy-preserving projection
 described above; it does not return the upstream account object.
+Model discovery returns a compact identity summary by default (dynamic model
+IDs, display names, and aliases). Add `"detail":true` for the bounded
+provider parameters and variants, or `"refresh":true` to force a fresh
+authenticated `/v1/models` read. Catalog and page truncation are reported
+explicitly; Cursor's official API currently documents no resolved-model field,
+so effective selection remains unknown.
 Cursor documents repository discovery as both strictly rate-limited and
 potentially tens of seconds long. The plugin therefore makes one bounded
 60-second attempt, never retries that endpoint, and returns
