@@ -47,6 +47,85 @@ function elapsedSeconds(startedAt, finishedAt) {
 }
 
 const HEARTBEAT_INTERVAL_MS = 15000;
+// A provider command is launched as the leader of a detached process group.
+// The command can exit while a child it spawned is still running, so the
+// runner must close that group before it snapshots the target checkout. Keep
+// the cleanup bounded: a provider-owned descendant that ignores SIGTERM gets
+// SIGKILL, and a group that still cannot be observed as drained fails closed.
+const PROCESS_GROUP_TERM_GRACE_MS = 1000;
+const PROCESS_GROUP_DRAIN_TIMEOUT_MS = 1000;
+const PROCESS_GROUP_POLL_INTERVAL_MS = 25;
+// A detached descendant can escape the provider's group while retaining an
+// inherited stdout/stderr pipe. Never let finalization wait on that reader.
+const OUTPUT_DRAIN_TIMEOUT_MS = 1000;
+
+function processGroupSignalTarget(pgid) {
+  // Detached process groups and negative-PID signalling are POSIX semantics.
+  // Windows keeps the existing direct-child behaviour; the provider adapters
+  // supported by this plugin run on Linux/macOS hosts today.
+  return process.platform === 'win32' ? pgid : -pgid;
+}
+
+function processGroupExists(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(processGroupSignalTarget(pgid), 0);
+    return true;
+  } catch (error) {
+    // EPERM means the group exists but cannot be probed by this uid. Treating
+    // it as present is the safe choice; ESRCH is the only drained result.
+    return error?.code === 'EPERM';
+  }
+}
+
+function signalProcessGroup(pgid, signal) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(processGroupSignalTarget(pgid), signal);
+    return true;
+  } catch {
+    // The group may have drained between the probe and the signal.
+    return false;
+  }
+}
+
+function waitForProcessGroup(pgid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (!processGroupExists(pgid)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, Math.min(PROCESS_GROUP_POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    };
+    poll();
+  });
+}
+
+async function terminateProcessGroup(pgid) {
+  const result = {
+    drained: true,
+    signalSent: null,
+    forced: false,
+  };
+  // There is no portable process-group probe on Windows. The direct child is
+  // already observed as exited at every normal call site, so there is no
+  // additional group to drain there.
+  if (process.platform === 'win32' || !processGroupExists(pgid)) return result;
+
+  if (signalProcessGroup(pgid, 'SIGTERM')) result.signalSent = 'SIGTERM';
+  if (await waitForProcessGroup(pgid, PROCESS_GROUP_TERM_GRACE_MS)) return result;
+
+  result.forced = signalProcessGroup(pgid, 'SIGKILL');
+  if (result.forced) result.signalSent = 'SIGKILL';
+  result.drained = await waitForProcessGroup(pgid, PROCESS_GROUP_DRAIN_TIMEOUT_MS);
+  return result;
+}
 // `git status --ignored=matching` intentionally reports an ignored directory
 // as one entry. Hashing only that directory's metadata misses edits to files
 // already inside it, while recursively walking without a bound lets a model
@@ -91,13 +170,43 @@ function sanitizeOutput(value, fragments) {
 }
 
 function captureSanitizedLines(stream, writer, fragments) {
-  if (!stream) return Promise.resolve();
-  return new Promise((resolve) => {
-    const input = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    input.on('line', (line) => writer.write(`${sanitizeOutput(line, fragments)}\n`));
-    input.on('close', resolve);
-    input.on('error', resolve);
+  if (!stream) return { promise: Promise.resolve(true), abort() {} };
+  let settled = false;
+  let resolveCapture;
+  const promise = new Promise((resolve) => { resolveCapture = resolve; });
+  const input = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const finish = (drained) => {
+    if (settled) return;
+    settled = true;
+    resolveCapture(drained);
+  };
+  input.on('line', (line) => writer.write(`${sanitizeOutput(line, fragments)}\n`));
+  input.on('close', () => finish(true));
+  input.on('error', () => finish(false));
+  stream.on('error', () => finish(false));
+  return {
+    promise,
+    abort() {
+      if (settled) return;
+      finish(false);
+      input.close();
+      stream.destroy();
+    },
+  };
+}
+
+async function drainCapturedOutput(captures, timeoutMs) {
+  const captureResults = Promise.all(captures.map((capture) => capture.promise));
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
   });
+  const result = await Promise.race([captureResults, timeout]);
+  if (timer) clearTimeout(timer);
+  if (result !== null) return result.every(Boolean);
+  for (const capture of captures) capture.abort();
+  await Promise.allSettled(captures.map((capture) => capture.promise));
+  return false;
 }
 
 function fixedDeadlineMs(spec, acceptedJob) {
@@ -117,7 +226,8 @@ function failureClassFor(reason, outcome) {
   if (reason === 'adapter_error' || reason === 'target_preflight_failed'
     || reason === 'scope_verification_failed' || reason === 'scope_violation'
     || reason === 'ignored_file_change' || reason === 'read_only_violation'
-    || reason === 'patch_capture_failed') return 'tool_error';
+    || reason === 'patch_capture_failed' || reason === 'process_group_cleanup_failed'
+    || reason === 'output_drain_failed') return 'tool_error';
   if (reason === 'protocol_error') return 'protocol_error';
   return 'process_failure';
 }
@@ -666,6 +776,10 @@ async function main() {
   let currentPhase = 'started';
   let terminalStateCommitted = false;
   let childExitAt = null;
+  let processGroupCleanup = null;
+  let processGroupCleanupFailed = false;
+  let outputCaptures = [];
+  let outputDrainFailed = false;
 
   const deadlineExpired = () => deadlineMs !== null && Date.now() >= deadlineMs;
   const finishTerminal = (outcome, patch, payload = null) => {
@@ -694,17 +808,29 @@ async function main() {
   const forward = (signal) => {
     signalSent = signal;
     if (!child?.pid) return;
-    try {
-      process.kill(-child.pid, signal);
-    } catch {
-      // The child may have already exited.
+    signalProcessGroup(child.pid, signal);
+  };
+  const cleanupChildGroup = async () => {
+    if (processGroupCleanup) return processGroupCleanup;
+    processGroupCleanup = await terminateProcessGroup(child?.pid);
+    processGroupCleanupFailed = !processGroupCleanup.drained;
+    if (processGroupCleanup.signalSent === 'SIGKILL') {
+      signalSent = 'SIGKILL';
+      forcedKill = true;
+    } else if (processGroupCleanup.signalSent === 'SIGTERM' && !signalSent) {
+      signalSent = 'SIGTERM';
     }
+    return processGroupCleanup;
+  };
+  const abortOutputReaders = () => {
+    for (const capture of outputCaptures) capture.abort();
   };
   const onDeadline = () => {
     if (timedOut || terminalStateCommitted) return;
     timedOut = true;
     timedOutAt = Date.now();
     signalSent = 'SIGTERM';
+    abortOutputReaders();
     void updateHeartbeat({ deadline_reached: true }).catch(() => {});
     forward('SIGTERM');
     forceTimer = setTimeout(() => {
@@ -833,14 +959,28 @@ async function main() {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    const outputCaptured = Promise.all([
+    outputCaptures = [
       captureSanitizedLines(child.stdout, logWriter, fragments),
       captureSanitizedLines(child.stderr, logWriter, fragments),
-    ]);
+    ];
 
+    // Use `exit`, not `close`: a descendant that inherits stdio can keep the
+    // streams open after the direct provider process has exited. We must see
+    // that direct exit first, terminate its process group, and only then wait
+    // for stream closure and take the final workspace snapshot.
     const resultPromise = new Promise((resolve) => {
-      child.once('error', (error) => resolve({ error }));
-      child.once('close', (code, signal) => resolve({ code, signal }));
+      let settled = false;
+      child.once('error', (error) => {
+        if (settled) return;
+        settled = true;
+        resolve({ error });
+      });
+      child.once('exit', (code, signal) => {
+        if (settled) return;
+        childExitAt = Date.now();
+        settled = true;
+        resolve({ code, signal });
+      });
     });
     const workingAt = Date.now();
     const working = transitionJob(database, spec.id, 'working', {
@@ -856,6 +996,7 @@ async function main() {
     }, { child_pid: child.pid ?? null });
     if (!working.changed && working.job?.terminal_state) {
       forward('SIGTERM');
+      await cleanupChildGroup();
       return;
     }
     currentPhase = 'working';
@@ -864,15 +1005,19 @@ async function main() {
     await updateHeartbeat();
 
     const result = await resultPromise;
-    await outputCaptured;
+    // A provider may have forked a background worker and exited cleanly. The
+    // worker remains in the detached process group, so it must be terminated
+    // and observed as drained before any status/patch publication.
+    await cleanupChildGroup();
+    outputDrainFailed = !await drainCapturedOutput(outputCaptures, OUTPUT_DRAIN_TIMEOUT_MS);
     await new Promise((resolve) => logWriter.end(resolve));
     logWriter = null;
-    childExitAt = Date.now();
     const cancelTimestamp = await readFile(spec.cancel_file, 'utf8')
       .then((value) => Date.parse(value.trim().split(/\r?\n/, 1)[0]))
       .catch(() => Number.NaN);
     const cancellationRequested = Number.isFinite(cancelTimestamp) || await exists(spec.cancel_file);
     const cancellationBeforeExit = cancellationRequested
+      && childExitAt !== null
       && (!Number.isFinite(cancelTimestamp) || cancelTimestamp <= childExitAt);
     const cancellationWins = cancellationBeforeExit && (!timedOut
       || timedOutAt === null || !Number.isFinite(cancelTimestamp) || cancelTimestamp <= timedOutAt);
@@ -883,7 +1028,7 @@ async function main() {
     const bytes = await fileSize(spec.log_file);
     if (bytes !== lastLogBytes) {
       lastLogBytes = bytes;
-      lastOutputAt = new Date(childExitAt).toISOString();
+      lastOutputAt = new Date(childExitAt ?? Date.now()).toISOString();
     }
     let outcome;
     let terminationReason;
@@ -923,7 +1068,23 @@ async function main() {
     let workspaceTainted = outcome === 'timeout' || outcome === 'cancelled' ? true : null;
     let changed = [];
     let patchAvailable = false;
-    if (preflight.target) {
+    if (processGroupCleanupFailed) {
+      workspaceTainted = true;
+      if (outcome !== 'timeout' && outcome !== 'cancelled') {
+        outcome = 'failed';
+        terminationReason = 'process_group_cleanup_failed';
+      }
+      error = `${error ? `${error} ` : ''}Provider process group did not drain within the bounded cleanup window; final workspace verification and patch publication were withheld.`;
+    }
+    if (outputDrainFailed) {
+      workspaceTainted = true;
+      if (!processGroupCleanupFailed && outcome !== 'timeout' && outcome !== 'cancelled') {
+        outcome = 'failed';
+        terminationReason = 'output_drain_failed';
+      }
+      error = `${error ? `${error} ` : ''}Provider output streams did not drain within the bounded cleanup window; final workspace verification and patch publication were withheld.`;
+    }
+    if (preflight.target && !processGroupCleanupFailed && !outputDrainFailed) {
       const postflight = await gitSnapshot(spec.cwd);
       const postflightIdentity = postflight.ok
         ? await verifyTargetIdentities(preflight.target)
@@ -1075,6 +1236,8 @@ async function main() {
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (forceTimer) clearTimeout(forceTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (!processGroupCleanup) await cleanupChildGroup().catch(() => {});
+    abortOutputReaders();
     if (logWriter) logWriter.end();
     database.close();
   }

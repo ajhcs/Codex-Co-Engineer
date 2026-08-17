@@ -15,6 +15,19 @@ import { targetIdentityDigest } from '../mcp/preflight.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+async function waitForFile(file, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await stat(file);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${file}`);
+}
+
 async function makeGitTarget(context, prefix, initial = 'initial\n') {
   const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -350,6 +363,74 @@ test('detached runner keeps an exit-code-0 cancellation unambiguously cancelled'
   assert.match(job.error, /Cancellation was requested/);
 });
 
+test('detached runner does not let cancellation during group cleanup override direct exit', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-cancel-cleanup-runner-test-'));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+
+  const databaseFile = path.join(directory, 'control.sqlite3');
+  const logFile = path.join(directory, 'job.log');
+  const cancelFile = path.join(directory, 'job.cancel');
+  const helperReadyMarker = path.join(directory, 'helper-ready.marker');
+  const cleanupMarker = path.join(directory, 'cleanup-started.marker');
+  const specFile = path.join(directory, 'job.spec.json');
+  const helperScript = [
+    'const fs=require("node:fs");',
+    `const ready=${JSON.stringify(helperReadyMarker)};`,
+    `const marker=${JSON.stringify(cleanupMarker)};`,
+    "fs.writeFileSync(ready, 'ready\\n');",
+    "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'cleanup-started\\n'); setTimeout(() => process.exit(0), 250); });",
+    'setTimeout(() => process.exit(0), 5000);',
+  ].join('\n');
+  const childScript = [
+    "const fs=require('node:fs');",
+    "const {spawn}=require('node:child_process');",
+    `const helper=spawn(process.execPath, ['-e', ${JSON.stringify(helperScript)}], {stdio:'ignore'});`,
+    'helper.unref();',
+    `const wait= setInterval(() => { if (fs.existsSync(${JSON.stringify(helperReadyMarker)})) { clearInterval(wait); process.exit(0); } }, 5);`,
+    'setTimeout(() => process.exit(1), 2000);',
+  ].join('\n');
+  const createdAt = new Date().toISOString();
+  const database = openStore(databaseFile);
+  insertJob(database, {
+    id: 'cancel-cleanup-job-1234',
+    kind: 'deepseek_agent',
+    status: 'queued',
+    summary: 'Cancellation during cleanup precedence test',
+    created_at: createdAt,
+    updated_at: createdAt,
+    log_file: logFile,
+    cancel_file: cancelFile,
+  });
+  database.close();
+  await writeFile(specFile, JSON.stringify({
+    id: 'cancel-cleanup-job-1234',
+    database_file: databaseFile,
+    log_file: logFile,
+    cancel_file: cancelFile,
+    command: process.execPath,
+    args: ['-e', childScript],
+    env: {},
+    cwd: directory,
+    timeout_seconds: 60,
+  }));
+
+  const runner = spawn(process.execPath, ['--no-warnings', path.join(ROOT, 'mcp', 'runner.mjs'), specFile], {
+    stdio: 'ignore',
+  });
+  await waitForFile(cleanupMarker);
+  await writeFile(cancelFile, `${new Date().toISOString()}\n`);
+  const exitCode = await new Promise((resolve) => runner.once('exit', resolve));
+
+  const completedStore = openStore(databaseFile);
+  const job = getStoredJob(completedStore, 'cancel-cleanup-job-1234');
+  completedStore.close();
+  assert.equal(exitCode, 0);
+  assert.equal(job.status, 'succeeded');
+  assert.equal(job.exit_code, 0);
+  assert.equal(job.termination_reason, 'completed');
+  assert.equal(job.workspace_tainted, null);
+});
+
 test('target timeout marks the checkout tainted and withholds a partial patch', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-target-timeout-test-'));
   const stateDirectory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-target-timeout-state-'));
@@ -652,6 +733,72 @@ test('detached runner permits scoped implement targets and records a patch artif
   assert.deepEqual(JSON.parse(job.changed_paths), ['new.txt', 'note.txt']);
   assert.equal(job.patch_artifact, patchFile);
   assert.match(await readFile(patchFile, 'utf8'), /updated/);
+});
+
+test('detached runner drains provider descendants before final snapshot and patch publication', async (context) => {
+  const result = await runTargetFixture(context, {
+    prefix: 'plumbob-descendant-drain',
+    id: 'descendant-drain-1234',
+    command: process.execPath,
+    args: (target) => ['-e', [
+      "const fs=require('node:fs');",
+      "const {spawn}=require('node:child_process');",
+      "const helper=spawn(process.execPath, ['-e', \"setTimeout(() => require('node:fs').writeFileSync('note.txt', 'late descendant edit\\\\n'), 800)\"], {cwd: process.cwd(), stdio: 'ignore'});",
+      "fs.writeFileSync('note.txt', 'direct provider edit\\n');",
+      'process.exit(0);',
+    ].join('\n')],
+    allowedPaths: ['note.txt'],
+    includeIdentities: true,
+  });
+
+  assert.equal(result.job.status, 'succeeded', result.job.error ?? undefined);
+  assert.equal(result.job.workspace_changed, 1);
+  assert.match(await readFile(result.job.patch_artifact, 'utf8'), /direct provider edit/);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(await readFile(path.join(result.target.directory, 'note.txt'), 'utf8'), 'direct provider edit\n');
+});
+
+test('detached runner bounds an escaped pipe-holder and withholds the patch', async (context) => {
+  if (process.platform === 'win32') {
+    context.skip('process-group and detached-pipe containment are POSIX-only');
+    return;
+  }
+  const pidFile = path.join(os.tmpdir(), `plumbob-escaped-pipe-${process.pid}-${Date.now()}.pid`);
+  const cleanupHolder = async () => {
+    const holderPid = Number((await readFile(pidFile, 'utf8').catch(() => '')).trim());
+    if (Number.isInteger(holderPid) && holderPid > 0) {
+      try { process.kill(holderPid, 'SIGKILL'); } catch {}
+    }
+    await rm(pidFile, { force: true });
+  };
+  context.after(cleanupHolder);
+
+  const result = await runTargetFixture(context, {
+    prefix: 'plumbob-escaped-pipe-holder',
+    id: 'escaped-pipe-holder-1234',
+    command: process.execPath,
+    args: () => ['-e', [
+      "const fs=require('node:fs');",
+      "const {spawn}=require('node:child_process');",
+      `const pidFile=${JSON.stringify(pidFile)};`,
+      `const holder=spawn(process.execPath, ['-e', ${JSON.stringify('setInterval(() => {}, 10000);')}], {detached:true, stdio:['ignore', 1, 2]});`,
+      'fs.writeFileSync(pidFile, String(holder.pid));',
+      'holder.unref();',
+      "fs.writeFileSync('note.txt', 'escaped pipe-holder edit\\n');",
+      'process.exit(0);',
+    ].join('\n')],
+    allowedPaths: ['note.txt'],
+    includeIdentities: true,
+  });
+  await cleanupHolder();
+
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.termination_reason, 'output_drain_failed');
+  assert.equal(result.job.failure_class, 'tool_error');
+  assert.equal(result.job.workspace_tainted, 1);
+  assert.equal(result.job.patch_artifact, null);
+  assert.deepEqual(JSON.parse(result.job.changed_paths), []);
+  assert.match(result.job.error, /output streams did not drain/);
 });
 
 test('detached runner captures an untracked root-relative path from a nested working directory', async (context) => {
