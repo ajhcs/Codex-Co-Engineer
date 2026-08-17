@@ -5,6 +5,7 @@ import { redactText } from './redaction.mjs';
 export const DEFAULT_API_ORIGIN = 'https://api.cursor.com';
 export const API_VERSION = 'v1';
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+export const DEFAULT_REPOSITORY_TIMEOUT_MS = 60_000;
 export const DEFAULT_MAX_RESPONSE_BYTES = 2_000_000;
 export const DEFAULT_MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 export const DEFAULT_MAX_REQUEST_BYTES = 25 * 1024 * 1024;
@@ -14,6 +15,17 @@ export function defaultApiKeyFile(env = process.env) {
 }
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const responseDeadlines = new WeakMap();
+
+function requestTimeoutError() {
+  return new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
+}
+
+function remainingDeadline(deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw requestTimeoutError();
+  return remaining;
+}
 
 export class CursorApiError extends Error {
   constructor(code, message, { status, details, retryable = false, ambiguous = false } = {}) {
@@ -103,6 +115,7 @@ function classifyHttp(status) {
 }
 
 async function boundedBody(response, maxBytes, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  if (timeoutMs <= 0) throw requestTimeoutError();
   const declared = Number(response.headers?.get?.('content-length') ?? 0);
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new CursorApiError('response_too_large', 'Cursor response exceeded the configured size limit.');
@@ -113,7 +126,7 @@ async function boundedBody(response, maxBytes, timeoutMs = DEFAULT_REQUEST_TIMEO
     try {
       text = await Promise.race([
         response.text(),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.')), timeoutMs); }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(requestTimeoutError()), timeoutMs); }),
       ]);
     } finally { clearTimeout(timer); }
     if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new CursorApiError('response_too_large', 'Cursor response exceeded the configured size limit.');
@@ -139,14 +152,14 @@ async function boundedBody(response, maxBytes, timeoutMs = DEFAULT_REQUEST_TIMEO
       chunks.push(value);
     }
   } catch (error) {
-    if (timedOut) throw new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
+    if (timedOut) throw requestTimeoutError();
     throw error;
   } finally {
     clearTimeout(timer);
     reader.releaseLock?.();
   }
 
-  if (timedOut) throw new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
+  if (timedOut) throw requestTimeoutError();
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -164,6 +177,7 @@ export class CursorApiClient {
     origin = process.env.CURSOR_API_ORIGIN ?? DEFAULT_API_ORIGIN,
     fetchImpl = globalThis.fetch,
     requestTimeoutMs = integerEnv('CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS', DEFAULT_REQUEST_TIMEOUT_MS, 250, 60_000),
+    repositoryTimeoutMs = integerEnv('CURSOR_CLOUD_CONTROL_REPOSITORY_TIMEOUT_MS', DEFAULT_REPOSITORY_TIMEOUT_MS, 1_000, 60_000),
     maxResponseBytes = integerEnv('CURSOR_CLOUD_CONTROL_MAX_RESPONSE_BYTES', DEFAULT_MAX_RESPONSE_BYTES, 1024, 20_000_000),
   } = {}) {
     this.apiKey = apiKey ?? null;
@@ -171,6 +185,7 @@ export class CursorApiClient {
     this.origin = validOrigin(origin ?? DEFAULT_API_ORIGIN);
     this.fetchImpl = fetchImpl;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.repositoryTimeoutMs = repositoryTimeoutMs;
     this.maxResponseBytes = maxResponseBytes;
     this.secrets = this.apiKey ? [this.apiKey] : [];
     if (typeof this.fetchImpl !== 'function') throw new CursorApiError('fetch_unavailable', 'Node fetch is unavailable.');
@@ -188,10 +203,12 @@ export class CursorApiClient {
   async request(pathname, { method = 'GET', query, body, accept = 'application/json', lastEventId, timeoutMs = this.requestTimeoutMs, retryRead = method === 'GET' } = {}) {
     const url = this.url(pathname, query);
     const attempts = retryRead && method === 'GET' ? 3 : 1;
+    const deadline = Date.now() + timeoutMs;
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const remaining = remainingDeadline(deadline);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const timer = setTimeout(() => controller.abort(), remaining);
       const headers = { Accept: accept, Authorization: this.authHeader() };
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
       if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -213,21 +230,32 @@ export class CursorApiClient {
           ? error
           : new CursorApiError(error?.name === 'AbortError' ? 'request_timeout' : 'network_error', 'Cursor API request failed.', { retryable: true });
         lastError = wrapped;
-        if (attempt + 1 < attempts) { await sleep(100 * (2 ** attempt)); continue; }
+        if (attempt + 1 < attempts && Date.now() < deadline) {
+          await sleep(Math.min(100 * (2 ** attempt), remainingDeadline(deadline)));
+          continue;
+        }
         throw wrapped;
       }
       clearTimeout(timer);
       if (!response.ok) {
         let detail = '';
-        try { detail = await boundedBody(response, Math.min(this.maxResponseBytes, 100_000), this.requestTimeoutMs); } catch {}
+        try {
+          detail = await boundedBody(response, Math.min(this.maxResponseBytes, 100_000), remainingDeadline(deadline));
+        } catch (error) {
+          if (error?.code === 'request_timeout') throw error;
+        }
         const [code, retryable] = classifyHttp(response.status);
         const safeDetail = detail ? redactText(detail, this.secrets) : '';
         const message = safeDetail ? `Cursor API returned HTTP ${response.status}: ${safeDetail}` : `Cursor API returned HTTP ${response.status}.`;
         const error = new CursorApiError(code, message, { status: response.status, retryable });
         lastError = error;
-        if (retryable && attempt + 1 < attempts) { await sleep(100 * (2 ** attempt)); continue; }
+        if (retryable && attempt + 1 < attempts && Date.now() < deadline) {
+          await sleep(Math.min(100 * (2 ** attempt), remainingDeadline(deadline)));
+          continue;
+        }
         throw error;
       }
+      responseDeadlines.set(response, deadline);
       return response;
     }
     throw lastError ?? new CursorApiError('network_error', 'Cursor API request failed.');
@@ -240,7 +268,8 @@ export class CursorApiClient {
     if (!['application/json', 'application/problem+json', 'text/json'].includes(type)) {
       throw new CursorApiError('invalid_content_type', 'Cursor API returned a non-JSON response.');
     }
-    const text = await boundedBody(response, this.maxResponseBytes, this.requestTimeoutMs);
+    const deadline = responseDeadlines.get(response) ?? (Date.now() + (options.timeoutMs ?? this.requestTimeoutMs));
+    const text = await boundedBody(response, this.maxResponseBytes, remainingDeadline(deadline));
     if (!text.trim()) return {};
     try { return JSON.parse(text); } catch {
       throw new CursorApiError('invalid_json', 'Cursor API returned invalid JSON.');
@@ -280,10 +309,28 @@ export class CursorApiClient {
 
   me() { return this.json('/v1/me'); }
   models() { return this.json('/v1/models'); }
-  repositories() { return this.json('/v1/repositories'); }
+  // Cursor documents this endpoint as slow and rate-limited to one call per
+  // user per minute. Give it one longer attempt instead of applying the
+  // generic three-attempt GET retry policy.
+  repositories() {
+    return this.json('/v1/repositories', {
+      timeoutMs: this.repositoryTimeoutMs,
+      retryRead: false,
+    });
+  }
   listAgents(query) { return this.json('/v1/agents', { query }); }
   getAgent(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}`); }
-  createAgent(body) { return this.json('/v1/agents', { method: 'POST', body, retryRead: false }); }
+  createAgent(body) {
+    const timeoutMs = Array.isArray(body?.repos) && body.repos.length > 0
+      ? this.repositoryTimeoutMs
+      : this.requestTimeoutMs;
+    return this.json('/v1/agents', {
+      method: 'POST',
+      body,
+      retryRead: false,
+      timeoutMs,
+    });
+  }
   listRuns(agentId, query) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { query }); }
   getRun(agentId, runId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}`); }
   createRun(agentId, body) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { method: 'POST', body, retryRead: false }); }

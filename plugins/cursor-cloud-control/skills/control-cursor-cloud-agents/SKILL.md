@@ -17,6 +17,9 @@ or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
 1. Call `status` with no arguments to check local configuration.
 2. Call `status` with `action=identity`, `action=models`, or
    `action=repositories` only when discovery is needed.
+   Repository discovery is slow and strictly rate-limited; if it returns
+   `available=false`, continue with a separately confirmed GitHub URL rather
+   than repeatedly polling it.
 3. Confirm the repository URL and the intended immutable start reference.
 4. Use `mode=plan` for exploration or planning. For `mode=agent` with a
    repository, provide a full 40-character commit in `repos[].startingRef`.

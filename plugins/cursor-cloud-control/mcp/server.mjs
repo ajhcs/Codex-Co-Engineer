@@ -20,7 +20,7 @@ import {
 
 export const MCP_PROTOCOL_VERSION = '2025-11-25';
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-11-25', '2024-11-05']);
-export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', version: '0.1.0' });
+export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', version: '0.1.1' });
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const TOOL_DESCRIPTIONS = Object.freeze({
@@ -204,7 +204,25 @@ export class CursorCloudService {
     const client = await this.getClient();
     if (action === 'identity') return successResult({ identity: redactValue(await client.me(), this.secrets()) });
     if (action === 'models') return successResult({ models: redactValue(pageResult(await client.models(), value.limit), this.secrets()) });
-    if (action === 'repositories') return successResult({ repositories: redactValue(pageResult(await client.repositories(), value.limit), this.secrets()) });
+    if (action === 'repositories') {
+      try {
+        return successResult({
+          repositories: redactValue(pageResult(await client.repositories(), value.limit), this.secrets()),
+          available: true,
+        });
+      } catch (error) {
+        if (error?.retryable === true
+          || ['network_error', 'request_timeout', 'upstream_timeout', 'rate_limited', 'upstream_failure'].includes(error?.code)) {
+          return successResult({
+            repositories: { items: [] },
+            available: false,
+            reason: error.code,
+            note: 'Cursor repository discovery is slow and strictly rate-limited; use a confirmed GitHub URL directly instead of blocking agent creation on inventory discovery.',
+          });
+        }
+        throw error;
+      }
+    }
     throw new InputError('invalid_input', `Unsupported status action ${action}.`);
   }
 

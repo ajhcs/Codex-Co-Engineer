@@ -16,6 +16,9 @@ class FakeClient {
     this.secrets = ['unit-secret-value'];
     this.calls = [];
     this.failFollowup = false;
+    this.failRepositories = null;
+    this.requestTimeoutMs = 30_000;
+    this.repositoryTimeoutMs = 60_000;
   }
 
   async createAgent(body) {
@@ -27,6 +30,12 @@ class FakeClient {
     this.calls.push(['createRun', agent, body]);
     if (this.failFollowup) throw new CursorApiError('network_error', 'network failed', { ambiguous: true });
     return { run: { id: runId, agentId: agent, status: 'CREATING' } };
+  }
+
+  async repositories() {
+    this.calls.push(['repositories']);
+    if (this.failRepositories) throw new CursorApiError(this.failRepositories, 'repository inventory unavailable', { retryable: true });
+    return { items: [{ url: 'https://github.com/example/repo' }] };
   }
 
   async listAgents(query) { this.calls.push(['listAgents', query]); return { items: [{ id: agentId }], nextCursor: 'next' }; }
@@ -90,6 +99,59 @@ test('local status treats an empty default key file as unconfigured', async (con
   const result = await handleToolCall('status', {}, service);
   assert.equal(result.structuredContent.status.credentials.configured, false);
   assert.equal(result.structuredContent.status.credentials.source, 'none');
+});
+
+test('transient repository discovery failure degrades without retries or blocking direct repository use', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failRepositories = 'network_error';
+  const result = await handleToolCall('status', { action: 'repositories' }, service);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.available, false);
+  assert.equal(result.structuredContent.reason, 'network_error');
+  assert.deepEqual(result.structuredContent.repositories.items, []);
+  assert.equal(client.calls.filter((call) => call[0] === 'repositories').length, 1);
+});
+
+test('successful repository discovery is explicitly marked available', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const result = await handleToolCall('status', { action: 'repositories' }, service);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.available, true);
+  assert.deepEqual(result.structuredContent.repositories.items, [{ url: 'https://github.com/example/repo' }]);
+  assert.equal(client.calls.filter((call) => call[0] === 'repositories').length, 1);
+});
+
+test('HTTP 429 repository discovery remains a compact unavailable result', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failRepositories = 'rate_limited';
+  const result = await handleToolCall('status', { action: 'repositories' }, service);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.available, false);
+  assert.equal(result.structuredContent.reason, 'rate_limited');
+  assert.deepEqual(result.structuredContent.repositories.items, []);
+  assert.equal(client.calls.filter((call) => call[0] === 'repositories').length, 1);
+});
+
+test('repository discovery failure does not block direct immutable repository creation', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failRepositories = 'network_error';
+  const discovery = await handleToolCall('status', { action: 'repositories' }, service);
+  assert.equal(discovery.structuredContent.available, false);
+
+  client.failRepositories = null;
+  const startingRef = '0123456789abcdef0123456789abcdef01234567';
+  const created = await handleToolCall('agents', {
+    action: 'create',
+    requestId: 'create-after-discovery-failure',
+    prompt: { text: 'inspect the confirmed repository' },
+    repos: [{ url: 'https://github.com/example/repo', startingRef }],
+    mode: 'agent',
+  }, service);
+  assert.equal(created.structuredContent.ok, true);
+  assert.equal(created.structuredContent.receipt.status, 'submitted');
+  assert.deepEqual(client.calls.find((call) => call[0] === 'createAgent')[1].repos, [{ url: 'https://github.com/example/repo', startingRef }]);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
 });
 
 test('create maps official fields, safe defaults, redacted receipts, and deduplicates', async (context) => {

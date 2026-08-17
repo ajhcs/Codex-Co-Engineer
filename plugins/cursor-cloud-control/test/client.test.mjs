@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -56,6 +56,73 @@ test('maps v1 request paths and does not retry non-idempotent mutations', async 
   assert.equal(calls[0].init.headers.Authorization, 'Bearer unit-secret-value');
   assert.match(calls[1].url, /\/v1\/agents\/bc-[^/]+\/usage\?runId=run-/);
   assert.match(calls[2].url, /\/v1\/agents\/bc-[^/]+\/artifacts\/download\?path=artifacts%2Flog.txt/);
+});
+
+test('uses one extended attempt for repository discovery and repository-backed creation', async () => {
+  const client = new CursorApiClient({
+    apiKey: 'unit-secret-value',
+    requestTimeoutMs: 12_345,
+    repositoryTimeoutMs: 54_321,
+    fetchImpl: async () => jsonResponse({ items: [] }),
+  });
+  const calls = [];
+  client.json = async (pathname, options) => {
+    calls.push({ pathname, options });
+    return { items: [] };
+  };
+
+  await client.repositories();
+  await client.createAgent({ prompt: { text: 'repository task' }, repos: [{ url: 'https://github.com/example/repo' }] });
+  await client.createAgent({ prompt: { text: 'projectless task' } });
+
+  assert.deepEqual(calls[0], {
+    pathname: '/v1/repositories',
+    options: { timeoutMs: 54_321, retryRead: false },
+  });
+  assert.equal(calls[1].options.timeoutMs, 54_321);
+  assert.equal(calls[1].options.retryRead, false);
+  assert.equal(calls[2].options.timeoutMs, 12_345);
+});
+
+test('forwards the repository timeout override through the MCP manifest', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../.mcp.json', import.meta.url), 'utf8'));
+  assert.ok(manifest.mcpServers['cursor-cloud-control'].env_vars.includes('CURSOR_CLOUD_CONTROL_REPOSITORY_TIMEOUT_MS'));
+});
+
+test('repository discovery has one absolute deadline and one fetch attempt', async () => {
+  let calls = 0;
+  let bodyCancelled = false;
+  const client = new CursorApiClient({
+    apiKey: 'unit-secret-value',
+    repositoryTimeoutMs: 40,
+    fetchImpl: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return new Response(new ReadableStream({
+        start() {},
+        cancel() { bodyCancelled = true; },
+      }), { headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const started = Date.now();
+  await assert.rejects(client.repositories(), (error) => error.code === 'request_timeout');
+  const elapsed = Date.now() - started;
+  assert.equal(calls, 1);
+  assert.equal(bodyCancelled, true, 'the single request deadline must cancel the response body');
+  assert.ok(elapsed < 500, `request exceeded a generous absolute deadline bound (elapsed ${elapsed}ms)`);
+});
+
+test('repository discovery surfaces HTTP 429 without retrying', async () => {
+  let calls = 0;
+  const client = new CursorApiClient({
+    apiKey: 'unit-secret-value',
+    fetchImpl: async () => {
+      calls += 1;
+      return jsonResponse({ message: 'rate limited' }, { status: 429 });
+    },
+  });
+  await assert.rejects(client.repositories(), (error) => error.code === 'rate_limited' && error.status === 429);
+  assert.equal(calls, 1);
 });
 
 test('classifies invalid JSON, content type, response size, timeout, and transport errors', async () => {

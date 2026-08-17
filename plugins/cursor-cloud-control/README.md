@@ -85,6 +85,7 @@ Optional administrator settings:
 - `CURSOR_ARTIFACT_ROOT`: required before downloading an artifact. Downloads
   are limited to this administrator-configured root.
 - `CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS`,
+  `CURSOR_CLOUD_CONTROL_REPOSITORY_TIMEOUT_MS`,
   `CURSOR_CLOUD_CONTROL_MAX_RESPONSE_BYTES`, and
   `CURSOR_CLOUD_CONTROL_MAX_ARTIFACT_BYTES`: bounded transport limits.
 
@@ -124,6 +125,12 @@ checkout and does not merge or execute returned artifacts.
 `status` returns local configuration without contacting Cursor by default.
 Use `{"action":"identity"}`, `{"action":"models"}`, or
 `{"action":"repositories"}` for explicit safe discovery.
+Cursor documents repository discovery as both strictly rate-limited and
+potentially tens of seconds long. The plugin therefore makes one bounded
+60-second attempt, never retries that endpoint, and returns
+`available=false` on a timeout or rate limit so a confirmed repository URL can
+be used directly. Repository-backed creation receives the same longer
+one-attempt transport bound.
 
 `agents` supports `list`, `get`, and `create`. A create call supplies a
 prompt and may select a model, environment, repositories, prompt images,
