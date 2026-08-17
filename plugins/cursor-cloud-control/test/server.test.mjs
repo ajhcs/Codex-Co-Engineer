@@ -6,7 +6,7 @@ import test from 'node:test';
 import { Readable, Writable } from 'node:stream';
 import { CursorApiError } from '../mcp/client.mjs';
 import { SubmissionLedger } from '../mcp/ledger.mjs';
-import { CursorCloudService, TOOLS, handleToolCall, runStdio } from '../mcp/server.mjs';
+import { CursorCloudService, TOOLS, handleToolCall, projectIdentity, runStdio } from '../mcp/server.mjs';
 
 const agentId = 'bc-00000000-0000-0000-0000-000000000001';
 const runId = 'run-00000000-0000-0000-0000-000000000001';
@@ -19,6 +19,15 @@ class FakeClient {
     this.failRepositories = null;
     this.requestTimeoutMs = 30_000;
     this.repositoryTimeoutMs = 60_000;
+    this.identity = {
+      userId: 'cursor-user-0001',
+      name: 'Ada Example',
+      email: 'ada@example.test',
+      avatar: 'https://example.test/avatar.png',
+      organization: { name: 'Example Org' },
+      apiKey: 'crsr_secret-value',
+      unknown: 'must-not-cross-the-boundary',
+    };
   }
 
   async createAgent(body) {
@@ -37,6 +46,8 @@ class FakeClient {
     if (this.failRepositories) throw new CursorApiError(this.failRepositories, 'repository inventory unavailable', { retryable: true });
     return { items: [{ url: 'https://github.com/example/repo' }] };
   }
+
+  async me() { this.calls.push(['me']); return this.identity; }
 
   async listAgents(query) { this.calls.push(['listAgents', query]); return { items: [{ id: agentId }], nextCursor: 'next' }; }
   async getAgent(id) { this.calls.push(['getAgent', id]); return { id, latestRunId: runId }; }
@@ -99,6 +110,34 @@ test('local status treats an empty default key file as unconfigured', async (con
   const result = await handleToolCall('status', {}, service);
   assert.equal(result.structuredContent.status.credentials.configured, false);
   assert.equal(result.structuredContent.status.credentials.source, 'none');
+});
+
+test('identity status emits only the compact opaque identity projection', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const result = await handleToolCall('status', { action: 'identity' }, service);
+  assert.deepEqual(result.structuredContent.identity, {
+    authenticated: true,
+    userId: 'cursor-user-0001',
+    keyStatus: 'valid',
+  });
+  const serialized = JSON.stringify(result);
+  for (const forbidden of ['Ada Example', 'ada@example.test', 'avatar', 'Example Org', 'crsr_secret-value', 'must-not-cross-the-boundary']) {
+    assert.equal(serialized.includes(forbidden), false, `identity leaked ${forbidden}`);
+  }
+  assert.deepEqual(client.calls, [['me']]);
+});
+
+test('identity projection fails closed when upstream has no safe opaque identifier', () => {
+  assert.deepEqual(projectIdentity({ id: 'person@example.test', name: 'Ada Example', secret: 'hidden' }), {
+    authenticated: true,
+    userId: null,
+    keyStatus: 'valid',
+  });
+  assert.deepEqual(projectIdentity({ id: { value: 'nested' }, email: 'ada@example.test' }), {
+    authenticated: true,
+    userId: null,
+    keyStatus: 'valid',
+  });
 });
 
 test('transient repository discovery failure degrades without retries or blocking direct repository use', async (context) => {

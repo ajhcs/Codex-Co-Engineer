@@ -24,6 +24,7 @@ test('create requires a stable request ID, usage permits an omitted run ID, and 
   assert.equal(validateToolInput('usage', { agentId }).runId, undefined);
   assert.throws(() => validateToolInput('agents', { action: 'list', prompt: { text: 'not allowed' } }), InputError);
   assert.throws(() => validateToolInput('runs', { action: 'get', agentId, runId, timeoutMs: 1000 }), InputError);
+  assert.throws(() => validateToolInput('status', { action: 'identity', fullIdentity: true }), /not supported/);
 });
 
 test('write-mode repository dispatch requires an immutable start commit', () => {

@@ -2,7 +2,8 @@
 
 Cursor Cloud Control is a typed MCP control plane for the official Cursor
 Cloud Agents API v1. It lets Codex discover the authenticated account, models,
-and GitHub repositories; create durable agents; submit follow-up runs; observe
+and GitHub repositories; return a compact authenticated identity projection;
+create durable agents; submit follow-up runs; observe
 bounded polling or SSE; cancel runs; read usage; handle artifacts; and archive,
 unarchive, or permanently delete agents.
 
@@ -23,6 +24,12 @@ The plugin uses the v1 routes documented there: `/v1/me`, `/v1/models`,
 artifacts. Cursor documents both Basic (`base64(api_key:)`) and Bearer
 authentication for Cloud Agents; Bearer is the default and Basic can be chosen
 by an administrator with `CURSOR_API_AUTH_SCHEME=basic`.
+
+Cursor's `/v1/me` response is projected through an explicit allowlist before it
+reaches Codex. Identity status contains only `authenticated`, an opaque
+`userId` when Cursor provides one, and `keyStatus`; names, email addresses,
+avatars, organizations, unknown fields, and credential-shaped fields are never
+returned. There is no model-facing full-identity escape hatch.
 
 Cursor's reference names an OAuth `auth` option for remote MCP servers but does
 not define a safe secret-reference schema there. This plugin therefore exposes
@@ -125,6 +132,8 @@ checkout and does not merge or execute returned artifacts.
 `status` returns local configuration without contacting Cursor by default.
 Use `{"action":"identity"}`, `{"action":"models"}`, or
 `{"action":"repositories"}` for explicit safe discovery.
+Identity discovery returns only the compact, privacy-preserving projection
+described above; it does not return the upstream account object.
 Cursor documents repository discovery as both strictly rate-limited and
 potentially tens of seconds long. The plugin therefore makes one bounded
 60-second attempt, never retries that endpoint, and returns
@@ -172,9 +181,11 @@ Prompts, repository references, selected model parameters, and explicitly
 requested sensitive run inputs are sent to the configured Cursor API origin.
 Cursor controls cloud VM, repository, branch, PR, and retention semantics.
 The local ledger contains only bounded operational metadata and hashes. API
-errors, SSE events, and artifact metadata are redacted again before returning
-to Codex. Permanent deletion is sent directly to Cursor only after the exact
-agent ID confirmation barrier; it cannot be undone by this plugin.
+errors, SSE events, artifact metadata, and identity responses are bounded or
+redacted again before returning to Codex. Identity responses use the explicit
+allowlist projection above. Permanent deletion is sent directly to Cursor only
+after the exact agent ID confirmation barrier; it cannot be undone by this
+plugin.
 
 ## Development
 

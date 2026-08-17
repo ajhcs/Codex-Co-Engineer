@@ -24,13 +24,39 @@ export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', ver
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const TOOL_DESCRIPTIONS = Object.freeze({
-  status: 'Show local Cursor Cloud Control configuration, or perform one safe read-only identity/models/repositories discovery action.',
+  status: 'Show local Cursor Cloud Control configuration, or perform one safe read-only compact identity/models/repositories discovery action.',
   agents: 'List, inspect, or create typed Cursor Cloud Agents. Creation defaults to plan mode, a new branch, and no pull request.',
   runs: 'List, inspect, follow up, wait for, stream, or cancel one exact Cursor Cloud Agent run.',
   artifacts: 'List agent artifacts or download one exact artifact to an administrator-configured owner-only local root.',
   usage: 'Read token usage for one exact Cursor Cloud Agent, optionally scoped to one run.',
   lifecycle: 'Archive, unarchive, or permanently delete one exact Cursor Cloud Agent. Deletion requires exact confirmation.',
 });
+
+// Cursor's /v1/me response is provider-owned and may grow fields such as a
+// display name, email address, avatar, organization, or credential metadata.
+// Keep the model-facing identity contract deliberately narrower than that
+// upstream response. Only provider identifiers from these exact fields are
+// eligible, and values that look like contact data are rejected.
+const IDENTITY_ID_KEYS = Object.freeze(['userId', 'user_id', 'id', 'accountId', 'account_id']);
+const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+function opaqueIdentityId(identity) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return null;
+  for (const key of IDENTITY_ID_KEYS) {
+    const candidate = identity[key];
+    if (typeof candidate === 'string' && OPAQUE_ID_PATTERN.test(candidate)) return candidate;
+    if (typeof candidate === 'number' && Number.isSafeInteger(candidate)) return String(candidate);
+  }
+  return null;
+}
+
+export function projectIdentity(identity) {
+  return {
+    authenticated: true,
+    userId: opaqueIdentityId(identity),
+    keyStatus: 'valid',
+  };
+}
 
 export const TOOLS = Object.freeze([
   {
@@ -202,7 +228,7 @@ export class CursorCloudService {
     };
     if (action === 'local') return successResult({ status: local });
     const client = await this.getClient();
-    if (action === 'identity') return successResult({ identity: redactValue(await client.me(), this.secrets()) });
+    if (action === 'identity') return successResult({ identity: projectIdentity(await client.me()) });
     if (action === 'models') return successResult({ models: redactValue(pageResult(await client.models(), value.limit), this.secrets()) });
     if (action === 'repositories') {
       try {

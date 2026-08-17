@@ -17,6 +17,9 @@ or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
 1. Call `status` with no arguments to check local configuration.
 2. Call `status` with `action=identity`, `action=models`, or
    `action=repositories` only when discovery is needed.
+   Identity status is intentionally compact and privacy-preserving: it returns
+   only authentication/key status and an opaque user identifier when one is
+   available. Personal identity fields from Cursor are not exposed.
    Repository discovery is slow and strictly rate-limited; if it returns
    `available=false`, continue with a separately confirmed GitHub URL rather
    than repeatedly polling it.
