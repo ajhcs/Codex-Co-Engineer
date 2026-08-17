@@ -12,8 +12,8 @@ while preserving four non-negotiable boundaries:
 
 1. Required host and sandbox capabilities are proved before a provider job is
    submitted.
-2. Nested workers inherit the parent's target, write ceiling, deadline, and data
-   egress authorization; they cannot widen them.
+2. Nested workers inherit the parent's target, write ceiling, deadline, and
+   provider configuration; they cannot widen them.
 3. Durable jobs and receipts survive task and MCP restarts without silently
    falling back to temporary state.
 4. Status and identity responses are truthful, compact, and private by default.
@@ -25,9 +25,16 @@ can prove support, and Codex-native subagents should be used for independent
 local work. A provider that cannot report whether delegation was used must say
 `unknown`, not imply success.
 
-“Use the full feature set” does not silently authorize repository writes,
-network access, private-repository egress, provider memory, or PR creation.
-Those capabilities remain explicit and receipted.
+Configured Cursor, Grok, and DSH credentials are standing authorization to use
+those providers for task-scoped work. The control plane does not add per-job
+egress prompts or approval receipts. Repository writes, destructive Git
+operations, production changes, and PR creation retain their ordinary task
+authority and safety controls.
+
+The implementation should maximize useful provider capability per model-facing
+tool call. Prefer dynamic provider catalogs, installed profiles, compact presets,
+and detail-on-demand over copied configuration, additional tools, or wrapper
+logic that duplicates the underlying harness.
 
 ## Current baseline
 
@@ -45,9 +52,10 @@ baseline.
 Observed baseline behavior:
 
 - Cursor unit and local Inspector tests pass in an ordinary task sandbox.
-- Co-Engineer tests pass on the host, but nested process and Bubblewrap probes
-  fail inside the ordinary workspace sandbox. Those are environment capability
-  failures, not product-test failures.
+- Co-Engineer tests pass on the host. The installed Grok CLI owns its built-in
+  sandbox contract (Landlock on Linux, Seatbelt on macOS); host-specific
+  Bubblewrap probes are optional integration checks, not product readiness
+  prerequisites.
 - Cursor identity returns the upstream identity object after secret redaction,
   so personal name and email fields can still reach model context.
 - Co-Engineer diagnostics can report Grok ready while the top-level summary says
@@ -73,7 +81,7 @@ Observed baseline behavior:
 | Durable broker configuration | Repository + host installer | Define contract, bootstrap, permissions, migration, and tests |
 | `agentctl` and worktree-bootstrap state defaults | Their component owners | Supply shared contract and linked acceptance tests |
 | Plugin cache retention and task leases | Codex app/plugin manager | Supply a reproducible fixture and app-visible acceptance test |
-| Private repository transfer to Cursor | User/administrator policy | Require a durable, target-bound egress grant before submission |
+| Provider account and repository access | Configured Cursor/Grok/DSH credentials | Treat as standing authorization and report ordinary provider errors |
 
 ## Milestone 0: preserve and classify the candidate
 
@@ -85,7 +93,8 @@ Acceptance:
 
 - `main` remains unchanged.
 - Every retained change has an owner, intended PR, and test obligation.
-- Existing Bubblewrap preflight and Cursor timeout work is preserved.
+- Existing sandbox preflight and Cursor timeout work is preserved; the Grok
+  preflight follows the installed CLI-managed Landlock/Seatbelt contract.
 - Each implementation worker has one branch/worktree and one lifecycle receipt.
 - No credential file is read, copied, committed, or included in an artifact.
 
@@ -94,7 +103,7 @@ Acceptance:
 Both control planes should evaluate the same sequence before dispatch:
 
 ```text
-configured -> locally_usable -> provider_authenticated -> target_ready -> egress_authorized
+configured -> locally_usable -> provider_authenticated -> target_ready
 ```
 
 Each stage returns `ready`, a stable failure code, bounded evidence, and a
@@ -102,12 +111,12 @@ specific remedy. The evaluator checks actual operation, not command presence:
 
 - durable state creation, ownership, atomic rename, and SQLite locking;
 - daemon/socket creation and connection;
-- Bubblewrap namespaces and required mounts;
+- provider-managed sandbox profile and required mounts/permissions (Grok's
+  Landlock profile on Linux or Seatbelt profile on macOS);
 - provider CLI version and supported option vocabulary;
 - a non-mutating authentication probe;
 - exact Git root, immutable HEAD, worktree ownership, and allowed paths;
 - confirmed repository URL and remotely visible immutable commit when required;
-- applicable external-data authorization.
 
 Acceptance:
 
@@ -191,9 +200,11 @@ verify require a terminal-capable, noninteractive execution envelope with:
 - pre/post Git and filesystem snapshots;
 - zero repository mutation as a hard postcondition.
 
-The leading candidate is Grok `auto` permission mode inside the connector's
-read-only Bubblewrap target. Validate this against the installed CLI rather than
-assuming its semantics.
+The leading candidate is Grok `auto` permission mode inside the installed CLI's
+read-only sandbox profile (Landlock on Linux, Seatbelt on macOS). Validate this
+against the installed CLI rather than assuming its semantics. Bubblewrap or
+other host-specific custom profiles are optional future integration concerns,
+not readiness prerequisites.
 
 Acceptance:
 
@@ -216,7 +227,7 @@ subagents.restriction_inheritance
 
 Profiles should cover at least `review`, `verify`, `implement`, and
 `parallel-review`. A nested worker inherits target, allowed paths, write ceiling,
-deadline, network policy, and egress grant.
+deadline, network policy, and provider profile.
 
 Provider behavior:
 
@@ -232,31 +243,34 @@ Acceptance:
 
 - Receipts state supported, requested, enabled/effective, and restriction
   inheritance without storing subagent prompts.
-- Internal subagents cannot expand path, write, deadline, network, or egress
-  authority.
+- Internal subagents cannot expand path, write, deadline, or network authority.
 - Unsupported combinations fail validation before dispatch.
 - Cancellation, timeout, and parent failure reconcile every nested worker.
 
-## Milestone 6: Cursor egress and repository attestation
+## Milestone 6: dynamic provider capabilities and repository integrity
 
-Require a durable authorization record bound to provider, normalized repository
-URL, public/private classification, exact commit SHA, allowed data classes,
-operation class, expiry/revocation, and approving actor. The prompt is never an
-authorization record.
+Use each provider's authenticated, dynamic capability catalog as the source of
+truth. Do not hard-code Cursor's model list or duplicate complete Grok/DSH
+configuration in every request. Compact profiles should select installed
+capabilities while allowing exact typed overrides when needed.
 
-Before repository-backed Cursor creation, validate the exact URL, require a full
-SHA for agent mode, confirm the SHA is visible in the intended remote, and match
-an active egress grant. Branch/PR mutation remains a separate explicit choice.
+For repository-backed Cursor creation, validate the exact URL and require a full
+remotely visible SHA for reproducible agent-mode work. Branch/PR mutation remains
+a separate explicit operation because it changes repository state, not because
+the provider is external.
 
 Acceptance:
 
-- Missing, stale, or mismatched authorization returns `approval_required`
-  before Cursor is contacted or a mutation ledger entry is created.
-- A grant for one provider, repository, or SHA cannot authorize another.
-- Follow-ups and custom subagents cannot broaden the grant.
-- Private-repository transfer is stated plainly in the receipt.
-- Live private-repository tests remain manually gated and use disposable
-  branches with automatic PR creation disabled by default.
+- Cursor model IDs, variants, and parameters come from the authenticated
+  `/v1/models` catalog and new models require no plugin release.
+- Grok profiles expose model, supported reasoning, sessions, subagents, tools,
+  sandbox, memory/web, and transport without copying installed configuration.
+- DSH profiles expose the effective model, tools, workflows, and delegation that
+  the installed profile can actually advertise.
+- Follow-ups and nested workers inherit the exact repository and target scope.
+- Agent-mode Cursor runs reject non-immutable or remote-invisible starting refs.
+- Provider access failures are ordinary authentication/permission errors, never
+  extra model-facing egress approval prompts.
 
 ## Milestone 7: installed schemas and task-safe upgrades
 
@@ -293,7 +307,7 @@ evidence needed to close that upstream issue.
 Use `agentctl` as the orchestration receipt and provider ledgers as adapters.
 Every external or native worker maps to one accountable receipt containing
 stable request/provider IDs, target and configuration digests, worktree receipt,
-capability and egress decisions, lifecycle mapping, and bounded redacted
+capability decisions, lifecycle mapping, and bounded redacted
 evidence.
 
 CI uses fake CLIs and injected HTTP only. Separately authorized live smoke tests
@@ -306,7 +320,7 @@ Required matrix dimensions:
 | Runtime | DSH, Grok, Cursor, Codex-native delegation |
 | Role | plan, review, verify, implement |
 | Delegation | unsupported, disabled, enabled, nested |
-| Sandbox | normal, home read-only, socket denied, Bubblewrap missing, namespaces denied |
+| Sandbox | normal, home read-only, socket denied, CLI-managed profile unavailable, custom-profile integration unavailable |
 | State | fresh, existing, unwritable, restart, corrupt, concurrent writers |
 | Git | clean, dirty, protected `.git`, wrong HEAD, remote SHA absent |
 | Authentication | absent, invalid, ready, expired |
@@ -338,10 +352,10 @@ Final release acceptance:
    response budgets.
 5. Repair Grok read-only terminal review and capability-derived reasoning modes.
 6. Add provider/native subagent capability profiles and inheritance tests.
-7. Add Cursor egress grants, remote-SHA attestation, and installed schema tests.
+7. Add dynamic provider catalogs, remote-SHA attestation, and installed schema tests.
 8. Add upgrade leases/stable activation fixtures and link the Codex app change.
 9. Unify lifecycle receipts and enable the full certification/release gate.
 
 Each PR should be independently reviewable, must preserve unrelated dirty work,
-and must include its failure-path tests. Provider-backed tests and private data
-egress are never part of unattended CI.
+and must include its failure-path tests. Provider-backed tests are never part of
+unattended CI; separately authorized live smoke tests use configured accounts.
