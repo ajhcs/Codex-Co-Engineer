@@ -413,13 +413,19 @@ export class CursorCloudService {
       }
       return successResult({ agentId: value.agentId, runId: value.runId, timedOut: !isTerminalRunStatus(run?.status), run: redactValue(run, this.secrets(operation)) });
     }
+    const client = await this.getClient();
     try {
-      const client = await this.getClient();
       const response = await client.streamRun(value.agentId, value.runId, { lastEventId: value.lastEventId, timeoutMs: value.timeoutMs ?? 30_000 });
-      const parsed = await consumeSse(response, { maxEvents: value.maxEvents ?? 200, maxBytes: value.maxBytes ?? 500_000, timeoutMs: value.timeoutMs ?? 30_000, secrets: this.secrets(operation) });
+      const parsed = await consumeSse(response, {
+        maxEvents: value.maxEvents ?? 200,
+        maxBytes: value.maxBytes ?? 500_000,
+        timeoutMs: value.timeoutMs ?? 30_000,
+        lastEventId: value.lastEventId,
+        secrets: this.secrets(operation),
+      });
       return successResult({ agentId: value.agentId, runId: value.runId, stream: parsed, resumedFrom: value.lastEventId ?? null });
     } catch (error) {
-      if (error?.code === 'stream_expired') {
+      if (error?.code === 'stream_expired' || error?.status === 410) {
         const run = await client.getRun(value.agentId, value.runId);
         return successResult({ agentId: value.agentId, runId: value.runId, streamExpired: true, reconciled: true, run: redactValue(run, this.secrets(operation)) });
       }

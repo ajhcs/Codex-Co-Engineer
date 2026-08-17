@@ -633,3 +633,59 @@ test('list, usage, cancellation, and deletion use exact typed endpoint operation
   assert.equal(deleted.structuredContent.irreversible, true);
   assert.ok(client.calls.some((call) => call[0] === 'usage' && call[2] === undefined));
 });
+
+test('expired streams reconcile the exact run without resubmitting', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.streamRun = async (agent, run, options) => {
+    client.calls.push(['streamRun', agent, run, options]);
+    throw new CursorApiError('stream_expired', 'stream cursor expired', { status: 410 });
+  };
+
+  const result = await handleToolCall('runs', {
+    action: 'stream', agentId, runId, lastEventId: 'cursor-7',
+  }, service);
+
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.streamExpired, true);
+  assert.equal(result.structuredContent.reconciled, true);
+  assert.equal(result.structuredContent.run.id, runId);
+  assert.deepEqual(client.calls, [
+    ['streamRun', agentId, runId, { lastEventId: 'cursor-7', timeoutMs: 30_000 }],
+    ['getRun', agentId, runId],
+  ]);
+  assert.equal(client.calls.some((call) => call[0] === 'createRun'), false);
+});
+
+test('stream timeouts preserve partial progress and non-expiry errors', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.streamRun = async (agent, run, options) => {
+    client.calls.push(['streamRun', agent, run, options]);
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'id: cursor-7\nevent: replay\ndata: {"text":"replayed"}\n\n'
+          + 'id: cursor-8\nevent: assistant\ndata: {"text":"partial"}\n\n',
+        ));
+      },
+    });
+    return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  const partial = await handleToolCall('runs', {
+    action: 'stream', agentId, runId, lastEventId: 'cursor-7', timeoutMs: 250,
+  }, service);
+
+  assert.equal(partial.structuredContent.ok, true);
+  assert.equal(partial.structuredContent.stream.timedOut, true);
+  assert.deepEqual(partial.structuredContent.stream.events.map((event) => event.id), ['cursor-8']);
+  assert.equal(partial.structuredContent.stream.lastEventId, 'cursor-8');
+  assert.equal(partial.structuredContent.resumedFrom, 'cursor-7');
+
+  client.streamRun = async () => {
+    throw new CursorApiError('network_error', 'stream failed');
+  };
+  const failure = await handleToolCall('runs', { action: 'stream', agentId, runId }, service);
+  assert.equal(failure.isError, true);
+  assert.equal(failure.structuredContent.error.code, 'network_error');
+  assert.equal(client.calls.filter((call) => call[0] === 'getRun').length, 0);
+});
