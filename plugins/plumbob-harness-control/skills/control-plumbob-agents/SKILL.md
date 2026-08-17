@@ -1,6 +1,6 @@
 ---
 name: control-plumbob-agents
-description: Use Codex-Co-Engineer to control and monitor target-bound DeepSeek Harness or Grok Build jobs from Codex through compact MCP tools. Use when the user asks to preflight a target, run a bounded task, follow lifecycle progress, inspect redacted logs, or cancel a managed job. Prime Agent and Prime Lab are optional adapters.
+description: Use Codex-Co-Engineer to control and monitor target-bound DeepSeek Harness or Grok Build jobs from Codex through compact MCP tools. Use when the user asks to preflight a target, run a bounded task, follow lifecycle progress, inspect redacted logs, or cancel a managed job.
 ---
 
 # Codex-Co-Engineer
@@ -58,6 +58,6 @@ private material.
 Grok Build uses its documented headless prompt interface. The ACP
 `grok agent stdio` interface is intentionally deferred until a proxy can
 preserve the same target and lifecycle guarantees. Do not present DeepSeek
-Harness, Grok Build, Prime Agent, or Prime Lab as Codex subagents.
+Harness or Grok Build as Codex subagents.
 Codex remains the chief control-plane agent; external runtimes are bounded
 peer workers.

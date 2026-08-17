@@ -16,7 +16,7 @@ git diff --check
 
 Do not run provider-backed jobs as part of a pull request. Use fixture
 processes, temporary Git repositories, and redacted test data. A change that
-requires a model or Prime Lab should document the manual, opt-in verification
+requires an external model should document the manual, opt-in verification
 separately.
 
 ## Code and contract expectations
@@ -35,8 +35,8 @@ separately.
 
 ## Public/private boundary
 
-Never commit `Secrets/`, `prime-intellect-lab/`, `.dsh/`, `.prime/`, local
-state, model registries, provider keys, or personal Codex configuration. Use
+Never commit `Secrets/`, `.dsh/`, local state, model registries, provider keys,
+or personal Codex configuration. Use
 the redacted files under `config/` and `examples/` as templates. If a test
 needs a credential-shaped value, generate it in memory or in a temporary
 directory and assert only redacted behavior.

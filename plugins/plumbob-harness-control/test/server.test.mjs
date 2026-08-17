@@ -96,7 +96,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
         name: 'run',
         arguments: {
           schema_version: 'codex-co-engineer.config.v1',
-          kind: 'prime_agent',
+          kind: 'removed_backend',
           request_id: 'test-request-001',
           prompt: 'Do not actually run.',
           target_context: target,
@@ -131,7 +131,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
     result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line)).map((message) => [message.id, message]),
   );
   assert.equal(responses.get(1).result.serverInfo.name, 'plumbob-harness-control');
-  assert.equal(responses.get(1).result.serverInfo.version, '1.0.0');
+  assert.equal(responses.get(1).result.serverInfo.version, '2.0.0');
   assert.equal(responses.get(1).result.protocolVersion, '2025-11-25');
   assert.deepEqual(
     responses.get(2).result.tools.map((tool) => tool.name),
@@ -145,14 +145,13 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.equal(statusBody.ok, true);
   assert.equal(statusBody.integration, 'control-only');
   assert.equal(statusBody.control_plane.health, 'healthy');
-  assert.equal(statusBody.control_plane.version, '1.0.0');
+  assert.equal(statusBody.control_plane.version, '2.0.0');
   assert.ok(['administrator-allowlisted', 'explicit-target-any-git-root'].includes(statusBody.targeting.mode));
   assert.equal(statusBody.targeting.implement_targets, 'explicit-scoped-workspace');
   assert.equal(statusBody.ui.optional, true);
   assert.ok(statusBody.headless_agent);
   assert.equal(statusBody.credentials.model_api_key_available, false);
-  assert.equal(statusBody.workspace.prime_agent_model, 'meta-model-api/muse-spark-1.2-contributor');
-  assert.equal(statusBody.workspace.prime_agent_enabled, false);
+  assert.equal(statusBody.workspace.dsh_command, 'dsh');
   assert.equal(statusBody.grok_build.kind, 'grok_build');
   assert.equal(statusBody.grok_build.auth_state, 'unknown');
 
@@ -163,15 +162,15 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.match(preflight.configuration_digest, /^[0-9a-f]{64}$/);
   assert.equal(preflight.transport, 'stdio');
   assert.equal(preflight.protocol_version, '2025-11-25');
-  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '1.0.0' });
+  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.0.0' });
   assert.deepEqual(preflight.available_tools, ['preflight', 'status', 'runtime', 'run', 'jobs', 'cancel']);
 
   const denied = responses.get(5);
   assert.equal(denied.result.isError, true);
-  assert.equal(JSON.parse(denied.result.content[0].text).code, 'capability_disabled');
+  assert.equal(JSON.parse(denied.result.content[0].text).code, 'invalid_kind');
 
   const runTool = responses.get(2).result.tools.find((tool) => tool.name === 'run');
-  assert.ok(runTool.inputSchema.properties.kind.enum.includes('grok_build'));
+  assert.deepEqual(runTool.inputSchema.properties.kind.enum, ['deepseek_agent', 'grok_build']);
   assert.deepEqual(
     runTool.inputSchema.properties.output_format.enum,
     ['plain', 'json', 'streaming-json', 'streaming-messages-json'],

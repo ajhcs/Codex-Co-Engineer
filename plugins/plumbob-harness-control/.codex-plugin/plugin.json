@@ -1,7 +1,7 @@
 {
   "name": "plumbob-harness-control",
-  "version": "1.0.0",
-  "description": "Codex-Co-Engineer gives Codex a bounded control plane for DeepSeek Harness jobs, with optional Prime Agent and Prime Lab support.",
+  "version": "2.0.0",
+  "description": "Codex-Co-Engineer gives Codex a bounded control plane for DeepSeek Harness and Grok Build jobs.",
   "author": {
     "name": "Plumbob"
   },
@@ -10,7 +10,7 @@
     "codex",
     "agents",
     "deepseek-harness",
-    "prime-intellect",
+    "grok-build",
     "control-plane",
     "target-fingerprint",
     "mcp"
@@ -19,8 +19,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex-Co-Engineer",
-    "shortDescription": "Control DeepSeek Harness jobs from Codex",
-    "longDescription": "Use Codex-Co-Engineer as Codex's control plane for bounded DeepSeek Harness jobs, with optional Prime Agent and Prime Lab evaluation support. Every job is target-bound, fingerprintable, observable, and cancellable without opening a shell.",
+    "shortDescription": "Control DeepSeek and Grok Build jobs",
+    "longDescription": "Use Codex-Co-Engineer as Codex's control plane for bounded DeepSeek Harness and Grok Build jobs. Every job is target-bound, fingerprintable, observable, and cancellable without opening a shell.",
     "developerName": "Plumbob",
     "category": "Developer Tools",
     "capabilities": [
@@ -31,6 +31,7 @@
     "defaultPrompt": [
       "Show Codex-Co-Engineer status.",
       "Run a target-bound DeepSeek Harness task and monitor its lifecycle.",
+      "Run a target-bound Grok Build task with typed CLI controls.",
       "Preflight the selected target with MCP Inspector."
     ],
     "brandColor": "#111111",

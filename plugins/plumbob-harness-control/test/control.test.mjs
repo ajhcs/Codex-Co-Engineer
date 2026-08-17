@@ -69,7 +69,7 @@ test('jobs rejects an invalid tail before entering the polling loop', async (con
   else process.env.PLUMBOB_HARNESS_STATE_DIR = previousState;
 });
 
-test('DeepSeek rejects Prime-only inputs instead of silently ignoring them', async () => {
+test('DeepSeek rejects fields from removed backends instead of silently ignoring them', async () => {
   const { dispatchControl, ToolError } = await import(`../mcp/control.mjs?kind=${Date.now()}`);
   await assert.rejects(
     dispatchControl('run', {

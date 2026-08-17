@@ -61,6 +61,7 @@ function daemonEnvironment() {
     'LC_ALL',
     'TERM',
     'TMPDIR',
+    'DSH_HOME',
     'MODEL_API_KEY',
     'XAI_API_KEY',
     'CODEX_CO_ENGINEER_RUNTIME_WORKSPACE',
@@ -68,18 +69,13 @@ function daemonEnvironment() {
     'CODEX_CO_ENGINEER_STATE_DIR',
     'CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS',
     'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
-    'CODEX_CO_ENGINEER_ENABLE_PRIME_AGENT',
     'CODEX_CO_ENGINEER_DSH_COMMAND',
-    'CODEX_CO_ENGINEER_PRIME_COMMAND',
-    'CODEX_CO_ENGINEER_PRIME_AGENT_COMMAND',
-    'CODEX_CO_ENGINEER_PRIME_AGENT_MODELS',
     'CODEX_CO_ENGINEER_GROK_COMMAND',
     'PLUMBOB_HARNESS_WORKSPACE',
     'PLUMBOB_HARNESS_ALLOWED_ROOTS',
     'PLUMBOB_HARNESS_STATE_DIR',
     'PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS',
     'PLUMBOB_HARNESS_MODEL_API_KEY_FILE',
-    'PLUMBOB_HARNESS_ENABLE_PRIME_AGENT',
   ];
   return Object.fromEntries(
     names.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]),
@@ -358,10 +354,9 @@ const TOOLS = [
       type: 'object',
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
-        kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build'], default: 'preflight' },
+        kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'grok_build'], default: 'preflight' },
         request_id: { type: 'string', minLength: 8, maxLength: 128 },
         prompt: { type: 'string', minLength: 1, maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$', description: 'Hashed for the configuration digest; never returned.' },
-        autonomy: { type: 'string', enum: ['standard', 'high'], default: 'high' },
         timeout_seconds: { type: 'integer', minimum: 60, maximum: 21600, default: 3600 },
         target_context: TARGET_CONTEXT_SCHEMA,
         expected_target_fingerprint: {
@@ -378,7 +373,7 @@ const TOOLS = [
   },
   {
     name: 'status',
-    description: 'Show compact DeepSeek, Prime Agent, Prime Lab, credential, UI, and recent-job status.',
+    description: 'Show compact DeepSeek Harness, Grok Build, credential, UI, and recent-job status.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -427,36 +422,9 @@ const TOOLS = [
       type: 'object',
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
-        kind: { type: 'string', enum: ['deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build'] },
+        kind: { type: 'string', enum: ['deepseek_agent', 'grok_build'] },
         request_id: { type: 'string', minLength: 8, maxLength: 128 },
         prompt: { type: 'string', maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$' },
-        autonomy: {
-          type: 'string',
-          enum: ['standard', 'high'],
-          default: 'high',
-          description: 'Prime Agent only; rejected for DeepSeek and Prime evaluation.',
-        },
-        environment: {
-          type: 'string',
-          maxLength: 240,
-          description: 'Prime evaluation only; rejected for agent runs.',
-        },
-        examples: {
-          type: 'integer', minimum: 1, maximum: 100, default: 3,
-          description: 'Prime evaluation only.',
-        },
-        rollouts: {
-          type: 'integer', minimum: 1, maximum: 8, default: 1,
-          description: 'Prime evaluation only.',
-        },
-        concurrency: {
-          type: 'integer', minimum: 1, maximum: 16, default: 2,
-          description: 'Prime evaluation only.',
-        },
-        max_tokens: {
-          type: 'integer', minimum: 128, maximum: 32768, default: 2048,
-          description: 'Prime evaluation only.',
-        },
         timeout_seconds: {
           type: 'integer', minimum: 60, maximum: 21600, default: 3600,
           description: 'All kinds; wall-clock range 60–21600 seconds.',

@@ -282,30 +282,6 @@ async function capturePatch(spec, allowedPaths) {
   return true;
 }
 
-async function primeAgentFailure(logFile) {
-  const raw = await readFile(logFile, 'utf8').catch(() => '');
-  const tail = raw.slice(-1_048_576);
-  let lastAssistant = null;
-  let retryFailure = null;
-  for (const line of tail.split(/\r?\n/)) {
-    try {
-      const event = JSON.parse(line);
-      if (event.type === 'message_end' && event.message?.role === 'assistant') {
-        lastAssistant = event.message;
-      } else if (event.type === 'auto_retry_end') {
-        retryFailure = event.success === false ? event.finalError ?? 'Prime Agent exhausted its retries.' : null;
-      }
-    } catch {
-      // Prime Agent may write startup diagnostics to stderr alongside JSON events.
-    }
-  }
-  if (retryFailure) return retryFailure;
-  if (lastAssistant?.stopReason === 'error') {
-    return lastAssistant.errorMessage ?? 'Prime Agent ended with a provider or agent error.';
-  }
-  return null;
-}
-
 async function main() {
   if (!specPath || !path.isAbsolute(specPath)) {
     process.exitCode = 2;
@@ -509,7 +485,11 @@ async function main() {
       'LC_ALL',
       'TERM',
       'TMPDIR',
-      ...(spec.kind === 'grok_build' ? ['XAI_API_KEY'] : ['MODEL_API_KEY']),
+      ...(spec.kind === 'grok_build'
+        ? ['XAI_API_KEY']
+        : spec.kind === 'deepseek_agent' || spec.kind === 'dsh_web'
+          ? ['MODEL_API_KEY', 'DSH_HOME']
+          : []),
     ];
     const inheritedEnvironment = Object.fromEntries(
       inheritedNames
@@ -570,12 +550,10 @@ async function main() {
       && (!Number.isFinite(cancelTimestamp) || cancelTimestamp <= childExitAt);
     const cancellationWins = cancellationBeforeExit && (!timedOut
       || timedOutAt === null || !Number.isFinite(cancelTimestamp) || cancelTimestamp <= timedOutAt);
-    const semanticError = spec.result_format === 'prime_agent_json' && !cancellationWins && !timedOut
-      ? await primeAgentFailure(spec.log_file)
-      : (spec.result_format === 'grok_streaming_json' || spec.result_format === 'grok_json')
-        && !cancellationWins && !timedOut
-        ? grokBuildFailure((await readFile(spec.log_file, 'utf8').catch(() => '')).slice(-1_048_576))
-        : null;
+    const semanticError = (spec.result_format === 'grok_streaming_json' || spec.result_format === 'grok_json')
+      && !cancellationWins && !timedOut
+      ? grokBuildFailure((await readFile(spec.log_file, 'utf8').catch(() => '')).slice(-1_048_576))
+      : null;
     const bytes = await fileSize(spec.log_file);
     if (bytes !== lastLogBytes) {
       lastLogBytes = bytes;

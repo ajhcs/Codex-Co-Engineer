@@ -4,8 +4,9 @@ Codex-Co-Engineer is the Codex-first MCP control plane for the standalone
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the
 official [Grok Build CLI](https://docs.x.ai/build/cli/headless-scripting). It
 submits bounded background work, reports a durable lifecycle, and lets Codex
-inspect or cancel plugin-owned jobs without opening a shell. Prime Agent and
-Prime Lab remain optional adapters.
+inspect or cancel plugin-owned jobs without opening a shell. Version 2 removes
+all Prime Intellect adapters and runtime dependencies; the only worker kinds
+are `deepseek_agent` and `grok_build`.
 
 The public product name is **Codex-Co-Engineer**. The stable plugin and MCP
 identifier remains `plumbob-harness-control` so existing Codex configurations
@@ -18,8 +19,7 @@ The MCP server exposes six compact tools:
 - `preflight`: resolve and attest one strict target/configuration
 - `status`: control-plane, adapter, credential-presence, and recent-job state
 - `runtime`: start or stop the optional loopback DeepSeek UI
-- `run`: accept a target-bound DeepSeek, Prime Agent, Prime evaluation, or
-  `grok_build` job
+- `run`: accept a target-bound `deepseek_agent` or `grok_build` job
 - `jobs`: list, inspect, wait for, or cursor-page a managed job
 - `cancel`: request cancellation of one plugin-owned job
 
@@ -42,9 +42,9 @@ ports, provider URLs, or environment maps as tool arguments.
 5. Set the runtime environment described below before Codex starts the MCP
    server.
 
-The plugin has no runtime npm dependencies. The public repository deliberately
-does not include a Prime Lab checkout, generated Harness packages, model
-registries, session logs, or credentials.
+The plugin has no runtime npm dependencies. DeepSeek Harness and Grok Build are
+installed and authenticated independently. The public repository deliberately
+does not include generated Harness profiles, session logs, or credentials.
 
 ## Configuration
 
@@ -55,14 +55,65 @@ portable example is in [`config/configuration.example.json`](../../config/config
 | --- | --- |
 | `MODEL_API_KEY` | Provider credential, supplied by the environment or a secret manager. |
 | `XAI_API_KEY` | Optional xAI API key for the official Grok CLI; OAuth/session state remains under the normal user home. Never pass it as an MCP argument. |
-| `CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` | Runtime workspace containing the configured DSH/Prime adapters. It is not target authority. |
+| `DSH_HOME` | Optional DeepSeek Harness profile home. When omitted, DSH uses its normal per-user default. |
+| `CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` | Default Git workspace selected only by an explicit `target_context.mode: "default"`; it is not prompt-derived authority. |
 | `CODEX_CO_ENGINEER_ALLOWED_ROOTS` | Optional path-delimited administrator allowlist for local Git roots. |
 | `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only state, SQLite ledger, cancellation markers, and redacted logs. |
 | `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Optional protected file containing only the provider key; keep it outside the clone. |
-| `CODEX_CO_ENGINEER_ENABLE_PRIME_AGENT` | Set to `1` only when the optional Prime Agent adapter is intentionally enabled. |
+| `CODEX_CO_ENGINEER_DSH_COMMAND` | Optional DeepSeek Harness executable override; defaults to `dsh`; passed to `spawn` without a shell. |
 | `CODEX_CO_ENGINEER_GROK_COMMAND` | Optional direct Grok executable override; defaults to `grok`; passed to `spawn` without a shell. |
 
 Legacy `PLUMBOB_HARNESS_*` names remain compatibility aliases.
+
+## MCP tool calls
+
+The six MCP tools remain stable; removing Prime narrows only the accepted
+worker kinds and backend-specific fields.
+
+- `preflight` is read-only. Supply `schema_version`, `target_context`, and the
+  caller-computed `expected_target_fingerprint`. Set `kind` to `preflight`,
+  `deepseek_agent`, or `grok_build`. A Grok preflight may include the same typed
+  Grok options accepted by `run`.
+- `status` accepts optional `recent_limit` (`0`–`15`) and `diagnostics`. The
+  default path performs no provider-auth request. `diagnostics: true` may run
+  the official read-only `grok models` authentication probe.
+- `runtime` accepts `action: "start"` with the versioned target contract and a
+  bounded timeout, or `action: "stop"` to stop only the plugin-owned DeepSeek
+  UI job.
+- `run` requires `schema_version`, `kind`, `request_id`, `prompt`,
+  `target_context`, and `expected_target_fingerprint`. `kind` is exactly
+  `deepseek_agent` or `grok_build`; unknown and removed kinds fail closed.
+- `jobs` accepts `action: "list"`, `"get"`, `"wait"`, or `"logs"`. Waits are
+  bounded to 55 seconds per call and log reads use byte cursors.
+- `cancel` requires one exact `job_id` and signals only a process whose
+  ownership the plugin can prove.
+
+Minimal DeepSeek dispatch after a successful preflight:
+
+```json
+{
+  "schema_version": "codex-co-engineer.config.v1",
+  "kind": "deepseek_agent",
+  "request_id": "review-example-001",
+  "prompt": "Review the requested files and report findings.",
+  "target_context": {
+    "schema_version": "codex-co-engineer.target.v1",
+    "mode": "explicit",
+    "working_directory": "/absolute/path/to/checkout",
+    "expected_git_root": "/absolute/path/to/checkout",
+    "expected_head": "0123456789abcdef0123456789abcdef01234567",
+    "allowed_paths": ["src", "tests"],
+    "role": "review"
+  },
+  "expected_target_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}
+```
+
+For Grok, change `kind` to `grok_build` and optionally add typed fields such as
+`model`, `reasoning_effort`, `max_turns`, `sandbox_profile`, `allowed_tools`,
+or the structured-output controls described below. Credentials, executable
+paths, raw arguments, shell commands, environment maps, and provider URLs are
+never accepted in a tool call.
 
 Prefer a native per-user secret store. If a file is necessary, place it under
 the platform's user configuration directory, restrict it to the current user,

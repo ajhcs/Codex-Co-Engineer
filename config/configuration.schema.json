@@ -22,9 +22,10 @@
     },
     "runtime": {
       "type": "object",
-      "required": ["workspace", "state_directory", "allowed_roots", "enable_prime_agent"],
+      "required": ["workspace", "dsh_home", "state_directory", "allowed_roots"],
       "properties": {
         "workspace": { "type": "string", "minLength": 1 },
+        "dsh_home": { "type": "string", "minLength": 1 },
         "state_directory": { "type": "string", "minLength": 1 },
         "allowed_roots": {
           "type": "array",
@@ -32,7 +33,6 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "enable_prime_agent": { "type": "boolean" },
         "grok_command": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false

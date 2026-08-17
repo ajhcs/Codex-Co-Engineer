@@ -115,57 +115,6 @@ test('runner redacts prompts and credential-shaped output before writing logs', 
   assert.match(log, /\[REDACTED\]/);
 });
 
-test('detached runner treats Prime Agent JSON provider errors as failures', async (context) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-prime-runner-test-'));
-  context.after(async () => rm(directory, { recursive: true, force: true }));
-
-  const databaseFile = path.join(directory, 'control.sqlite3');
-  const logFile = path.join(directory, 'job.log');
-  const cancelFile = path.join(directory, 'job.cancel');
-  const specFile = path.join(directory, 'job.spec.json');
-  const createdAt = new Date().toISOString();
-  const database = openStore(databaseFile);
-  insertJob(database, {
-    id: 'prime-job-1234',
-    kind: 'prime_agent',
-    status: 'queued',
-    summary: 'Prime semantic failure test',
-    created_at: createdAt,
-    updated_at: createdAt,
-    log_file: logFile,
-    cancel_file: cancelFile,
-  });
-  database.close();
-  const providerError = JSON.stringify({
-    type: 'message_end',
-    message: { role: 'assistant', stopReason: 'error', errorMessage: '401 Unauthorized' },
-  });
-  await writeFile(specFile, JSON.stringify({
-    id: 'prime-job-1234',
-    database_file: databaseFile,
-    log_file: logFile,
-    cancel_file: cancelFile,
-    command: '/usr/bin/printf',
-    args: [`${providerError}\\n`],
-    env: {},
-    cwd: directory,
-    timeout_seconds: 60,
-    result_format: 'prime_agent_json',
-  }));
-
-  const runner = spawn(process.execPath, ['--no-warnings', path.join(ROOT, 'mcp', 'runner.mjs'), specFile], {
-    stdio: 'ignore',
-  });
-  const exitCode = await new Promise((resolve) => runner.once('exit', resolve));
-  assert.equal(exitCode, 0);
-
-  const completedStore = openStore(databaseFile);
-  const job = getStoredJob(completedStore, 'prime-job-1234');
-  completedStore.close();
-  assert.equal(job.status, 'failed');
-  assert.equal(job.error, '401 Unauthorized');
-});
-
 test('detached runner fixes the deadline at acceptance before child startup', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-timeout-runner-test-'));
   context.after(async () => rm(directory, { recursive: true, force: true }));
@@ -480,6 +429,100 @@ test('detached runner permits scoped implement targets and records a patch artif
   assert.deepEqual(JSON.parse(job.changed_paths), ['new.txt', 'note.txt']);
   assert.equal(job.patch_artifact, patchFile);
   assert.match(await readFile(patchFile, 'utf8'), /updated/);
+});
+
+test('deepseek runner invokes DSH directly with only its profile environment', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-deepseek-runner-test-'));
+  const stateDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-deepseek-state-test-'));
+  context.after(async () => Promise.all([
+    rm(directory, { recursive: true, force: true }),
+    rm(stateDirectory, { recursive: true, force: true }),
+  ]));
+
+  assert.equal(spawnSync('git', ['init', '-q', directory]).status, 0);
+  await writeFile(path.join(directory, 'note.txt'), 'initial\n');
+  assert.equal(spawnSync('git', ['-C', directory, 'add', 'note.txt']).status, 0);
+  assert.equal(spawnSync('git', [
+    '-C', directory,
+    '-c', 'user.name=Codex-Co-Engineer Test',
+    '-c', 'user.email=codex-co-engineer@example.invalid',
+    'commit', '-qm', 'initial',
+  ]).status, 0);
+  const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const databaseFile = path.join(stateDirectory, 'control.sqlite3');
+  const logFile = path.join(stateDirectory, 'job.log');
+  const cancelFile = path.join(stateDirectory, 'job.cancel');
+  const specFile = path.join(stateDirectory, 'job.spec.json');
+  const recordFile = path.join(stateDirectory, 'deepseek.json');
+  const fake = path.join(stateDirectory, 'dsh');
+  await writeFile(fake, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(recordFile)}, JSON.stringify({
+  argv: process.argv.slice(2),
+  cwd: process.cwd(),
+  model: process.env.MODEL_API_KEY ?? null,
+  dshHome: process.env.DSH_HOME ?? null,
+  xai: process.env.XAI_API_KEY ?? null,
+  permission: process.env.DSH_PERMISSION_MODE ?? null,
+}));
+console.log('deepseek-ok');
+`, { mode: 0o755 });
+
+  const createdAt = new Date().toISOString();
+  const database = openStore(databaseFile);
+  insertJob(database, {
+    id: 'deepseek-runner-1234',
+    kind: 'deepseek_agent',
+    status: 'queued',
+    summary: 'DeepSeek direct invocation test',
+    created_at: createdAt,
+    updated_at: createdAt,
+    log_file: logFile,
+    cancel_file: cancelFile,
+  });
+  database.close();
+  await writeFile(specFile, JSON.stringify({
+    id: 'deepseek-runner-1234',
+    database_file: databaseFile,
+    log_file: logFile,
+    cancel_file: cancelFile,
+    command: fake,
+    args: ['--profile', 'headless', 'active task'],
+    env: { DSH_PERMISSION_MODE: 'read-only', DSH_TELEMETRY_MODE: 'DISABLED' },
+    cwd: directory,
+    timeout_seconds: 60,
+    kind: 'deepseek_agent',
+    target_context: {
+      working_directory: directory,
+      expected_git_root: directory,
+      expected_head: head,
+      git_common_directory: path.join(directory, '.git'),
+      allowed_paths: ['.'],
+      role: 'review',
+    },
+  }));
+
+  const runner = spawn(process.execPath, ['--no-warnings', path.join(ROOT, 'mcp', 'runner.mjs'), specFile], {
+    env: {
+      ...process.env,
+      MODEL_API_KEY: 'model-secret',
+      DSH_HOME: '/tmp/test-dsh-home',
+      XAI_API_KEY: 'must-not-leak',
+    },
+    stdio: 'ignore',
+  });
+  assert.equal(await new Promise((resolve) => runner.once('exit', resolve)), 0);
+  const completedStore = openStore(databaseFile);
+  const job = getStoredJob(completedStore, 'deepseek-runner-1234');
+  completedStore.close();
+  assert.equal(job.status, 'succeeded');
+  const recorded = JSON.parse(await readFile(recordFile, 'utf8'));
+  assert.deepEqual(recorded.argv, ['--profile', 'headless', 'active task']);
+  assert.equal(recorded.cwd, directory);
+  assert.equal(recorded.model, 'model-secret');
+  assert.equal(recorded.dshHome, '/tmp/test-dsh-home');
+  assert.equal(recorded.xai, null);
+  assert.equal(recorded.permission, 'read-only');
 });
 
 test('grok runner invokes a fake executable with exact argv and OAuth-only environment', async (context) => {

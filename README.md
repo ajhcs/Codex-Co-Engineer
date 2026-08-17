@@ -4,8 +4,8 @@ Codex-Co-Engineer is a public, Codex-first control plane for the standalone
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the
 official [Grok Build CLI](https://docs.x.ai/build/cli/headless-scripting). Codex is
 the chief engineer and operator; these are bounded peer workers.
-Prime Agent and Prime Lab support are optional adapters, not required for the
-main release. `grok_build` is a first-class target-bound headless run kind.
+The worker kinds are exactly `deepseek_agent` and `grok_build`; version 2 has no
+Prime Intellect integration or runtime dependency.
 
 The stable plugin and MCP identifier is `plumbob-harness-control`. The public
 product name is **Codex-Co-Engineer**. Keeping the technical identifier stable
@@ -23,11 +23,11 @@ scripts/                           dependency-free release validation
 .github/workflows/                 CI and package checks
 ```
 
-The public tree does not contain a Prime Lab checkout, generated DSH packages,
-model registries, session logs, provider credentials, or personal Codex
-configuration. Keep those in a separate private checkout or secret manager.
-The root ignore policy is intentionally fail-closed for `Secrets/`,
-`prime-intellect-lab/`, local state, and generated runtimes.
+The public tree does not contain generated DSH packages, model registries,
+session logs, provider credentials, or personal Codex configuration. Keep
+those in a separate private directory or secret manager. The root ignore
+policy is intentionally fail-closed for `Secrets/`, local state, and generated
+runtimes.
 
 ## Quick start
 
@@ -50,13 +50,15 @@ Example environment (replace placeholders locally; never commit the values):
 ```bash
 export MODEL_API_KEY='provided-by-your-secret-manager'
 export XAI_API_KEY='optional-xai-key-for-grok-cli'
-export CODEX_CO_ENGINEER_RUNTIME_WORKSPACE='/absolute/path/to/dsh-runtime-workspace'
+export DSH_HOME='/absolute/path/to/dsh-profile-home'
+export CODEX_CO_ENGINEER_RUNTIME_WORKSPACE='/absolute/path/to/default/git-workspace'
 export CODEX_CO_ENGINEER_ALLOWED_ROOTS='/absolute/path/to/checkouts'
 export CODEX_CO_ENGINEER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer"
 ```
 
-`CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` locates the configured runtime. It is not target
-authority. A job must carry one strict target contract with an absolute cwd,
+`CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` is used only when an explicit target
+contract selects `mode: "default"`. It is not prompt-derived target authority.
+A job must carry one strict target contract with an absolute cwd,
 expected Git root and HEAD, allowed paths, role, and caller-supplied expected
 fingerprint. Prompt-level `cd` is never authoritative, and an invalid
 explicit target never falls back to a default workspace.
@@ -72,6 +74,22 @@ commands, agent bundles, raw output schemas, and system-prompt overrides are
 not exposed. Bounded typed `json_schema` input is supported for structured JSON
 output; ACP (`grok agent stdio`) is documented but intentionally deferred until
 it can preserve the same target and lifecycle guarantees.
+
+## Co-Engineer tools
+
+The plugin exposes six stable MCP tools:
+
+- `preflight` attests the target, configuration digest, protocol, and tool set.
+- `status` reports DeepSeek, Grok, credential-presence, UI, and recent-job state.
+- `runtime` starts or stops the optional plugin-owned loopback DeepSeek UI.
+- `run` dispatches exactly `deepseek_agent` or `grok_build`.
+- `jobs` lists, inspects, waits for, or cursor-pages managed jobs.
+- `cancel` cancels one exact plugin-owned job.
+
+Every dispatch requires the versioned target contract, caller-supplied target
+fingerprint, stable request ID, and bounded timeout. See the
+[plugin README](plugins/plumbob-harness-control/README.md#mcp-tool-calls) for
+the complete call shapes and examples.
 
 ## Reliability contract
 

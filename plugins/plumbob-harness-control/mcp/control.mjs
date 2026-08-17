@@ -56,13 +56,7 @@ const STATE_DIR = path.resolve(
 );
 const JOBS_DIR = path.join(STATE_DIR, 'jobs');
 const DATABASE_FILE = path.join(STATE_DIR, 'control.sqlite3');
-const DSH_WRAPPER = path.join(WORKSPACE, 'bin', 'dsh-prime-lab');
-const ENDPOINTS = path.join(WORKSPACE, 'configs', 'endpoints.toml');
-const PRIME_AGENT_MODELS = process.env.CODEX_CO_ENGINEER_PRIME_AGENT_MODELS
-  ?? path.join(USER_HOME, '.prime', 'agent', 'models.json');
-const PRIME = process.env.CODEX_CO_ENGINEER_PRIME_COMMAND ?? 'prime';
 const DSH = process.env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
-const PRIME_AGENT = process.env.CODEX_CO_ENGINEER_PRIME_AGENT_COMMAND ?? 'prime-agent';
 const GROK = process.env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
 const GROK_ENVIRONMENT_NAMES = Object.freeze([
   'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR',
@@ -77,13 +71,8 @@ function grokEnvironment() {
   );
 }
 const RUNNER = path.join(PLUGIN_ROOT, 'mcp', 'runner.mjs');
-const DEEPSEEK_LAUNCHER = path.join(PLUGIN_ROOT, 'mcp', 'deepseek-launcher.mjs');
 const WEB_HOST = '127.0.0.1';
 const WEB_PORT = 3180;
-const PRIME_AGENT_ENABLED = (
-  process.env.CODEX_CO_ENGINEER_ENABLE_PRIME_AGENT
-    ?? process.env.PLUMBOB_HARNESS_ENABLE_PRIME_AGENT
-) === '1';
 const FINAL_STATES = new Set([
   'completed',
   'succeeded',
@@ -98,8 +87,6 @@ const ACTIVE_STATES = new Set([
   'queued', 'starting', 'running', 'cancelling',
 ]);
 const TESTED_DSH_VERSION = '0.1.0-rc.6';
-const TESTED_PRIME_VERSION = '0.6.22';
-const TESTED_PRIME_AGENT_VERSION = '0.7.2';
 const PLUGIN_VERSION = SERVER_IDENTITY.version;
 const WAIT_LIMITS = Object.freeze({
   list_limit: { minimum: 1, maximum: 25, default: 10 },
@@ -183,7 +170,7 @@ function publicJobKind(kind) {
 
 function isAgentJobKind(kind) {
   return kind === 'deepseek_agent' || kind === 'dsh_agent'
-    || kind === 'prime_agent' || kind === 'grok_build';
+    || kind === 'grok_build';
 }
 
 function jobExecutionScope(job) {
@@ -629,58 +616,6 @@ async function tailLog(file, lineCount) {
   }
 }
 
-function assistantText(message) {
-  if (!message || message.role !== 'assistant' || !Array.isArray(message.content)) return '';
-  return message.content
-    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part) => part.text)
-    .join('\n')
-    .trim();
-}
-
-async function tailPrimeAgentLog(file, lineCount) {
-  if (!(await exists(file)) || lineCount === 0) return { text: '', truncated: false };
-  const info = await stat(file);
-  const bytes = Math.min(info.size, 262144);
-  const handle = await open(file, 'r');
-  try {
-    const buffer = Buffer.alloc(bytes);
-    await handle.read(buffer, 0, bytes, info.size - bytes);
-    const summaries = [];
-    for (const rawLine of buffer.toString('utf8').split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line) continue;
-      try {
-        const event = JSON.parse(line);
-        if (event.type === 'session') summaries.push(`session ${event.id ?? 'started'}`);
-        else if (event.type === 'agent_start') summaries.push('agent started');
-        else if (event.type === 'agent_end') summaries.push('agent finished');
-        else if (event.type === 'turn_start') summaries.push('turn started');
-        else if (event.type === 'turn_end') summaries.push('turn finished');
-        else if (event.type === 'tool_execution_start') {
-          summaries.push(`tool started: ${concise(event.toolName ?? 'unknown', 80)}`);
-        } else if (event.type === 'tool_execution_end') {
-          summaries.push(`tool ${event.isError ? 'failed' : 'finished'}: ${concise(event.toolName ?? 'unknown', 80)}`);
-        } else if (event.type === 'message_end') {
-          const text = assistantText(event.message);
-          if (text) summaries.push(`assistant: ${concise(text, 1200)}`);
-        } else if (event.type === 'compaction_start') summaries.push('context compaction started');
-        else if (event.type === 'compaction_end') summaries.push(`context compaction ${event.aborted ? 'aborted' : 'finished'}`);
-        else if (event.type === 'auto_retry_start') summaries.push(`provider retry ${event.attempt}/${event.maxAttempts}`);
-      } catch {
-        summaries.push(concise(line, 500));
-      }
-    }
-    const selected = summaries.slice(-lineCount).join('\n');
-    return {
-      text: redactLog(selected.length <= LOG_PAGE_MAX_BYTES ? selected : selected.slice(-LOG_PAGE_MAX_BYTES)),
-      truncated: info.size > bytes || selected.length > LOG_PAGE_MAX_BYTES,
-    };
-  } finally {
-    await handle.close();
-  }
-}
-
 function parseCursor(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
   const text = String(value);
@@ -755,44 +690,20 @@ function versions() {
   };
   versionCache = {
     deepseek_harness: run(DSH, ['--version']),
-    prime: run(PRIME, ['--version']),
-    prime_agent: run(PRIME_AGENT, ['--version']),
     grok: run(GROK, ['--version'], grokEnvironment()),
   };
   versionCache.compatible = {
     deepseek_harness: versionCache.deepseek_harness.includes(TESTED_DSH_VERSION),
-    prime: versionCache.prime.includes(TESTED_PRIME_VERSION),
-    prime_agent: versionCache.prime_agent.includes(TESTED_PRIME_AGENT_VERSION),
   };
   return versionCache;
 }
 
 function requireDeepSeekCompatible() {
   const current = versions();
-  if (!current.compatible.deepseek_harness || !current.compatible.prime) {
+  if (!current.compatible.deepseek_harness) {
     throw new ToolError(
       'unsupported_runtime_version',
-      `Mutations require DeepSeek ${TESTED_DSH_VERSION} and Prime ${TESTED_PRIME_VERSION}; inspect status for detected versions.`,
-    );
-  }
-}
-
-function requirePrimeCompatible() {
-  const current = versions();
-  if (!current.compatible.prime) {
-    throw new ToolError(
-      'unsupported_runtime_version',
-      `Prime evaluations require Prime CLI ${TESTED_PRIME_VERSION}; inspect status for the detected version.`,
-    );
-  }
-}
-
-function requirePrimeAgentCompatible() {
-  const current = versions();
-  if (!current.compatible.prime_agent) {
-    throw new ToolError(
-      'unsupported_runtime_version',
-      `Prime Agent runs require version ${TESTED_PRIME_AGENT_VERSION}; inspect status for the detected version.`,
+      `DeepSeek jobs require DeepSeek Harness ${TESTED_DSH_VERSION}; inspect status for the detected version.`,
     );
   }
 }
@@ -830,14 +741,6 @@ async function startJob({
   const cancelFile = path.join(JOBS_DIR, `${id}.cancel`);
   const specFile = path.join(JOBS_DIR, `${id}.spec.json`);
   const patchArtifact = targetContext ? path.join(JOBS_DIR, `${id}.patch`) : null;
-  const jobEnvironment = targetContext && kind === 'deepseek_agent'
-    ? {
-      ...env,
-      DSH_PATCH_TEMPLATE: path.join(WORKSPACE, '.dsh', 'cordis.patch.yml'),
-      DSH_TARGET_WORKSPACE: targetContext.expected_git_root,
-      DSH_TARGET_PATCH_FILE: path.join(JOBS_DIR, `${id}.dsh.patch.yml`),
-    }
-    : env;
   const job = {
     id,
     kind,
@@ -867,7 +770,7 @@ async function startJob({
     cancel_file: cancelFile,
     command,
     args,
-    env: jobEnvironment,
+    env,
     cwd,
     timeout_seconds: timeoutSeconds,
     deadline_at: deadlineAt,
@@ -935,19 +838,17 @@ async function statusTool(args) {
   const listening = await portOpen();
   const detectedVersions = versions();
   const grokStatus = grokVersionProbe(GROK, WORKSPACE, grokEnvironment());
-  const deepseekConfigured = await exists(DSH_WRAPPER) && await exists(ENDPOINTS);
+  const deepseekConfigured = detectedVersions.compatible.deepseek_harness;
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
     ok: true,
     integration: 'control-only',
     control_plane: { health: 'healthy', version: PLUGIN_VERSION, transport: 'unix_socket', ledger: 'sqlite_wal' },
     headless_agent: {
-      availability: deepseekConfigured && detectedVersions.compatible.deepseek_harness && detectedVersions.compatible.prime
-        ? 'available'
-        : 'unavailable',
+      availability: deepseekConfigured ? 'available' : 'unavailable',
       configured: deepseekConfigured,
       kind: 'deepseek_agent',
-      version_compatible: detectedVersions.compatible.deepseek_harness && detectedVersions.compatible.prime,
+      version_compatible: detectedVersions.compatible.deepseek_harness,
     },
     grok_build: {
       kind: 'grok_build',
@@ -992,10 +893,9 @@ async function statusTool(args) {
     credential_setup: { protected_file: MODEL_API_KEY_FILE },
     workspace: {
       path: WORKSPACE,
-      deepseek_configured: await exists(DSH_WRAPPER) && await exists(ENDPOINTS),
-      prime_agent_configured: await exists(PRIME_AGENT_MODELS),
-      prime_agent_enabled: PRIME_AGENT_ENABLED,
-      prime_agent_model: 'meta-model-api/muse-spark-1.2-contributor',
+      deepseek_configured: deepseekConfigured,
+      dsh_command: DSH,
+      dsh_home_configured: Boolean(process.env.DSH_HOME),
       grok_command: GROK,
     },
     versions: detectedVersions,
@@ -1006,8 +906,6 @@ async function statusTool(args) {
   };
   if (args.diagnostics === true) {
     result.diagnostics = {
-      prime_lab: await primeLabDoctor(),
-      prime_agent: primeAgentDoctor(),
       grok_build: grokAuthDoctor(),
     };
   }
@@ -1049,45 +947,6 @@ function grokAuthDoctor() {
   };
 }
 
-async function primeLabDoctor() {
-  const result = spawnSync(PRIME, ['--plain', 'lab', 'doctor'], {
-    cwd: WORKSPACE,
-    env: process.env,
-    encoding: 'utf8',
-    timeout: 30000,
-  });
-  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
-  const count = (label) => (output.match(new RegExp(`│\\s*${label}\\s*│`, 'g')) ?? []).length;
-  return {
-    ok: result.status === 0 && count('FAIL') === 0,
-    exit_code: result.status,
-    checks: { pass: count('PASS'), warn: count('WARN'), fail: count('FAIL') },
-    note: count('WARN') === 1
-      ? 'The expected warning is that no Codex/OpenCode coding agent is configured.'
-      : null,
-  };
-}
-
-function primeAgentDoctor() {
-  const result = spawnSync(PRIME_AGENT, ['doctor', '--json'], {
-    cwd: WORKSPACE,
-    env: process.env,
-    encoding: 'utf8',
-    timeout: 30000,
-  });
-  let findings = null;
-  try { findings = JSON.parse(result.stdout || '[]'); } catch {}
-  const services = Array.isArray(findings) ? findings : null;
-  const issues = services?.filter((item) => item?.status !== 'current') ?? null;
-  return {
-    ok: result.status === 0 && services !== null && issues.length === 0,
-    exit_code: result.status,
-    services: services?.length ?? null,
-    issues: issues?.length ?? null,
-  };
-}
-
 async function runtimeTool(args) {
   if (args.action === 'start') {
     if (args.schema_version !== CONFIG_SCHEMA_VERSION) {
@@ -1107,8 +966,8 @@ async function runtimeTool(args) {
     const job = await startJob({
       kind: 'dsh_web',
       summary: 'DeepSeek Harness web UI',
-      command: '/usr/bin/bash',
-      args: [DSH_WRAPPER, '--profile', 'web', '--host', WEB_HOST, '--port', String(WEB_PORT)],
+      command: DSH,
+      args: ['--profile', 'web', '--host', WEB_HOST, '--port', String(WEB_PORT)],
       env: { DSH_PERMISSION_MODE: 'workspace-write', DSH_TELEMETRY_MODE: 'DISABLED' },
       url: `http://${WEB_HOST}:${WEB_PORT}`,
       timeoutSeconds,
@@ -1228,7 +1087,6 @@ function agentConfiguration({
   timeoutSeconds,
   cwd,
   target,
-  autonomy = null,
   grokConfiguration = null,
 }) {
   const configuration = {
@@ -1261,14 +1119,6 @@ function agentConfiguration({
         ? 'read-only-process-contract'
         : 'workspace-write',
     target_context: target,
-    ...(kind === 'prime_agent'
-      ? {
-        autonomy: autonomy ?? 'high',
-        autonomy_effective: autonomy === 'standard'
-          ? { continuations: 0, turns: 1, max_tokens: null }
-          : { continuations: 3, turns: 12, max_tokens: 80000 },
-      }
-      : {}),
     ...(kind === 'grok_build' ? { grok_configuration: grokConfiguration } : {}),
   };
   configuration.configuration_digest = sha256Digest(configuration);
@@ -1326,12 +1176,6 @@ function preflightAllowedFields(args) {
     'kind',
     'request_id',
     'prompt',
-    'autonomy',
-    'environment',
-    'examples',
-    'rollouts',
-    'concurrency',
-    'max_tokens',
     'timeout_seconds',
     'target_context',
     'expected_target_fingerprint',
@@ -1357,17 +1201,11 @@ async function preflightTool(args) {
   assertTargetFingerprint(expectedFingerprint, targetFingerprint);
 
   let kind = args.kind ?? 'preflight';
-  if (kind !== 'preflight' && !['deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build'].includes(kind)) {
-    throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent, prime_agent, prime_eval, or grok_build.');
+  if (kind !== 'preflight' && !['deepseek_agent', 'grok_build'].includes(kind)) {
+    throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent or grok_build.');
   }
   const commonFields = new Set(['schema_version', 'kind', 'request_id', 'prompt', 'timeout_seconds', 'target_context', 'expected_target_fingerprint']);
-  const kindFields = kind === 'prime_agent'
-    ? new Set(['autonomy'])
-    : kind === 'prime_eval'
-      ? new Set(['environment', 'examples', 'rollouts', 'concurrency', 'max_tokens'])
-      : kind === 'grok_build'
-        ? GROK_CONFIGURATION_FIELDS
-        : new Set();
+  const kindFields = kind === 'grok_build' ? GROK_CONFIGURATION_FIELDS : new Set();
   for (const field of Object.keys(args)) {
     if (!commonFields.has(field) && !kindFields.has(field)) {
       throw new ToolError('invalid_argument', `preflight.${field} is not supported for kind=${kind}.`);
@@ -1390,23 +1228,6 @@ async function preflightTool(args) {
     target_fingerprint: targetFingerprint,
     target_context: target,
   };
-  if (kind === 'prime_agent') {
-    if (!['standard', 'high'].includes(args.autonomy ?? 'high')) {
-      throw new ToolError('invalid_autonomy', 'autonomy must be standard or high.');
-    }
-    configuration.autonomy = args.autonomy ?? 'high';
-  }
-  if (kind === 'prime_eval') {
-    if (typeof args.environment !== 'string' || args.environment.length > 240 || args.environment.startsWith('-')
-      || args.environment.includes('..') || /[\u0000-\u001f\u007f]/.test(args.environment)) {
-      throw new ToolError('invalid_environment', 'environment must be a safe Prime environment ID or workspace-relative path.');
-    }
-    configuration.environment = args.environment;
-    configuration.examples = clampInteger(args.examples, 3, 1, 100, 'examples');
-    configuration.rollouts = clampInteger(args.rollouts, 1, 1, 8, 'rollouts');
-    configuration.concurrency = clampInteger(args.concurrency, 2, 1, 16, 'concurrency');
-    configuration.max_tokens = clampInteger(args.max_tokens, 2048, 128, 32768, 'max_tokens');
-  }
   if (kind === 'grok_build') {
     configuration.grok_configuration = normalizeGrokForTool(args, target.role);
   }
@@ -1432,9 +1253,9 @@ async function runTool(args) {
   if (args.schema_version !== CONFIG_SCHEMA_VERSION) {
     throw new ToolError('invalid_configuration', `schema_version must be ${CONFIG_SCHEMA_VERSION}.`);
   }
-  const supportedKinds = new Set(['deepseek_agent', 'prime_agent', 'prime_eval', 'grok_build']);
+  const supportedKinds = new Set(['deepseek_agent', 'grok_build']);
   if (!supportedKinds.has(args.kind)) {
-    throw new ToolError('invalid_kind', 'run.kind must be deepseek_agent, prime_agent, prime_eval, or grok_build.');
+    throw new ToolError('invalid_kind', 'run.kind must be deepseek_agent or grok_build.');
   }
   const id = requestId(args.request_id);
   const timeoutSeconds = clampInteger(args.timeout_seconds, 3600, 60, 21600, 'timeout_seconds');
@@ -1519,7 +1340,7 @@ async function runTool(args) {
       next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
     };
   }
-  if (args.kind === 'deepseek_agent' || args.kind === 'prime_agent') {
+  if (args.kind === 'deepseek_agent') {
     const allowed = new Set([
       'schema_version',
       'kind',
@@ -1529,13 +1350,9 @@ async function runTool(args) {
       'target_context',
       'expected_target_fingerprint',
     ]);
-    if (args.kind === 'prime_agent') allowed.add('autonomy');
     rejectUnsupportedRunFields(args, allowed, args.kind);
     if (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000) {
       throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters.');
-    }
-    if (args.kind === 'prime_agent' && !['standard', 'high'].includes(args.autonomy ?? 'high')) {
-      throw new ToolError('invalid_autonomy', 'autonomy must be standard or high.');
     }
     if (!Object.hasOwn(args, 'target_context')) {
       throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
@@ -1543,12 +1360,6 @@ async function runTool(args) {
     const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
-    if (args.kind === 'prime_agent' && !PRIME_AGENT_ENABLED) {
-      throw new ToolError(
-        'capability_disabled',
-        'Prime Agent access is disabled by the Codex-Co-Engineer policy.',
-      );
-    }
     const effectiveConfiguration = agentConfiguration({
       kind: args.kind,
       id,
@@ -1556,7 +1367,6 @@ async function runTool(args) {
       timeoutSeconds,
       cwd,
       target,
-      autonomy: args.autonomy ?? 'high',
     });
     const fingerprint = requestFingerprint({
       kind: args.kind,
@@ -1566,175 +1376,34 @@ async function runTool(args) {
     const existing = await findRequest(id, fingerprint);
     if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
     requireCredential();
-    if (args.kind === 'deepseek_agent') {
-      requireDeepSeekCompatible();
-      const activeTask = [
-        'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
-        targetPreamble(target),
-        '',
-        args.prompt,
-      ].join('\n');
-      const job = await startAgentJob({
-        working_directory: cwd,
-        expected_git_root: target?.expected_git_root ?? null,
-        git_common_directory: target?.git_common_directory ?? null,
-      }, () => startJob({
-        kind: 'deepseek_agent',
-        summary: `DeepSeek task ${id}`,
-        command: process.execPath,
-        args: [DEEPSEEK_LAUNCHER, '--profile', 'headless', activeTask],
-        env: {
-          DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
-          DSH_TELEMETRY_MODE: 'DISABLED',
-        },
-        requestId: id,
-        requestFingerprint: fingerprint,
-        timeoutSeconds,
-        cwd,
-        targetContext: target,
-        effectiveConfiguration,
-        redactions: [args.prompt],
-      }));
-      return {
-        ok: true,
-        job: publicJob(job),
-        effective_configuration: effectiveConfiguration,
-        next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
-      };
-    }
-
-    requirePrimeAgentCompatible();
-    const primeArgs = [
-      '--mode', 'json',
-      '--cwd', cwd,
-      '--provider', 'meta-model-api',
-      '--model', 'muse-spark-1.2-contributor',
-      '--no-session',
-    ];
-    if ((args.autonomy ?? 'high') === 'high') {
-      primeArgs.push(
-        '--autonomous',
-        '--autonomous-max-continuations', '3',
-        '--autonomous-max-turns', '12',
-        '--autonomous-max-tokens', '80000',
-        '--autonomous-timeout-ms', String(timeoutSeconds * 1000),
-      );
-    }
-    primeArgs.push('--', [targetPreamble(target), args.prompt].filter(Boolean).join('\n\n'));
+    requireDeepSeekCompatible();
+    const activeTask = [
+      'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
+      targetPreamble(target),
+      '',
+      args.prompt,
+    ].join('\n');
     const job = await startAgentJob({
       working_directory: cwd,
       expected_git_root: target?.expected_git_root ?? null,
       git_common_directory: target?.git_common_directory ?? null,
     }, () => startJob({
-      kind: 'prime_agent',
-      summary: `Prime Agent task ${id}`,
-      command: PRIME_AGENT,
-      args: primeArgs,
+      kind: 'deepseek_agent',
+      summary: `DeepSeek task ${id}`,
+      command: DSH,
+      args: ['--profile', 'headless', activeTask],
+      env: {
+        DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
+        DSH_TELEMETRY_MODE: 'DISABLED',
+      },
       requestId: id,
       requestFingerprint: fingerprint,
       timeoutSeconds,
-      resultFormat: 'prime_agent_json',
       cwd,
       targetContext: target,
       effectiveConfiguration,
       redactions: [args.prompt],
     }));
-    return {
-      ok: true,
-      job: publicJob(job),
-      effective_configuration: effectiveConfiguration,
-      next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
-    };
-  }
-
-  if (args.kind === 'prime_eval') {
-    rejectUnsupportedRunFields(
-      args,
-      new Set([
-        'schema_version',
-        'kind',
-        'request_id',
-        'environment',
-        'examples',
-        'rollouts',
-        'concurrency',
-        'max_tokens',
-        'timeout_seconds',
-        'target_context',
-        'expected_target_fingerprint',
-      ]),
-      args.kind,
-    );
-    if (typeof args.environment !== 'string'
-      || args.environment.length > 240
-      || args.environment.startsWith('-')
-      || args.environment.includes('..')
-      || /[\u0000-\u001f\u007f]/.test(args.environment)) {
-      throw new ToolError('invalid_environment', 'environment must be a safe Prime environment ID or workspace-relative path.');
-    }
-    const examples = clampInteger(args.examples, 3, 1, 100, 'examples');
-    const rollouts = clampInteger(args.rollouts, 1, 1, 8, 'rollouts');
-    const concurrency = clampInteger(args.concurrency, 2, 1, 16, 'concurrency');
-    const maxTokens = clampInteger(args.max_tokens, 2048, 128, 32768, 'max_tokens');
-    if (!Object.hasOwn(args, 'target_context')) {
-      throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
-    }
-    const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
-    const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
-    assertTargetFingerprint(expectedFingerprint, targetFingerprint);
-    const effectiveConfiguration = {
-      schema_version: CONFIG_SCHEMA_VERSION,
-      kind: 'prime_eval',
-      request_id: id,
-      environment: args.environment,
-      examples,
-      rollouts,
-      concurrency,
-      max_tokens: maxTokens,
-      timeout_seconds: timeoutSeconds,
-      timeout_range_seconds: { minimum: 60, maximum: 21600, default: 3600 },
-      working_directory: cwd,
-      target_fingerprint: targetFingerprint,
-      target_context: target,
-    };
-    effectiveConfiguration.configuration_digest = sha256Digest(effectiveConfiguration);
-    const fingerprint = requestFingerprint({
-      kind: 'prime_eval',
-      effective_configuration: effectiveConfiguration,
-    });
-    const existing = await findRequest(id, fingerprint);
-    if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
-    if (examples * rollouts * maxTokens > 2_000_000) {
-      throw new ToolError('cost_ceiling', 'The requested evaluation exceeds the 2,000,000 generated-token safety ceiling.');
-    }
-    requirePrimeCompatible();
-    requireCredential();
-    const idPreview = concise(args.environment, 80);
-    const outputDir = path.join(STATE_DIR, 'outputs', newJobId('eval-output'));
-    await mkdir(outputDir, { recursive: true, mode: 0o700 });
-    const job = await startJob({
-      kind: 'prime_eval',
-      summary: `Prime eval: ${idPreview}`,
-      command: PRIME,
-      args: [
-        '--plain', 'eval', 'run', args.environment,
-        '--endpoints-path', ENDPOINTS,
-        '--model', 'meta-muse-spark-1.2-contributor',
-        '--num-examples', String(examples),
-        '--rollouts-per-example', String(rollouts),
-        '--max-concurrent', String(concurrency),
-        '--max-tokens', String(maxTokens),
-        '--disable-tui', '--abbreviated-summary', '--save-results',
-        '--output-dir', outputDir,
-      ],
-      requestId: id,
-      requestFingerprint: fingerprint,
-      timeoutSeconds,
-      outputDir,
-      cwd,
-      targetContext: target,
-      effectiveConfiguration,
-    });
     return {
       ok: true,
       job: publicJob(job),
@@ -1821,9 +1490,7 @@ async function jobsTool(args) {
     if (!FINAL_STATES.has(job.status)) job = await waitForJob(job, seconds, until, afterCursor);
   }
   const tail = lines > 0
-    ? job.kind === 'prime_agent'
-      ? await tailPrimeAgentLog(job.log_file, lines)
-      : await tailLog(job.log_file, lines)
+    ? await tailLog(job.log_file, lines)
     : { text: '', truncated: false };
   const logDelta = afterCursor === null
     ? null

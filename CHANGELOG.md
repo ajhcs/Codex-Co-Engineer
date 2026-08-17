@@ -42,5 +42,20 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 - Cursor MCP preflight, plugin validation, unit coverage, and package inventory
   checks alongside the existing Co-Engineer release gate.
 
+### Changed
+
+- Co-Engineer is versioned `2.0.0` because the supported worker-kind contract
+  is now exactly `deepseek_agent` and `grok_build`.
+- DeepSeek Harness is invoked directly in the attested target checkout and is
+  validated independently through its own CLI version.
+- Root and plugin documentation now describe every MCP tool, accepted worker
+  kind, required target fields, monitoring call, and credential boundary.
+
+### Removed
+
+- All Prime Intellect integrations, including Prime Agent, Prime Eval, Prime
+  CLI compatibility probes, lab diagnostics, environment variables, schemas,
+  runner parsing, tests, and runtime patch generation.
+
 Future changes should document protocol, target-contract, lifecycle, and
 compatibility effects before implementation details.
