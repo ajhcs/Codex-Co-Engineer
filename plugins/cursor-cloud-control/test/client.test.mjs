@@ -46,6 +46,14 @@ test('maps v1 request paths and does not retry non-idempotent mutations', async 
     origin: 'https://api.example.test',
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), init });
+      if (String(url).includes('/usage')) {
+        return jsonResponse({
+          totalUsage: { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 0 },
+          runs: [{ id: 'run-00000000-0000-0000-0000-000000000001', usage: {
+            inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 0,
+          } }],
+        });
+      }
       return jsonResponse({ agent: { id: 'bc-00000000-0000-0000-0000-000000000001' }, run: { id: 'run-00000000-0000-0000-0000-000000000001' } });
     },
   });

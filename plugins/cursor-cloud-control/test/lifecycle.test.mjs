@@ -87,7 +87,10 @@ test('usage and artifact metadata remain read-only GET operations with exact end
     origin: 'https://api.example.test',
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), method: init.method });
-      if (String(url).endsWith('/usage')) return jsonResponse({ totalUsage: { totalTokens: 3 }, runs: [] });
+      if (String(url).includes('/usage')) return jsonResponse({
+        totalUsage: { inputTokens: 1, outputTokens: 1, cacheWriteTokens: 0, cacheReadTokens: 1, totalTokens: 3 },
+        runs: [{ id: runId, usage: { inputTokens: 1, outputTokens: 1, cacheWriteTokens: 0, cacheReadTokens: 1, totalTokens: 3 } }],
+      });
       if (String(url).includes('/artifacts/download')) return jsonResponse({ url: 'https://signed.example.test/artifact' });
       return jsonResponse({ items: [{ path: 'artifacts/output.txt', sizeBytes: 3 }] });
     },

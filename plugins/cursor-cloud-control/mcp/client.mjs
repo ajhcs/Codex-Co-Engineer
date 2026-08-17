@@ -1,6 +1,12 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
+import {
+  normalizeAgentUsage,
+  parseRateLimitHeaders,
+  providerErrorCode,
+  retryAfterDelayMs,
+} from './capacity.mjs';
 import { redactText } from './redaction.mjs';
 import {
   DEFAULT_MODEL_CATALOG_MAX_ITEMS,
@@ -23,6 +29,7 @@ export function defaultApiKeyFile(env = process.env) {
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const responseDeadlines = new WeakMap();
+const responseMetadata = new WeakMap();
 
 function requestTimeoutError() {
   return new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
@@ -35,7 +42,14 @@ function remainingDeadline(deadline) {
 }
 
 export class CursorApiError extends Error {
-  constructor(code, message, { status, details, retryable = false, ambiguous = false } = {}) {
+  constructor(code, message, {
+    status,
+    details,
+    retryable = false,
+    ambiguous = false,
+    providerCode: providerCodeValue,
+    rateWindow,
+  } = {}) {
     super(message);
     this.name = 'CursorApiError';
     this.code = code;
@@ -43,7 +57,13 @@ export class CursorApiError extends Error {
     this.details = details;
     this.retryable = retryable;
     this.ambiguous = ambiguous;
+    this.providerCode = providerCodeValue;
+    this.rateWindow = rateWindow;
   }
+}
+
+export function getResponseMetadata(value) {
+  return value && typeof value === 'object' ? responseMetadata.get(value) ?? null : null;
 }
 
 function validOrigin(value) {
@@ -360,10 +380,30 @@ export class CursorApiClient {
         const [code, retryable] = classifyHttp(response.status);
         const safeDetail = detail ? redactText(detail, this.secrets) : '';
         const message = safeDetail ? `Cursor API returned HTTP ${response.status}: ${safeDetail}` : `Cursor API returned HTTP ${response.status}.`;
-        const error = new CursorApiError(code, message, { status: response.status, retryable });
+        const providerCodeValue = providerErrorCode(detail);
+        const rateWindow = parseRateLimitHeaders(response.headers);
+        const effectiveRetryable = providerCodeValue === 'usage_limit_exceeded' ? false : retryable;
+        const hasRetryAfter = Boolean(rateWindow && Object.hasOwn(rateWindow, 'retryAfter'));
+        const retryAfterMs = hasRetryAfter ? retryAfterDelayMs(rateWindow.retryAfter) : undefined;
+        const metadata = {
+          ...(providerCodeValue ? { providerCode: providerCodeValue } : {}),
+          ...(rateWindow ? { rateWindow } : {}),
+        };
+        const error = new CursorApiError(code, message, {
+          status: response.status,
+          retryable: effectiveRetryable,
+          ...(providerCodeValue ? { providerCode: providerCodeValue } : {}),
+          ...(rateWindow ? { rateWindow } : {}),
+          ...(Object.keys(metadata).length > 0 ? { details: metadata } : {}),
+        });
         lastError = error;
-        if (retryable && attempt + 1 < attempts && Date.now() < deadline) {
-          await sleep(Math.min(100 * (2 ** attempt), remainingDeadline(deadline)));
+        if (effectiveRetryable && attempt + 1 < attempts && Date.now() < deadline) {
+          const remaining = remainingDeadline(deadline);
+          // A provider Retry-After is authoritative. If it cannot be parsed,
+          // or would outlive this request's deadline, return the retryable
+          // error rather than issuing an immediate request against the limit.
+          if (hasRetryAfter && (retryAfterMs === undefined || retryAfterMs >= remaining)) throw error;
+          await sleep(hasRetryAfter ? retryAfterMs : Math.min(100 * (2 ** attempt), remaining));
           continue;
         }
         throw error;
@@ -383,10 +423,20 @@ export class CursorApiClient {
     }
     const deadline = responseDeadlines.get(response) ?? (Date.now() + (options.timeoutMs ?? this.requestTimeoutMs));
     const text = await boundedBody(response, this.maxResponseBytes, remainingDeadline(deadline));
-    if (!text.trim()) return {};
-    try { return JSON.parse(text); } catch {
-      throw new CursorApiError('invalid_json', 'Cursor API returned invalid JSON.');
+    let parsed;
+    if (!text.trim()) parsed = {};
+    else {
+      try { parsed = JSON.parse(text); } catch {
+        throw new CursorApiError('invalid_json', 'Cursor API returned invalid JSON.');
+      }
     }
+    if (parsed && typeof parsed === 'object') {
+      responseMetadata.set(parsed, {
+        observedAt: new Date().toISOString(),
+        rateWindow: parseRateLimitHeaders(response.headers),
+      });
+    }
+    return parsed;
   }
 
   async stream(pathname, { lastEventId, timeoutMs = this.requestTimeoutMs } = {}) {
@@ -486,7 +536,16 @@ export class CursorApiClient {
     const path = `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream`;
     return this.stream(path, options);
   }
-  usage(agentId, runId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/usage`, { query: runId ? { runId } : undefined }); }
+  async usage(agentId, runId) {
+    const payload = await this.json(`/v1/agents/${encodeURIComponent(agentId)}/usage`, { query: runId ? { runId } : undefined });
+    const metadata = getResponseMetadata(payload);
+    return normalizeAgentUsage(payload, {
+      scope: runId ? 'run' : 'agent',
+      requestedRunId: runId,
+      observedAt: metadata?.observedAt,
+      rateWindow: metadata?.rateWindow,
+    });
+  }
   artifacts(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/artifacts`); }
   artifactDownload(agentId, artifactPath) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/artifacts/download`, { query: { path: artifactPath } }); }
   archive(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/archive`, { method: 'POST', retryRead: false }); }
