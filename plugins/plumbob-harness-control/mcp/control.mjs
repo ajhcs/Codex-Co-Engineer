@@ -837,7 +837,7 @@ async function statusTool(args) {
   const web = jobs.find((job) => job.kind === 'dsh_web' && ACTIVE_STATES.has(job.status));
   const listening = await portOpen();
   const detectedVersions = versions();
-  const grokStatus = grokVersionProbe(GROK, WORKSPACE, grokEnvironment());
+  const grokStatus = grokVersionProbe(GROK, PLUGIN_ROOT, grokEnvironment());
   const deepseekConfigured = detectedVersions.compatible.deepseek_harness;
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
@@ -913,7 +913,7 @@ async function statusTool(args) {
 }
 
 function grokAuthDoctor() {
-  const executable = grokVersionProbe(GROK, WORKSPACE, grokEnvironment());
+  const executable = grokVersionProbe(GROK, PLUGIN_ROOT, grokEnvironment());
   if (executable.executable_state === 'missing') {
     return {
       ok: false,
@@ -926,7 +926,7 @@ function grokAuthDoctor() {
   // probe. It may perform a read-only provider request, but it never starts a
   // coding session or invokes browser/device login.
   const result = spawnSync(GROK, ['models'], {
-    cwd: WORKSPACE,
+    cwd: PLUGIN_ROOT,
     env: grokEnvironment(),
     encoding: 'utf8',
     timeout: 15000,

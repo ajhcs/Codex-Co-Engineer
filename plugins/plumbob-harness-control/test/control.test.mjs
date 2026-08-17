@@ -101,6 +101,39 @@ test('non-Grok runs reject Grok-only fields instead of silently ignoring them', 
   );
 });
 
+test('status probes Grok independently of a missing default workspace', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-grok-status-test-'));
+  const state = path.join(directory, 'state');
+  const missingWorkspace = path.join(directory, 'missing-default-workspace');
+  const fakeGrok = path.join(directory, 'grok');
+  await writeFile(fakeGrok, '#!/usr/bin/env node\nconsole.log("grok 1.0.4 (test)");\n', { mode: 0o755 });
+
+  const previous = {
+    command: process.env.CODEX_CO_ENGINEER_GROK_COMMAND,
+    workspace: process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE,
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+  };
+  process.env.CODEX_CO_ENGINEER_GROK_COMMAND = fakeGrok;
+  process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE = missingWorkspace;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = state;
+  context.after(async () => {
+    if (previous.command === undefined) delete process.env.CODEX_CO_ENGINEER_GROK_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_GROK_COMMAND = previous.command;
+    if (previous.workspace === undefined) delete process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE;
+    else process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE = previous.workspace;
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const { dispatchControl } = await import(`../mcp/control.mjs?grok-status=${Date.now()}`);
+  const status = await dispatchControl('status', { recent_limit: 0 });
+  assert.equal(status.targeting.default_workspace, missingWorkspace);
+  assert.equal(status.grok_build.availability, 'installed');
+  assert.equal(status.grok_build.executable_state, 'installed');
+  assert.match(status.grok_build.version, /grok 1\.0\.4/);
+});
+
 test('explicit targets are not limited to the default workspace and allow implement contracts', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-target-policy-test-'));
   context.after(async () => rm(directory, { recursive: true, force: true }));

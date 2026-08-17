@@ -44,7 +44,7 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 
 ### Changed
 
-- Co-Engineer is versioned `2.0.0` because the supported worker-kind contract
+- Co-Engineer is versioned `2.0.1` because the supported worker-kind contract
   is now exactly `deepseek_agent` and `grok_build`.
 - DeepSeek Harness is invoked directly in the attested target checkout and is
   validated independently through its own CLI version.
