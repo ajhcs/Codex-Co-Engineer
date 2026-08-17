@@ -35,6 +35,44 @@ export const GROK_PERMISSION_MODES = Object.freeze([
   'bypassPermissions',
   'plan',
 ]);
+export const GROK_DELEGATION_MODES = Object.freeze(['enabled', 'disabled']);
+
+/**
+ * The small capability surface callers can use without copying the CLI's
+ * complete configuration. Inline custom definition JSON is not included
+ * because the current connector cannot receipt-redact arbitrary definition
+ * prompts. ACP output formats are not the issue; ACP transport itself is not
+ * exposed until the same target and lifecycle guarantees can be preserved.
+ */
+export const GROK_CAPABILITY_PROFILE = Object.freeze({
+  transport: Object.freeze({ selected: 'direct-headless', acp: 'not_exposed' }),
+  output_formats: GROK_OUTPUT_FORMATS,
+  reasoning_efforts: GROK_REASONING_EFFORTS,
+  sessions: Object.freeze({ resume: true, continue: true, fork: true }),
+  main_session_profile: Object.freeze({
+    selection: 'named',
+    effective: 'unknown',
+    resolution: 'grok_cli_project_user_or_bundled',
+    custom_or_shadowed: 'possible',
+    definition_paths: 'not_exposed',
+  }),
+  delegation: Object.freeze({
+    supported: true,
+    modes: GROK_DELEGATION_MODES,
+    enabled_by_default: true,
+    custom_definitions: 'not_exposed',
+    restriction_inheritance: 'connector_process_boundary',
+    effective: 'unknown',
+  }),
+});
+
+function cloneCapability(value) {
+  if (Array.isArray(value)) return value.map(cloneCapability);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneCapability(entry)]));
+  }
+  return value;
+}
 
 const MAX_TEXT = 8000;
 const MAX_TOKEN = 128;
@@ -42,6 +80,7 @@ const MAX_RULE = 240;
 const MAX_RULES = 32;
 const MAX_JSON_SCHEMA_BYTES = 16_384;
 const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,127}$/;
+const SAFE_AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_RULE = /^[^\u0000-\u001f\u007f]{1,240}$/;
 const CONTROL_FREE_TEXT = /^[^\u0000-\u001f\u007f]{1,8000}$/;
 const WRITE_WORDS = /(?:^|[\s:()[\],])(?:bash|shell|exec|command|edit|write|delete|remove|move|copy|mkdir|apply_patch|patch)(?:$|[\s:()[\],])/i;
@@ -79,6 +118,15 @@ function boundedText(value, field, maximum = MAX_TEXT) {
 function optionalText(value, field, maximum = MAX_TOKEN) {
   if (value === undefined || value === null) return null;
   return boundedText(value, field, maximum);
+}
+
+function optionalAgentName(value, field = 'agent') {
+  if (value === undefined || value === null) return null;
+  const name = boundedText(value, field, MAX_TOKEN);
+  if (!SAFE_AGENT_NAME.test(name)) {
+    invalid(field, 'must be an agent name, not a path or a name with unsupported characters.');
+  }
+  return name;
 }
 
 function list(value, field) {
@@ -168,6 +216,8 @@ export function normalizeGrokConfiguration(input = {}, role = 'review') {
     'disable_web_search',
     'experimental_memory',
     'fork_session',
+    'agent',
+    'delegation',
   ]);
   for (const key of Object.keys(input)) {
     if (!allowed.has(key)) invalid(`grok.${key}`, 'is not supported.');
@@ -254,6 +304,31 @@ export function normalizeGrokConfiguration(input = {}, role = 'review') {
     invalid('fork_session', 'requires resume or continue_session.');
   }
 
+  const agent = optionalAgentName(input.agent);
+  const delegation = input.delegation;
+  if (delegation !== undefined && delegation !== null
+    && (!delegation || typeof delegation !== 'object' || Array.isArray(delegation))) {
+    invalid('delegation', 'must be an object when provided.');
+  }
+  if (delegation) {
+    for (const key of Object.keys(delegation)) {
+      if (key !== 'enabled') {
+        invalid(`delegation.${key}`, 'is not supported.');
+      }
+    }
+    if (!Object.hasOwn(delegation, 'enabled')) {
+      invalid('delegation.enabled', 'is required when delegation is provided.');
+    }
+    if (delegation.enabled !== undefined && typeof delegation.enabled !== 'boolean') {
+      invalid('delegation.enabled', 'must be a boolean.');
+    }
+  }
+  const delegationEnabled = delegation?.enabled ?? !input.no_subagents;
+  if (Object.hasOwn(input, 'no_subagents') && delegation?.enabled !== undefined
+    && delegation.enabled !== !input.no_subagents) {
+    invalid('delegation.enabled', 'conflicts with no_subagents.');
+  }
+
   const effectiveRole = role ?? 'review';
   if (!['review', 'verify', 'implement'].includes(effectiveRole)) invalid('role', 'is unsupported.');
   const requestedSandbox = sandboxProfile;
@@ -312,13 +387,43 @@ export function normalizeGrokConfiguration(input = {}, role = 'review') {
     always_approve: alwaysApprove,
     no_auto_update: noAutoUpdate,
     no_plan: noPlan,
-    no_subagents: input.no_subagents === true,
+    no_subagents: !delegationEnabled,
     no_memory: input.no_memory === true,
     disable_web_search: input.disable_web_search === true,
     experimental_memory: input.experimental_memory === true,
     fork_session: forkSession,
+    ...(agent === null ? {} : { agent }),
+    ...(delegation === undefined || delegation === null
+      ? {}
+      : { delegation: Object.freeze({ enabled: delegationEnabled }) }),
     role: effectiveRole,
   });
+}
+
+/** Return the compact, non-sensitive capability/profile view for a request. */
+export function grokCapabilityProfile(configuration = {}, roleOverride = null) {
+  const role = roleOverride ?? configuration?.role ?? 'review';
+  const hasDelegation = Boolean(configuration && typeof configuration === 'object'
+    && Object.hasOwn(configuration, 'delegation')
+    && configuration.delegation !== undefined
+    && configuration.delegation !== null);
+  const hasLegacyPolicy = Boolean(configuration && typeof configuration === 'object'
+    && Object.hasOwn(configuration, 'no_subagents'));
+  const normalizedInput = configuration && typeof configuration === 'object'
+    ? Object.fromEntries(Object.entries(configuration)
+      .filter(([key, value]) => key !== 'role' && !(key === 'json_schema' && value === null)))
+    : configuration;
+  const normalized = normalizeGrokConfiguration(normalizedInput, role);
+  const profile = cloneCapability(GROK_CAPABILITY_PROFILE);
+  profile.main_session_profile.requested = normalized.agent ?? null;
+  profile.delegation = {
+    ...profile.delegation,
+    requested: hasDelegation || hasLegacyPolicy
+      ? (normalized.no_subagents ? 'disabled' : 'enabled')
+      : 'cli-default',
+    effective: 'unknown',
+  };
+  return profile;
 }
 
 function addFlag(args, flag, value) {
@@ -341,6 +446,7 @@ export function buildGrokArgs({ prompt, cwd, configuration }) {
   const config = normalizeGrokConfiguration(normalizedInput, requestedRole ?? 'review');
   const args = [];
   if (config.no_auto_update) args.push('--no-auto-update');
+  addFlag(args, '--agent', config.agent);
   args.push('-p', prompt, '--cwd', cwd, '--output-format', config.output_format);
   if (config.json_schema !== null) args.push('--json-schema', JSON.stringify(config.json_schema));
   if (config.verbatim) args.push('--verbatim');

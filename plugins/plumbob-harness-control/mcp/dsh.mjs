@@ -18,6 +18,130 @@ import { fileURLToPath } from 'node:url';
 export const TESTED_DSH_VERSION = '0.1.0-rc.6';
 export const DSH_PROFILE = 'headless';
 
+/**
+ * The managed headless overlay currently ships one explicitly declared Muse
+ * route.  Keep these facts beside the launcher rather than duplicating them
+ * in the MCP server: this is the adapter's effective capability contract.
+ *
+ * The headless bundle also mounts DSH's delegation tools.  They are useful
+ * inside one provider process, but the outer runner is one-shot, so a child
+ * cannot be followed up after the parent process exits.  That distinction is
+ * intentionally represented in the profile below.
+ */
+export const DSH_MODEL = 'muse-spark-1.2-contributor';
+export const DSH_MODEL_PROVIDER = 'meta';
+export const DSH_MODEL_NAME = 'Muse Spark 1.2 Contributor';
+export const DSH_CONTEXT_WINDOW_TOKENS = 1_048_576;
+export const DSH_MAX_OUTPUT_TOKENS = 131_072;
+export const DSH_DEFAULT_TOOL_MODE = 'native';
+export const DSH_TOOL_MODES = Object.freeze(['native', 'code', 'both']);
+export const DSH_MAX_RALPH_ROUNDS = 64;
+
+const DSH_CAPABILITIES = Object.freeze({
+  model: Object.freeze({
+    provider: DSH_MODEL_PROVIDER,
+    id: DSH_MODEL,
+    name: DSH_MODEL_NAME,
+    context_window_tokens: DSH_CONTEXT_WINDOW_TOKENS,
+    max_output_tokens: DSH_MAX_OUTPUT_TOKENS,
+    model_input_modalities: Object.freeze(['text', 'image']),
+    connector_input_modalities: Object.freeze(['text']),
+  }),
+  tools: Object.freeze({
+    default_mode: DSH_DEFAULT_TOOL_MODE,
+    modes: DSH_TOOL_MODES,
+    code_runtime: 'typescript',
+  }),
+  delegation: Object.freeze({
+    subagent: Object.freeze({
+      available: true,
+      tool_name: 'subagent',
+      background_mode: 'continuable',
+      foreground_override: true,
+      external_followup: false,
+      survives_headless_exit: false,
+    }),
+    fork: Object.freeze({
+      available: true,
+      tool_name: 'subagent_fork',
+      background_mode: 'one-shot',
+      foreground_default: true,
+      inherits_parent_context: true,
+      survives_headless_exit: false,
+    }),
+    workflow: Object.freeze({
+      available: true,
+      tool_name: 'workflow',
+      foreground_only: true,
+    }),
+    ralph: Object.freeze({
+      available: true,
+      tool_name: 'ralph',
+      foreground_only: true,
+      max_rounds: DSH_MAX_RALPH_ROUNDS,
+    }),
+  }),
+  execution: Object.freeze({
+    runner: 'one-shot',
+    interactive_followup: false,
+    external_child_collection: false,
+    image_input_exposed: false,
+  }),
+});
+
+function cloneCapabilities(value) {
+  if (Array.isArray(value)) return value.map(cloneCapabilities);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneCapabilities(entry)]));
+  }
+  return value;
+}
+
+/**
+ * Return the adapter-owned, provider-free DSH capability profile.  A fresh
+ * value prevents callers from mutating the constants that readiness and
+ * effective-configuration code rely on.
+ */
+export function dshCapabilityProfile(options = {}) {
+  const normalized = normalizeDshOptions(options);
+  const profile = cloneCapabilities(DSH_CAPABILITIES);
+  profile.tools.effective_mode = normalized.tool_mode;
+  profile.model.effective_max_output_tokens = normalized.max_tokens;
+  return profile;
+}
+
+/**
+ * Validate the small set of DSH options the managed overlay can actually
+ * enforce.  Arbitrary model ids, tool names, provider routes, and token
+ * values are deliberately not accepted: the overlay has one trusted Muse
+ * route and the upstream bundle owns the tool catalog.
+ */
+export function normalizeDshOptions(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('DSH options must be an object.');
+  }
+  const allowed = new Set(['model', 'tool_mode', 'max_tokens']);
+  const unknown = Object.keys(options).find((field) => !allowed.has(field));
+  if (unknown) throw new TypeError(`dsh_options.${unknown} is not supported.`);
+  const model = options.model ?? DSH_MODEL;
+  if (model !== DSH_MODEL) {
+    throw new TypeError(`The managed DSH profile supports only ${DSH_MODEL}.`);
+  }
+  const toolMode = options.tool_mode ?? DSH_DEFAULT_TOOL_MODE;
+  if (!DSH_TOOL_MODES.includes(toolMode)) {
+    throw new TypeError(`DSH tool mode must be one of ${DSH_TOOL_MODES.join(', ')}.`);
+  }
+  const maxTokens = options.max_tokens ?? DSH_MAX_OUTPUT_TOKENS;
+  if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > DSH_MAX_OUTPUT_TOKENS) {
+    throw new TypeError(`DSH max_tokens must be an integer from 1 to ${DSH_MAX_OUTPUT_TOKENS}.`);
+  }
+  return {
+    model,
+    tool_mode: toolMode,
+    max_tokens: maxTokens,
+  };
+}
+
 const ADAPTER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_DSH_PATCH_FILE = path.join(ADAPTER_ROOT, 'assets', 'dsh-headless.patch.yml');
 
@@ -71,7 +195,7 @@ export function resolveDshHome({ env = process.env, stateDirectory } = {}) {
   };
 }
 
-export function dshChildEnvironment(home) {
+export function dshBaseEnvironment(home) {
   if (typeof home !== 'string' || !path.isAbsolute(home)) {
     throw new TypeError('A resolved absolute DSH home is required.');
   }
@@ -81,10 +205,20 @@ export function dshChildEnvironment(home) {
   };
 }
 
+export function dshChildEnvironment(home, options = {}) {
+  const normalized = normalizeDshOptions(options);
+  return {
+    ...dshBaseEnvironment(home),
+    DSH_TOOLS_MODE: normalized.tool_mode,
+    CODEX_CO_ENGINEER_DSH_MODEL: normalized.model,
+    CODEX_CO_ENGINEER_DSH_MAX_TOKENS: String(normalized.max_tokens),
+  };
+}
+
 function probeEnvironment(env, home) {
   return {
     ...safeEnvironment(env),
-    ...dshChildEnvironment(home),
+    ...dshBaseEnvironment(home),
   };
 }
 

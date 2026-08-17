@@ -15,10 +15,15 @@ const stateDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-i
 const inspector = process.env.MCP_INSPECTOR_COMMAND ?? 'mcp-inspector';
 const inspectorEnvironment = {
   ...process.env,
+  HOME: stateDirectory,
   CODEX_CO_ENGINEER_STATE_DIR: stateDirectory,
   CODEX_CO_ENGINEER_RUNTIME_WORKSPACE: targetDirectory,
   PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS: '60',
 };
+// Exercise the verified managed overlay, independent of a caller's custom
+// DSH home. The managed home remains beneath the temporary Inspector state.
+delete inspectorEnvironment.CODEX_CO_ENGINEER_DSH_HOME;
+delete inspectorEnvironment.DSH_HOME;
 
 function inspect(method, toolName, toolArguments, { allowToolError = false } = {}) {
   const argumentsList = [
@@ -33,10 +38,11 @@ function inspect(method, toolName, toolArguments, { allowToolError = false } = {
     encoding: 'utf8',
     timeout: 30000,
   });
+  const diagnostic = [result.stderr, result.stdout].filter(Boolean).join('\n');
   if (allowToolError) {
-    assert.ok([0, 5].includes(result.status), result.stderr || result.stdout);
+    assert.ok([0, 5].includes(result.status), diagnostic);
   } else {
-    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.status, 0, diagnostic);
   }
   return JSON.parse(result.stdout);
 }
@@ -106,6 +112,15 @@ try {
   const forbiddenFields = kindPolicy.else.not.anyOf.flatMap((schema) => schema.required);
   assert.ok(forbiddenFields.includes('permission_mode'));
   assert.ok(forbiddenFields.includes('model'));
+  assert.ok(forbiddenFields.includes('agent'));
+  assert.ok(forbiddenFields.includes('delegation'));
+  assert.match(runTool.inputSchema.properties.agent.description, /main-session/);
+  assert.deepEqual(runTool.inputSchema.properties.delegation.required, ['enabled']);
+  const dshPolicy = runTool.inputSchema.allOf.find((policy) => policy.if?.properties?.kind?.const === 'deepseek_agent');
+  assert.ok(dshPolicy, 'run schema must gate dsh_options by kind=deepseek_agent');
+  assert.deepEqual(dshPolicy.else.not.required, ['dsh_options']);
+  assert.equal(runTool.inputSchema.properties.dsh_options.additionalProperties, false);
+  assert.match(runTool.inputSchema.properties.dsh_options.description, /text-only/);
 
   const envelope = inspect('tools/call', 'preflight', args);
   const structured = structuredResult(envelope);
@@ -134,8 +149,44 @@ try {
     kind: 'grok_build',
     target_context: grokImplementTarget,
     permission_mode: 'auto',
+    agent: 'project-review',
+    delegation: { enabled: false },
   }));
   assert.notEqual(grokImplementAuto.code, 'invalid_argument');
+  assert.equal(grokImplementAuto.configuration.grok_configuration.agent, 'project-review');
+  assert.deepEqual(grokImplementAuto.configuration.grok_configuration.delegation, { enabled: false });
+  assert.equal(grokImplementAuto.capabilities.grok_build.main_session_profile.requested, 'project-review');
+  assert.equal(grokImplementAuto.capabilities.grok_build.main_session_profile.effective, 'unknown');
+  assert.equal(grokImplementAuto.capabilities.grok_build.delegation.requested, 'disabled');
+  assert.equal(grokImplementAuto.capabilities.grok_build.delegation.effective, 'unknown');
+
+  const deepseekProfile = structuredResult(inspect('tools/call', 'preflight', {
+    ...args,
+    kind: 'deepseek_agent',
+    dsh_options: {
+      model: 'muse-spark-1.2-contributor',
+      tool_mode: 'both',
+      max_tokens: 4096,
+    },
+  }));
+  assert.deepEqual(deepseekProfile.configuration.dsh_configuration, {
+    model: 'muse-spark-1.2-contributor',
+    tool_mode: 'both',
+    max_tokens: 4096,
+  });
+  assert.equal(deepseekProfile.capabilities.deepseek_agent.tools.effective_mode, 'both');
+  assert.equal(deepseekProfile.capabilities.deepseek_agent.delegation.subagent.background_mode, 'continuable');
+  assert.equal(deepseekProfile.capabilities.deepseek_agent.delegation.fork.background_mode, 'one-shot');
+  assert.deepEqual(deepseekProfile.capabilities.deepseek_agent.model.connector_input_modalities, ['text']);
+  assert.equal(deepseekProfile.capabilities.deepseek_agent.execution.image_input_exposed, false);
+
+  const invalidDshOption = callResult(inspect('tools/call', 'preflight', {
+    ...args,
+    kind: 'deepseek_agent',
+    dsh_options: { workflow: true },
+  }, { allowToolError: true }));
+  assert.equal(invalidDshOption.isError, true);
+  assert.equal(JSON.parse(invalidDshOption.content[0].text).code, 'invalid_dsh_configuration');
 
   const deepseekPermission = callResult(inspect('tools/call', 'preflight', {
     ...args,

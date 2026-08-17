@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   buildGrokArgs,
+  grokCapabilityProfile,
   grokBuildFailure,
   grokVersionProbe,
   normalizeGrokConfiguration,
@@ -63,6 +64,85 @@ test('Grok session fork, approval, sandbox, and feature flags map to the local 1
     '--output-format', 'streaming-messages-json', '--resume', '--fork-session',
     '--sandbox', 'strict', '--permission-mode', 'auto', '--always-approve',
     '--experimental-memory',
+  ]);
+});
+
+test('Grok profile separates main-session agent selection from requested delegation policy', () => {
+  const configuration = normalizeGrokConfiguration({
+    agent: 'explore',
+    delegation: { enabled: true },
+  }, 'implement');
+  assert.equal(configuration.no_subagents, false);
+  assert.equal(configuration.agent, 'explore');
+  assert.deepEqual(configuration.delegation, { enabled: true });
+  assert.deepEqual(buildGrokArgs({
+    prompt: 'inspect this bounded target',
+    cwd: '/tmp/target',
+    configuration,
+  }).slice(0, 5), [
+    '--no-auto-update', '--agent', 'explore', '-p', 'inspect this bounded target',
+  ]);
+
+  const disabled = normalizeGrokConfiguration({ delegation: { enabled: false } }, 'implement');
+  assert.equal(disabled.no_subagents, true);
+  assert.equal(disabled.delegation.enabled, false);
+  const profile = grokCapabilityProfile({
+    agent: 'explore',
+    delegation: { enabled: true },
+  }, 'implement');
+  assert.deepEqual(profile.transport, { selected: 'direct-headless', acp: 'not_exposed' });
+  assert.deepEqual(profile.main_session_profile, {
+    selection: 'named',
+    effective: 'unknown',
+    resolution: 'grok_cli_project_user_or_bundled',
+    custom_or_shadowed: 'possible',
+    definition_paths: 'not_exposed',
+    requested: 'explore',
+  });
+  assert.deepEqual(profile.delegation, {
+    supported: true,
+    modes: ['enabled', 'disabled'],
+    enabled_by_default: true,
+    custom_definitions: 'not_exposed',
+    restriction_inheritance: 'connector_process_boundary',
+    requested: 'enabled',
+    effective: 'unknown',
+  });
+  assert.equal(grokCapabilityProfile({ delegation: { enabled: false } }, 'implement').delegation.requested, 'disabled');
+  assert.equal(grokCapabilityProfile({ delegation: { enabled: false } }, 'implement').delegation.effective, 'unknown');
+  assert.equal(grokCapabilityProfile().delegation.requested, 'cli-default');
+  const detached = grokCapabilityProfile();
+  detached.delegation.modes.push('invalid');
+  assert.deepEqual(grokCapabilityProfile().delegation.modes, ['enabled', 'disabled']);
+
+  assert.throws(
+    () => normalizeGrokConfiguration({ agent: '/tmp/agent.md' }, 'implement'),
+    /agent must be an agent name, not a path/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ delegation: { agent: 'explore' } }, 'implement'),
+    /delegation\.agent is not supported/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ delegation: {} }, 'implement'),
+    /delegation\.enabled is required/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ no_subagents: true, delegation: { enabled: true } }, 'implement'),
+    /delegation\.enabled conflicts with no_subagents/,
+  );
+
+  const legacy = normalizeGrokConfiguration({}, 'implement');
+  assert.equal(Object.hasOwn(legacy, 'agent'), false);
+  assert.equal(Object.hasOwn(legacy, 'delegation'), false);
+  assert.deepEqual(Object.keys(legacy).slice(-7), [
+    'no_plan',
+    'no_subagents',
+    'no_memory',
+    'disable_web_search',
+    'experimental_memory',
+    'fork_session',
+    'role',
   ]);
 });
 

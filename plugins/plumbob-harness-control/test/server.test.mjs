@@ -152,8 +152,21 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.ok(statusBody.headless_agent);
   assert.equal(statusBody.credentials.model_api_key_available, false);
   assert.equal(statusBody.workspace.dsh_command, 'dsh');
+  assert.ok(['verified-managed-overlay', 'unknown'].includes(statusBody.headless_agent.capability_state));
+  if (statusBody.headless_agent.capability_state === 'verified-managed-overlay') {
+    assert.deepEqual(statusBody.headless_agent.capabilities.model.connector_input_modalities, ['text']);
+    assert.equal(statusBody.headless_agent.capabilities.execution.image_input_exposed, false);
+  } else {
+    assert.equal(Object.hasOwn(statusBody.headless_agent, 'capabilities'), false);
+  }
   assert.equal(statusBody.grok_build.kind, 'grok_build');
   assert.equal(statusBody.grok_build.auth_state, 'unknown');
+  assert.deepEqual(statusBody.grok_build.capabilities.transport, {
+    selected: 'direct-headless',
+    acp: 'not_exposed',
+  });
+  assert.equal(statusBody.grok_build.capabilities.delegation.requested, 'cli-default');
+  assert.equal(statusBody.grok_build.capabilities.delegation.effective, 'unknown');
 
   const preflight = responses.get(4).result.structuredContent;
   assert.equal(preflight.target_fingerprint, fingerprint);
@@ -191,7 +204,18 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   const forbiddenFields = kindPolicy.else.not.anyOf.flatMap((schema) => schema.required);
   assert.ok(forbiddenFields.includes('permission_mode'));
   assert.ok(forbiddenFields.includes('model'));
+  assert.ok(forbiddenFields.includes('agent'));
+  assert.ok(forbiddenFields.includes('delegation'));
   assert.ok(forbiddenFields.includes('no_subagents'));
+  const dshPolicy = runTool.inputSchema.allOf.find((policy) => policy.if?.properties?.kind?.const === 'deepseek_agent');
+  assert.ok(dshPolicy);
+  assert.deepEqual(dshPolicy.else.not.required, ['dsh_options']);
+  assert.equal(runTool.inputSchema.properties.dsh_options.additionalProperties, false);
+  assert.equal(runTool.inputSchema.properties.dsh_options.properties.model.const, 'muse-spark-1.2-contributor');
+  assert.deepEqual(runTool.inputSchema.properties.dsh_options.properties.tool_mode.enum, ['native', 'code', 'both']);
+  assert.equal(runTool.inputSchema.properties.dsh_options.properties.max_tokens.maximum, 131072);
+  assert.match(runTool.inputSchema.properties.dsh_options.description, /text-only/);
+  assert.match(runTool.inputSchema.properties.prompt.description, /Text-only/);
 
   // The repository has no JSON Schema validator dependency, so keep these
   // fixtures at the advertised policy boundary and make the intended
@@ -217,6 +241,12 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   );
   assert.equal(runTool.inputSchema.properties.verbatim.type, 'boolean');
   assert.equal(runTool.inputSchema.properties.include_partial_messages.type, 'boolean');
+  assert.equal(runTool.inputSchema.properties.agent.pattern, '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$');
+  assert.deepEqual(runTool.inputSchema.properties.delegation.required, ['enabled']);
+  assert.equal(runTool.inputSchema.properties.delegation.additionalProperties, false);
+  assert.match(runTool.inputSchema.properties.agent.description, /main-session/);
+  assert.match(runTool.inputSchema.properties.agent.description, /shadow/);
+  assert.match(runTool.inputSchema.properties.delegation.properties.enabled.description, /Actual delegation usage.*unknown/);
   assert.deepEqual(
     runTool.inputSchema.properties.json_schema.oneOf.map((schema) => schema.type),
     ['boolean', 'object'],

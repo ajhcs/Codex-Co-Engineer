@@ -231,6 +231,25 @@ const GROK_CONFIGURATION_PROPERTIES = {
     pattern: '^[^\\u0000-\\u001f\\u007f-][^\\u0000-\\u001f\\u007f]{0,199}$',
     description: 'Optional Grok model ID; it is passed as -m/--model.',
   },
+  agent: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 128,
+    pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$',
+    description: 'Named Grok main-session agent profile passed as --agent. Resolution is owned by the CLI: project or user profiles may be custom or shadow bundled names, so the effective definition remains unknown.',
+  },
+  delegation: {
+    type: 'object',
+    properties: {
+      enabled: {
+        type: 'boolean',
+        description: 'Requested CLI subagent policy. false maps to --no-subagents; true omits that disabling flag. Actual delegation usage/effectiveness remains unknown unless runtime output proves it.',
+      },
+    },
+    required: ['enabled'],
+    additionalProperties: false,
+    description: 'Compact requested policy for Grok CLI subagents. This does not select the main-session agent profile or claim that a subagent was spawned.',
+  },
   output_format: {
     type: 'string',
     enum: ['plain', 'json', 'streaming-json', 'streaming-messages-json'],
@@ -340,11 +359,36 @@ const GROK_CONFIGURATION_PROPERTIES = {
     description: 'Suppress Grok background update checks; defaults true for managed jobs.',
   },
   no_plan: { type: 'boolean', default: false, description: 'Pass Grok --no-plan for implement only; review/verify retain the forced plan policy.' },
-  no_subagents: { type: 'boolean', default: false, description: 'Pass Grok --no-subagents.' },
+  no_subagents: { type: 'boolean', default: false, description: 'Legacy direct switch for Grok --no-subagents. Prefer delegation.enabled; conflicting values are rejected.' },
   no_memory: { type: 'boolean', default: false, description: 'Pass Grok --no-memory.' },
   disable_web_search: { type: 'boolean', default: false, description: 'Pass Grok --disable-web-search.' },
   experimental_memory: { type: 'boolean', default: false, description: 'Pass Grok --experimental-memory; mutually exclusive with no_memory.' },
   fork_session: { type: 'boolean', default: false, description: 'Pass Grok --fork-session when resuming or continuing a session.' },
+};
+
+const DSH_OPTIONS_SCHEMA = {
+  type: 'object',
+  properties: {
+    model: {
+      const: 'muse-spark-1.2-contributor',
+      description: 'The only model route enforced by the managed headless overlay.',
+    },
+    tool_mode: {
+      type: 'string',
+      enum: ['native', 'code', 'both'],
+      default: 'native',
+      description: 'DSH tool presentation mode. All three use the same mounted tool catalog.',
+    },
+    max_tokens: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 131072,
+      default: 131072,
+      description: 'Per-request Muse output-token ceiling enforced by the managed model route.',
+    },
+  },
+  additionalProperties: false,
+  description: 'Compact managed-headless DSH profile. Available only when Co-Engineer owns and verifies the managed overlay. MCP prompt input remains text-only even though the model route can accept images.',
 };
 
 // Keep the advertised schema aligned with normalizeGrokConfiguration. Grok
@@ -401,18 +445,30 @@ const GROK_KIND_FIELD_POLICY = {
   },
 };
 
+const DSH_KIND_FIELD_POLICY = {
+  if: {
+    properties: { kind: { const: 'deepseek_agent' } },
+    required: ['kind'],
+  },
+  then: {},
+  else: {
+    not: { required: ['dsh_options'] },
+    description: 'Generic preflight and Grok requests must omit dsh_options.',
+  },
+};
+
 const TOOLS = [
   {
     name: 'preflight',
     description: 'Resolve and attest exactly one target/configuration before dispatch. The caller must supply expected_target_fingerprint; a mismatch is fatal.',
     inputSchema: {
       type: 'object',
-      allOf: [GROK_KIND_FIELD_POLICY],
+      allOf: [GROK_KIND_FIELD_POLICY, DSH_KIND_FIELD_POLICY],
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
         kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'grok_build'], default: 'preflight' },
         request_id: { type: 'string', minLength: 8, maxLength: 128 },
-        prompt: { type: 'string', minLength: 1, maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$', description: 'Hashed for the configuration digest; never returned.' },
+        prompt: { type: 'string', minLength: 1, maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$', description: 'Text-only task input. Hashed for the configuration digest; never returned.' },
         timeout_seconds: { type: 'integer', minimum: 60, maximum: 21600, default: 3600 },
         target_context: TARGET_CONTEXT_SCHEMA,
         expected_target_fingerprint: {
@@ -420,6 +476,7 @@ const TOOLS = [
           pattern: '^(sha256:)?[0-9a-fA-F]{64}$',
           description: 'Caller assertion for the resolved target fingerprint.',
         },
+        dsh_options: DSH_OPTIONS_SCHEMA,
         ...GROK_CONFIGURATION_PROPERTIES,
       },
       required: ['schema_version', 'target_context', 'expected_target_fingerprint'],
@@ -473,15 +530,15 @@ const TOOLS = [
   },
   {
     name: 'run',
-    description: 'Queue a kind-specific Co-Engineer task and return effective_configuration plus a stable job ID. Grok Build uses the official direct headless CLI with typed model, session, reasoning, sandbox, permission, tool, and bounded policy controls.',
+    description: 'Queue a kind-specific Co-Engineer text task and return effective_configuration plus a stable job ID. DeepSeek uses one compact managed-headless profile; Grok Build uses the official direct headless CLI with typed controls.',
     inputSchema: {
       type: 'object',
-      allOf: [GROK_KIND_FIELD_POLICY],
+      allOf: [GROK_KIND_FIELD_POLICY, DSH_KIND_FIELD_POLICY],
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
         kind: { type: 'string', enum: ['deepseek_agent', 'grok_build'] },
         request_id: { type: 'string', minLength: 8, maxLength: 128 },
-        prompt: { type: 'string', maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$' },
+        prompt: { type: 'string', maxLength: 12000, pattern: '^[^\\u0000\\u007f]*$', description: 'Text-only task input; image attachments are not exposed by this connector.' },
         timeout_seconds: {
           type: 'integer', minimum: 60, maximum: 21600, default: 3600,
           description: 'All kinds; wall-clock range 60–21600 seconds.',
@@ -492,6 +549,7 @@ const TOOLS = [
           pattern: '^(sha256:)?[0-9a-fA-F]{64}$',
           description: 'Caller assertion for the resolved target fingerprint; mismatch is fatal.',
         },
+        dsh_options: DSH_OPTIONS_SCHEMA,
         ...GROK_CONFIGURATION_PROPERTIES,
       },
       required: ['schema_version', 'kind', 'request_id', 'target_context', 'expected_target_fingerprint'],

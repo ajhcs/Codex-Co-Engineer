@@ -36,15 +36,19 @@ import {
 } from './preflight.mjs';
 import {
   buildGrokArgs,
+  grokCapabilityProfile,
   grokVersionProbe,
   normalizeGrokConfiguration,
 } from './grok-build.mjs';
 import {
   DEFAULT_DSH_PATCH_FILE,
+  dshBaseEnvironment,
+  dshCapabilityProfile,
   dshChildEnvironment,
   dshReadinessMessage,
   dshVersionProbe,
   inspectDsh,
+  normalizeDshOptions,
   resolveDshHome,
 } from './dsh.mjs';
 
@@ -809,6 +813,44 @@ function requireDeepSeekReady() {
   return status;
 }
 
+function managedDshOverlayConfigured() {
+  return DSH_HOME_CONFIG.source === 'managed-state'
+    && DSH_PATCH_FILE === DEFAULT_DSH_PATCH_FILE;
+}
+
+function verifiedManagedDshOverlay(status) {
+  return status?.ok === true && managedDshOverlayConfigured();
+}
+
+function normalizeDshForTool(value) {
+  if (!managedDshOverlayConfigured()) {
+    if (value !== undefined) {
+      throw new ToolError(
+        'dsh_options_unavailable',
+        'dsh_options require the verified Co-Engineer managed headless overlay; custom DSH homes have an unknown capability/configuration surface.',
+      );
+    }
+    return null;
+  }
+  try {
+    return normalizeDshOptions(value ?? {});
+  } catch (error) {
+    throw new ToolError('invalid_dsh_configuration', error?.message ?? 'Invalid dsh_options.');
+  }
+}
+
+function dshCapabilities(readiness, configuration = {}) {
+  return verifiedManagedDshOverlay(readiness)
+    ? dshCapabilityProfile(configuration)
+    : null;
+}
+
+function dshWorkerEnvironment(configuration) {
+  return configuration
+    ? dshChildEnvironment(DSH_HOME, configuration)
+    : dshBaseEnvironment(DSH_HOME);
+}
+
 async function startJob({
   kind,
   summary,
@@ -946,6 +988,7 @@ async function statusTool(args) {
   const grokDiagnostic = args.diagnostics === true ? grokAuthDoctor() : null;
   const deepseekConfigured = detectedVersions.compatible.deepseek_harness;
   const deepseekReady = deepseekConfigured && deepseekStatus.ok;
+  const deepseekCapabilities = deepseekReady ? dshCapabilities(deepseekStatus) : null;
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
     ok: true,
@@ -962,6 +1005,11 @@ async function statusTool(args) {
       dsh_home: deepseekStatus.home,
       dsh_home_source: deepseekStatus.source,
       profile: deepseekStatus.profile,
+      capability_state: deepseekCapabilities ? 'verified-managed-overlay' : 'unknown',
+      capability_note: deepseekCapabilities
+        ? null
+        : 'Capabilities are reported only for the verified Co-Engineer managed headless overlay; custom or unavailable profiles remain unknown.',
+      ...(deepseekCapabilities ? { capabilities: deepseekCapabilities } : {}),
     },
     grok_build: {
       kind: 'grok_build',
@@ -974,6 +1022,7 @@ async function statusTool(args) {
       version: grokStatus.version,
       executable_state: grokStatus.executable_state,
       sandbox: { managed_by: 'grok_cli', enforcement: 'cli_managed' },
+      capabilities: grokCapabilityProfile(),
       auth_state: grokDiagnostic?.auth_state ?? 'unknown',
       ready: grokDiagnostic?.ok === true && grokDiagnostic.auth_state === 'ready',
       auth_note: grokDiagnostic?.note ?? (grokStatus.executable_state === 'missing'
@@ -1083,6 +1132,7 @@ async function runtimeTool(args) {
       throw new ToolError('port_occupied', `Port ${WEB_PORT} is occupied by an unmanaged process.`);
     }
     requireDeepSeekReady();
+    const runtimeDshConfiguration = normalizeDshForTool(undefined);
     const job = await startJob({
       kind: 'dsh_web',
       summary: 'DeepSeek Harness web UI',
@@ -1094,7 +1144,7 @@ async function runtimeTool(args) {
         '--port', String(WEB_PORT),
       ],
       env: {
-        ...dshChildEnvironment(DSH_HOME),
+        ...dshWorkerEnvironment(runtimeDshConfiguration),
         DSH_PERMISSION_MODE: 'workspace-write',
       },
       url: `http://${WEB_HOST}:${WEB_PORT}`,
@@ -1215,6 +1265,7 @@ function agentConfiguration({
   timeoutSeconds,
   cwd,
   target,
+  dshConfiguration = null,
   grokConfiguration = null,
 }) {
   const configuration = {
@@ -1247,6 +1298,9 @@ function agentConfiguration({
         ? 'read-only-process-contract'
         : 'workspace-write',
     target_context: target,
+    ...(kind === 'deepseek_agent' && dshConfiguration
+      ? { dsh_configuration: dshConfiguration }
+      : {}),
     ...(kind === 'grok_build' ? { grok_configuration: grokConfiguration } : {}),
   };
   configuration.configuration_digest = sha256Digest(configuration);
@@ -1255,6 +1309,8 @@ function agentConfiguration({
 
 const GROK_CONFIGURATION_FIELDS = new Set([
   'model',
+  'agent',
+  'delegation',
   'output_format',
   'json_schema',
   'verbatim',
@@ -1280,6 +1336,7 @@ const GROK_CONFIGURATION_FIELDS = new Set([
   'experimental_memory',
   'fork_session',
 ]);
+const DSH_CONFIGURATION_FIELDS = new Set(['dsh_options']);
 
 function grokInput(args) {
   return Object.fromEntries([...GROK_CONFIGURATION_FIELDS]
@@ -1307,6 +1364,7 @@ function preflightAllowedFields(args) {
     'timeout_seconds',
     'target_context',
     'expected_target_fingerprint',
+    ...DSH_CONFIGURATION_FIELDS,
     ...GROK_CONFIGURATION_FIELDS,
   ]);
   for (const field of Object.keys(args)) {
@@ -1333,19 +1391,23 @@ async function preflightTool(args) {
     throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent or grok_build.');
   }
   const commonFields = new Set(['schema_version', 'kind', 'request_id', 'prompt', 'timeout_seconds', 'target_context', 'expected_target_fingerprint']);
-  const kindFields = kind === 'grok_build' ? GROK_CONFIGURATION_FIELDS : new Set();
+  const kindFields = kind === 'grok_build'
+    ? GROK_CONFIGURATION_FIELDS
+    : kind === 'deepseek_agent'
+      ? DSH_CONFIGURATION_FIELDS
+      : new Set();
   for (const field of Object.keys(args)) {
     if (!commonFields.has(field) && !kindFields.has(field)) {
       throw new ToolError('invalid_argument', `preflight.${field} is not supported for kind=${kind}.`);
     }
   }
   if (args.prompt !== undefined
-    && (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000)) {
-    throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters.');
+    && (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000
+      || /[\u0000\u007f]/.test(args.prompt))) {
+    throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 text characters without NUL or DEL controls.');
   }
-  if (kind === 'deepseek_agent') {
-    requireDeepSeekReady();
-  }
+  let dshReadiness = null;
+  if (kind === 'deepseek_agent') dshReadiness = requireDeepSeekReady();
   if (args.request_id !== undefined) requestId(args.request_id);
   const configuration = {
     schema_version: CONFIG_SCHEMA_VERSION,
@@ -1359,8 +1421,16 @@ async function preflightTool(args) {
     target_fingerprint: targetFingerprint,
     target_context: target,
   };
+  let grokCapabilities = null;
+  let deepseekCapabilities = null;
+  if (kind === 'deepseek_agent') {
+    const dshConfiguration = normalizeDshForTool(args.dsh_options);
+    if (dshConfiguration) configuration.dsh_configuration = dshConfiguration;
+    deepseekCapabilities = dshCapabilities(dshReadiness, dshConfiguration ?? {});
+  }
   if (kind === 'grok_build') {
     configuration.grok_configuration = normalizeGrokForTool(args, target.role);
+    grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
   }
   configuration.configuration_digest = sha256Digest(configuration);
   return {
@@ -1377,6 +1447,11 @@ async function preflightTool(args) {
     server_identity: SERVER_IDENTITY,
     available_tools: null,
     configuration,
+    ...(deepseekCapabilities
+      ? { capabilities: { deepseek_agent: deepseekCapabilities } }
+      : grokCapabilities
+        ? { capabilities: { grok_build: grokCapabilities } }
+        : {}),
   };
 }
 
@@ -1413,6 +1488,7 @@ async function runTool(args) {
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
     const grokConfiguration = normalizeGrokForTool(args, target.role);
+    const grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
     const effectiveConfiguration = agentConfiguration({
       kind: args.kind,
       id,
@@ -1428,7 +1504,14 @@ async function runTool(args) {
       effective_configuration: effectiveConfiguration,
     });
     const existing = await findRequest(id, fingerprint);
-    if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
+    if (existing) {
+      return {
+        ok: true,
+        deduplicated: true,
+        job: publicJob(existing),
+        capabilities: { grok_build: grokCapabilities },
+      };
+    }
     const activeTask = [
       'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
       targetPreamble(target),
@@ -1468,6 +1551,7 @@ async function runTool(args) {
       ok: true,
       job: publicJob(job),
       effective_configuration: effectiveConfiguration,
+      capabilities: { grok_build: grokCapabilities },
       next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
     };
   }
@@ -1480,10 +1564,12 @@ async function runTool(args) {
       'timeout_seconds',
       'target_context',
       'expected_target_fingerprint',
+      'dsh_options',
     ]);
     rejectUnsupportedRunFields(args, allowed, args.kind);
-    if (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000) {
-      throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters.');
+    if (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000
+      || /[\u0000\u007f]/.test(args.prompt)) {
+      throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 text characters without NUL or DEL controls.');
     }
     if (!Object.hasOwn(args, 'target_context')) {
       throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
@@ -1491,6 +1577,10 @@ async function runTool(args) {
     const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
+    const dshConfiguration = normalizeDshForTool(args.dsh_options);
+    const deepseekCapabilities = dshConfiguration
+      ? dshCapabilityProfile(dshConfiguration)
+      : null;
     const effectiveConfiguration = agentConfiguration({
       kind: args.kind,
       id,
@@ -1498,6 +1588,7 @@ async function runTool(args) {
       timeoutSeconds,
       cwd,
       target,
+      dshConfiguration,
     });
     const fingerprint = requestFingerprint({
       kind: args.kind,
@@ -1505,7 +1596,16 @@ async function runTool(args) {
       effective_configuration: effectiveConfiguration,
     });
     const existing = await findRequest(id, fingerprint);
-    if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
+    if (existing) {
+      return {
+        ok: true,
+        deduplicated: true,
+        job: publicJob(existing),
+        ...(deepseekCapabilities
+          ? { capabilities: { deepseek_agent: deepseekCapabilities } }
+          : {}),
+      };
+    }
     requireCredential();
     requireDeepSeekReady();
     const activeTask = [
@@ -1530,7 +1630,7 @@ async function runTool(args) {
           activeTask,
         ],
         env: {
-          ...dshChildEnvironment(DSH_HOME),
+          ...dshWorkerEnvironment(dshConfiguration),
           DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
         },
         requestId: id,
@@ -1546,6 +1646,9 @@ async function runTool(args) {
       ok: true,
       job: publicJob(job),
       effective_configuration: effectiveConfiguration,
+      ...(deepseekCapabilities
+        ? { capabilities: { deepseek_agent: deepseekCapabilities } }
+        : {}),
       next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
     };
   }

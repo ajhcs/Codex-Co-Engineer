@@ -5,7 +5,7 @@
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
     provider: meta
-    model: muse-spark-1.2-contributor
+    model: !!js process.env.CODEX_CO_ENGINEER_DSH_MODEL ?? 'muse-spark-1.2-contributor'
 
 - id: llm-pi-ai
   name: '@deepseek-ai/dsh-llm-pi-ai'
@@ -20,5 +20,5 @@
           - id: muse-spark-1.2-contributor
             name: Muse Spark 1.2 Contributor
             contextWindow: 1048576
-            maxTokens: 131072
+            maxTokens: !!js Number(process.env.CODEX_CO_ENGINEER_DSH_MAX_TOKENS ?? '131072')
             input: [text, image]
