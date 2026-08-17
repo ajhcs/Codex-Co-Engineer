@@ -355,6 +355,28 @@ test('create maps official fields, safe defaults, redacted receipts, and dedupli
   assert.equal(prCall[1].skipReviewerRequest, true);
 });
 
+test('create forwards explicit empty repositories and image dimensions unchanged', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const args = {
+    action: 'create',
+    requestId: 'create-image-repo-contract',
+    prompt: {
+      text: 'inspect this image',
+      images: [{ data: 'abcd', mimeType: 'image/png', dimension: { width: 640, height: 480 } }],
+    },
+    repos: [],
+  };
+
+  const result = await handleToolCall('agents', args, service);
+  assert.equal(result.structuredContent.ok, true);
+  const createCall = client.calls.find((call) => call[0] === 'createAgent');
+  assert.ok(createCall, 'createAgent should receive the validated request');
+  assert.ok(Object.hasOwn(createCall[1], 'repos'), 'explicit empty repos must remain present');
+  assert.deepEqual(createCall[1].repos, []);
+  assert.deepEqual(createCall[1].prompt, args.prompt);
+  assert.deepEqual(createCall[1].prompt.images[0].dimension, { width: 640, height: 480 });
+});
+
 test('concurrent identical generated-ID creates share one submission and preserve duplicate receipt', async (context) => {
   const { client, service } = await serviceFixture(context);
   client.blockCreateAgent = true;

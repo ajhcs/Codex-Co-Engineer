@@ -7,10 +7,17 @@ export const MAX_ENV_VARS = 50;
 export const MAX_MCP_SERVERS = 50;
 export const MAX_SUBAGENTS = 20;
 export const MAX_PAGE_SIZE = 100;
-export const AGENT_ID_PATTERN = /^bc-[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/;
+export const AGENT_ID_PATTERN = /^bc-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 export const RUN_ID_PATTERN = /^run-[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 export const COMMIT_PATTERN = /^[0-9a-f]{40}$/i;
+export const RESERVED_SUBAGENT_NAMES = Object.freeze([
+  'explore',
+  'shell',
+  'debug',
+  'computerUse',
+  'cursorGuide',
+]);
 
 export class InputError extends Error {
   constructor(code, message, details = undefined) {
@@ -103,7 +110,7 @@ function pageFields(value, { includeArchived = false } = {}) {
 
 function image(value, path) {
   object(value, path);
-  unknown(value, ['data', 'mimeType', 'url'], path);
+  unknown(value, ['data', 'mimeType', 'url', 'dimension'], path);
   const hasData = value.data !== undefined;
   const hasUrl = value.url !== undefined;
   if (hasData === hasUrl) fail(`${path} must contain exactly one of data or url.`);
@@ -115,7 +122,15 @@ function image(value, path) {
       fail(`${path}.mimeType is not supported.`);
     }
   } else {
+    if (value.mimeType !== undefined) fail(`${path}.mimeType must be omitted when url is provided.`);
     url(value.url, `${path}.url`);
+  }
+  if (value.dimension !== undefined) {
+    object(value.dimension, `${path}.dimension`);
+    unknown(value.dimension, ['width', 'height'], `${path}.dimension`);
+    required(value.dimension, ['width', 'height'], `${path}.dimension`);
+    integer(value.dimension.width, `${path}.dimension.width`, { min: 1 });
+    integer(value.dimension.height, `${path}.dimension.height`, { min: 1 });
   }
 }
 
@@ -160,7 +175,7 @@ function envVars(value, path = 'arguments.envVars') {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(name) || name.startsWith('CURSOR_')) {
       fail(`${path} contains an invalid or reserved variable name.`);
     }
-    string(value[name], `${path}.${name}`, { min: 0, max: 4096 });
+    string(value[name], `${path}.${name}`, { min: 1, max: 4096 });
   }
 }
 
@@ -228,7 +243,7 @@ function repo(value, path) {
 
 function repos(value, path = 'arguments.repos') {
   if (value === undefined) return;
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_REPOS) fail(`${path} must contain 1-${MAX_REPOS} repositories.`);
+  if (!Array.isArray(value) || value.length > MAX_REPOS) fail(`${path} must contain at most ${MAX_REPOS} repositories.`);
   value.forEach((entry, index) => repo(entry, `${path}[${index}]`));
 }
 
@@ -236,7 +251,7 @@ function subagents(value, path = 'arguments.customSubagents') {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > MAX_SUBAGENTS) fail(`${path} must contain at most ${MAX_SUBAGENTS} entries.`);
   const names = new Set();
-  const reserved = new Set(['explore', 'debug', 'shell', 'computerUse', 'computer_use']);
+  const reserved = new Set(RESERVED_SUBAGENT_NAMES);
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
     object(entry, base);
@@ -245,8 +260,8 @@ function subagents(value, path = 'arguments.customSubagents') {
     string(entry.name, `${base}.name`, { min: 1, max: 100 });
     if (reserved.has(entry.name) || names.has(entry.name)) fail(`${base}.name is reserved or duplicated.`);
     names.add(entry.name);
-    string(entry.description, `${base}.description`, { min: 1, max: 4000 });
-    string(entry.prompt, `${base}.prompt`, { min: 1, max: MAX_PROMPT_CHARS });
+    string(entry.description, `${base}.description`, { min: 1, max: 1000 });
+    string(entry.prompt, `${base}.prompt`, { min: 1, max: 8192 });
     if (entry.model !== undefined) {
       if (entry.model === 'inherit') string(entry.model, `${base}.model`, { min: 7, max: 7 });
       else if (typeof entry.model === 'string') string(entry.model, `${base}.model`, { min: 1, max: 200 });
@@ -321,16 +336,27 @@ function validateAction(value, actions, path = 'arguments.action') {
   if (!actions.includes(value.action)) fail(`${path} must be one of ${actions.join(', ')}.`);
 }
 
+const IMAGE_DIMENSION_SCHEMA = {
+  type: 'object',
+  properties: {
+    width: { type: 'integer', minimum: 1 },
+    height: { type: 'integer', minimum: 1 },
+  },
+  required: ['width', 'height'],
+  additionalProperties: false,
+};
+
 const IMAGE_SCHEMA = {
   type: 'object',
   properties: {
     data: { type: 'string', minLength: 4, maxLength: Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 8, pattern: '^[A-Za-z0-9+/=_-]+$' },
     mimeType: { type: 'string', minLength: 1, maxLength: 100, enum: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] },
     url: { type: 'string', format: 'uri', maxLength: 2048 },
+    dimension: IMAGE_DIMENSION_SCHEMA,
   },
   oneOf: [
-    { required: ['data', 'mimeType'] },
-    { required: ['url'] },
+    { required: ['data', 'mimeType'], not: { required: ['url'] } },
+    { required: ['url'], not: { anyOf: [{ required: ['data'] }, { required: ['mimeType'] }] } },
   ],
   additionalProperties: false,
 };
@@ -391,7 +417,7 @@ const REPO_SCHEMA = {
 const ENV_VARS_SCHEMA = {
   type: 'object',
   maxProperties: MAX_ENV_VARS,
-  patternProperties: { '^[A-Za-z_][A-Za-z0-9_]{0,254}$': { type: 'string', maxLength: 4096 } },
+  patternProperties: { '^[A-Za-z_][A-Za-z0-9_]{0,254}$': { type: 'string', minLength: 1, maxLength: 4096 } },
   additionalProperties: false,
 };
 
@@ -428,15 +454,16 @@ const SUBAGENT_SCHEMA = {
   type: 'object',
   properties: {
     name: { type: 'string', minLength: 1, maxLength: 100 },
-    description: { type: 'string', minLength: 1, maxLength: 4000 },
-    prompt: { type: 'string', minLength: 1, maxLength: MAX_PROMPT_CHARS },
+    description: { type: 'string', minLength: 1, maxLength: 1000 },
+    prompt: { type: 'string', minLength: 1, maxLength: 8192 },
     model: MODEL_REFERENCE_SCHEMA,
   },
   required: ['name', 'description', 'prompt'],
+  not: { properties: { name: { enum: RESERVED_SUBAGENT_NAMES } } },
   additionalProperties: false,
 };
 
-const REPOS_SCHEMA = { type: 'array', minItems: 1, maxItems: MAX_REPOS, items: REPO_SCHEMA };
+const REPOS_SCHEMA = { type: 'array', maxItems: MAX_REPOS, items: REPO_SCHEMA };
 const MCP_SERVERS_SCHEMA = { type: 'array', maxItems: MAX_MCP_SERVERS, items: MCP_SERVER_SCHEMA };
 const SUBAGENTS_SCHEMA = { type: 'array', maxItems: MAX_SUBAGENTS, items: SUBAGENT_SCHEMA };
 
@@ -445,12 +472,13 @@ export const TOOL_SCHEMAS = Object.freeze({
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['local', 'identity', 'models', 'repositories'] },
+      limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE },
     },
     oneOf: [
       { properties: { action: { const: 'local' } }, required: [], additionalProperties: false },
       { properties: { action: { const: 'identity' } }, required: ['action'], additionalProperties: false },
-      { properties: { action: { const: 'models' } }, required: ['action'], additionalProperties: false },
-      { properties: { action: { const: 'repositories' } }, required: ['action'], additionalProperties: false },
+      { properties: { action: { const: 'models' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE } }, required: ['action'], additionalProperties: false },
+      { properties: { action: { const: 'repositories' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE } }, required: ['action'], additionalProperties: false },
     ],
     additionalProperties: false,
     description: 'Local configuration or safe read-only identity/model/repository discovery. Defaults to local.',
@@ -535,9 +563,14 @@ export const TOOL_SCHEMAS = Object.freeze({
 export function validateToolInput(toolName, raw) {
   const value = object(raw ?? {});
   if (toolName === 'status') {
-    unknown(value, ['action'], 'arguments');
     value.action ??= 'local';
     validateAction(value, ['local', 'identity', 'models', 'repositories']);
+    if (value.action === 'models' || value.action === 'repositories') {
+      unknown(value, ['action', 'limit'], 'arguments');
+      integer(value.limit, 'arguments.limit', { min: 1, max: MAX_PAGE_SIZE, optional: true });
+    } else {
+      unknown(value, ['action'], 'arguments');
+    }
     return value;
   }
   if (toolName === 'agents') {

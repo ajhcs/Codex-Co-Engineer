@@ -29,8 +29,13 @@ assert.equal(responses[0].result.protocolVersion, '2025-11-25');
 const tools = responses[1].result.tools.map((tool) => tool.name);
 assert.deepEqual(tools, ['status', 'agents', 'runs', 'artifacts', 'usage', 'lifecycle']);
 const agentsTool = responses[1].result.tools.find((tool) => tool.name === 'agents');
+const statusTool = responses[1].result.tools.find((tool) => tool.name === 'status');
+assert.ok(agentsTool);
+assert.ok(statusTool);
 const repositorySchema = agentsTool.inputSchema.properties.repos;
 assert.equal(repositorySchema.type, 'array');
+assert.ok(repositorySchema.minItems === undefined || repositorySchema.minItems === 0);
+assert.equal(repositorySchema.maxItems, 20);
 assert.equal(repositorySchema.items.type, 'object');
 assert.deepEqual(repositorySchema.items.required, ['url']);
 assert.equal(repositorySchema.items.additionalProperties, false);
@@ -44,6 +49,40 @@ assert.equal(repositorySchema.items.properties.startingRef.pattern, undefined);
 assert.equal(repositorySchema.items.properties.prUrl.type, 'string');
 assert.equal(repositorySchema.items.properties.prUrl.format, 'uri');
 assert.equal(repositorySchema.items.properties.prUrl.maxLength, 2048);
+const agentIdPattern = '^bc-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+assert.deepEqual(agentsTool.inputSchema.properties.agentId, { type: 'string', pattern: agentIdPattern });
+for (const branch of agentsTool.inputSchema.oneOf) {
+  if (branch.properties.agentId !== undefined) assert.equal(branch.properties.agentId.pattern, agentIdPattern);
+}
+const envValueSchema = agentsTool.inputSchema.properties.envVars.patternProperties['^[A-Za-z_][A-Za-z0-9_]{0,254}$'];
+assert.deepEqual(envValueSchema, { type: 'string', minLength: 1, maxLength: 4096 });
+const imageSchema = agentsTool.inputSchema.properties.prompt.properties.images.items;
+assert.deepEqual(imageSchema.properties.dimension, {
+  type: 'object',
+  properties: {
+    width: { type: 'integer', minimum: 1 },
+    height: { type: 'integer', minimum: 1 },
+  },
+  required: ['width', 'height'],
+  additionalProperties: false,
+});
+const dataImageVariant = imageSchema.oneOf.find((variant) => variant.required.includes('data'));
+const urlImageVariant = imageSchema.oneOf.find((variant) => variant.required.length === 1 && variant.required[0] === 'url');
+assert.deepEqual(dataImageVariant.not, { required: ['url'] });
+assert.deepEqual(urlImageVariant.not, { anyOf: [{ required: ['data'] }, { required: ['mimeType'] }] });
+const subagentSchema = agentsTool.inputSchema.properties.customSubagents.items;
+assert.equal(agentsTool.inputSchema.properties.customSubagents.maxItems, 20);
+assert.deepEqual(subagentSchema.properties.description, { type: 'string', minLength: 1, maxLength: 1000 });
+assert.deepEqual(subagentSchema.properties.prompt, { type: 'string', minLength: 1, maxLength: 8192 });
+assert.deepEqual(subagentSchema.not, {
+  properties: { name: { enum: ['explore', 'shell', 'debug', 'computerUse', 'cursorGuide'] } },
+});
+const statusBranches = statusTool.inputSchema.oneOf;
+const statusBranch = (action) => statusBranches.find((branch) => branch.properties.action.const === action);
+assert.equal(statusBranch('local').properties.limit, undefined);
+assert.equal(statusBranch('identity').properties.limit, undefined);
+assert.deepEqual(statusBranch('models').properties.limit, { type: 'integer', minimum: 1, maximum: 100 });
+assert.deepEqual(statusBranch('repositories').properties.limit, { type: 'integer', minimum: 1, maximum: 100 });
 assert.equal(responses[2].result.structuredContent.ok, true);
 assert.equal(responses[2].result.structuredContent.status.credentials.configured, false);
 process.stdout.write(`cursor MCP preflight passed (${tools.length} tools, no network)\n`);

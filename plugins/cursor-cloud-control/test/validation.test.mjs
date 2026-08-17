@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   InputError,
+  TOOL_SCHEMAS,
   assertSafeArtifactPath,
   assertSafeRelativeDestination,
   validateToolInput,
@@ -42,6 +43,110 @@ test('write-mode repository dispatch requires an immutable start commit', () => 
     customSubagents: [{ name: 'review', description: 'Review changes', prompt: 'Review the patch', model: 'composer-2' }],
   });
   assert.equal(customModel.customSubagents[0].model, 'composer-2');
+});
+
+test('Cursor v1 create bounds match the typed image, repository, and caller ID contract', () => {
+  const base = {
+    action: 'create',
+    requestId: 'image-contract-1',
+    prompt: {
+      text: 'inspect the image',
+      images: [{ data: 'abcd', mimeType: 'image/png', dimension: { width: 1, height: 2 } }],
+    },
+    repos: [],
+    agentId,
+  };
+  assert.deepEqual(validateToolInput('agents', base).repos, []);
+  assert.throws(() => validateToolInput('agents', {
+    ...base,
+    agentId: 'bc-not-a-uuid',
+  }), /invalid format/);
+  assert.throws(() => validateToolInput('agents', {
+    ...base,
+    prompt: { text: 'inspect the image', images: [{ url: 'https://example.test/image.png', mimeType: 'image/png' }] },
+  }), /must be omitted/);
+  assert.throws(() => validateToolInput('agents', {
+    ...base,
+    prompt: { text: 'inspect the image', images: [{ data: 'abcd', mimeType: 'image/png', dimension: { width: 1 } }] },
+  }), /height is required/);
+  assert.throws(() => validateToolInput('agents', {
+    ...base,
+    agentId: undefined,
+    envVars: { EMPTY_VALUE: '' },
+  }), /1-4096/);
+  assert.equal(TOOL_SCHEMAS.agents.properties.repos.minItems, undefined);
+
+  const urlImage = {
+    ...base,
+    prompt: {
+      text: 'inspect the image URL',
+      images: [{ url: 'https://example.test/image.png', dimension: { width: 320, height: 240 } }],
+    },
+  };
+  assert.deepEqual(validateToolInput('agents', urlImage).prompt.images, urlImage.prompt.images);
+
+  for (const invalidId of [
+    'bc-00000000-0000-0000-0000-00000000000',
+    'bc-00000000-0000-0000-0000-00000000000z',
+    'bc-0000000000000000000000000000000000000001',
+  ]) {
+    assert.throws(() => validateToolInput('agents', { ...base, agentId: invalidId }), /invalid format/);
+  }
+});
+
+test('Cursor v1 custom subagents enforce documented limits and built-in names', () => {
+  const create = {
+    action: 'create',
+    requestId: 'subagent-contract-1',
+    prompt: { text: 'delegate' },
+    customSubagents: [{
+      name: 'reviewer',
+      description: 'd'.repeat(1000),
+      prompt: 'p'.repeat(8192),
+    }],
+  };
+  assert.equal(validateToolInput('agents', create).customSubagents[0].prompt.length, 8192);
+  assert.throws(() => validateToolInput('agents', {
+    ...create,
+    customSubagents: [{ ...create.customSubagents[0], description: 'd'.repeat(1001) }],
+  }), /1-1000/);
+  assert.throws(() => validateToolInput('agents', {
+    ...create,
+    customSubagents: [{ ...create.customSubagents[0], prompt: 'p'.repeat(8193) }],
+  }), /1-8192/);
+  for (const name of ['explore', 'shell', 'debug', 'computerUse', 'cursorGuide']) {
+    assert.throws(() => validateToolInput('agents', {
+      ...create,
+      customSubagents: [{ ...create.customSubagents[0], name }],
+    }), /reserved/);
+  }
+  assert.throws(() => validateToolInput('agents', {
+    ...create,
+    customSubagents: [
+      { ...create.customSubagents[0], name: 'reviewer-a' },
+      { ...create.customSubagents[0], name: 'reviewer-a' },
+    ],
+  }), /reserved or duplicated/);
+  const maxSubagents = Array.from({ length: 20 }, (_, index) => ({
+    ...create.customSubagents[0],
+    name: `reviewer-${index}`,
+  }));
+  assert.equal(validateToolInput('agents', { ...create, customSubagents: maxSubagents }).customSubagents.length, 20);
+  assert.throws(() => validateToolInput('agents', {
+    ...create,
+    customSubagents: [...maxSubagents, { ...create.customSubagents[0], name: 'reviewer-overflow' }],
+  }), /at most 20/);
+  const subagentSchema = TOOL_SCHEMAS.agents.properties.customSubagents.items;
+  assert.deepEqual(subagentSchema.not.properties.name.enum, ['explore', 'shell', 'debug', 'computerUse', 'cursorGuide']);
+  assert.equal(subagentSchema.properties.description.maxLength, 1000);
+  assert.equal(subagentSchema.properties.prompt.maxLength, 8192);
+});
+
+test('status limit is a local cap only for model and repository discovery', () => {
+  assert.equal(validateToolInput('status', { action: 'models', limit: 3 }).limit, 3);
+  assert.equal(validateToolInput('status', { action: 'repositories', limit: 3 }).limit, 3);
+  assert.throws(() => validateToolInput('status', { action: 'local', limit: 3 }), /not supported/);
+  assert.throws(() => validateToolInput('status', { action: 'identity', limit: 3 }), /not supported/);
 });
 
 test('sensitive MCP headers and unsafe destinations are rejected', () => {
