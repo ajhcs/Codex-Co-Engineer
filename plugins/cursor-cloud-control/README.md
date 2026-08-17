@@ -86,9 +86,11 @@ Optional administrator settings:
   credentials, query, or fragment. HTTPS is required for production; HTTP is
   accepted only for loopback or `.test` test origins.
 - `CURSOR_CLOUD_CONTROL_STATE_DIR`: owner-only durable submission ledger
-  location. It stores request IDs, hashes, status, and opaque agent/run IDs;
-  it does not store prompts, environment-variable values, images, MCP header
-  values, or full transcripts.
+  location. Prefer a host-provisioned path that survives MCP restarts. The
+  directory is created or checked as owner-only (`0700`), and its
+  `submissions.json` ledger is written owner-only (`0600`). It stores request
+  IDs, hashes, status, and opaque agent/run IDs; it does not store prompts,
+  environment-variable values, images, MCP header values, or full transcripts.
 - `CURSOR_ARTIFACT_ROOT`: required before downloading an artifact. Downloads
   are limited to this administrator-configured root.
 - `CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS`,
@@ -100,6 +102,19 @@ Do not place credentials in a repository, commit, prompt, MCP server
 definition, or issue report. Inline MCP stdio environment values and session
 environment variables are sent to Cursor only for the requested run and are
 represented locally by counts and a configuration digest.
+
+### Durable local state
+
+The local `status` response reports the ledger contract under
+`status.state.ready`, `status.state.source`, and, when unavailable,
+`status.state.reason`/`reasonCode`. Configure
+`CURSOR_CLOUD_CONTROL_STATE_DIR` explicitly when the host needs a known
+persistent owner-only location; the process may otherwise resolve the host's
+`XDG_STATE_HOME` or `HOME` state directory. It never falls back silently to
+`/tmp` or another transient location. If the resolved directory or ledger is
+missing, not owner-only, corrupt, or not writable, mutation tools fail closed
+before calling Cursor. Read-only status and discovery calls remain available
+so the state problem can be diagnosed without submitting work.
 
 ## Safe operating model
 

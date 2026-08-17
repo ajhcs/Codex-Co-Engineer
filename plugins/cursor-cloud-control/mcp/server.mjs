@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import { CursorApiClient, CursorApiError, DEFAULT_API_ORIGIN, defaultApiKeyFile, loadApiKey } from './client.mjs';
 import { saveArtifact, maxArtifactBytes } from './artifacts.mjs';
-import { SubmissionLedger, requestDigest } from './ledger.mjs';
+import { SubmissionLedger, requestDigest, resolveStateDirectory } from './ledger.mjs';
 import { redactError, redactValue } from './redaction.mjs';
 import { consumeSse } from './sse.mjs';
 import {
@@ -86,11 +86,6 @@ export const TOOLS = Object.freeze([
 ]);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-function stateDirectory(env = process.env) {
-  return path.resolve(env.CURSOR_CLOUD_CONTROL_STATE_DIR
-    ?? path.join(env.XDG_STATE_HOME ?? path.join(env.HOME ?? '.', '.local', 'state'), 'cursor-cloud-control'));
-}
 
 function artifactRootConfigured(env = process.env) {
   const value = typeof env.CURSOR_ARTIFACT_ROOT === 'string' ? env.CURSOR_ARTIFACT_ROOT.trim() : '';
@@ -179,26 +174,40 @@ export class CursorCloudService {
     this.env = env;
     this.client = client ?? null;
     this.fetchImpl = fetchImpl;
-    this.ledger = ledger ?? new SubmissionLedger({ stateDir: stateDirectory(env) });
+    const state = resolveStateDirectory(env);
+    this.ledger = ledger ?? new SubmissionLedger({ stateDir: state.directory, source: state.source, reason: state.reason });
     this.apiKey = undefined;
     this.transientSecrets = [];
   }
 
   async getClient() {
-    if (this.client) return this.client;
-    if (this.apiKey === undefined) this.apiKey = await loadApiKey(this.env, { pluginRoot: PLUGIN_ROOT });
-    this.client = new CursorApiClient({
-      apiKey: this.apiKey,
-      origin: this.env.CURSOR_API_ORIGIN ?? DEFAULT_API_ORIGIN,
-      authScheme: this.env.CURSOR_API_AUTH_SCHEME ?? 'bearer',
-      fetchImpl: this.fetchImpl,
-    });
+    if (!this.client) {
+      if (this.apiKey === undefined) this.apiKey = await loadApiKey(this.env, { pluginRoot: PLUGIN_ROOT });
+      this.client = new CursorApiClient({
+        apiKey: this.apiKey,
+        origin: this.env.CURSOR_API_ORIGIN ?? DEFAULT_API_ORIGIN,
+        authScheme: this.env.CURSOR_API_AUTH_SCHEME ?? 'bearer',
+        fetchImpl: this.fetchImpl,
+      });
+    }
+    // CursorApiClient defers credential validation until its first request.
+    // Validate before a mutation reserves an idempotency record, so missing
+    // credentials or invalid local client configuration cannot strand pending.
+    if (typeof this.client.authHeader === 'function') this.client.authHeader();
     return this.client;
   }
 
   secrets() { return [...(this.client?.secrets ?? (this.apiKey ? [this.apiKey] : [])), ...this.transientSecrets]; }
 
   clearTransientSecrets() { this.transientSecrets = []; }
+
+  async requireDurableState() {
+    const readiness = await this.ledger.readiness();
+    if (!readiness.ready) {
+      throw new CursorApiError(readiness.code ?? 'ledger_unavailable', readiness.reason ?? 'Durable submission state is unavailable.');
+    }
+    return readiness;
+  }
 
   async status(value) {
     const action = value.action ?? 'local';
@@ -216,12 +225,21 @@ export class CursorCloudService {
       } catch {}
     }
     const configured = configuredByEnvironment || configuredFile;
+    const readiness = await this.ledger.readiness();
     const local = {
       apiVersion: 'v1',
       apiOrigin: this.env.CURSOR_API_ORIGIN ?? DEFAULT_API_ORIGIN,
       authScheme: String(this.env.CURSOR_API_AUTH_SCHEME ?? 'bearer').toLowerCase(),
       credentials: { configured, source: configuredByEnvironment ? 'environment' : (configuredFile ? 'owner-only-file' : 'none') },
-      state: { directory: stateDirectory(this.env), durableLedger: true, plaintextSensitiveInputs: false },
+      state: {
+        directory: readiness.directory,
+        ready: readiness.ready,
+        source: readiness.source,
+        durability: readiness.durability,
+        durableLedger: readiness.ready,
+        plaintextSensitiveInputs: false,
+        ...(readiness.reason ? { reason: readiness.reason, reasonCode: readiness.code } : {}),
+      },
       artifacts: { configuredRoot: artifactRootConfigured(this.env), automaticExecution: false },
       safety: { modeDefault: 'plan', workOnCurrentBranchDefault: false, autoCreatePRDefault: false, retryMutations: false },
       documentation: { checkedDate: '2026-08-16', api: 'https://cursor.com/docs/cloud-agent/api/endpoints' },
@@ -253,72 +271,112 @@ export class CursorCloudService {
   }
 
   async agents(value) {
-    const client = await this.getClient();
     if (value.action === 'list') {
+      const client = await this.getClient();
       const response = await client.listAgents({ limit: value.limit, cursor: value.cursor, prUrl: value.prUrl, includeArchived: value.includeArchived });
       return successResult({ agents: redactValue(pageResult(response, value.limit), this.secrets()) });
     }
-    if (value.action === 'get') return successResult({ agent: redactValue(await client.getAgent(value.agentId), this.secrets()) });
+    if (value.action === 'get') {
+      const client = await this.getClient();
+      return successResult({ agent: redactValue(await client.getAgent(value.agentId), this.secrets()) });
+    }
 
+    const client = await this.getClient();
     const requestId = value.requestId;
     const previous = await this.ledger.lookup(requestId);
     const agentId = value.envVars !== undefined
       ? undefined
       : (value.agentId ?? previous?.agentId ?? `bc-${randomUUID()}`);
     const body = mapCreateBody(value, agentId);
-    const digest = requestDigest('create-agent', body);
+    // The generated agent ID is a submission detail, not caller intent. Keep
+    // it out of the request digest so concurrent identical requests share one
+    // idempotency key; an explicit caller-supplied ID remains part of intent.
+    const digest = requestDigest('create-agent', mapCreateBody(value, value.agentId));
     const began = await this.ledger.begin({ requestId, kind: 'create-agent', digest, agentId });
     if (began.duplicate) {
       return successResult({ receipt: { requestId, requestDigest: digest, duplicate: true, status: began.record.status, agentId: began.record.agentId, runId: began.record.runId ?? null } });
     }
+    let response;
     try {
-      const response = await client.createAgent(body);
-      const agent = response?.agent ?? null;
-      const run = response?.run ?? null;
-      await this.ledger.complete(requestId, { agentId: agent?.id ?? agentId, runId: run?.id ?? null });
-      return successResult({
-        receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: agent?.id ?? agentId, runId: run?.id ?? null, effectiveConfiguration: effectiveCreateConfiguration(value) },
-        agent: redactValue(agent, this.secrets()),
-        run: redactValue(run, this.secrets()),
-      });
+      response = await client.createAgent(body);
     } catch (error) {
       if (isAmbiguous(error) || error?.code === 'conflict') {
-        await this.ledger.uncertain(requestId, { agentId });
-        const reconciliation = agentId ? `agent ID ${agentId}` : 'agent listing and the request ledger';
-        throw new CursorApiError('uncertain_submission', `Cursor may have accepted the create request but the response was not confirmed; reconcile via ${reconciliation} before retrying.`, { ambiguous: true });
+        const fields = submissionFields(agentId);
+        await bestEffortUncertain(this.ledger, requestId, fields, { kind: 'create-agent', digest });
+        const reconciliation = fields.agentId ? `agent ID ${fields.agentId}` : 'agent listing and the request ledger';
+        throw uncertainSubmissionError(`Cursor may have accepted the create request but the response was not confirmed; reconcile via ${reconciliation} before retrying.`, fields);
       }
+      await this.ledger.fail(requestId, { agentId: opaqueSubmissionId(agentId), failureCode: error?.code ?? 'submission_failed' });
       throw error;
     }
+    const agent = response?.agent ?? null;
+    const run = response?.run ?? null;
+    const finalized = submissionFields(agent?.id ?? agentId, run?.id ?? null);
+    try {
+      await this.ledger.complete(requestId, finalized);
+    } catch {
+      await bestEffortUncertain(this.ledger, requestId, finalized, { kind: 'create-agent', digest });
+      throw uncertainSubmissionError(
+        'Cursor accepted the create request, but durable completion was not confirmed; reconcile the recorded agent and run before retrying.',
+        finalized,
+      );
+    }
+    return successResult({
+      receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: finalized.agentId, runId: finalized.runId, effectiveConfiguration: effectiveCreateConfiguration(value) },
+      agent: redactValue(agent, this.secrets()),
+      run: redactValue(run, this.secrets()),
+    });
   }
 
   async runs(value) {
-    const client = await this.getClient();
     if (value.action === 'list') {
+      const client = await this.getClient();
       const response = await client.listRuns(value.agentId, { limit: value.limit, cursor: value.cursor });
       return successResult({ runs: redactValue(pageResult(response, value.limit), this.secrets()) });
     }
-    if (value.action === 'get') return successResult({ run: redactValue(await client.getRun(value.agentId, value.runId), this.secrets()) });
-    if (value.action === 'cancel') return successResult({ cancelled: redactValue(await client.cancelRun(value.agentId, value.runId), this.secrets()), agentId: value.agentId, runId: value.runId });
+    if (value.action === 'get') {
+      const client = await this.getClient();
+      return successResult({ run: redactValue(await client.getRun(value.agentId, value.runId), this.secrets()) });
+    }
+    if (value.action === 'cancel') {
+      await this.requireDurableState();
+      const client = await this.getClient();
+      return successResult({ cancelled: redactValue(await client.cancelRun(value.agentId, value.runId), this.secrets()), agentId: value.agentId, runId: value.runId });
+    }
     if (value.action === 'followup') {
+      const client = await this.getClient();
       const requestId = value.requestId;
       const body = mapFollowupBody(value);
       const digest = requestDigest('followup-run', { agentId: value.agentId, body });
       const began = await this.ledger.begin({ requestId, kind: 'followup-run', digest, agentId: value.agentId });
       if (began.duplicate) return successResult({ receipt: { requestId, requestDigest: digest, duplicate: true, status: began.record.status, agentId: began.record.agentId, runId: began.record.runId ?? null } });
+      let response;
       try {
-        const response = await client.createRun(value.agentId, body);
-        const run = response?.run ?? response ?? null;
-        await this.ledger.complete(requestId, { agentId: value.agentId, runId: run?.id ?? null });
-        return successResult({ receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: value.agentId, runId: run?.id ?? null }, run: redactValue(run, this.secrets()) });
+        response = await client.createRun(value.agentId, body);
       } catch (error) {
         if (isAmbiguous(error) || error?.code === 'conflict') {
-          await this.ledger.uncertain(requestId, { agentId: value.agentId });
-          throw new CursorApiError('uncertain_submission', 'Cursor may have accepted the follow-up but the response was not confirmed; reconcile runs before retrying.', { ambiguous: true });
+          const fields = submissionFields(value.agentId);
+          await bestEffortUncertain(this.ledger, requestId, fields, { kind: 'followup-run', digest });
+          throw uncertainSubmissionError('Cursor may have accepted the follow-up but the response was not confirmed; reconcile runs before retrying.', fields);
         }
+        await this.ledger.fail(requestId, { agentId: opaqueSubmissionId(value.agentId), failureCode: error?.code ?? 'submission_failed' });
         throw error;
       }
+      const run = response?.run ?? response ?? null;
+      const finalized = submissionFields(value.agentId, run?.id ?? null);
+      try {
+        await this.ledger.complete(requestId, finalized);
+      } catch {
+        await bestEffortUncertain(this.ledger, requestId, finalized, { kind: 'followup-run', digest });
+        throw uncertainSubmissionError(
+          'Cursor accepted the follow-up, but durable completion was not confirmed; reconcile the recorded agent and run before retrying.',
+          finalized,
+        );
+      }
+      return successResult({ receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: finalized.agentId, runId: finalized.runId }, run: redactValue(run, this.secrets()) });
     }
     if (value.action === 'wait') {
+      const client = await this.getClient();
       const timeoutMs = value.timeoutMs ?? 30_000;
       const pollMs = value.pollMs ?? 1_000;
       const deadline = Date.now() + timeoutMs;
@@ -330,6 +388,7 @@ export class CursorCloudService {
       return successResult({ agentId: value.agentId, runId: value.runId, timedOut: !isTerminalRunStatus(run?.status), run: redactValue(run, this.secrets()) });
     }
     try {
+      const client = await this.getClient();
       const response = await client.streamRun(value.agentId, value.runId, { lastEventId: value.lastEventId, timeoutMs: value.timeoutMs ?? 30_000 });
       const parsed = await consumeSse(response, { maxEvents: value.maxEvents ?? 200, maxBytes: value.maxBytes ?? 500_000, timeoutMs: value.timeoutMs ?? 30_000, secrets: this.secrets() });
       return successResult({ agentId: value.agentId, runId: value.runId, stream: parsed, resumedFrom: value.lastEventId ?? null });
@@ -363,6 +422,7 @@ export class CursorCloudService {
   }
 
   async lifecycle(value) {
+    await this.requireDurableState();
     const client = await this.getClient();
     if (value.action === 'archive') return successResult({ action: value.action, agentId: value.agentId, result: redactValue(await client.archive(value.agentId), this.secrets()) });
     if (value.action === 'unarchive') return successResult({ action: value.action, agentId: value.agentId, result: redactValue(await client.unarchive(value.agentId), this.secrets()) });
@@ -383,7 +443,30 @@ export class CursorCloudService {
 }
 
 function isAmbiguous(error) {
-  return error?.ambiguous === true || ['network_error', 'request_timeout', 'upstream_timeout'].includes(error?.code);
+  return error?.ambiguous === true
+    || error?.retryable === true
+    || ['network_error', 'request_timeout', 'upstream_timeout', 'upstream_failure'].includes(error?.code);
+}
+
+function opaqueSubmissionId(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function submissionFields(agentId, runId = null) {
+  return { agentId: opaqueSubmissionId(agentId), runId: opaqueSubmissionId(runId) };
+}
+
+async function bestEffortUncertain(ledger, requestId, fields, reservation) {
+  try {
+    await ledger.uncertain(requestId, { ...fields, ...reservation });
+  } catch {
+    // The durable record remains pending when this best-effort write fails;
+    // the ledger's stale-pending recovery will make it uncertain later.
+  }
+}
+
+function uncertainSubmissionError(message, fields) {
+  return new CursorApiError('uncertain_submission', message, { ambiguous: true, details: fields });
 }
 
 export async function handleToolCall(name, rawArguments, service = new CursorCloudService()) {

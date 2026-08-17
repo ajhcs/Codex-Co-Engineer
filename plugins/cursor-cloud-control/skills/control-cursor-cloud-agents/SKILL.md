@@ -15,6 +15,13 @@ or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
 ## Before creating work
 
 1. Call `status` with no arguments to check local configuration.
+   Treat `status.state.ready` as the durable-mutation gate. Prefer setting
+   `CURSOR_CLOUD_CONTROL_STATE_DIR` to a host-provisioned persistent
+   owner-only directory; the directory is kept at `0700` and the ledger at
+   `0600`. Inspect `status.state.source` and, when it is not ready,
+   `status.state.reason`/`reasonCode`. There is no silent `/tmp` fallback.
+   Unsafe or unavailable state causes mutation tools to fail before any
+   Cursor provider call, while read-only status and discovery remain usable.
 2. Call `status` with `action=identity`, `action=models`, or
    `action=repositories` only when discovery is needed.
    Identity status is intentionally compact and privacy-preserving: it returns

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -15,6 +15,11 @@ class FakeClient {
   constructor() {
     this.secrets = ['unit-secret-value'];
     this.calls = [];
+    this.blockCreateAgent = false;
+    this.createAgentStarted = new Promise((resolve) => { this.resolveCreateAgentStarted = resolve; });
+    this.releaseCreateAgent = null;
+    this.failCreateAgent = null;
+    this.afterCreateAgent = null;
     this.failFollowup = false;
     this.failRepositories = null;
     this.requestTimeoutMs = 30_000;
@@ -32,7 +37,18 @@ class FakeClient {
 
   async createAgent(body) {
     this.calls.push(['createAgent', body]);
-    return { agent: { id: body.agentId, name: 'unit-secret-value', status: 'ACTIVE' }, run: { id: runId, agentId: body.agentId, status: 'CREATING' } };
+    if (this.failCreateAgent) {
+      throw new CursorApiError(this.failCreateAgent, 'create rejected', {
+        retryable: this.failCreateAgent === 'upstream_failure',
+      });
+    }
+    if (this.blockCreateAgent) {
+      this.resolveCreateAgentStarted();
+      await new Promise((resolve) => { this.releaseCreateAgent = resolve; });
+    }
+    const response = { agent: { id: body.agentId, name: 'unit-secret-value', status: 'ACTIVE' }, run: { id: runId, agentId: body.agentId, status: 'CREATING' } };
+    if (this.afterCreateAgent) await this.afterCreateAgent();
+    return response;
   }
 
   async createRun(agent, body) {
@@ -110,6 +126,129 @@ test('local status treats an empty default key file as unconfigured', async (con
   const result = await handleToolCall('status', {}, service);
   assert.equal(result.structuredContent.status.credentials.configured, false);
   assert.equal(result.structuredContent.status.credentials.source, 'none');
+});
+
+test('local status reports explicit durable-state readiness and source', async (context) => {
+  const state = await mkdtemp(path.join(os.tmpdir(), 'cursor-cloud-readiness-'));
+  context.after(() => rm(state, { recursive: true, force: true }));
+  const { service } = await serviceFixture(context);
+  service.env = { CURSOR_CLOUD_CONTROL_STATE_DIR: path.join(state, 'ledger') };
+  service.ledger = new SubmissionLedger({ stateDir: path.join(state, 'ledger'), source: 'environment' });
+  const result = await handleToolCall('status', {}, service);
+  assert.deepEqual(result.structuredContent.status.state, {
+    directory: path.join(state, 'ledger'),
+    ready: true,
+    source: 'environment',
+    durability: 'owner-only-local-ledger',
+    durableLedger: true,
+    plaintextSensitiveInputs: false,
+  });
+});
+
+test('local status fails closed without a state-root fallback', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  service.env = {};
+  service.ledger = new SubmissionLedger({ stateDir: null, source: 'unconfigured', reason: 'Set CURSOR_CLOUD_CONTROL_STATE_DIR before using Cursor mutations.' });
+  const result = await handleToolCall('status', {}, service);
+  assert.equal(result.structuredContent.status.state.ready, false);
+  assert.equal(result.structuredContent.status.state.source, 'unconfigured');
+  assert.equal(result.structuredContent.status.state.durability, 'owner-only-local-ledger');
+  assert.match(result.structuredContent.status.state.reason, /CURSOR_CLOUD_CONTROL_STATE_DIR/);
+  assert.equal(result.structuredContent.status.state.reasonCode, 'ledger_unavailable');
+  assert.deepEqual(client.calls, []);
+});
+
+test('durable-state unavailability blocks mutations before the client but preserves read-only list/get', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  service.ledger = new SubmissionLedger({
+    stateDir: null,
+    source: 'unconfigured',
+    reason: 'Set CURSOR_CLOUD_CONTROL_STATE_DIR before using Cursor mutations.',
+  });
+
+  const readOnlyResults = await Promise.all([
+    handleToolCall('agents', { action: 'list', limit: 1 }, service),
+    handleToolCall('agents', { action: 'get', agentId }, service),
+    handleToolCall('runs', { action: 'list', agentId, limit: 1 }, service),
+    handleToolCall('runs', { action: 'get', agentId, runId }, service),
+  ]);
+  for (const result of readOnlyResults) assert.equal(result.structuredContent.ok, true);
+  assert.deepEqual(client.calls.map(([operation]) => operation), ['listAgents', 'getAgent', 'listRuns', 'getRun']);
+
+  const mutationArguments = [
+    ['agents', { action: 'create', requestId: 'unavailable-create-1', prompt: { text: 'create' } }],
+    ['runs', { action: 'followup', requestId: 'unavailable-followup-1', agentId, prompt: { text: 'continue' } }],
+    ['runs', { action: 'cancel', agentId, runId }],
+    ['lifecycle', { action: 'archive', agentId }],
+    ['lifecycle', { action: 'unarchive', agentId }],
+    ['lifecycle', { action: 'delete', agentId, confirmation: `delete:${agentId}` }],
+  ];
+  for (const [name, arguments_] of mutationArguments) {
+    const callsBefore = client.calls.length;
+    const result = await handleToolCall(name, arguments_, service);
+    assert.equal(result.isError, true, `${name}/${arguments_.action} should fail closed`);
+    assert.equal(result.structuredContent.error.code, 'ledger_unavailable');
+    assert.match(result.structuredContent.error.message, /CURSOR_CLOUD_CONTROL_STATE_DIR/);
+    assert.equal(client.calls.length, callsBefore, `${name}/${arguments_.action} reached the Cursor client`);
+  }
+  assert.deepEqual(client.calls.map(([operation]) => operation), ['listAgents', 'getAgent', 'listRuns', 'getRun']);
+});
+
+test('missing credentials fail before reserving a durable submission record', async (context) => {
+  const state = await mkdtemp(path.join(os.tmpdir(), 'cursor-cloud-missing-credentials-'));
+  context.after(() => rm(state, { recursive: true, force: true }));
+  const ledger = new SubmissionLedger({ stateDir: path.join(state, 'ledger') });
+  const service = new CursorCloudService({
+    env: { HOME: state, CURSOR_API_AUTH_SCHEME: 'bearer' },
+    ledger,
+  });
+  const result = await handleToolCall('agents', {
+    action: 'create', requestId: 'missing-credentials-1', prompt: { text: 'create' },
+  }, service);
+  assert.equal(result.structuredContent.error.code, 'credentials_missing');
+  await assert.rejects(readFile(path.join(state, 'ledger', 'submissions.json'), 'utf8'), { code: 'ENOENT' });
+});
+
+test('unsafe ledger state blocks create, follow-up, cancel, and lifecycle before the client', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const target = path.join(service.ledger.stateDir, 'unsafe-target');
+  await mkdir(target, { mode: 0o700 });
+  const unsafe = path.join(service.ledger.stateDir, 'unsafe-link');
+  await symlink(target, unsafe);
+  service.ledger = new SubmissionLedger({ stateDir: unsafe, source: 'environment' });
+
+  const create = await handleToolCall('agents', {
+    action: 'create', requestId: 'unsafe-create-1', prompt: { text: 'create' },
+  }, service);
+  const followup = await handleToolCall('runs', {
+    action: 'followup', requestId: 'unsafe-follow-1', agentId, prompt: { text: 'continue' },
+  }, service);
+  const cancel = await handleToolCall('runs', { action: 'cancel', agentId, runId }, service);
+  const lifecycle = await handleToolCall('lifecycle', { action: 'archive', agentId }, service);
+  for (const result of [create, followup, cancel, lifecycle]) {
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error.code, 'ledger_permissions');
+  }
+  assert.deepEqual(client.calls, []);
+});
+
+test('corrupt or group-readable ledger blocks mutations before network', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const file = path.join(service.ledger.stateDir, 'submissions.json');
+  await writeFile(file, '{not-json', { mode: 0o600 });
+  await chmod(file, 0o600);
+  const corrupt = await handleToolCall('agents', {
+    action: 'create', requestId: 'corrupt-create-1', prompt: { text: 'create' },
+  }, service);
+  assert.equal(corrupt.structuredContent.error.code, 'ledger_corrupt');
+  assert.deepEqual(client.calls, []);
+
+  await rm(file, { force: true });
+  await writeFile(file, JSON.stringify({ version: 1, records: [] }), { mode: 0o640 });
+  await chmod(file, 0o640);
+  const readable = await handleToolCall('lifecycle', { action: 'archive', agentId }, service);
+  assert.equal(readable.structuredContent.error.code, 'ledger_permissions');
+  assert.deepEqual(client.calls, []);
 });
 
 test('identity status emits only the compact opaque identity projection', async (context) => {
@@ -214,6 +353,96 @@ test('create maps official fields, safe defaults, redacted receipts, and dedupli
   assert.equal(pr.structuredContent.receipt.effectiveConfiguration.skipReviewerRequest, true);
   const prCall = client.calls.find((call) => call[1]?.autoCreatePR === true);
   assert.equal(prCall[1].skipReviewerRequest, true);
+});
+
+test('concurrent identical generated-ID creates share one submission and preserve duplicate receipt', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.blockCreateAgent = true;
+  const args = { action: 'create', requestId: 'concurrent-create-1', prompt: { text: 'same caller intent' } };
+
+  const firstPromise = handleToolCall('agents', args, service);
+  await client.createAgentStarted;
+  const concurrent = await handleToolCall('agents', args, service);
+  assert.equal(concurrent.isError, true);
+  assert.equal(concurrent.structuredContent.error.code, 'submission_in_progress');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+
+  client.releaseCreateAgent();
+  const first = await firstPromise;
+  assert.equal(first.structuredContent.ok, true);
+  assert.equal(first.structuredContent.receipt.duplicate, false);
+  assert.match(first.structuredContent.receipt.agentId, /^bc-/);
+
+  const duplicate = await handleToolCall('agents', args, service);
+  assert.equal(duplicate.structuredContent.ok, true);
+  assert.equal(duplicate.structuredContent.receipt.duplicate, true);
+  assert.equal(duplicate.structuredContent.receipt.agentId, first.structuredContent.receipt.agentId);
+  assert.equal(duplicate.structuredContent.receipt.requestDigest, first.structuredContent.receipt.requestDigest);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('definitive create failure leaves a retryable reservation', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'bad_request';
+  const args = { action: 'create', requestId: 'definitive-create-failure-1', prompt: { text: 'retry me' } };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'bad_request');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'failed');
+
+  client.failCreateAgent = null;
+  const retry = await handleToolCall('agents', args, service);
+  assert.equal(retry.structuredContent.ok, true);
+  assert.equal(retry.structuredContent.receipt.duplicate, false);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 2);
+});
+
+test('retryable upstream mutation failures remain uncertain and are never resubmitted', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = { action: 'create', requestId: 'upstream-create-failure-1', prompt: { text: 'submit once' } };
+
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.isError, true);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+
+  client.failCreateAgent = null;
+  const retry = await handleToolCall('agents', args, service);
+  assert.equal(retry.isError, true);
+  assert.equal(retry.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('a missing reservation after provider success fails uncertain and prevents resubmission', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const args = { action: 'create', requestId: 'missing-final-record-1', prompt: { text: 'create once' } };
+  client.afterCreateAgent = () => rm(path.join(service.ledger.stateDir, 'submissions.json'));
+
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.isError, true);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+
+  client.afterCreateAgent = null;
+  const second = await handleToolCall('agents', args, service);
+  assert.equal(second.isError, true);
+  assert.equal(second.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('changed create intent conflicts even when the first request generated its agent ID', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const first = await handleToolCall('agents', {
+    action: 'create', requestId: 'changed-create-1', prompt: { text: 'original intent' },
+  }, service);
+  assert.equal(first.structuredContent.ok, true);
+
+  const changed = await handleToolCall('agents', {
+    action: 'create', requestId: 'changed-create-1', prompt: { text: 'changed intent' },
+  }, service);
+  assert.equal(changed.isError, true);
+  assert.equal(changed.structuredContent.error.code, 'request_id_conflict');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
 });
 
 test('uncertain follow-up is ledgered and cannot be silently duplicated', async (context) => {
