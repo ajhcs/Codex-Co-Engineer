@@ -74,9 +74,11 @@ worker kinds and backend-specific fields.
   caller-computed `expected_target_fingerprint`. Set `kind` to `preflight`,
   `deepseek_agent`, or `grok_build`. A Grok preflight may include the same typed
   Grok options accepted by `run`.
-- `status` accepts optional `recent_limit` (`0`–`15`) and `diagnostics`. The
-  default path performs no provider-auth request. `diagnostics: true` may run
-  the official read-only `grok models` authentication probe.
+- `status` accepts optional `recent_limit` (`0`–`15`) and `diagnostics`. Recent
+  jobs and `jobs` action `list` return bounded summaries only; use `jobs`
+  action `get` for one job's effective configuration and lifecycle history.
+  The default path performs no provider-auth request. `diagnostics: true` may
+  run the official read-only `grok models` authentication probe.
 - `runtime` accepts `action: "start"` with the versioned target contract and a
   bounded timeout, or `action: "stop"` to stop only the plugin-owned DeepSeek
   UI job.

@@ -95,6 +95,7 @@ const WAIT_LIMITS = Object.freeze({
   log_page_bytes: { minimum: 1, maximum: 12000, default: 12000 },
 });
 const LOG_PAGE_MAX_BYTES = WAIT_LIMITS.log_page_bytes.maximum;
+const COMPACT_JOB_TEXT_MAX_LENGTH = 160;
 const TARGET_ROLES = new Set(['review', 'implement', 'verify']);
 const TARGET_MODES = new Set(['default', 'explicit']);
 const TARGET_CONTEXT_KEYS = new Set([
@@ -588,6 +589,57 @@ function publicJob(job) {
   };
 }
 
+function compactText(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value);
+  return text.length <= COMPACT_JOB_TEXT_MAX_LENGTH
+    ? text
+    : `${text.slice(0, COMPACT_JOB_TEXT_MAX_LENGTH - 1)}…`;
+}
+
+function publicLifecycleState(job) {
+  return job.lifecycle_state ?? ({
+    queued: 'accepted',
+    starting: 'started',
+    running: 'working',
+    cancelling: 'working',
+    succeeded: 'completed',
+    timed_out: 'timeout',
+    uncertain: 'failed',
+  }[job.status] ?? job.status);
+}
+
+/**
+ * The status/list surfaces are intentionally summaries.  Keep provider
+ * configuration, target contracts, prompts, logs, and lifecycle history on
+ * the explicit jobs get path so routine health checks remain small and safe.
+ */
+function compactJob(job) {
+  const targetContext = storedJson(job.target_context);
+  const effectiveConfiguration = storedJson(job.effective_configuration);
+  const role = targetContext?.role ?? effectiveConfiguration?.role ?? null;
+  return {
+    id: job.id,
+    kind: publicJobKind(job.kind),
+    role: TARGET_ROLES.has(role) ? role : null,
+    status: publicLifecycleState(job),
+    terminal_state: job.terminal_state ?? null,
+    failure_class: compactText(job.failure_class),
+    created_at: job.created_at,
+    started_at: job.started_at ?? null,
+    finished_at: job.finished_at ?? null,
+    deadline_at: job.deadline_at ?? null,
+    last_activity_at: job.last_activity_at ?? null,
+    elapsed_seconds: typeof job.elapsed_seconds === 'number' ? job.elapsed_seconds : null,
+    stalled: storedBoolean(job.stalled),
+    termination_reason: compactText(job.termination_reason),
+    partial_output_available: storedBoolean(job.partial_output_available),
+    workspace_changed: storedBoolean(job.workspace_changed),
+    workspace_tainted: storedBoolean(job.workspace_tainted),
+    log_bytes: typeof job.log_bytes === 'number' ? job.log_bytes : null,
+  };
+}
+
 function redactLog(value) {
   return String(value)
     .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|secret)\s*[:=]\s*)[^\s,]+/gi, '$1[REDACTED]')
@@ -906,7 +958,7 @@ async function statusTool(args) {
     versions: detectedVersions,
     jobs: {
       active: jobs.filter((job) => ACTIVE_STATES.has(job.status)).length,
-      recent: jobs.slice(0, recentLimit).map(publicJob),
+      recent: jobs.slice(0, recentLimit).map(compactJob),
     },
   };
   if (grokDiagnostic) {
@@ -1443,7 +1495,7 @@ async function jobsTool(args) {
     return {
       ok: true,
       limits: WAIT_LIMITS,
-      jobs: (await listJobs(limit)).map(publicJob),
+      jobs: (await listJobs(limit)).map(compactJob),
     };
   }
   if (!['get', 'wait', 'logs'].includes(args.action)) {

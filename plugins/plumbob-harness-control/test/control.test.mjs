@@ -158,6 +158,103 @@ printf "grok 1.0.4 (test)\\n"
   assert.equal(failedDiagnosticStatus.grok_build.auth_note, failedDiagnosticStatus.diagnostics.grok_build.note);
 });
 
+test('status and jobs list expose bounded job summaries while jobs get keeps detail', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-compact-status-test-'));
+  const state = directory;
+  const fakeGrok = path.join(directory, 'grok');
+  await writeFile(fakeGrok, '#!/bin/sh\nprintf "grok 1.0.4 (test)\\n"\n', { mode: 0o755 });
+  const createdAt = new Date(Date.now() - 5000).toISOString();
+  const targetContext = {
+    schema_version: 'codex-co-engineer.target.v1',
+    mode: 'explicit',
+    working_directory: directory,
+    expected_git_root: directory,
+    expected_head: 'a'.repeat(40),
+    allowed_paths: ['.'],
+    role: 'review',
+    prompt_should_not_escape: 'private-target-contract',
+  };
+  const effectiveConfiguration = {
+    kind: 'grok_build',
+    model: 'grok-4.6',
+    prompt: 'private prompt that must remain available only through jobs get',
+    target_fingerprint: 'sha256:' + 'b'.repeat(64),
+    configuration_digest: 'sha256:' + 'c'.repeat(64),
+  };
+  const database = openStore(path.join(state, 'control.sqlite3'));
+  insertJob(database, {
+    id: 'grok-build-compact-1234',
+    kind: 'grok_build',
+    status: 'succeeded',
+    summary: 'private summary that should not be copied into routine status',
+    created_at: createdAt,
+    updated_at: createdAt,
+    started_at: createdAt,
+    finished_at: new Date().toISOString(),
+    elapsed_seconds: 4.2,
+    termination_reason: 'x'.repeat(1000),
+    effective_configuration: JSON.stringify(effectiveConfiguration),
+    target_context: JSON.stringify(targetContext),
+    log_file: path.join(state, 'job.log'),
+    cancel_file: path.join(state, 'job.cancel'),
+    log_bytes: 987654,
+  });
+  database.close();
+
+  const previous = {
+    command: process.env.CODEX_CO_ENGINEER_GROK_COMMAND,
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+    workspace: process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE,
+  };
+  process.env.CODEX_CO_ENGINEER_GROK_COMMAND = fakeGrok;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = state;
+  process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE = directory;
+  context.after(async () => {
+    if (previous.command === undefined) delete process.env.CODEX_CO_ENGINEER_GROK_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_GROK_COMMAND = previous.command;
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    if (previous.workspace === undefined) delete process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE;
+    else process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE = previous.workspace;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const { dispatchControl } = await import(`../mcp/control.mjs?compact-status=${Date.now()}`);
+  const status = await dispatchControl('status', { recent_limit: 1 });
+  const recent = status.jobs.recent;
+  assert.equal(recent.length, 1);
+  assert.deepEqual(recent[0], {
+    id: 'grok-build-compact-1234',
+    kind: 'grok_build',
+    role: 'review',
+    status: 'completed',
+    terminal_state: 'completed',
+    failure_class: null,
+    created_at: createdAt,
+    started_at: createdAt,
+    finished_at: recent[0].finished_at,
+    deadline_at: null,
+    last_activity_at: null,
+    elapsed_seconds: 4.2,
+    stalled: null,
+    termination_reason: `${'x'.repeat(159)}…`,
+    partial_output_available: null,
+    workspace_changed: null,
+    workspace_tainted: null,
+    log_bytes: 987654,
+  });
+  const serializedStatus = JSON.stringify(status);
+  assert.ok(serializedStatus.length < 5000, `status should remain compact (${serializedStatus.length} bytes)`);
+  assert.doesNotMatch(serializedStatus, /private prompt|private-target-contract|effective_configuration|lifecycle/);
+
+  const listed = await dispatchControl('jobs', { action: 'list', limit: 1 });
+  assert.deepEqual(listed.jobs[0], recent[0]);
+  const detailed = await dispatchControl('jobs', { action: 'get', job_id: 'grok-build-compact-1234', tail_lines: 0 });
+  assert.equal(detailed.job.effective_configuration.prompt, effectiveConfiguration.prompt);
+  assert.equal(detailed.job.target_context.prompt_should_not_escape, targetContext.prompt_should_not_escape);
+  assert.ok(Array.isArray(detailed.job.lifecycle));
+});
+
 test('explicit targets are not limited to the default workspace and allow implement contracts', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-target-policy-test-'));
   context.after(async () => rm(directory, { recursive: true, force: true }));
