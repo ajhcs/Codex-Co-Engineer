@@ -23,6 +23,13 @@ timeout_seconds = 120
 quiet_seconds = 15
 
 [[stages]]
+name = "plugin-activation-fixture"
+kind = "integration_tests"
+command = ["node", "scripts/plugin-activation-fixture.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 60
+
+[[stages]]
 name = "mcp-inspector"
 kind = "integration_tests"
 command = ["node", "scripts/inspector-preflight.mjs"]
