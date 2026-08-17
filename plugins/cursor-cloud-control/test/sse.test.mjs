@@ -12,6 +12,33 @@ function responseFromChunks(chunks) {
   return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
 }
 
+function delayedResponse(chunks, delayMs) {
+  let index = 0;
+  let cancelled = false;
+  let pendingTimer;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (cancelled) return;
+      if (index >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new TextEncoder().encode(chunks[index++]));
+      if (index < chunks.length) {
+        return new Promise((resolve) => {
+          pendingTimer = setTimeout(resolve, delayMs);
+        });
+      }
+      return undefined;
+    },
+    cancel() {
+      cancelled = true;
+      clearTimeout(pendingTimer);
+    },
+  });
+  return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+}
+
 test('parses fragmented SSE frames, multiline data, IDs, comments, unknown events, and done', async () => {
   const response = responseFromChunks([
     ': heartbeat\r\n\r\nevent: status\ndata: {"runId":"run-1","status":"RUNNING"}\r\n\r\n',
@@ -35,7 +62,29 @@ test('bounds stream output and preserves resume metadata', async () => {
   assert.equal(result.lastEventId, 'second');
 });
 
-test('stream timeout is bounded', async () => {
-  const response = new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } });
-  await assert.rejects(consumeSse(response, { timeoutMs: 10 }), (error) => error.code === 'stream_timeout');
+test('deduplicates resumed IDs while preserving the exact latest cursor', async () => {
+  const response = responseFromChunks([
+    'id: cursor-1\nevent: assistant\ndata: {"text":"replayed"}\n\n',
+    'id: cursor-2\nevent: assistant\ndata: {"text":"next"}\n\n',
+    'id: cursor-2\nevent: assistant\ndata: {"text":"duplicate"}\n\n',
+  ]);
+  const result = await consumeSse(response, { lastEventId: 'cursor-1' });
+  assert.deepEqual(result.events.map((event) => event.id), ['cursor-2']);
+  assert.equal(result.events[0].data.text, 'next');
+  assert.equal(result.lastEventId, 'cursor-2');
+  assert.equal(result.timedOut, false);
+});
+
+test('bounded timeout returns parsed redacted events and resume metadata', async () => {
+  const response = delayedResponse([
+    'id: cursor-1\nevent: assistant\ndata: {"text":"unit-secret-value"}\n\n',
+    'id: cursor-2\nevent: assistant\ndata: {"text":"later"}\n\n',
+  ], 100);
+  const result = await consumeSse(response, { timeoutMs: 20, secrets: ['unit-secret-value'] });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.complete, false);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].id, 'cursor-1');
+  assert.equal(result.events[0].data.text, '[REDACTED]');
+  assert.equal(result.lastEventId, 'cursor-1');
 });

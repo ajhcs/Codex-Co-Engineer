@@ -11,6 +11,7 @@ export async function consumeSse(response, {
   maxBytes = 500_000,
   timeoutMs = 30_000,
   secrets = [],
+  lastEventId: resumeFrom,
 } = {}) {
   if (!response?.body?.getReader) throw new CursorApiError('stream_unavailable', 'Cursor stream did not expose a readable body.');
   const reader = response.body.getReader();
@@ -21,11 +22,12 @@ export async function consumeSse(response, {
   let eventId;
   let dataLines = [];
   let totalBytes = 0;
-  let lastEventId;
+  let lastEventId = typeof resumeFrom === 'string' ? resumeFrom : undefined;
   let complete = false;
   let truncated = false;
   let timedOut = false;
   let finished = false;
+  const returnedIds = new Set(typeof resumeFrom === 'string' ? [resumeFrom] : []);
   const timer = setTimeout(() => {
     timedOut = true;
     reader.cancel().catch(() => {});
@@ -41,8 +43,12 @@ export async function consumeSse(response, {
       ...(eventId !== undefined ? { id: eventId } : {}),
     };
     if (eventId !== undefined) lastEventId = eventId;
-    if (events.length < maxEvents) events.push(event);
-    else truncated = true;
+    if (eventId === undefined || !returnedIds.has(eventId)) {
+      if (events.length < maxEvents) {
+        events.push(event);
+        if (eventId !== undefined) returnedIds.add(eventId);
+      } else truncated = true;
+    }
     if (rawName === 'done') { complete = true; finished = true; }
     eventName = '';
     eventId = undefined;
@@ -87,12 +93,15 @@ export async function consumeSse(response, {
     if (!finished && buffer) line(buffer);
     if (!finished) dispatch();
   } catch (error) {
-    if (timedOut) throw new CursorApiError('stream_timeout', 'Cursor stream exceeded the configured time bound.', { details: { events: events.length, lastEventId } });
-    throw error;
+    if (timedOut) {
+      // A bounded timeout is an expected partial-stream result. Keep the
+      // parsed, already-redacted events and cursor so the caller can resume.
+    } else {
+      throw error;
+    }
   } finally {
     clearTimeout(timer);
     reader.releaseLock?.();
   }
-  if (timedOut) throw new CursorApiError('stream_timeout', 'Cursor stream exceeded the configured time bound.', { details: { events: events.length, lastEventId } });
-  return { events, lastEventId, complete, truncated, bytes: totalBytes };
+  return { events, lastEventId, complete, truncated, timedOut, bytes: totalBytes };
 }
