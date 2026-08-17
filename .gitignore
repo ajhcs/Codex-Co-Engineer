@@ -1,6 +1,5 @@
 # Public release boundary: these paths belong to a private local checkout.
 Secrets/
-prime-intellect-lab/
 docs/research/
 
 # Codex and local orchestration state.
@@ -11,7 +10,6 @@ docs/research/
 .claude/
 .cursor/
 .opencode/
-.prime/
 .dsh/
 state/
 logs/

@@ -56,7 +56,7 @@ if (configurationExample.schema_version !== 'codex-co-engineer.config.v1'
   throw new Error('Configuration example must use the strict v1 explicit-target contract.');
 }
 
-const skipped = new Set(['.git', '.serena', 'Secrets', 'prime-intellect-lab', 'node_modules', 'research']);
+const skipped = new Set(['.git', '.serena', 'Secrets', 'node_modules', 'research']);
 const forbidden = [
   /\/home\/plumbob\b/g,
   /\/mnt\/d\/Coding Projects\/CheapTesting/g,
