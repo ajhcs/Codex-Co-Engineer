@@ -189,12 +189,27 @@ serialization, and forces `output_format: "json"`. `include_partial_messages`
 is accepted only with `streaming-messages-json`; `verbatim` is a boolean prompt
 transport control.
 
-Review and verify force a read-only target preamble, Grok `plan` permission mode,
-and the `read-only` sandbox; automatic approval, `no_plan`, and write-capable
-allow rules are rejected. Implement may narrow the default `workspace` sandbox
-and permission mode, and may explicitly request `--always-approve`; this is an
-implement-only CLI flag, not a separate connector permission mode. The
+Permission mode is role-dependent in the advertised MCP schema as well as at
+runtime. Review and verify accept only `default` or `plan`, then force a
+read-only target preamble, Grok `plan` permission mode, and the `read-only`
+sandbox; automatic approval, `no_plan`, and write-capable allow rules are
+rejected. Headless implement runs omit the field or use Grok's noninteractive
+`auto` permission mode inside the bounded `workspace` sandbox because
+interactive approval modes can cancel edits when no approval channel exists.
+An implement run that exits without changing an allowed path is reported as a
+contract/integrity failure, not a generic provider process failure. The
 postflight Git scope verifier remains authoritative for `allowed_paths`.
+
+Sandbox enforcement remains owned by the official Grok CLI ([built-in sandbox
+profiles](https://docs.x.ai/build/features/sandbox)). The connector accepts
+only Grok's built-in `off`, `workspace`, `devbox`, `read-only`, and
+`strict` profiles, records the normalized profile in the effective
+configuration, and passes it as the exact `--sandbox <profile>` argument. The
+status summary reports `managed_by: "grok_cli"` and
+`enforcement: "cli_managed"`; it does not guess at host-specific Landlock or
+Seatbelt capabilities and does not attempt to emulate them. The connector
+still verifies the configured executable with `grok --version` and records
+actual process-start failures from the managed spawn.
 
 The official CLI also provides ACP through `grok agent stdio`. This release
 uses the documented headless prompt interface instead of inventing an ACP

@@ -838,6 +838,10 @@ async function statusTool(args) {
   const listening = await portOpen();
   const detectedVersions = versions();
   const grokStatus = grokVersionProbe(GROK, PLUGIN_ROOT, grokEnvironment());
+  // The default path deliberately avoids a provider request.  When the
+  // caller explicitly asks for diagnostics, use that bounded read-only probe
+  // as the source of truth for the summary returned in this same response.
+  const grokDiagnostic = args.diagnostics === true ? grokAuthDoctor() : null;
   const deepseekConfigured = detectedVersions.compatible.deepseek_harness;
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
@@ -860,11 +864,12 @@ async function statusTool(args) {
       executable: GROK,
       version: grokStatus.version,
       executable_state: grokStatus.executable_state,
-      auth_state: 'unknown',
-      ready: false,
-      auth_note: grokStatus.executable_state === 'missing'
+      sandbox: { managed_by: 'grok_cli', enforcement: 'cli_managed' },
+      auth_state: grokDiagnostic?.auth_state ?? 'unknown',
+      ready: grokDiagnostic?.ok === true && grokDiagnostic.auth_state === 'ready',
+      auth_note: grokDiagnostic?.note ?? (grokStatus.executable_state === 'missing'
         ? 'Install the official Grok Build CLI and authenticate it with `grok login` (or provide XAI_API_KEY) before dispatch.'
-        : 'Auth remains unknown in the default status path; call status with diagnostics=true to run the documented read-only `grok models` probe. Status never opens a browser or starts a coding request.',
+        : 'Auth remains unknown in the default status path; call status with diagnostics=true to run the documented read-only `grok models` probe. Status never opens a browser or starts a coding request.'),
       api_key_available: Boolean(process.env.XAI_API_KEY),
     },
     targeting: {
@@ -904,9 +909,9 @@ async function statusTool(args) {
       recent: jobs.slice(0, recentLimit).map(publicJob),
     },
   };
-  if (args.diagnostics === true) {
+  if (grokDiagnostic) {
     result.diagnostics = {
-      grok_build: grokAuthDoctor(),
+      grok_build: grokDiagnostic,
     };
   }
   return result;

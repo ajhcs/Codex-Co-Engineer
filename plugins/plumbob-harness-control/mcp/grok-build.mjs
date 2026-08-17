@@ -277,6 +277,9 @@ export function normalizeGrokConfiguration(input = {}, role = 'review') {
     if (['dontAsk', 'bypassPermissions'].includes(permissionMode)) {
       invalid('permission_mode', 'implement roles cannot bypass the bounded permission policy.');
     }
+    if (permissionMode !== null && permissionMode !== 'auto') {
+      invalid('permission_mode', 'headless implement roles require auto so workspace edits cannot stall or be cancelled waiting for an unavailable approval channel.');
+    }
     if (requestedSandbox === 'off' || requestedSandbox === 'devbox') {
       invalid('sandbox_profile', 'implement roles cannot widen the bounded workspace sandbox.');
     }
@@ -286,7 +289,7 @@ export function normalizeGrokConfiguration(input = {}, role = 'review') {
     : requestedSandbox ?? 'workspace';
   const effectivePermission = effectiveRole === 'review' || effectiveRole === 'verify'
     ? 'plan'
-    : permissionMode ?? 'default';
+    : permissionMode ?? 'auto';
 
   return Object.freeze({
     model,

@@ -38,9 +38,21 @@ The preflight receipt records:
 - server identity
 - available tools
 
-Review and verify roles are read-only. Implement roles are scope-limited and
-must be independently checked after execution. Do not reuse a checkout after
-timeout or cancellation until its taint and partial changes are inspected.
+Review and verify roles are read-only. Their advertised permission modes are
+limited to `default`/`plan` and the runtime forces `plan`; implement roles may
+omit permission_mode or must use Grok's noninteractive `auto` mode inside the
+bounded workspace sandbox. They must change at least one allowlisted path and
+be independently checked after execution. A successful implement process that
+does not produce a net allowlisted workspace change is a contract/integrity
+failure. Do not reuse a checkout after timeout or cancellation until its taint
+and partial changes are inspected.
+
+Sandbox enforcement is owned by the official Grok CLI ([sandbox profiles](https://docs.x.ai/build/features/sandbox)). Use only its built-in
+`off`, `workspace`, `devbox`, `read-only`, and `strict` profiles; the connector
+passes the selected profile as `--sandbox <profile>` and reports the effective
+profile rather than probing or emulating host-specific Landlock/Seatbelt
+capabilities. Status verifies `grok --version`; dispatch reports actual
+managed-process startup failures if the CLI cannot be spawned.
 
 ## Lifecycle and data handling
 

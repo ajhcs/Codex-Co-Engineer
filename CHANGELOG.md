@@ -44,8 +44,18 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 
 ### Changed
 
-- Co-Engineer is versioned `2.0.1` because the supported worker-kind contract
+- Co-Engineer is versioned `2.0.3` because the supported worker-kind contract
   is now exactly `deepseek_agent` and `grok_build`.
+- Co-Engineer keeps sandbox enforcement inside the official Grok CLI: the
+  connector passes a validated built-in profile and does not assume a host
+  sandbox implementation.
+- Co-Engineer `2.0.3` uses Grok's noninteractive `auto` permission mode for
+  implement jobs and fails closed when an implement run exits without an
+  allowed workspace change.
+- Cursor Cloud Control `0.1.1` gives repository discovery and repository-backed
+  creation one bounded 60-second attempt, never retries the strictly
+  rate-limited inventory endpoint, and degrades discovery timeouts into an
+  explicit unavailable result.
 - DeepSeek Harness is invoked directly in the attested target checkout and is
   validated independently through its own CLI version.
 - Root and plugin documentation now describe every MCP tool, accepted worker

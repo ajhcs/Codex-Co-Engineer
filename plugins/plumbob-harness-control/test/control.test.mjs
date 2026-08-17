@@ -106,7 +106,7 @@ test('status probes Grok independently of a missing default workspace', async (c
   const state = path.join(directory, 'state');
   const missingWorkspace = path.join(directory, 'missing-default-workspace');
   const fakeGrok = path.join(directory, 'grok');
-  await writeFile(fakeGrok, '#!/usr/bin/env node\nconsole.log("grok 1.0.4 (test)");\n', { mode: 0o755 });
+  await writeFile(fakeGrok, '#!/bin/sh\nprintf "grok 1.0.4 (test)\\n"\n', { mode: 0o755 });
 
   const previous = {
     command: process.env.CODEX_CO_ENGINEER_GROK_COMMAND,
@@ -132,6 +132,30 @@ test('status probes Grok independently of a missing default workspace', async (c
   assert.equal(status.grok_build.availability, 'installed');
   assert.equal(status.grok_build.executable_state, 'installed');
   assert.match(status.grok_build.version, /grok 1\.0\.4/);
+  assert.deepEqual(status.grok_build.sandbox, {
+    managed_by: 'grok_cli',
+    enforcement: 'cli_managed',
+  });
+
+  const diagnosticStatus = await dispatchControl('status', { recent_limit: 0, diagnostics: true });
+  assert.equal(diagnosticStatus.diagnostics.grok_build.ok, true);
+  assert.equal(diagnosticStatus.diagnostics.grok_build.auth_state, 'ready');
+  assert.equal(diagnosticStatus.grok_build.auth_state, 'ready');
+  assert.equal(diagnosticStatus.grok_build.ready, true);
+  assert.equal(diagnosticStatus.grok_build.auth_note, diagnosticStatus.diagnostics.grok_build.note);
+  await writeFile(fakeGrok, `#!/bin/sh
+if [ "$1" = "models" ]; then
+  printf "login required: credentials unavailable\\n" >&2
+  exit 1
+fi
+printf "grok 1.0.4 (test)\\n"
+`, { mode: 0o755 });
+  const failedDiagnosticStatus = await dispatchControl('status', { recent_limit: 0, diagnostics: true });
+  assert.equal(failedDiagnosticStatus.diagnostics.grok_build.ok, false);
+  assert.equal(failedDiagnosticStatus.diagnostics.grok_build.auth_state, 'unauthenticated');
+  assert.equal(failedDiagnosticStatus.grok_build.auth_state, 'unauthenticated');
+  assert.equal(failedDiagnosticStatus.grok_build.ready, false);
+  assert.equal(failedDiagnosticStatus.grok_build.auth_note, failedDiagnosticStatus.diagnostics.grok_build.note);
 });
 
 test('explicit targets are not limited to the default workspace and allow implement contracts', async (context) => {

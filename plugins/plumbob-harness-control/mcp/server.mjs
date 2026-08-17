@@ -291,7 +291,7 @@ const GROK_CONFIGURATION_PROPERTIES = {
   permission_mode: {
     type: 'string',
     enum: ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions', 'plan'],
-    description: 'Grok permission mode. Review/verify force plan; implement rejects dontAsk and bypassPermissions.',
+    description: 'Role-dependent Grok permission mode. Review/verify accept only default or plan and force plan at runtime; implement defaults to and requires noninteractive auto.',
   },
   rules: {
     type: 'string',
@@ -346,12 +346,67 @@ const GROK_CONFIGURATION_PROPERTIES = {
   fork_session: { type: 'boolean', default: false, description: 'Pass Grok --fork-session when resuming or continuing a session.' },
 };
 
+// Keep the advertised schema aligned with normalizeGrokConfiguration. Grok
+// fields remain visible at the top level for compact client forms, while this
+// guard makes their presence conditional on kind=grok_build. This matters for
+// DeepSeek/preflight callers because the runtime rejects those fields before
+// dispatch rather than silently ignoring them.
+const GROK_READ_ONLY_TOOL_PATTERN = '^(?:[Rr]_?[Ee]_?[Aa]_?[Dd]|[Gg]_?[Rr]_?[Ee]_?[Pp]|[Gg]_?[Ll]_?[Oo]_?[Bb]|[Ll]_?[Ss]|[Ff]_?[Ii]_?[Nn]_?[Dd]|[Ww]_?[Ee]_?[Bb]_?[Ff]_?[Ee]_?[Tt]_?[Cc]_?[Hh]|[Ww]_?[Ee]_?[Bb]_?[Ss]_?[Ee]_?[Aa]_?[Rr]_?[Cc]_?[Hh])$';
+
+const GROK_ROLE_POLICY = {
+  if: {
+    required: ['target_context'],
+    properties: {
+      target_context: {
+        properties: { role: { const: 'implement' } },
+        required: ['role'],
+      },
+    },
+  },
+  then: {
+    properties: {
+      permission_mode: { const: 'auto' },
+      sandbox_profile: { enum: ['workspace', 'read-only', 'strict'] },
+    },
+    description: 'Implement targets omit permission_mode or use noninteractive auto and remain within the workspace sandbox.',
+  },
+  else: {
+    properties: {
+      permission_mode: { enum: ['default', 'plan'] },
+      sandbox_profile: { const: 'read-only' },
+      allowed_tools: {
+        items: { pattern: GROK_READ_ONLY_TOOL_PATTERN },
+      },
+      always_approve: { const: false },
+      no_plan: { const: false },
+    },
+    description: 'Review and verify targets omit permission_mode or use default/plan, retain plan mode, and expose only read-only tools.',
+  },
+};
+
+const GROK_KIND_FIELD_POLICY = {
+  if: {
+    properties: { kind: { const: 'grok_build' } },
+    required: ['kind'],
+  },
+  then: GROK_ROLE_POLICY,
+  else: {
+    not: {
+      anyOf: Object.keys(GROK_CONFIGURATION_PROPERTIES).map((field) => ({
+        required: [field],
+      })),
+    },
+    description: 'DeepSeek and generic preflight requests must omit Grok-only configuration fields.',
+  },
+};
+
 const TOOLS = [
   {
     name: 'preflight',
     description: 'Resolve and attest exactly one target/configuration before dispatch. The caller must supply expected_target_fingerprint; a mismatch is fatal.',
     inputSchema: {
       type: 'object',
+      allOf: [GROK_KIND_FIELD_POLICY],
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
         kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'grok_build'], default: 'preflight' },
@@ -420,6 +475,7 @@ const TOOLS = [
     description: 'Queue a kind-specific Co-Engineer task and return effective_configuration plus a stable job ID. Grok Build uses the official direct headless CLI with typed model, session, reasoning, sandbox, permission, tool, and bounded policy controls.',
     inputSchema: {
       type: 'object',
+      allOf: [GROK_KIND_FIELD_POLICY],
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
         kind: { type: 'string', enum: ['deepseek_agent', 'grok_build'] },

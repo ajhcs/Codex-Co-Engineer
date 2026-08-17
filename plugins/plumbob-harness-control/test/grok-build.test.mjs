@@ -49,7 +49,7 @@ test('Grok session fork, approval, sandbox, and feature flags map to the local 1
     resume: true,
     fork_session: true,
     sandbox_profile: 'strict',
-    permission_mode: 'acceptEdits',
+    permission_mode: 'auto',
     always_approve: true,
     no_auto_update: false,
     experimental_memory: true,
@@ -61,7 +61,7 @@ test('Grok session fork, approval, sandbox, and feature flags map to the local 1
   }), [
     '-p', 'continue this bounded task', '--cwd', '/tmp/target',
     '--output-format', 'streaming-messages-json', '--resume', '--fork-session',
-    '--sandbox', 'strict', '--permission-mode', 'acceptEdits', '--always-approve',
+    '--sandbox', 'strict', '--permission-mode', 'auto', '--always-approve',
     '--experimental-memory',
   ]);
 });
@@ -85,7 +85,7 @@ test('Grok structured output and message flags map to bounded official CLI argv'
     cwd: '/tmp/target',
     configuration: booleanSchema,
   }).slice(-6), [
-    '--json-schema', 'false', '--sandbox', 'workspace', '--permission-mode', 'default',
+    '--json-schema', 'false', '--sandbox', 'workspace', '--permission-mode', 'auto',
   ]);
   assert.deepEqual(buildGrokArgs({
     prompt: 'return a name',
@@ -93,7 +93,7 @@ test('Grok structured output and message flags map to bounded official CLI argv'
     configuration: structured,
   }), [
     '--no-auto-update', '-p', 'return a name', '--cwd', '/tmp/target', '--output-format', 'json',
-    '--json-schema', JSON.stringify(schema), '--verbatim', '--sandbox', 'workspace', '--permission-mode', 'default',
+    '--json-schema', JSON.stringify(schema), '--verbatim', '--sandbox', 'workspace', '--permission-mode', 'auto',
   ]);
 
   const partial = normalizeGrokConfiguration({
@@ -107,7 +107,7 @@ test('Grok structured output and message flags map to bounded official CLI argv'
   }), [
     '--no-auto-update', '-p', 'stream this task', '--cwd', '/tmp/target',
     '--output-format', 'streaming-messages-json', '--include-partial-messages',
-    '--sandbox', 'workspace', '--permission-mode', 'default',
+    '--sandbox', 'workspace', '--permission-mode', 'auto',
   ]);
 });
 
@@ -117,7 +117,7 @@ test('Grok session and role policy validation fails closed', () => {
   assert.equal(reviewDefaults.permission_mode, 'plan');
   const implementDefaults = normalizeGrokConfiguration({}, 'implement');
   assert.equal(implementDefaults.sandbox_profile, 'workspace');
-  assert.equal(implementDefaults.permission_mode, 'default');
+  assert.equal(implementDefaults.permission_mode, 'auto');
   assert.throws(
     () => normalizeGrokConfiguration({ session_id: 'not-a-uuid' }, 'implement'),
     /session_id must be a valid UUID/,
@@ -145,6 +145,10 @@ test('Grok session and role policy validation fails closed', () => {
   assert.throws(
     () => normalizeGrokConfiguration({ permission_mode: 'bypassPermissions' }, 'implement'),
     /cannot bypass/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ permission_mode: 'acceptEdits' }, 'implement'),
+    /require auto/,
   );
   assert.throws(
     () => normalizeGrokConfiguration({ always_approve: null }, 'implement'),
