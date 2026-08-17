@@ -27,6 +27,12 @@ The control plane stores only bounded metadata and redacted logs in an
 owner-only state directory. It does not accept arbitrary shell commands,
 ports, provider URLs, or environment maps as tool arguments.
 
+Provider CLIs run inside the control plane's managed process-group lifecycle.
+They may use their documented in-session background-job and subagent features,
+but must not daemonize or reparent work outside that lifecycle. Such detached
+processes are outside the supported worker contract and cannot be reliably
+cancelled or included in the final target snapshot.
+
 ## Install
 
 1. Install Node.js 24 or newer.

@@ -52,6 +52,12 @@ temporary `url`. The models and repositories references currently document no
 pagination query controls, so the plugin does not invent `limit` or `cursor`
 arguments for those discovery calls.
 
+That temporary artifact URL is trusted only as an authenticated Cursor API
+output for the exact listed artifact; it is never accepted from a tool caller.
+The adapter enforces bounded HTTPS redirects and rejects obvious local or
+private destinations, but it is not a general-purpose URL fetcher or a complete
+SSRF boundary for provider-compromise scenarios.
+
 The API is public beta and may change. Fleet worker administration, worker
 token minting, webhooks, and v0 private-worker routes are deliberately outside
 this plugin. Cursor currently exposes custom subagent configuration in the
