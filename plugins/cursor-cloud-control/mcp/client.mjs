@@ -1,4 +1,5 @@
 import { lstat, readFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { redactText } from './redaction.mjs';
 
@@ -9,6 +10,7 @@ export const DEFAULT_REPOSITORY_TIMEOUT_MS = 60_000;
 export const DEFAULT_MAX_RESPONSE_BYTES = 2_000_000;
 export const DEFAULT_MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 export const DEFAULT_MAX_REQUEST_BYTES = 25 * 1024 * 1024;
+export const DEFAULT_MAX_ARTIFACT_REDIRECTS = 5;
 
 export function defaultApiKeyFile(env = process.env) {
   return path.resolve(path.join(env.XDG_CONFIG_HOME ?? path.join(env.HOME ?? '.', '.config'), 'cursor-cloud-control', 'api-key'));
@@ -170,6 +172,107 @@ function contentType(response) {
   return String(response.headers?.get?.('content-type') ?? '').toLowerCase().split(';', 1)[0].trim();
 }
 
+const ARTIFACT_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const ARTIFACT_METADATA_HOSTS = new Set([
+  'instance-data',
+  'instance-data.ec2.internal',
+  'metadata',
+  'metadata.azure.com',
+  'metadata.azure.internal',
+  'metadata.google.com',
+  'metadata.google.internal',
+]);
+
+function unsafeIpv4(hostname) {
+  const octets = hostname.split('.').map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [first, second, third] = octets;
+  return first === 0
+    || first === 10
+    || first === 100 && second >= 64 && second <= 127
+    || first === 127
+    || first === 169 && second === 254
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && second === 0 && third === 0
+    || first === 192 && second === 0 && third === 2
+    || first === 192 && second === 88 && third === 99
+    || first === 192 && second === 168
+    || first === 198 && (second === 18 || second === 19)
+    || first === 198 && second === 51 && third === 100
+    || first === 203 && second === 0 && third === 113
+    || first >= 224;
+}
+
+function parseIpv6(hostname) {
+  const value = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const sections = value.split('::');
+  if (sections.length > 2) return null;
+  const parseSection = (section) => {
+    if (!section) return [];
+    const values = section.split(':');
+    const groups = [];
+    for (const part of values) {
+      if (part.includes('.')) {
+        const octets = part.split('.').map((entry) => Number(entry));
+        if (octets.length !== 4 || octets.some((entry) => !Number.isInteger(entry) || entry < 0 || entry > 255)) return null;
+        groups.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+        groups.push(Number.parseInt(part, 16));
+      }
+    }
+    return groups;
+  };
+  const left = parseSection(sections[0]);
+  const right = sections.length === 2 ? parseSection(sections[1]) : [];
+  if (!left || !right) return null;
+  if (sections.length === 1) return left.length === 8 ? left : null;
+  if (left.length + right.length >= 8) return null;
+  return [...left, ...Array(8 - left.length - right.length).fill(0), ...right];
+}
+
+function unsafeIpv6(hostname) {
+  const groups = parseIpv6(hostname);
+  if (!groups) return false;
+  const allZero = groups.every((group) => group === 0);
+  const loopback = allZero || groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
+  const uniqueLocal = (groups[0] & 0xfe00) === 0xfc00;
+  const linkLocal = (groups[0] & 0xffc0) === 0xfe80;
+  const siteLocal = (groups[0] & 0xffc0) === 0xfec0;
+  const multicast = (groups[0] & 0xff00) === 0xff00;
+  const ipv4Mapped = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+  const ipv4Compatible = groups.slice(0, 6).every((group) => group === 0);
+  if (ipv4Mapped) {
+    const first = groups[6] >> 8;
+    const second = groups[6] & 0xff;
+    const third = groups[7] >> 8;
+    const fourth = groups[7] & 0xff;
+    return unsafeIpv4(`${first}.${second}.${third}.${fourth}`);
+  }
+  return loopback || uniqueLocal || linkLocal || siteLocal || multicast || ipv4Compatible;
+}
+
+function validateArtifactUrl(value) {
+  let parsed;
+  try { parsed = value instanceof URL ? value : new URL(value); } catch {
+    throw new CursorApiError('invalid_artifact_url', 'Cursor returned an invalid artifact URL.');
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  const normalizedHost = hostname.replace(/^\[|\]$/g, '');
+  const ipVersion = isIP(normalizedHost);
+  const unsafeHost = ARTIFACT_METADATA_HOSTS.has(hostname)
+    || hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || hostname.endsWith('.internal')
+    || ipVersion === 4 && unsafeIpv4(normalizedHost)
+    || ipVersion === 6 && unsafeIpv6(normalizedHost);
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !hostname || unsafeHost) {
+    throw new CursorApiError('invalid_artifact_url', 'Cursor returned an unsafe artifact URL.');
+  }
+  return parsed;
+}
+
 export class CursorApiClient {
   constructor({
     apiKey,
@@ -291,20 +394,51 @@ export class CursorApiClient {
     return response;
   }
 
-  async fetchPresigned(urlValue, { maxBytes = DEFAULT_MAX_ARTIFACT_BYTES, timeoutMs = this.requestTimeoutMs } = {}) {
-    let parsed;
-    try { parsed = new URL(urlValue); } catch { throw new CursorApiError('invalid_artifact_url', 'Cursor returned an invalid artifact URL.'); }
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new CursorApiError('invalid_artifact_url', 'Cursor returned an unsafe artifact URL.');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response;
-    try {
-      response = await this.fetchImpl(parsed, { method: 'GET', headers: { Accept: '*/*' }, signal: controller.signal });
-    } catch (error) {
-      throw new CursorApiError(error?.name === 'AbortError' ? 'request_timeout' : 'network_error', 'Artifact download failed.');
-    } finally { clearTimeout(timer); }
-    if (!response.ok) throw new CursorApiError('artifact_download_failed', `Artifact download returned HTTP ${response.status}.`, { status: response.status });
-    return boundedBytes(response, maxBytes, timeoutMs);
+  async fetchPresigned(urlValue, { maxBytes = DEFAULT_MAX_ARTIFACT_BYTES, timeoutMs = this.requestTimeoutMs, maxRedirects = DEFAULT_MAX_ARTIFACT_REDIRECTS } = {}) {
+    if (!Number.isInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 10) {
+      throw new CursorApiError('invalid_configuration', 'maxRedirects must be an integer between 0 and 10.');
+    }
+    let current = validateArtifactUrl(urlValue);
+    const deadline = Date.now() + timeoutMs;
+    let redirects = 0;
+    while (true) {
+      const remaining = remainingDeadline(deadline);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remaining);
+      let response;
+      try {
+        response = await this.fetchImpl(current, {
+          method: 'GET',
+          // Presigned artifact hosts must never receive the Cursor API key.
+          headers: { Accept: '*/*' },
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error instanceof CursorApiError) throw error;
+        throw new CursorApiError(error?.name === 'AbortError' ? 'request_timeout' : 'network_error', 'Artifact download failed.');
+      } finally { clearTimeout(timer); }
+
+      if (ARTIFACT_REDIRECT_STATUSES.has(response.status)) {
+        if (redirects >= maxRedirects) {
+          await response.body?.cancel?.().catch(() => {});
+          throw new CursorApiError('artifact_redirect_limit', 'Artifact download exceeded the redirect limit.');
+        }
+        const location = response.headers?.get?.('location');
+        await response.body?.cancel?.().catch(() => {});
+        if (!location) throw new CursorApiError('artifact_download_failed', `Artifact redirect returned HTTP ${response.status} without a location.`, { status: response.status });
+        let next;
+        try { next = new URL(location, current); } catch {
+          throw new CursorApiError('invalid_artifact_url', 'Cursor returned an invalid artifact redirect.');
+        }
+        validateArtifactUrl(next);
+        current = next;
+        redirects += 1;
+        continue;
+      }
+      if (!response.ok) throw new CursorApiError('artifact_download_failed', `Artifact download returned HTTP ${response.status}.`, { status: response.status });
+      return boundedBytes(response, maxBytes, remainingDeadline(deadline));
+    }
   }
 
   me() { return this.json('/v1/me'); }

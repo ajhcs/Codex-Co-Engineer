@@ -125,6 +125,72 @@ test('repository discovery surfaces HTTP 429 without retrying', async () => {
   assert.equal(calls, 1);
 });
 
+test('fetches HTTPS presigned artifacts through bounded manual redirects without API authorization', async () => {
+  const calls = [];
+  const client = new CursorApiClient({
+    apiKey: 'unit-secret-value',
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      if (calls.length === 1) return new Response(null, { status: 302, headers: { location: 'https://cdn.example.test/artifacts/log.txt?signature=unit' } });
+      return new Response(new Uint8Array([97, 114, 116, 105, 102, 97, 99, 116]), { headers: { 'content-length': '8' } });
+    },
+  });
+
+  const bytes = await client.fetchPresigned('https://signed.example.test/download?signature=unit', { timeoutMs: 1_000 });
+  assert.equal(new TextDecoder().decode(bytes), 'artifact');
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.init.redirect, 'manual');
+    assert.deepEqual(call.init.headers, { Accept: '*/*' });
+    assert.equal(call.init.headers.Authorization, undefined);
+  }
+});
+
+test('rejects unsafe initial and redirected artifact destinations before fetching them', async () => {
+  const unsafeUrls = [
+    'http://cdn.example.test/artifact',
+    'https://user:password@cdn.example.test/artifact',
+    'https://127.0.0.1/artifact',
+    'https://10.0.0.8/artifact',
+    'https://169.254.169.254/latest/meta-data',
+    'https://[::1]/artifact',
+    'https://[fd00::8]/artifact',
+    'https://metadata.google.internal/artifact',
+  ];
+  for (const url of unsafeUrls) {
+    let calls = 0;
+    const client = new CursorApiClient({ apiKey: 'unit-secret-value', fetchImpl: async () => { calls += 1; return new Response('unexpected'); } });
+    await assert.rejects(client.fetchPresigned(url), (error) => error.code === 'invalid_artifact_url');
+    assert.equal(calls, 0, `unsafe initial URL was fetched: ${url}`);
+  }
+
+  for (const location of unsafeUrls) {
+    let calls = 0;
+    const client = new CursorApiClient({
+      apiKey: 'unit-secret-value',
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(null, { status: 302, headers: { location } });
+      },
+    });
+    await assert.rejects(client.fetchPresigned('https://signed.example.test/download'), (error) => error.code === 'invalid_artifact_url');
+    assert.equal(calls, 1, `unsafe redirect was followed: ${location}`);
+  }
+});
+
+test('bounds presigned artifact redirect hops', async () => {
+  const calls = [];
+  const client = new CursorApiClient({
+    apiKey: 'unit-secret-value',
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return new Response(null, { status: 302, headers: { location: `https://cdn.example.test/hop-${calls.length + 1}` } });
+    },
+  });
+  await assert.rejects(client.fetchPresigned('https://signed.example.test/start', { maxRedirects: 2 }), (error) => error.code === 'artifact_redirect_limit');
+  assert.equal(calls.length, 3);
+});
+
 test('classifies invalid JSON, content type, response size, timeout, and transport errors', async () => {
   const invalidJson = new CursorApiClient({ apiKey: 'unit-secret-value', fetchImpl: async () => new Response('{', { headers: { 'content-type': 'application/json' } }) });
   await assert.rejects(invalidJson.me(), (error) => error.code === 'invalid_json');
