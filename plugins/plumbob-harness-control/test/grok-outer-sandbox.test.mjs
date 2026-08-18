@@ -682,9 +682,11 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
     const argv = buildGrokOuterSandboxArgv({ prepared, invocation });
     for (const flag of [
       '--die-with-parent', '--unshare-all', '--share-net', '--disable-userns',
-      '--assert-userns-disabled', '--new-session', '--clearenv', '--remount-ro',
+      '--assert-userns-disabled', '--clearenv', '--remount-ro',
       '--ro-bind-fd', '--bind-fd',
     ]) assert.ok(argv.includes(flag), `missing boundary flag ${flag}`);
+    assert.equal(argv.includes('--new-session'), false,
+      'the provider must remain in the detached launcher process group');
     assert.ok(argv.some((value, index) => value === '--tmpfs' && argv[index + 1] === '/'));
     assert.equal(argv.includes('--ro-bind'), false, 'path-based host bind unexpectedly present');
     assert.equal(argv.includes('--bind'), false, 'path-based writable bind unexpectedly present');
@@ -952,21 +954,30 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
     assert.equal(ttlCompletion.outcome, 'ttl_expired');
     await assert.rejects(lstat(ttlPrepared.private_home), (error) => error?.code === 'ENOENT');
 
-    const stubbornPrepared = await prepareGrokOuterSandbox(
-      await makeRealOptions(tree, bwrap, 'stubborn', 10_000, tree.providerPath, busybox),
-    );
-    const stubbornRun = await spawnGrokOuterSandbox({
-      prepared: stubbornPrepared,
-      invocation: createGrokReviewInvocation({ operation: 'review', prompt: 'stubborn-child' }),
-    });
-    const stubbornStdout = collect(stubbornRun.child.stdout);
-    const stubbornStderr = collect(stubbornRun.child.stderr);
-    await cleanupGrokOuterSandbox(stubbornPrepared);
-    const stubbornCompletion = await stubbornRun.completion;
-    await Promise.all([stubbornStdout, stubbornStderr]);
-    assert.notEqual(stubbornCompletion.signal, null, 'manual cleanup did not terminate the stubborn process group');
-    assert.equal(stubbornCompletion.outcome, 'cancelled');
-    await assert.rejects(lstat(stubbornPrepared.private_home), (error) => error?.code === 'ENOENT');
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const stubbornPrepared = await prepareGrokOuterSandbox(
+        await makeRealOptions(tree, bwrap, `stubborn-${attempt}`, 10_000, tree.providerPath, busybox),
+      );
+      const stubbornRun = await spawnGrokOuterSandbox({
+        prepared: stubbornPrepared,
+        invocation: createGrokReviewInvocation({ operation: 'review', prompt: 'stubborn-child' }),
+      });
+      const stubbornStdout = collect(stubbornRun.child.stdout);
+      const stubbornStderr = collect(stubbornRun.child.stderr);
+      await cleanupGrokOuterSandbox(stubbornPrepared);
+      const stubbornCompletion = await stubbornRun.completion;
+      await Promise.all([stubbornStdout, stubbornStderr]);
+      assert.notEqual(stubbornCompletion.signal, null, 'manual cleanup did not terminate the stubborn process group');
+      assert.equal(stubbornCompletion.outcome, 'cancelled');
+      assert.equal(stubbornCompletion.cleaned, true);
+      assert.equal(stubbornCompletion.error, null);
+      assert.throws(
+        () => process.kill(-stubbornRun.child.pid, 0),
+        (error) => error?.code === 'ESRCH',
+        'the stubborn provider process group survived successful cleanup',
+      );
+      await assert.rejects(lstat(stubbornPrepared.private_home), (error) => error?.code === 'ENOENT');
+    }
   } finally {
     await rm(tree.base, { recursive: true, force: true });
     await rm(PROBE_HOST_MARKER, { force: true });

@@ -60,7 +60,7 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 
 ### Changed
 
-- Co-Engineer is versioned `2.1.1`; the supported worker-kind contract
+- Co-Engineer is versioned `2.1.2`; the supported worker-kind contract
   is now exactly `deepseek_agent` and `grok_build`.
 - The Grok auth doctor now treats an exit-zero CLI response that explicitly
   says the user is unauthenticated as unauthenticated, and the typed Grok
@@ -70,14 +70,18 @@ All notable public changes to Codex-Co-Engineer are recorded here.
   API key file, including when the legacy environment alias is used.
 - Public direct Grok dispatch keeps sandbox enforcement inside the official
   CLI. The separately packaged outer-boundary experiment is not runtime-wired
-  and still requires real host/systemd acceptance.
+  and still requires real host/systemd acceptance. Its Bubblewrap provider now
+  stays in the one owned detached process group, and bounded cleanup verifies
+  that both the launcher and group have drained before reporting success.
 - Review and verify dispatch rejects catch-all/write-capable permission rules,
   refuses project-local Grok, Cursor/Claude compatibility, or MCP configuration
   before provider startup, and isolates Grok capacity probes from repository
   working directories.
-- Co-Engineer `2.1.1` uses Grok's noninteractive `auto` permission mode for
-  implement jobs and fails closed when an implement run exits without an
-  allowed workspace change.
+- Co-Engineer `2.1.2` persists the validated worker kind into each internal
+  runner specification, restoring the protected DSH credential allowlist and
+  Grok's kind-specific HOME guard. It uses Grok's noninteractive `auto`
+  permission mode for implement jobs and fails closed when an implement run
+  exits without an allowed workspace change.
 - Cursor Cloud Control `0.3.0` packages the distinct local Cursor CLI
   foundation but keeps it unwired and not exposed in the production catalog;
   only status/auth/permissions diagnostics are ready pending real Cursor plus

@@ -1085,6 +1085,7 @@ async function startJob({
   insertJob(database, job);
   await writeSpec(specFile, {
     id,
+    kind,
     database_file: DATABASE_FILE,
     log_file: logFile,
     cancel_file: cancelFile,
