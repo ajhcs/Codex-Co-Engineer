@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdir, open, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { CursorApiError } from './client.mjs';
 
@@ -38,17 +39,75 @@ function nonEmptyString(value) {
 export function resolveStateDirectory(env = process.env) {
   if (Object.prototype.hasOwnProperty.call(env, 'CURSOR_CLOUD_CONTROL_STATE_DIR')) {
     const configured = nonEmptyString(env.CURSOR_CLOUD_CONTROL_STATE_DIR);
+    if (!configured) {
+      return {
+        directory: null,
+        source: 'environment',
+        reason: 'CURSOR_CLOUD_CONTROL_STATE_DIR is empty.',
+      };
+    }
+    if (!path.isAbsolute(configured)) {
+      return {
+        directory: null,
+        source: 'environment',
+        reason: 'CURSOR_CLOUD_CONTROL_STATE_DIR must be an absolute path.',
+      };
+    }
     return {
-      directory: configured ? path.resolve(configured) : null,
+      directory: configured,
       source: 'environment',
-      reason: configured ? null : 'CURSOR_CLOUD_CONTROL_STATE_DIR is empty.',
+      reason: null,
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(env, 'CODEX_TASK_STATE_ROOT')) {
+    const sharedRoot = nonEmptyString(env.CODEX_TASK_STATE_ROOT);
+    if (!sharedRoot) {
+      return {
+        directory: null,
+        source: 'task_state_root',
+        reason: 'CODEX_TASK_STATE_ROOT is empty.',
+      };
+    }
+    if (!path.isAbsolute(sharedRoot)) {
+      return {
+        directory: null,
+        source: 'task_state_root',
+        reason: 'CODEX_TASK_STATE_ROOT must be an absolute path.',
+      };
+    }
+    return {
+      directory: path.join(sharedRoot, 'cursor-cloud-control'),
+      source: 'task_state_root',
+      reason: null,
     };
   }
   const xdg = nonEmptyString(env.XDG_STATE_HOME);
-  if (xdg) return { directory: path.resolve(path.join(xdg, 'cursor-cloud-control')), source: 'xdg_state_home', reason: null };
+  if (xdg) {
+    if (!path.isAbsolute(xdg)) {
+      return {
+        directory: null,
+        source: 'xdg_state_home',
+        reason: 'XDG_STATE_HOME must be an absolute path.',
+      };
+    }
+    return { directory: path.join(xdg, 'cursor-cloud-control'), source: 'xdg_state_home', reason: null };
+  }
   const home = nonEmptyString(env.HOME);
-  if (home) return { directory: path.resolve(path.join(home, '.local', 'state', 'cursor-cloud-control')), source: 'home', reason: null };
-  return { directory: null, source: 'unconfigured', reason: 'Set CURSOR_CLOUD_CONTROL_STATE_DIR or HOME/XDG_STATE_HOME before using Cursor mutations.' };
+  if (home) {
+    if (!path.isAbsolute(home)) {
+      return {
+        directory: null,
+        source: 'home',
+        reason: 'HOME must be an absolute path.',
+      };
+    }
+    return { directory: path.join(home, '.local', 'state', 'cursor-cloud-control'), source: 'home', reason: null };
+  }
+  return {
+    directory: null,
+    source: 'unconfigured',
+    reason: 'Set CURSOR_CLOUD_CONTROL_STATE_DIR, CODEX_TASK_STATE_ROOT, or HOME/XDG_STATE_HOME before using Cursor mutations.',
+  };
 }
 
 function currentUid() {
@@ -66,6 +125,50 @@ function assertOwnerOnly(metadata, label, { directory = false } = {}) {
   if (uid !== null && metadata.uid !== uid) {
     throw new CursorApiError('ledger_permissions', `${label} must be owned by the MCP process user.`);
   }
+}
+
+function assertSecureLedgerDirectory(metadata, label) {
+  assertOwnerOnly(metadata, label, { directory: true });
+  if ((metadata.mode & 0o7777) !== 0o700) {
+    throw new CursorApiError('ledger_permissions', `${label} must have mode 0700.`);
+  }
+}
+
+function assertSecureLedgerFile(metadata, label) {
+  assertOwnerOnly(metadata, label);
+  if (metadata.nlink !== 1) {
+    throw new CursorApiError('ledger_permissions', `${label} must have exactly one hard link.`);
+  }
+  if ((metadata.mode & 0o7777) !== 0o600) {
+    throw new CursorApiError('ledger_permissions', `${label} must have mode 0600.`);
+  }
+}
+
+function fileIdentity(metadata) {
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+function assertFileIdentity(metadata, expected, label) {
+  if (metadata.dev !== expected.dev || metadata.ino !== expected.ino) {
+    throw new CursorApiError('ledger_permissions', `${label} changed during an operation.`);
+  }
+}
+
+export function secureLedgerOpenFlags(flags, noFollow = fsConstants.O_NOFOLLOW) {
+  if (!Number.isInteger(noFollow) || noFollow === 0) {
+    throw new CursorApiError('ledger_unavailable', 'Secure no-follow ledger file operations are unavailable on this host.');
+  }
+  return flags | noFollow;
+}
+
+const noFollowFlags = secureLedgerOpenFlags;
+
+function ledgerFileError(error, file, label = 'Submission ledger') {
+  if (error instanceof CursorApiError) return error;
+  if (error?.code === 'ELOOP') {
+    return new CursorApiError('ledger_permissions', `${label} must not be a symbolic link (${file}).`);
+  }
+  return unavailable(error, file);
 }
 
 function unavailable(error, target) {
@@ -90,6 +193,12 @@ function assertDirectoryComponent(metadata, component) {
   }
   if (!metadata.isDirectory()) {
     throw new CursorApiError('ledger_unavailable', `Submission ledger path component is not a directory (${component}).`);
+  }
+  if ((metadata.mode & 0o022) !== 0 && (metadata.mode & 0o1000) === 0) {
+    throw new CursorApiError(
+      'ledger_permissions',
+      `Submission ledger path component must not be group/world-writable unless it has the sticky bit (${component}).`,
+    );
   }
 }
 
@@ -154,20 +263,135 @@ async function inspectOrCreateDirectory(directory) {
   if (!directory) throw new CursorApiError('ledger_unavailable', 'No durable submission state directory is configured.');
   const snapshot = await inspectPathComponents(directory);
   const metadata = await lstat(directory);
-  assertOwnerOnly(metadata, 'Submission ledger directory', { directory: true });
+  assertSecureLedgerDirectory(metadata, 'Submission ledger directory');
   return snapshot;
 }
 
-async function inspectLedgerFile(file, { allowMissing = true } = {}) {
-  let metadata;
+async function confirmMissingLedgerFile(file, snapshot) {
+  await revalidatePath(snapshot);
   try {
-    metadata = await lstat(file);
+    await lstat(file);
   } catch (error) {
-    if (allowMissing && error?.code === 'ENOENT') return null;
-    throw unavailable(error, file);
+    if (error?.code === 'ENOENT') return;
+    throw ledgerFileError(error, file);
   }
-  assertOwnerOnly(metadata, 'Submission ledger');
-  return metadata;
+  throw new CursorApiError('ledger_permissions', 'Submission ledger appeared while its absence was being verified.');
+}
+
+async function inspectLedgerFile(file, snapshot, {
+  allowMissing = true,
+  expectedIdentity,
+  read = false,
+  label = 'Submission ledger',
+} = {}) {
+  await revalidatePath(snapshot);
+  let handle;
+  try {
+    handle = await open(file, noFollowFlags(fsConstants.O_RDONLY));
+  } catch (error) {
+    if (allowMissing && error?.code === 'ENOENT') {
+      await confirmMissingLedgerFile(file, snapshot);
+      return null;
+    }
+    throw ledgerFileError(error, file, label);
+  }
+
+  try {
+    const before = await handle.stat();
+    assertSecureLedgerFile(before, label);
+    const identity = fileIdentity(before);
+    if (expectedIdentity) assertFileIdentity(before, expectedIdentity, label);
+
+    const contents = read ? await handle.readFile({ encoding: 'utf8' }) : undefined;
+    const after = await handle.stat();
+    assertSecureLedgerFile(after, label);
+    assertFileIdentity(after, identity, label);
+    if (expectedIdentity) assertFileIdentity(after, expectedIdentity, label);
+
+    await revalidatePath(snapshot);
+    let pathMetadata;
+    try {
+      pathMetadata = await lstat(file);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        throw new CursorApiError('ledger_permissions', `${label} changed during an operation.`);
+      }
+      throw error;
+    }
+    assertSecureLedgerFile(pathMetadata, label);
+    assertFileIdentity(pathMetadata, identity, label);
+    await revalidatePath(snapshot);
+    return { contents, identity };
+  } catch (error) {
+    throw ledgerFileError(error, file, label);
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+async function cleanupTemporaryFile(file, expectedIdentity) {
+  if (!expectedIdentity) return;
+  try {
+    const metadata = await lstat(file);
+    if (!metadata.isSymbolicLink()
+      && metadata.dev === expectedIdentity.dev
+      && metadata.ino === expectedIdentity.ino) {
+      await unlink(file);
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      // Cleanup is best effort. The operation's original fail-closed error is
+      // more useful than a secondary cleanup error.
+    }
+  }
+}
+
+async function writeLedgerFile(file, payload, snapshot) {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  let handle;
+  let identity;
+  let renamed = false;
+  try {
+    await revalidatePath(snapshot);
+    try {
+      handle = await open(
+        temporary,
+        noFollowFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL),
+        0o600,
+      );
+    } catch (error) {
+      throw ledgerFileError(error, temporary, 'Submission ledger temporary file');
+    }
+
+    const before = await handle.stat();
+    assertSecureLedgerFile(before, 'Submission ledger temporary file');
+    identity = fileIdentity(before);
+    await handle.writeFile(payload, { encoding: 'utf8' });
+    const after = await handle.stat();
+    assertSecureLedgerFile(after, 'Submission ledger temporary file');
+    assertFileIdentity(after, identity, 'Submission ledger temporary file');
+
+    await revalidatePath(snapshot);
+    const temporaryMetadata = await lstat(temporary);
+    assertSecureLedgerFile(temporaryMetadata, 'Submission ledger temporary file');
+    assertFileIdentity(temporaryMetadata, identity, 'Submission ledger temporary file');
+    await handle.close();
+    handle = null;
+
+    // Reject an existing unsafe ledger before replacing it. A later race can
+    // only replace the directory entry; rename never follows that entry.
+    await inspectLedgerFile(file, snapshot);
+    await revalidatePath(snapshot);
+    await rename(temporary, file);
+    renamed = true;
+    await revalidatePath(snapshot);
+    await inspectLedgerFile(file, snapshot, { allowMissing: false, expectedIdentity: identity });
+  } catch (error) {
+    throw ledgerFileError(error, file);
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    if (!renamed) await cleanupTemporaryFile(temporary, identity);
+  }
 }
 
 function validateRecord(record) {
@@ -424,11 +648,11 @@ export class SubmissionLedger {
     const snapshot = await inspectOrCreateDirectory(this.stateDir);
     const records = new Map();
     let recovered = false;
-    const metadata = await inspectLedgerFile(this.file);
-    if (metadata) {
+    const ledgerFile = await inspectLedgerFile(this.file, snapshot, { read: true });
+    if (ledgerFile) {
       let parsed;
       try {
-        parsed = JSON.parse(await readFile(this.file, 'utf8'));
+        parsed = JSON.parse(ledgerFile.contents);
       } catch {
         throw new CursorApiError('ledger_corrupt', 'Submission ledger is not valid JSON.');
       }
@@ -459,24 +683,8 @@ export class SubmissionLedger {
 
   async persistUnlocked() {
     const snapshot = await inspectOrCreateDirectory(this.stateDir);
-    await inspectLedgerFile(this.file);
-    await revalidatePath(snapshot);
     const records = [...this.records.values()].slice(-MAX_RECORDS);
-    const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
-    let safeToCleanup = true;
-    try {
-      await writeFile(temporary, JSON.stringify({ version: LEDGER_VERSION, records }), { flag: 'wx', mode: 0o600 });
-      assertOwnerOnly(await lstat(temporary), 'Submission ledger temporary file');
-      await revalidatePath(snapshot);
-      await rename(temporary, this.file);
-      await revalidatePath(snapshot);
-      assertOwnerOnly(await lstat(this.file), 'Submission ledger');
-    } catch (error) {
-      safeToCleanup = false;
-      throw unavailable(error, this.file);
-    } finally {
-      if (safeToCleanup) await unlink(temporary).catch(() => {});
-    }
+    await writeLedgerFile(this.file, JSON.stringify({ version: LEDGER_VERSION, records }), snapshot);
   }
 
   async withMutation(operation) {

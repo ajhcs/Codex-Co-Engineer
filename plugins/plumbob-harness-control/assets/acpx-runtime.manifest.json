@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "bundle": "acpx-runtime.mjs",
+  "bundle_sha512": "sha512-Mf/0Dy6ptIcU8HYry3jJ/+fXEyQcpy7cp9sG0LLwwUy3FKwoEf/clOVge5MKo23WAoXHhOj6k8i9HtuTM3Vwhw==",
+  "exports": [
+    "createAcpRuntime",
+    "createAgentRegistry",
+    "createRuntimeStore"
+  ],
+  "source": {
+    "package": "acpx",
+    "version": "0.13.0",
+    "tag": "v0.13.0",
+    "commit": "47dc1c56b20da3c248a4a1b5c5106f52e65e6594",
+    "tarball_integrity": "sha512-EdGgMx5osY4bNpVN+7dTTT67ZXsFqx/itl4QjGYTKH/Nzm3fqGmWL3E6FjRkVrlWRpiFnRNi+J1lxUJPie4lmg=="
+  },
+  "bundled_packages": [
+    {
+      "name": "@agentclientprotocol/sdk",
+      "version": "1.3.0",
+      "integrity": "sha512-i3h/efaeuMUFAO1HSfo97QZQnnvMd7wWBYtBsdL6UMZg3a78sk3Ffya5Xu7C7tYsXomXoDXJBAzQF2PcFKAhIQ==",
+      "resolved": "https://registry.npmjs.org/@agentclientprotocol/sdk/-/sdk-1.3.0.tgz",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "acpx",
+      "version": "0.13.0",
+      "integrity": "sha512-EdGgMx5osY4bNpVN+7dTTT67ZXsFqx/itl4QjGYTKH/Nzm3fqGmWL3E6FjRkVrlWRpiFnRNi+J1lxUJPie4lmg==",
+      "resolved": "https://registry.npmjs.org/acpx/-/acpx-0.13.0.tgz",
+      "license": "MIT"
+    },
+    {
+      "name": "zod",
+      "version": "4.4.3",
+      "integrity": "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.4.3.tgz",
+      "license": "MIT"
+    }
+  ],
+  "dependencies": {
+    "acp_sdk": {
+      "package": "@agentclientprotocol/sdk",
+      "version": "1.3.0",
+      "integrity": "sha512-i3h/efaeuMUFAO1HSfo97QZQnnvMd7wWBYtBsdL6UMZg3a78sk3Ffya5Xu7C7tYsXomXoDXJBAzQF2PcFKAhIQ=="
+    },
+    "lock_sha512": "sha512-yugpDRvMZI1PxzGHMsM+ePY8FqQHkEJytF5S4wE4+bYF54pECLiFQEE1QGhgJHrYFAfGtZe+MvKqDkU2YrME8Q==",
+    "bundler": {
+      "package": "esbuild",
+      "version": "0.28.2",
+      "integrity": "sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA=="
+    }
+  },
+  "external_imports": [
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:fs/promises",
+    "node:os",
+    "node:path",
+    "node:readline/promises",
+    "node:stream",
+    "node:url",
+    "node:util"
+  ],
+  "notice": "acpx-third-party-notices.md",
+  "reproducibility": {
+    "source_maps": false,
+    "ambient_cli_or_flows": false,
+    "dynamic_imports": false,
+    "non_node_external_imports": false,
+    "local_paths": false,
+    "generated_at": null,
+    "authoritative_build": "clean_npm_ci_offline",
+    "offline_cache": "preseeded_required"
+  }
+}

@@ -92,8 +92,9 @@ test('uses one extended attempt for repository discovery and repository-backed c
   assert.equal(calls[2].options.timeoutMs, 12_345);
 });
 
-test('forwards the repository timeout override through the MCP manifest', async () => {
+test('forwards state and repository timeout overrides through the MCP manifest', async () => {
   const manifest = JSON.parse(await readFile(new URL('../.mcp.json', import.meta.url), 'utf8'));
+  assert.ok(manifest.mcpServers['cursor-cloud-control'].env_vars.includes('XDG_STATE_HOME'));
   assert.ok(manifest.mcpServers['cursor-cloud-control'].env_vars.includes('CURSOR_CLOUD_CONTROL_REPOSITORY_TIMEOUT_MS'));
 });
 

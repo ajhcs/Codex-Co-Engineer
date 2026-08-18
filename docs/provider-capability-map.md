@@ -64,15 +64,15 @@ Smallest useful profile:
 }
 ```
 
-`transport: auto` should use direct headless execution for bounded one-shot work
-and ACP for continuation, durable interactive streaming, and richer subagent
-observability. Codex should create and attest worktrees; Grok should not create
-an unattested worktree behind the control plane.
+The current public transport is direct headless execution. Pinned ACPX and
+bounded ACP helpers are packaged as an unwired conformance experiment; there
+is no public sessions tool. Codex should create and attest worktrees; Grok
+should not create an unattested worktree behind the control plane.
 
-Built-in Linux sandbox profiles are enforced by Grok with Landlock. Co-Engineer
-must not require Bubblewrap for the built-in `workspace`, `devbox`, `read-only`,
-or `strict` profiles. Bubblewrap becomes relevant only if a future custom
-profile feature specifically requires it.
+Built-in Linux sandbox profiles remain the boundary for public direct dispatch.
+The separate Bubblewrap outer-boundary experiment is unwired, accepts an
+attested auth file rather than `XAI_API_KEY`, and still requires real
+host/systemd acceptance.
 
 Sources:
 
@@ -128,6 +128,10 @@ subagent_mode, max_depth, tool_preset, workflow_preset, timeout
 Status must distinguish installed modules from features actually presented to
 the model. Unknown Muse reasoning, tool-call, pricing, latency, or quota facts
 must remain `unknown`; generic adapter support is not proof of model support.
+The installed profile reports DSH subagent/fork support and requested policy,
+but effectiveness stays `unknown` without provider proof. Trusted receipts can
+report exact job tokens; Muse spend, remaining quota, pricing, and reset remain
+unknown.
 
 The DSH profile currently tries to materialize composed configuration beneath
 its protected home directory. Installation/bootstrap should pre-materialize the

@@ -1,6 +1,6 @@
 # Control-plane reliability and full-feature utilization plan
 
-Status: proposed implementation plan
+Status: implementation candidate under release validation
 
 Scope: Codex-Co-Engineer, DeepSeek Harness (DSH), Grok Build, Cursor Cloud
 Control, Codex-native delegation, and their lifecycle integrations.
@@ -43,11 +43,9 @@ already provides strict target contracts, separate Co-Engineer and Cursor MCP
 servers, package validation, Inspector preflights, and a repository release
 gate.
 
-The current `main` working tree is an unfinished mixed candidate: Co-Engineer
-2.0.3 and Cursor 0.1.1 changes are present alongside an untracked `inline-keys`
-plugin. That work must be preserved and attributed before further changes; it
-must not be reset, silently folded into a new release, or treated as a clean
-baseline.
+The initial mixed tree contained Co-Engineer 2.0.3 and Cursor 0.1.1 work beside
+an unrelated untracked `inline-keys` plugin. This candidate targets
+Co-Engineer 2.1.0 and Cursor 0.2.0; `inline-keys` remains outside the release.
 
 Observed baseline behavior:
 
@@ -62,8 +60,9 @@ Observed baseline behavior:
   it is not ready.
 - Co-Engineer status returns full recent-job configurations and lifecycle
   histories.
-- Grok review and verify force plan permission mode, which prevents normal
-  read-only terminal inspection even though the outer sandbox is read-only.
+- Grok review and verify use noninteractive `auto` permission mode so blocked
+  tool calls fail back to the model, while the CLI-managed `read-only` sandbox
+  remains the hard write boundary.
 - Durable state defaults beneath `~/.local/state`, which a workspace-only task
   sandbox may not be able to write.
 - Cursor repository items are typed in source, but the installed Codex tool can
@@ -324,7 +323,7 @@ Required matrix dimensions:
 | State | fresh, existing, unwritable, restart, corrupt, concurrent writers |
 | Git | clean, dirty, protected `.git`, wrong HEAD, remote SHA absent |
 | Authentication | absent, invalid, ready, expired |
-| Egress | public policy, private pending, approved, expired, revoked |
+| Provider auth | absent, invalid, ready, expired, revoked standing credential |
 | Lifecycle | success, product failure, environment block, timeout, cancel, transport loss, uncertain submission |
 | Upgrade | idle, active-task, rollback, garbage collection |
 | Privacy | PII identity, secrets in errors/events, oversized status |
@@ -333,7 +332,7 @@ Final release acceptance:
 
 - The fake/integration matrix passes under the same workspace-write sandbox used
   by Codex.
-- A separately authorized live smoke proves read-only review with internal
+- A bounded live smoke using configured standing provider authorization proves read-only review with internal
   delegation and one bounded implementation for each supported provider.
 - No live smoke requires an ad hoc state override or manual unsandboxed daemon.
 - Status is compact, private, and internally consistent.

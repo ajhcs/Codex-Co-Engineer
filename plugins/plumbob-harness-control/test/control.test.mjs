@@ -134,7 +134,9 @@ test('status probes Grok independently of a missing default workspace', async (c
   assert.match(status.grok_build.version, /grok 1\.0\.4/);
   assert.deepEqual(status.grok_build.sandbox, {
     managed_by: 'grok_cli',
-    enforcement: 'cli_managed',
+    requested_profile: 'read-only_for_review_verify',
+    enforcement: 'fallback_warning_fail_closed_runner_postflight',
+    writable_builtin_roots: 'rejected_for_review_verify',
   });
   assert.deepEqual(status.grok_build.capabilities.transport, {
     selected: 'direct-headless',
@@ -349,6 +351,28 @@ test('omitted, null, and unknown target fields fail without default fallback', a
   );
 });
 
+test('capacity dispatch validates bounded provider selectors before any provider call', async () => {
+  const { dispatchControl, ToolError } = await import(`../mcp/control.mjs?capacity-validation=${Date.now()}`);
+  await assert.rejects(
+    dispatchControl('capacity', { unexpected: true }),
+    (error) => error instanceof ToolError
+      && error.code === 'invalid_argument'
+      && /unexpected/.test(error.message),
+  );
+  await assert.rejects(
+    dispatchControl('capacity', { providers: ['codex', 'codex'] }),
+    (error) => error instanceof ToolError
+      && error.code === 'invalid_options'
+      && /duplicate/.test(error.message),
+  );
+  await assert.rejects(
+    dispatchControl('capacity', { max_age_seconds: 3601 }),
+    (error) => error instanceof ToolError
+      && error.code === 'invalid_options'
+      && /max_age_seconds/.test(error.message),
+  );
+});
+
 test('preflight rejects a caller fingerprint mismatch before dispatch', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-fingerprint-test-'));
   const state = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-grok-profile-state-'));
@@ -396,59 +420,19 @@ test('preflight rejects a caller fingerprint mismatch before dispatch', async (c
   );
 
   const prepared = await __testing.prepareTarget(targetContext);
-  const preflight = await dispatchControl('preflight', {
-    schema_version: 'codex-co-engineer.config.v1',
-    kind: 'grok_build',
-    target_context: targetContext,
-    expected_target_fingerprint: prepared.targetFingerprint,
-    agent: 'project-review',
-    delegation: { enabled: false },
-  });
-  assert.equal(preflight.configuration.grok_configuration.agent, 'project-review');
-  assert.deepEqual(preflight.configuration.grok_configuration.delegation, { enabled: false });
-  assert.equal(preflight.configuration.grok_configuration.no_subagents, true);
-  assert.equal(preflight.capabilities.grok_build.main_session_profile.requested, 'project-review');
-  assert.equal(preflight.capabilities.grok_build.main_session_profile.effective, 'unknown');
-  assert.equal(preflight.capabilities.grok_build.delegation.requested, 'disabled');
-  assert.equal(preflight.capabilities.grok_build.delegation.effective, 'unknown');
-
-  const run = await dispatchControl('run', {
-    schema_version: 'codex-co-engineer.config.v1',
-    kind: 'grok_build',
-    request_id: 'grok-profile-run-1',
-    prompt: 'Review the bounded target without changing it.',
-    target_context: targetContext,
-    expected_target_fingerprint: prepared.targetFingerprint,
-    agent: 'project-review',
-    delegation: { enabled: false },
-  });
-  assert.equal(run.capabilities.grok_build.main_session_profile.requested, 'project-review');
-  assert.equal(run.capabilities.grok_build.main_session_profile.effective, 'unknown');
-  assert.equal(run.capabilities.grok_build.delegation.requested, 'disabled');
-  assert.equal(run.capabilities.grok_build.delegation.effective, 'unknown');
-  assert.equal(run.effective_configuration.grok_configuration.agent, 'project-review');
-  assert.deepEqual(run.effective_configuration.grok_configuration.delegation, { enabled: false });
-
-  const repeated = await dispatchControl('run', {
-    schema_version: 'codex-co-engineer.config.v1',
-    kind: 'grok_build',
-    request_id: 'grok-profile-run-1',
-    prompt: 'Review the bounded target without changing it.',
-    target_context: targetContext,
-    expected_target_fingerprint: prepared.targetFingerprint,
-    agent: 'project-review',
-    delegation: { enabled: false },
-  });
-  assert.equal(repeated.deduplicated, true);
-  assert.equal(repeated.capabilities.grok_build.delegation.requested, 'disabled');
-  const terminal = await dispatchControl('jobs', {
-    action: 'wait',
-    job_id: run.job.id,
-    wait_seconds: 10,
-    until: 'terminal',
-    tail_lines: 0,
-  });
-  assert.ok(['completed', 'failed'].includes(terminal.job.status));
+  await assert.rejects(
+    dispatchControl('preflight', {
+      schema_version: 'codex-co-engineer.config.v1',
+      kind: 'grok_build',
+      target_context: targetContext,
+      expected_target_fingerprint: prepared.targetFingerprint,
+      agent: 'project-review',
+      delegation: { enabled: false },
+    }),
+    (error) => error instanceof ToolError
+      && error.code === 'grok_read_only_target_unverifiable'
+      && /built-in read-only profile permits provider writes/.test(error.message),
+  );
 });
 
 test('managed DSH options flow through preflight, run configuration, and child environment', async (context) => {
@@ -471,11 +455,13 @@ for argument in "$@"; do
   if [ "$argument" = "--version" ]; then printf 'dsh 0.1.0-rc.6\\n'; exit 0; fi
   if [ "$argument" = "--dump-config" ]; then
     mkdir -p "$DSH_HOME/profiles/headless"
+    chmod 700 "$DSH_HOME" "$DSH_HOME/profiles" "$DSH_HOME/profiles/headless"
     printf '{}\\n' > "$DSH_HOME/profiles/headless/package.json"
+    chmod 600 "$DSH_HOME/profiles/headless/package.json"
     exit 0
   fi
 done
-printf '%s|%s|%s\\n' "$DSH_TOOLS_MODE" "$CODEX_CO_ENGINEER_DSH_MODEL" "$CODEX_CO_ENGINEER_DSH_MAX_TOKENS" > "$DSH_HOME/child-env.txt"
+printf '%s|%s|%s|%s|%s\\n' "$DSH_TOOLS_MODE" "$CODEX_CO_ENGINEER_DSH_MODEL" "$CODEX_CO_ENGINEER_DSH_MAX_TOKENS" "$CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER" "$CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH" > "$DSH_HOME/child-env.txt"
 printf 'completed fixture\\n'
 `, { mode: 0o755 });
   const previous = {
@@ -567,9 +553,15 @@ printf 'completed fixture\\n'
     action: 'wait', job_id: run.job.id, wait_seconds: 10, until: 'terminal', tail_lines: 0,
   });
   assert.equal(terminal.job.status, 'completed');
-  assert.equal(
-    (await readFile(path.join(state, 'dsh-home', 'child-env.txt'), 'utf8')).trim(),
-    'both|muse-spark-1.2-contributor|4096',
+  assert.deepEqual(
+    (await readFile(path.join(state, 'dsh-home', 'child-env.txt'), 'utf8')).trim().split('|'),
+    [
+      'both',
+      'muse-spark-1.2-contributor',
+      '4096',
+      '1',
+      path.join(state, 'jobs', `${run.job.id}.usage.json`),
+    ],
   );
 });
 
@@ -611,4 +603,354 @@ exit 0
   assert.equal(status.headless_agent.usable, true);
   assert.equal(status.headless_agent.capability_state, 'unknown');
   assert.equal(Object.hasOwn(status.headless_agent, 'capabilities'), false);
+});
+
+test('only verified managed DeepSeek jobs receive exact connector-owned usage env', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-dsh-usage-env-test-'));
+  const previous = {
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+    home: process.env.CODEX_CO_ENGINEER_DSH_HOME,
+    dshHome: process.env.DSH_HOME,
+  };
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = directory;
+  delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+  delete process.env.DSH_HOME;
+  context.after(async () => {
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    if (previous.home === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+    else process.env.CODEX_CO_ENGINEER_DSH_HOME = previous.home;
+    if (previous.dshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous.dshHome;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const { __testing } = await import(`../mcp/control.mjs?dsh-usage-env=${Date.now()}`);
+  const jobId = 'deepseek-usage-1234';
+  const configuredOnly = __testing.startJobEnvironment('deepseek_agent', jobId, {
+    CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER: 'provider-value',
+    CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH: '/provider/receipt.json',
+    DSH_HOME: '/managed/home',
+  });
+  assert.equal(Object.hasOwn(configuredOnly, 'CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER'), false);
+  assert.equal(Object.hasOwn(configuredOnly, 'CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH'), false);
+  assert.equal(configuredOnly.DSH_HOME, '/managed/home');
+
+  const environment = __testing.startJobEnvironment('deepseek_agent', jobId, {
+    CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER: 'provider-value',
+    CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH: '/provider/receipt.json',
+    DSH_HOME: '/managed/home',
+  }, { ok: true });
+  assert.equal(environment.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER, '1');
+  assert.equal(
+    environment.CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH,
+    path.join(directory, 'jobs', `${jobId}.usage.json`),
+  );
+  assert.equal(environment.DSH_HOME, '/managed/home');
+  const webEnvironment = __testing.startJobEnvironment('dsh_web', jobId, {
+    CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER: 'provider-value',
+    CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH: '/provider/receipt.json',
+  }, { ok: true });
+  assert.equal(Object.hasOwn(webEnvironment, 'CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER'), false);
+  assert.equal(Object.hasOwn(webEnvironment, 'CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH'), false);
+});
+
+test('production DSH capacity is bound to terminal managed jobs and jobs get exposes only compact usage', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-dsh-capacity-integration-test-'));
+  const jobsDirectory = path.join(directory, 'jobs');
+  await mkdir(jobsDirectory, { mode: 0o700 });
+  const fakeDsh = path.join(directory, 'dsh');
+  const probeFile = path.join(directory, 'dsh-home.probe');
+  await writeFile(fakeDsh, `#!/bin/sh
+printf 'probe\\n' >> "$DSH_HOME.probe"
+for argument in "$@"; do
+  if [ "$argument" = "--version" ]; then printf 'dsh 0.1.0-rc.6\\n'; exit 0; fi
+  if [ "$argument" = "--dump-config" ]; then
+    mkdir -p "$DSH_HOME/profiles/headless"
+    chmod 700 "$DSH_HOME" "$DSH_HOME/profiles" "$DSH_HOME/profiles/headless"
+    printf '{}\\n' > "$DSH_HOME/profiles/headless/package.json"
+    chmod 600 "$DSH_HOME/profiles/headless/package.json"
+    exit 0
+  fi
+done
+exit 64
+`, { mode: 0o755 });
+  const jobId = 'deepseek-capacity-1234';
+  const logFile = path.join(jobsDirectory, `${jobId}.log`);
+  const cancelFile = path.join(jobsDirectory, `${jobId}.cancel`);
+  await writeFile(logFile, '', { mode: 0o600 });
+  const previous = {
+    command: process.env.CODEX_CO_ENGINEER_DSH_COMMAND,
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+    home: process.env.CODEX_CO_ENGINEER_DSH_HOME,
+    dshHome: process.env.DSH_HOME,
+  };
+  process.env.CODEX_CO_ENGINEER_DSH_COMMAND = fakeDsh;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = directory;
+  delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+  delete process.env.DSH_HOME;
+  context.after(async () => {
+    if (previous.command === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_DSH_COMMAND = previous.command;
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    if (previous.home === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+    else process.env.CODEX_CO_ENGINEER_DSH_HOME = previous.home;
+    if (previous.dshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous.dshHome;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const database = openStore(path.join(directory, 'control.sqlite3'));
+  insertJob(database, {
+    id: jobId,
+    kind: 'deepseek_agent',
+    status: 'succeeded',
+    summary: 'DSH capacity integration fixture',
+    created_at: new Date(Date.now() - 1000).toISOString(),
+    updated_at: new Date().toISOString(),
+    finished_at: new Date().toISOString(),
+    log_file: logFile,
+    cancel_file: cancelFile,
+  });
+  database.close();
+  await writeFile(path.join(jobsDirectory, `${jobId}.usage.json`), JSON.stringify({
+    schemaVersion: 1,
+    source: 'dsh-headless-live',
+    scope: 'task',
+    jobId,
+    rootSessionId: 'session-capacity-opaque',
+    observedAt: new Date().toISOString(),
+    aggregationComplete: true,
+    confidence: 'exact',
+    usageSamples: 1,
+    counts: {
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheReadTokens: 2,
+      cacheWriteTokens: 1,
+      totalTokens: 18,
+    },
+    secret_provider_field: 'must-not-escape',
+  }) + '\n', { mode: 0o600 });
+
+  const { dispatchControl } = await import(`../mcp/control.mjs?dsh-capacity-integration=${Date.now()}`);
+  const accountCapacity = await dispatchControl('capacity', { providers: ['dsh'] });
+  assert.equal(accountCapacity.providers[0].status, 'unsupported');
+  await assert.rejects(readFile(probeFile), { code: 'ENOENT' });
+  const capacity = await dispatchControl('capacity', {
+    providers: ['dsh'],
+    dsh_job_id: jobId,
+    refresh: true,
+    max_age_seconds: 0,
+  });
+  assert.equal(capacity.providers[0].status, 'available');
+  assert.equal(capacity.providers[0].usage.total_tokens, 18);
+  assert.match(await readFile(probeFile, 'utf8'), /probe/);
+  assert.equal(JSON.stringify(capacity).includes('secret_provider_field'), false);
+
+  const detailed = await dispatchControl('jobs', { action: 'get', job_id: jobId, tail_lines: 0 });
+  assert.equal(detailed.dsh_usage.status, 'available');
+  assert.equal(detailed.dsh_usage.freshness.state, 'fresh');
+  assert.equal(typeof detailed.dsh_usage.freshness.age_seconds, 'number');
+  assert.equal(detailed.dsh_usage.usage.total_tokens, 18);
+  assert.equal(JSON.stringify(detailed.dsh_usage).includes('usage.json'), false);
+  assert.equal(JSON.stringify(detailed.dsh_usage).includes(directory), false);
+
+  const listed = await dispatchControl('jobs', { action: 'list', limit: 1 });
+  assert.equal(Object.hasOwn(listed.jobs[0], 'dsh_usage'), false);
+  const status = await dispatchControl('status', { recent_limit: 1 });
+  assert.equal(JSON.stringify(status).includes('dsh_usage'), false);
+  assert.equal(JSON.stringify(status).includes('usage.json'), false);
+});
+
+test('configured but unverified managed DSH cannot read an otherwise valid receipt', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-dsh-unverified-receipt-test-'));
+  const jobsDirectory = path.join(directory, 'jobs');
+  await mkdir(jobsDirectory, { mode: 0o700 });
+  const fakeDsh = path.join(directory, 'dsh');
+  const probeFile = path.join(directory, 'dsh-home.probe');
+  await writeFile(fakeDsh, `#!/bin/sh
+printf 'probe\\n' >> "$DSH_HOME.probe"
+for argument in "$@"; do
+  if [ "$argument" = "--version" ]; then printf 'dsh 0.1.0-rc.6\\n'; exit 0; fi
+  if [ "$argument" = "--dump-config" ]; then exit 1; fi
+done
+exit 64
+`, { mode: 0o755 });
+  const jobId = 'deepseek-unverified-1234';
+  const logFile = path.join(jobsDirectory, `${jobId}.log`);
+  await writeFile(logFile, '', { mode: 0o600 });
+  const previous = {
+    command: process.env.CODEX_CO_ENGINEER_DSH_COMMAND,
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+    home: process.env.CODEX_CO_ENGINEER_DSH_HOME,
+    dshHome: process.env.DSH_HOME,
+  };
+  process.env.CODEX_CO_ENGINEER_DSH_COMMAND = fakeDsh;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = directory;
+  delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+  delete process.env.DSH_HOME;
+  context.after(async () => {
+    if (previous.command === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_DSH_COMMAND = previous.command;
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    if (previous.home === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+    else process.env.CODEX_CO_ENGINEER_DSH_HOME = previous.home;
+    if (previous.dshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous.dshHome;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const database = openStore(path.join(directory, 'control.sqlite3'));
+  insertJob(database, {
+    id: jobId,
+    kind: 'deepseek_agent',
+    status: 'succeeded',
+    summary: 'Unverified DSH receipt fixture',
+    created_at: new Date(Date.now() - 1000).toISOString(),
+    updated_at: new Date().toISOString(),
+    finished_at: new Date().toISOString(),
+    log_file: logFile,
+    cancel_file: path.join(jobsDirectory, `${jobId}.cancel`),
+  });
+  database.close();
+  await writeFile(path.join(jobsDirectory, `${jobId}.usage.json`), JSON.stringify({
+    schemaVersion: 1,
+    source: 'dsh-headless-live',
+    scope: 'task',
+    jobId,
+    rootSessionId: 'session-unverified-opaque',
+    observedAt: new Date().toISOString(),
+    aggregationComplete: true,
+    confidence: 'exact',
+    usageSamples: 1,
+    counts: { inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 7 },
+  }), { mode: 0o600 });
+
+  const { __testing, dispatchControl } = await import(`../mcp/control.mjs?dsh-unverified=${Date.now()}`);
+  const result = await dispatchControl('capacity', {
+    providers: ['dsh'],
+    dsh_job_id: jobId,
+    refresh: true,
+    max_age_seconds: 0,
+  });
+  assert.equal(result.providers[0].status, 'unavailable');
+  assert.equal(result.providers[0].usage, null);
+  assert.match(await readFile(probeFile, 'utf8'), /probe/);
+  assert.equal(JSON.stringify(result).includes(directory), false);
+
+  const environment = __testing.startJobEnvironment('deepseek_agent', jobId, {
+    CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER: 'provider-value',
+    CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH: '/provider/receipt.json',
+  });
+  assert.equal(Object.hasOwn(environment, 'CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER'), false);
+  assert.equal(Object.hasOwn(environment, 'CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH'), false);
+});
+
+test('production DSH capacity fails closed for invalid, missing, active, and wrong-kind jobs', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-dsh-capacity-fail-closed-test-'));
+  const jobsDirectory = path.join(directory, 'jobs');
+  await mkdir(jobsDirectory, { mode: 0o700 });
+  const fakeDsh = path.join(directory, 'dsh');
+  await writeFile(fakeDsh, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "--version" ]; then printf 'dsh 0.1.0-rc.6\\n'; exit 0; fi
+  if [ "$argument" = "--dump-config" ]; then
+    mkdir -p "$DSH_HOME/profiles/headless"
+    chmod 700 "$DSH_HOME" "$DSH_HOME/profiles" "$DSH_HOME/profiles/headless"
+    printf '{}\\n' > "$DSH_HOME/profiles/headless/package.json"
+    chmod 600 "$DSH_HOME/profiles/headless/package.json"
+    exit 0
+  fi
+done
+exit 64
+`, { mode: 0o755 });
+  const previous = {
+    command: process.env.CODEX_CO_ENGINEER_DSH_COMMAND,
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+    home: process.env.CODEX_CO_ENGINEER_DSH_HOME,
+    dshHome: process.env.DSH_HOME,
+  };
+  process.env.CODEX_CO_ENGINEER_DSH_COMMAND = fakeDsh;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = directory;
+  delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+  delete process.env.DSH_HOME;
+  context.after(async () => {
+    if (previous.command === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_DSH_COMMAND = previous.command;
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    if (previous.home === undefined) delete process.env.CODEX_CO_ENGINEER_DSH_HOME;
+    else process.env.CODEX_CO_ENGINEER_DSH_HOME = previous.home;
+    if (previous.dshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous.dshHome;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const jobs = [
+    ['deepseek-invalid-1', 'deepseek_agent', 'succeeded'],
+    ['deepseek-missing-1', 'deepseek_agent', 'succeeded'],
+    ['deepseek-active-1', 'deepseek_agent', 'running'],
+    ['grok-wrong-kind-1', 'grok_build', 'succeeded'],
+  ];
+  const database = openStore(path.join(directory, 'control.sqlite3'));
+  for (const [id, kind, status] of jobs) {
+    insertJob(database, {
+      id,
+      kind,
+      status,
+      summary: 'DSH receipt validation fixture',
+      created_at: new Date(Date.now() - 2000).toISOString(),
+      updated_at: new Date().toISOString(),
+      ...(status === 'succeeded' ? { finished_at: new Date().toISOString() } : {}),
+      ...(status === 'running' ? { child_pid: process.pid } : {}),
+      log_file: path.join(jobsDirectory, `${id}.log`),
+      cancel_file: path.join(jobsDirectory, `${id}.cancel`),
+    });
+    await writeFile(path.join(jobsDirectory, `${id}.log`), '', { mode: 0o600 });
+  }
+  database.close();
+
+  const receipt = (jobId) => ({
+    schemaVersion: 1,
+    source: 'dsh-headless-live',
+    scope: 'task',
+    jobId,
+    rootSessionId: `session-${jobId}`,
+    observedAt: new Date().toISOString(),
+    aggregationComplete: true,
+    confidence: 'exact',
+    usageSamples: 1,
+    counts: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1 },
+  });
+  await writeFile(
+    path.join(jobsDirectory, 'deepseek-invalid-1.usage.json'),
+    JSON.stringify(receipt('different-job-1')),
+    { mode: 0o600 },
+  );
+  await writeFile(
+    path.join(jobsDirectory, 'deepseek-active-1.usage.json'),
+    JSON.stringify(receipt('deepseek-active-1')),
+    { mode: 0o600 },
+  );
+  await writeFile(
+    path.join(jobsDirectory, 'grok-wrong-kind-1.usage.json'),
+    JSON.stringify(receipt('grok-wrong-kind-1')),
+    { mode: 0o600 },
+  );
+
+  const { dispatchControl } = await import(`../mcp/control.mjs?dsh-capacity-fail-closed=${Date.now()}`);
+  for (const jobId of ['deepseek-invalid-1', 'deepseek-missing-1', 'deepseek-active-1', 'grok-wrong-kind-1']) {
+    const result = await dispatchControl('capacity', {
+      providers: ['dsh'],
+      dsh_job_id: jobId,
+      refresh: true,
+      max_age_seconds: 0,
+    });
+    assert.equal(result.providers[0].status, 'unavailable', jobId);
+    assert.equal(result.providers[0].scope, 'job', jobId);
+    assert.equal(JSON.stringify(result).includes(directory), false, jobId);
+  }
 });

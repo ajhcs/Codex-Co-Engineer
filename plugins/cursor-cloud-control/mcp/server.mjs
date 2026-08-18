@@ -22,7 +22,7 @@ import {
 
 export const MCP_PROTOCOL_VERSION = '2025-11-25';
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-11-25', '2024-11-05']);
-export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', version: '0.1.1' });
+export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', version: '0.2.0' });
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const TOOL_DESCRIPTIONS = Object.freeze({

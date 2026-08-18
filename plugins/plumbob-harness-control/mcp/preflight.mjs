@@ -13,7 +13,7 @@ export const SUPPORTED_MCP_PROTOCOL_VERSIONS = Object.freeze([
 
 export const SERVER_IDENTITY = Object.freeze({
   name: 'plumbob-harness-control',
-  version: '2.0.3',
+  version: '2.1.0',
 });
 
 function canonicalValue(value) {

@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { CursorApiError } from '../mcp/client.mjs';
-import { SubmissionLedger, requestDigest, resolveStateDirectory } from '../mcp/ledger.mjs';
+import {
+  SubmissionLedger,
+  requestDigest,
+  resolveStateDirectory,
+  secureLedgerOpenFlags,
+} from '../mcp/ledger.mjs';
 
 const digest = requestDigest('agents.create', { prompt: { text: 'inspect' } });
 const otherDigest = requestDigest('agents.create', { prompt: { text: 'different' } });
@@ -56,6 +61,13 @@ test('configured state is created owner-only and readiness does not create a led
   });
   assert.equal((await lstat(stateDir)).mode & 0o777, 0o700);
   await assert.rejects(readFile(path.join(stateDir, 'submissions.json'), 'utf8'), { code: 'ENOENT' });
+});
+
+test('ledger open flags fail closed when the runtime exposes O_NOFOLLOW as zero', () => {
+  assert.throws(
+    () => secureLedgerOpenFlags(0, 0),
+    (error) => error instanceof CursorApiError && error.code === 'ledger_unavailable',
+  );
 });
 
 test('records persist across ledger instances and completed requests deduplicate safely', async (context) => {
@@ -176,6 +188,35 @@ test('a read queued during begin persistence cannot clear the in-flight record',
   assert.deepEqual(await ledger.lookup('read-race'), beginResult.record);
 });
 
+test('ledger reads reject a final-path inode swap after the handle-bound read', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-path-swap-');
+  const stateDir = path.join(root, 'state');
+  const ledger = new SubmissionLedger({ stateDir });
+  await ledger.begin({ requestId: 'path-swap', kind: 'agents.create', digest });
+  const ledgerFile = path.join(stateDir, 'submissions.json');
+  const displacedFile = path.join(stateDir, 'submissions.displaced.json');
+
+  const probe = await open(ledgerFile, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const originalReadFile = fileHandlePrototype.readFile;
+  let swapped = false;
+  fileHandlePrototype.readFile = async function (...arguments_) {
+    const contents = await originalReadFile.apply(this, arguments_);
+    if (!swapped) {
+      swapped = true;
+      await rename(ledgerFile, displacedFile);
+      await writeFile(ledgerFile, JSON.stringify({ version: 1, records: [] }), { mode: 0o600 });
+    }
+    return contents;
+  };
+  context.after(() => { fileHandlePrototype.readFile = originalReadFile; });
+
+  await assertLedgerError(() => new SubmissionLedger({ stateDir }).lookup('path-swap'), 'ledger_permissions');
+  assert.equal(swapped, true);
+  fileHandlePrototype.readFile = originalReadFile;
+});
+
 test('parallel mutations from independent ledger instances merge without record loss', async (context) => {
   const root = await stateFixture(context, 'cursor-ledger-parallel-');
   const stateDir = path.join(root, 'state');
@@ -226,11 +267,26 @@ test('a live lock fails closed after the bounded wait instead of overwriting sta
   await assert.rejects(readFile(path.join(stateDir, 'submissions.json'), 'utf8'), { code: 'ENOENT' });
 });
 
-test('state-directory resolution honors explicit configuration and fails closed when it is empty or absent', async (context) => {
+test('state-directory resolution honors explicit and shared configuration before XDG/HOME', async (context) => {
   const root = await stateFixture(context);
   assert.deepEqual(resolveStateDirectory({ CURSOR_CLOUD_CONTROL_STATE_DIR: path.join(root, 'explicit'), HOME: root }), {
     directory: path.join(root, 'explicit'),
     source: 'environment',
+    reason: null,
+  });
+  assert.deepEqual(resolveStateDirectory({
+    CURSOR_CLOUD_CONTROL_STATE_DIR: path.join(root, 'explicit'),
+    CODEX_TASK_STATE_ROOT: path.join(root, 'shared'),
+    XDG_STATE_HOME: path.join(root, 'xdg'),
+    HOME: root,
+  }), {
+    directory: path.join(root, 'explicit'),
+    source: 'environment',
+    reason: null,
+  });
+  assert.deepEqual(resolveStateDirectory({ CODEX_TASK_STATE_ROOT: path.join(root, 'shared'), HOME: root }), {
+    directory: path.join(root, 'shared', 'cursor-cloud-control'),
+    source: 'task_state_root',
     reason: null,
   });
   assert.deepEqual(resolveStateDirectory({ CURSOR_CLOUD_CONTROL_STATE_DIR: '', HOME: root }), {
@@ -238,10 +294,40 @@ test('state-directory resolution honors explicit configuration and fails closed 
     source: 'environment',
     reason: 'CURSOR_CLOUD_CONTROL_STATE_DIR is empty.',
   });
+  assert.deepEqual(resolveStateDirectory({ CURSOR_CLOUD_CONTROL_STATE_DIR: 'relative-state', HOME: root }), {
+    directory: null,
+    source: 'environment',
+    reason: 'CURSOR_CLOUD_CONTROL_STATE_DIR must be an absolute path.',
+  });
+  assert.deepEqual(resolveStateDirectory({ CODEX_TASK_STATE_ROOT: '', HOME: root }), {
+    directory: null,
+    source: 'task_state_root',
+    reason: 'CODEX_TASK_STATE_ROOT is empty.',
+  });
+  assert.deepEqual(resolveStateDirectory({ CODEX_TASK_STATE_ROOT: 'relative-state', HOME: root }), {
+    directory: null,
+    source: 'task_state_root',
+    reason: 'CODEX_TASK_STATE_ROOT must be an absolute path.',
+  });
+  assert.deepEqual(resolveStateDirectory({ XDG_STATE_HOME: path.join(root, 'xdg'), HOME: root }), {
+    directory: path.join(root, 'xdg', 'cursor-cloud-control'),
+    source: 'xdg_state_home',
+    reason: null,
+  });
+  assert.deepEqual(resolveStateDirectory({ XDG_STATE_HOME: 'relative-xdg', HOME: root }), {
+    directory: null,
+    source: 'xdg_state_home',
+    reason: 'XDG_STATE_HOME must be an absolute path.',
+  });
+  assert.deepEqual(resolveStateDirectory({ HOME: 'relative-home' }), {
+    directory: null,
+    source: 'home',
+    reason: 'HOME must be an absolute path.',
+  });
   assert.deepEqual(resolveStateDirectory({}), {
     directory: null,
     source: 'unconfigured',
-    reason: 'Set CURSOR_CLOUD_CONTROL_STATE_DIR or HOME/XDG_STATE_HOME before using Cursor mutations.',
+    reason: 'Set CURSOR_CLOUD_CONTROL_STATE_DIR, CODEX_TASK_STATE_ROOT, or HOME/XDG_STATE_HOME before using Cursor mutations.',
   });
 
   const empty = new SubmissionLedger({ env: { CURSOR_CLOUD_CONTROL_STATE_DIR: '' } });
@@ -258,7 +344,45 @@ test('state-directory resolution honors explicit configuration and fails closed 
   await assertLedgerError(() => unconfigured.lookup('request-1'), 'ledger_unavailable');
 });
 
-test('symlinked state directories and ledger files are rejected', async (context) => {
+test('relative XDG and HOME state roots fail before creating cwd-relative state', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-relative-root-');
+  const target = path.join(root, 'cwd-relative-target');
+  const relativeTarget = path.relative(process.cwd(), target);
+
+  for (const env of [
+    { XDG_STATE_HOME: relativeTarget, HOME: root },
+    { XDG_STATE_HOME: '', HOME: relativeTarget },
+  ]) {
+    const ledger = new SubmissionLedger({ env });
+    const readiness = await ledger.readiness();
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.code, 'ledger_unavailable');
+    assert.match(readiness.reason, /must be an absolute path/);
+    await assert.rejects(lstat(target), { code: 'ENOENT' });
+  }
+});
+
+test('shared task state works without HOME and does not fall back from an unsafe root', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-shared-root-');
+  const sharedRoot = path.join(root, 'shared');
+  const shared = new SubmissionLedger({ env: { CODEX_TASK_STATE_ROOT: sharedRoot } });
+  const readiness = await shared.readiness();
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.source, 'task_state_root');
+  assert.equal(readiness.directory, path.join(sharedRoot, 'cursor-cloud-control'));
+  assert.equal((await lstat(readiness.directory)).mode & 0o777, 0o700);
+
+  const regularFile = path.join(root, 'not-a-directory');
+  await writeFile(regularFile, 'x', { mode: 0o600 });
+  const unavailable = new SubmissionLedger({ env: { CODEX_TASK_STATE_ROOT: path.join(regularFile, 'child') } });
+  const unavailableReadiness = await unavailable.readiness();
+  assert.equal(unavailableReadiness.ready, false);
+  assert.equal(unavailableReadiness.source, 'task_state_root');
+  assert.equal(unavailableReadiness.code, 'ledger_unavailable');
+  assert.match(unavailableReadiness.reason, /not-a-directory|unavailable|prepare/i);
+});
+
+test('symlinked state directories and symlinked or hardlinked ledger files are rejected', async (context) => {
   const root = await stateFixture(context);
   const targetDirectory = await mkdtemp(path.join(root, 'target-directory-'));
   const linkedDirectory = path.join(root, 'linked-directory');
@@ -271,6 +395,13 @@ test('symlinked state directories and ledger files are rejected', async (context
   await writeFile(targetFile, JSON.stringify({ version: 1, records: [] }), { mode: 0o600 });
   await symlink(targetFile, path.join(stateDir, 'submissions.json'));
   await assertLedgerError(() => new SubmissionLedger({ stateDir }).lookup('request-1'), 'ledger_permissions');
+
+  const hardlinkStateDir = path.join(root, 'hardlink-state');
+  const hardlinkTarget = path.join(root, 'hardlink-ledger.json');
+  await new SubmissionLedger({ stateDir: hardlinkStateDir }).init();
+  await writeFile(hardlinkTarget, JSON.stringify({ version: 1, records: [] }), { mode: 0o600 });
+  await link(hardlinkTarget, path.join(hardlinkStateDir, 'submissions.json'));
+  await assertLedgerError(() => new SubmissionLedger({ stateDir: hardlinkStateDir }).lookup('request-1'), 'ledger_permissions');
 });
 
 test('symlinked ancestor cannot redirect state creation into an external target', async (context) => {
@@ -290,6 +421,26 @@ test('symlinked ancestor cannot redirect state creation into an external target'
   await assert.rejects(lstat(path.join(external, 'nested-state', 'submissions.json')), { code: 'ENOENT' });
 });
 
+test('non-sticky group/world-writable ancestors are rejected while sticky ancestors are allowed', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-ancestor-mode-');
+  for (const [label, mode] of [['group-writable', 0o770], ['world-writable', 0o777]]) {
+    const ancestor = path.join(root, label);
+    const stateDir = path.join(ancestor, 'state');
+    await mkdir(ancestor, { mode: 0o700 });
+    await chmod(ancestor, mode);
+    await assertLedgerError(() => new SubmissionLedger({ stateDir }).lookup('request-1'), 'ledger_permissions');
+    await assert.rejects(lstat(stateDir), { code: 'ENOENT' });
+  }
+
+  const stickyAncestor = path.join(root, 'sticky-world-writable');
+  const stickyStateDir = path.join(stickyAncestor, 'state');
+  await mkdir(stickyAncestor, { mode: 0o700 });
+  await chmod(stickyAncestor, 0o1777);
+  const readiness = await new SubmissionLedger({ stateDir: stickyStateDir }).readiness();
+  assert.equal(readiness.ready, true);
+  assert.equal((await lstat(stickyStateDir)).mode & 0o777, 0o700);
+});
+
 test('group/world-readable or writable directories and ledger files are rejected', async (context) => {
   const directoryRoot = await stateFixture(context, 'cursor-ledger-directory-mode-');
   const unsafeDirectory = path.join(directoryRoot, 'state');
@@ -303,6 +454,16 @@ test('group/world-readable or writable directories and ledger files are rejected
   await ledger.begin({ requestId: 'request-1', kind: 'agents.create', digest });
   await chmod(path.join(stateDir, 'submissions.json'), 0o604);
   await assertLedgerError(() => new SubmissionLedger({ stateDir }).lookup('request-1'), 'ledger_permissions');
+});
+
+test('ledger directory rejects special permission bits even when group/world bits are clear', async (context) => {
+  for (const mode of [0o1700, 0o2700, 0o4700]) {
+    const root = await stateFixture(context, `cursor-ledger-directory-special-${mode.toString(8)}-`);
+    const stateDir = path.join(root, 'state');
+    await new SubmissionLedger({ stateDir }).init();
+    await chmod(stateDir, mode);
+    await assertLedgerError(() => new SubmissionLedger({ stateDir }).lookup('request-1'), 'ledger_permissions');
+  }
 });
 
 test('invalid JSON, unsupported versions, and malformed records fail closed', async (context) => {

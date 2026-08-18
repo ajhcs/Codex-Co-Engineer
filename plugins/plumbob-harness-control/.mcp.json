@@ -9,6 +9,7 @@
         "--stdio"
       ],
       "env_vars": [
+        "XDG_STATE_HOME",
         "DSH_HOME",
         "CODEX_CO_ENGINEER_DSH_HOME",
         "MODEL_API_KEY",
@@ -16,6 +17,7 @@
         "CODEX_CO_ENGINEER_RUNTIME_WORKSPACE",
         "CODEX_CO_ENGINEER_ALLOWED_ROOTS",
         "CODEX_CO_ENGINEER_STATE_DIR",
+        "CODEX_TASK_STATE_ROOT",
         "CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS",
         "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE",
         "CODEX_CO_ENGINEER_DSH_COMMAND",

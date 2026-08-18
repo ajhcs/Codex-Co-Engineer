@@ -1,14 +1,25 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   accessSync,
   chmodSync,
   constants,
+  closeSync,
+  fchmodSync,
+  fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
   readdirSync,
+  unlinkSync,
+  writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveStateDirectory } from './state.mjs';
 
 /**
  * The DSH adapter owns only the launcher/profile boundary.  It never reads a
@@ -144,12 +155,42 @@ export function normalizeDshOptions(options = {}) {
 
 const ADAPTER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_DSH_PATCH_FILE = path.join(ADAPTER_ROOT, 'assets', 'dsh-headless.patch.yml');
+export const DSH_HEADLESS_USAGE_RUNNER_FILE = 'dsh-headless-usage-runner.mjs';
+export const DEFAULT_DSH_HEADLESS_USAGE_RUNNER_FILE = path.join(
+  ADAPTER_ROOT,
+  'assets',
+  DSH_HEADLESS_USAGE_RUNNER_FILE,
+);
+
+const DSH_HEADLESS_USAGE_RUNNER_MODE = 0o600;
+export const DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES = 64 * 1024;
+const DSH_HEADLESS_USAGE_RUNNER_SCOPE = 'managed-state';
+
+function initialBundledRunnerDigest() {
+  const metadata = lstatSync(DEFAULT_DSH_HEADLESS_USAGE_RUNNER_FILE);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES) {
+    throw new Error('The bundled DSH usage runner is missing, invalid, or too large.');
+  }
+  const bytes = readFileSync(DEFAULT_DSH_HEADLESS_USAGE_RUNNER_FILE);
+  if (bytes.length > DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES) {
+    throw new Error('The bundled DSH usage runner exceeds the fixed size limit.');
+  }
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+// The package asset is trusted at module load, but it is still size-checked
+// before this initial digest read.  Later reads are independently bounded and
+// compared with this load-time digest.
+export const DSH_HEADLESS_USAGE_RUNNER_SHA256 = initialBundledRunnerDigest();
 
 const ENVIRONMENT_NAMES = Object.freeze([
   'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR',
 ]);
 const OWNER_ONLY_DIRECTORY_MODE = 0o700;
 const OWNER_ONLY_FILE_MODE = 0o600;
+const NOFOLLOW_FLAG = Number.isInteger(constants.O_NOFOLLOW) ? constants.O_NOFOLLOW : 0;
+const DIRECTORY_FLAG = Number.isInteger(constants.O_DIRECTORY) ? constants.O_DIRECTORY : 0;
+const PROC_FD_ROOT = process.platform === 'linux' ? '/proc/self/fd' : null;
 
 function cleanOutput(value, maximum = 240) {
   return String(value ?? '')
@@ -192,6 +233,32 @@ export function resolveDshHome({ env = process.env, stateDirectory } = {}) {
     path: path.join(path.resolve(stateDirectory), 'dsh-home'),
     source: 'managed-state',
     reason: null,
+  };
+}
+
+/**
+ * Reconstruct the control plane's effective state directory from configuration
+ * rather than trusting the DSH home supplied to inspectDsh.  The control
+ * caller currently passes the process environment, so keeping this fallback
+ * here preserves that call shape while still giving the runner an independent
+ * managed-home anchor.
+ */
+function effectiveStateDirectory(env, stateDirectory) {
+  if (stateDirectory !== undefined && stateDirectory !== null) {
+    if (typeof stateDirectory !== 'string' || !path.isAbsolute(stateDirectory)) return null;
+    return path.resolve(stateDirectory);
+  }
+  return resolveStateDirectory(env).directory;
+}
+
+function derivedManagedDshConfig(env, stateDirectory) {
+  const effective = effectiveStateDirectory(env, stateDirectory);
+  if (!effective) return { stateDirectory: null, home: null, source: 'invalid' };
+  const resolved = resolveDshHome({ env, stateDirectory: effective });
+  return {
+    stateDirectory: effective,
+    home: resolved.source === 'managed-state' ? resolved.path : null,
+    source: resolved.source,
   };
 }
 
@@ -352,13 +419,435 @@ function ownerOnlyError(component, metadata, kind) {
       detail: `The managed DSH ${kind} must be owned by the MCP process user (${component}).`,
     };
   }
-  if ((metadata.mode & 0o077) !== 0) {
+  const expectedMode = ['home', 'profile', 'runner_parent'].includes(kind)
+    ? OWNER_ONLY_DIRECTORY_MODE
+    : OWNER_ONLY_FILE_MODE;
+  if ((metadata.mode & 0o7777) !== expectedMode) {
     return {
       reason: `${kind}_permissions`,
-      detail: `The managed DSH ${kind} must be owner-only (${component}).`,
+      detail: `The managed DSH ${kind} must have exact mode ${expectedMode.toString(8).padStart(4, '0')} (${component}).`,
     };
   }
   return null;
+}
+
+function runnerFailure(reason, detail, runnerPath = null) {
+  return {
+    ok: false,
+    path: runnerPath,
+    created: false,
+    sha256: null,
+    reason,
+    detail,
+  };
+}
+
+function runnerScopeAllowed(source, patchFile, home, trustedManagedHome, stateDirectory) {
+  if (source !== DSH_HEADLESS_USAGE_RUNNER_SCOPE || patchFile !== DEFAULT_DSH_PATCH_FILE) {
+    return false;
+  }
+  if (typeof trustedManagedHome !== 'string' || !path.isAbsolute(trustedManagedHome)) {
+    return false;
+  }
+  if (path.resolve(home) !== path.resolve(trustedManagedHome)) return false;
+  if (stateDirectory !== undefined && stateDirectory !== null) {
+    if (typeof stateDirectory !== 'string' || !path.isAbsolute(stateDirectory)) return false;
+    const expectedManagedHome = path.join(path.resolve(stateDirectory), 'dsh-home');
+    if (path.resolve(home) !== expectedManagedHome) return false;
+  }
+  return true;
+}
+
+function runnerParentStatus(home, profileRoot, runnerPath) {
+  if (!pathWithin(home, profileRoot) || !pathWithin(home, runnerPath)) {
+    return runnerFailure(
+      'runner_outside_home',
+      'The managed DSH usage runner must remain beneath the exact configured DSH home.',
+      runnerPath,
+    );
+  }
+  const parents = [];
+  for (const component of pathComponents(profileRoot)) {
+    if (!pathWithin(home, component)) continue;
+    let metadata;
+    try {
+      metadata = lstatSync(component);
+    } catch (error) {
+      return runnerFailure(
+        error?.code === 'ENOENT' ? 'runner_profile_missing' : 'runner_parent_unavailable',
+        error?.code === 'ENOENT'
+          ? 'The DSH headless profile was not created before runner materialization.'
+          : 'The DSH headless profile cannot be inspected before runner materialization.',
+        runnerPath,
+      );
+    }
+    if (metadata.isSymbolicLink()) {
+      return runnerFailure(
+        'runner_parent_symlink',
+        'The DSH headless profile path may not contain a symlink.',
+        runnerPath,
+      );
+    }
+    if (!metadata.isDirectory()) {
+      return runnerFailure(
+        'runner_parent_not_directory',
+        'The DSH headless profile path requires real directories.',
+        runnerPath,
+      );
+    }
+    const ownerError = ownerOnlyError(component, metadata, 'runner_parent');
+    if (ownerError) return runnerFailure(ownerError.reason, ownerError.detail, runnerPath);
+    parents.push({
+      path: component,
+      identity: fileIdentity(metadata),
+      mode: metadata.mode & 0o7777,
+    });
+  }
+  return { ok: true, path: runnerPath, parents };
+}
+
+function runnerParentRevalidated(snapshot, runnerPath = snapshot?.path) {
+  if (!snapshot?.ok || !Array.isArray(snapshot.parents)) {
+    return runnerFailure('runner_parent_unavailable', 'The DSH headless profile parents could not be revalidated.', runnerPath);
+  }
+  for (const parent of snapshot.parents) {
+    let metadata;
+    try {
+      metadata = lstatSync(parent.path);
+    } catch {
+      return runnerFailure(
+        'runner_parent_replaced',
+        'A DSH headless profile parent disappeared while the usage runner was being materialized.',
+        runnerPath,
+      );
+    }
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      return runnerFailure(
+        metadata.isSymbolicLink() ? 'runner_parent_symlink' : 'runner_parent_not_directory',
+        'The DSH headless profile path changed while the usage runner was being materialized.',
+        runnerPath,
+      );
+    }
+    const ownerError = ownerOnlyError(parent.path, metadata, 'runner_parent');
+    if (ownerError) return runnerFailure(ownerError.reason, ownerError.detail, runnerPath);
+    if (!sameIdentity(fileIdentity(metadata), parent.identity)) {
+      return runnerFailure(
+        'runner_parent_replaced',
+        'A DSH headless profile parent changed while the usage runner was being materialized.',
+        runnerPath,
+      );
+    }
+    if ((metadata.mode & 0o7777) !== parent.mode) {
+      return runnerFailure(
+        'runner_parent_permissions',
+        'A DSH headless profile parent mode changed while the usage runner was being materialized.',
+        runnerPath,
+      );
+    }
+  }
+  return { ok: true, path: runnerPath, parents: snapshot.parents };
+}
+
+function runnerDirectoryHandle(profileRoot, snapshot, runnerPath) {
+  if (!PROC_FD_ROOT || NOFOLLOW_FLAG === 0 || DIRECTORY_FLAG === 0) {
+    return runnerFailure(
+      'runner_secure_io_unavailable',
+      'The managed DSH usage runner requires Linux directory-handle support for safe materialization.',
+      runnerPath,
+    );
+  }
+  let descriptor;
+  try {
+    descriptor = openSync(profileRoot, constants.O_RDONLY | DIRECTORY_FLAG | NOFOLLOW_FLAG);
+    const metadata = fstatSync(descriptor);
+    const expected = snapshot.parents.find((parent) => parent.path === profileRoot);
+    if (!expected || !metadata.isDirectory()) {
+      closeSync(descriptor);
+      return runnerFailure(
+        'runner_parent_replaced',
+        'The DSH headless profile changed while the usage runner was being materialized.',
+        runnerPath,
+      );
+    }
+    const ownerError = ownerOnlyError(profileRoot, metadata, 'runner_parent');
+    if (ownerError || !sameIdentity(fileIdentity(metadata), expected.identity)
+      || (metadata.mode & 0o7777) !== expected.mode) {
+      closeSync(descriptor);
+      return runnerFailure(
+        ownerError?.reason ?? 'runner_parent_replaced',
+        ownerError?.detail ?? 'The DSH headless profile changed while the usage runner was being materialized.',
+        runnerPath,
+      );
+    }
+    return { ok: true, descriptor, path: runnerPath, directoryPath: path.join(PROC_FD_ROOT, String(descriptor)) };
+  } catch {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch {}
+    }
+    return runnerFailure(
+      'runner_secure_io_unavailable',
+      'The managed DSH usage runner directory could not be opened securely.',
+      runnerPath,
+    );
+  }
+}
+
+function writeBoundedDescriptor(descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const count = writeSync(descriptor, bytes, offset, bytes.length - offset, null);
+    if (!Number.isInteger(count) || count <= 0) throw new Error('short runner write');
+    offset += count;
+  }
+}
+
+function boundedFileRead(filePath, maximum, expectedIdentity = null) {
+  let descriptor;
+  try {
+    descriptor = openSync(filePath, constants.O_RDONLY | NOFOLLOW_FLAG);
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isFile()) return { ok: false, reason: 'not_regular' };
+    if (metadata.size > maximum) return { ok: false, reason: 'too_large' };
+    if (expectedIdentity && !sameIdentity(fileIdentity(metadata), expectedIdentity)) {
+      return { ok: false, reason: 'replaced' };
+    }
+    const bytes = Buffer.allocUnsafe(maximum + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > maximum || metadata.size > maximum) return { ok: false, reason: 'too_large' };
+    const finalMetadata = fstatSync(descriptor);
+    if (!finalMetadata.isFile()) return { ok: false, reason: 'not_regular' };
+    if (!sameIdentity(fileIdentity(finalMetadata), fileIdentity(metadata))) {
+      return { ok: false, reason: 'replaced' };
+    }
+    if (finalMetadata.size > maximum || offset > maximum) return { ok: false, reason: 'too_large' };
+    return { ok: true, bytes: bytes.subarray(0, offset), metadata: finalMetadata };
+  } catch (error) {
+    return { ok: false, reason: error?.code === 'EFBIG' ? 'too_large' : 'unavailable' };
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function bundledRunner() {
+  let metadata;
+  try {
+    metadata = lstatSync(DEFAULT_DSH_HEADLESS_USAGE_RUNNER_FILE);
+  } catch {
+    return runnerFailure('runner_asset_missing', 'The bundled DSH usage runner is missing.');
+  }
+  if (metadata.isSymbolicLink()) {
+    return runnerFailure('runner_asset_symlink', 'The bundled DSH usage runner may not be a symlink.');
+  }
+  if (!metadata.isFile()) {
+    return runnerFailure('runner_asset_not_regular', 'The bundled DSH usage runner must be a regular file.');
+  }
+  if (metadata.size > DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES) {
+    return runnerFailure('runner_asset_too_large', 'The bundled DSH usage runner exceeds the fixed size limit.');
+  }
+  const bounded = boundedFileRead(
+    DEFAULT_DSH_HEADLESS_USAGE_RUNNER_FILE,
+    DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES,
+    fileIdentity(metadata),
+  );
+  if (!bounded.ok) {
+    return runnerFailure(
+      bounded.reason === 'too_large' ? 'runner_asset_too_large' : 'runner_asset_unavailable',
+      bounded.reason === 'too_large'
+        ? 'The bundled DSH usage runner exceeds the fixed size limit.'
+        : 'The bundled DSH usage runner cannot be read.',
+    );
+  }
+  const bytes = bounded.bytes;
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  if (sha256 !== DSH_HEADLESS_USAGE_RUNNER_SHA256) {
+    return runnerFailure('runner_asset_changed', 'The bundled DSH usage runner changed after adapter load.');
+  }
+  return { ok: true, bytes, sha256 };
+}
+
+function validateRunnerFile(runnerPath, expected) {
+  let metadata;
+  try {
+    metadata = lstatSync(runnerPath);
+  } catch (error) {
+    return runnerFailure(
+      error?.code === 'ENOENT' ? 'runner_missing' : 'runner_unavailable',
+      error?.code === 'ENOENT'
+        ? 'The managed DSH usage runner is missing from the headless profile.'
+        : 'The managed DSH usage runner cannot be inspected.',
+      runnerPath,
+    );
+  }
+  if (metadata.isSymbolicLink()) {
+    return runnerFailure('runner_symlink', 'The managed DSH usage runner may not be a symlink.', runnerPath);
+  }
+  if (!metadata.isFile()) {
+    return runnerFailure('runner_not_regular', 'The managed DSH usage runner must be a regular file.', runnerPath);
+  }
+  const ownerError = ownerOnlyError(runnerPath, metadata, 'usage_runner');
+  if (ownerError?.reason === 'usage_runner_owner_mismatch') {
+    return runnerFailure(ownerError.reason, ownerError.detail, runnerPath);
+  }
+  if (metadata.size > DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES) {
+    return runnerFailure('runner_too_large', 'The managed DSH usage runner exceeds the fixed size limit.', runnerPath);
+  }
+  const bounded = boundedFileRead(
+    runnerPath,
+    DSH_HEADLESS_USAGE_RUNNER_MAX_BYTES,
+    fileIdentity(metadata),
+  );
+  if (!bounded.ok) {
+    return runnerFailure(
+      bounded.reason === 'too_large' ? 'runner_too_large' : 'runner_unavailable',
+      bounded.reason === 'too_large'
+        ? 'The managed DSH usage runner exceeds the fixed size limit.'
+        : 'The managed DSH usage runner cannot be read.',
+      runnerPath,
+    );
+  }
+  metadata = bounded.metadata;
+  const bytes = bounded.bytes;
+  const finalOwnerError = ownerOnlyError(runnerPath, metadata, 'usage_runner');
+  if (finalOwnerError?.reason === 'usage_runner_owner_mismatch') {
+    return runnerFailure(finalOwnerError.reason, finalOwnerError.detail, runnerPath);
+  }
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  if (sha256 !== expected.sha256 || !bytes.equals(expected.bytes)) {
+    return runnerFailure('runner_tampered', 'The managed DSH usage runner does not match the bundled asset.', runnerPath);
+  }
+  if (ownerError || finalOwnerError) {
+    // Do not chmod an already-existing path: a replacement between lstat and
+    // chmod could make the adapter modify an attacker-selected file.  New
+    // materializations are created with the exact mode below.
+    return runnerFailure('runner_permissions', (finalOwnerError ?? ownerError).detail, runnerPath);
+  }
+  if ((metadata.mode & 0o7777) !== DSH_HEADLESS_USAGE_RUNNER_MODE) {
+    return runnerFailure(
+      'runner_permissions',
+      'The managed DSH usage runner must have exact owner-read/write mode 0600.',
+      runnerPath,
+    );
+  }
+  return { ok: true, path: runnerPath, created: false, sha256 };
+}
+
+/**
+ * Materialize the one trusted DSH usage runner only inside the managed
+ * headless profile.  Custom DSH homes are intentionally rejected before any
+ * filesystem operation.  Existing files are byte/hash checked; a missing
+ * file is created only during initialization using an atomic hard-link.
+ */
+export function materializeDshHeadlessUsageRunner({
+  home,
+  source,
+  patchFile,
+  trustedManagedHome,
+  stateDirectory,
+  initialize = true,
+  // Test-only synchronous seam.  Production callers omit this.  The parent
+  // snapshot is always revalidated after each hook and before link(2).
+  onBeforeTemporary,
+  onBeforeLink,
+} = {}) {
+  if (typeof home !== 'string' || !path.isAbsolute(home)) {
+    return runnerFailure('runner_invalid_home', 'A resolved absolute DSH home is required.');
+  }
+  const profileRoot = path.join(home, 'profiles', DSH_PROFILE);
+  const runnerPath = path.join(profileRoot, DSH_HEADLESS_USAGE_RUNNER_FILE);
+  if (!runnerScopeAllowed(source, patchFile, home, trustedManagedHome, stateDirectory)) {
+    return runnerFailure(
+      'runner_untrusted_scope',
+      'The DSH usage runner may be materialized only for the managed state home with the exact bundled patch.',
+      runnerPath,
+    );
+  }
+  const parent = runnerParentStatus(home, profileRoot, runnerPath);
+  if (!parent.ok) return parent;
+  const expected = bundledRunner();
+  if (!expected.ok) return { ...expected, path: runnerPath };
+
+  const existing = validateRunnerFile(runnerPath, expected);
+  if (existing.ok) {
+    const unchanged = runnerParentRevalidated(parent, runnerPath);
+    return unchanged.ok ? existing : unchanged;
+  }
+  if (existing.reason !== 'runner_missing' || !initialize) return existing;
+
+  // Keep every create/link operation relative to a directory descriptor that
+  // was opened with O_DIRECTORY|O_NOFOLLOW and checked against the snapshot.
+  // A lexical path recheck alone still leaves a window where a replaced
+  // profile parent could receive the temporary file before the next lstat.
+  const beforeDirectory = runnerParentRevalidated(parent, runnerPath);
+  if (!beforeDirectory.ok) return beforeDirectory;
+  const directory = runnerDirectoryHandle(profileRoot, parent, runnerPath);
+  if (!directory.ok) return directory;
+  const temporaryName = `${DSH_HEADLESS_USAGE_RUNNER_FILE}.tmp-${process.pid}-${randomUUID()}`;
+  const temporary = path.join(directory.directoryPath, temporaryName);
+  const destination = path.join(directory.directoryPath, DSH_HEADLESS_USAGE_RUNNER_FILE);
+  let temporaryDescriptor;
+  let temporaryIdentity = null;
+  try {
+    if (typeof onBeforeTemporary === 'function') onBeforeTemporary();
+    temporaryDescriptor = openSync(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW_FLAG,
+      DSH_HEADLESS_USAGE_RUNNER_MODE,
+    );
+    fchmodSync(temporaryDescriptor, DSH_HEADLESS_USAGE_RUNNER_MODE);
+    writeBoundedDescriptor(temporaryDescriptor, expected.bytes);
+    const temporaryMetadata = fstatSync(temporaryDescriptor);
+    if (!temporaryMetadata.isFile()
+      || (temporaryMetadata.mode & 0o7777) !== DSH_HEADLESS_USAGE_RUNNER_MODE
+      || temporaryMetadata.size !== expected.bytes.length
+      || (currentUid() !== null && temporaryMetadata.uid !== currentUid())) {
+      return runnerFailure('runner_materialize_failed', 'The managed DSH usage runner could not be materialized safely.', runnerPath);
+    }
+    temporaryIdentity = fileIdentity(temporaryMetadata);
+    if (typeof onBeforeLink === 'function') onBeforeLink();
+    const beforeLink = runnerParentRevalidated(parent, runnerPath);
+    if (!beforeLink.ok) return beforeLink;
+    let created = true;
+    try {
+      // Both paths are anchored through the already-open directory handle.
+      // link(2) creates the destination atomically without replacing a file,
+      // while a later parent replacement cannot redirect either operation.
+      linkSync(temporary, destination);
+    } catch (error) {
+      if (error?.code !== 'EEXIST') {
+        return runnerFailure('runner_materialize_failed', 'The managed DSH usage runner could not be materialized.', runnerPath);
+      }
+      created = false;
+    }
+    const afterLink = runnerParentRevalidated(parent, runnerPath);
+    if (!afterLink.ok) return afterLink;
+    const materialized = validateRunnerFile(runnerPath, expected);
+    return materialized.ok
+      ? { ...materialized, created }
+      : materialized;
+  } catch {
+    return runnerFailure('runner_materialize_failed', 'The managed DSH usage runner could not be materialized.', runnerPath);
+  } finally {
+    if (temporaryDescriptor !== undefined) {
+      if (temporaryIdentity) {
+        try {
+          const temporaryMetadata = fstatSync(temporaryDescriptor);
+          if (temporaryMetadata.isFile()
+            && sameIdentity(fileIdentity(temporaryMetadata), temporaryIdentity)) {
+            unlinkSync(temporary);
+          }
+        } catch {}
+      }
+      try { closeSync(temporaryDescriptor); } catch {}
+    }
+    try { closeSync(directory.descriptor); } catch {}
+  }
 }
 
 /**
@@ -436,25 +925,6 @@ function inspectProfileTree(home, profileRoot, profilePackage, { repair = false 
       'The materialized DSH profile must remain beneath the exact configured DSH home.',
     );
   }
-  let rootMetadata;
-  try {
-    rootMetadata = lstatSync(profileRoot);
-  } catch (error) {
-    return profileFailure(
-      error?.code === 'ENOENT' ? 'profile_missing' : 'profile_unavailable',
-      error?.code === 'ENOENT'
-        ? 'DSH did not expose a headless profile.'
-        : `The DSH profile cannot be inspected (${profileRoot}).`,
-    );
-  }
-  const rootShapeError = directoryShapeError(profileRoot, rootMetadata, true);
-  if (rootShapeError) {
-    return profileFailure(
-      rootShapeError.reason === 'home_symlink' ? 'profile_symlink' : 'profile_not_directory',
-      rootShapeError.detail,
-    );
-  }
-  const profileIdentity = fileIdentity(rootMetadata);
   const fixPermissions = (candidate, metadata, directory) => {
     const securityError = ownerOnlyError(candidate, metadata, directory ? 'profile' : 'profile_file');
     if (!securityError) return { metadata, error: null };
@@ -475,6 +945,54 @@ function inspectProfileTree(home, profileRoot, profilePackage, { repair = false 
       };
     }
   };
+  const profileContainer = path.dirname(profileRoot);
+  let containerMetadata;
+  try {
+    containerMetadata = lstatSync(profileContainer);
+  } catch (error) {
+    return profileFailure(
+      error?.code === 'ENOENT' ? 'profile_missing' : 'profile_unavailable',
+      error?.code === 'ENOENT'
+        ? 'DSH did not expose a profiles directory.'
+        : `The DSH profiles directory cannot be inspected (${profileContainer}).`,
+    );
+  }
+  const containerShapeError = directoryShapeError(profileContainer, containerMetadata, true);
+  if (containerShapeError) {
+    return profileFailure(
+      containerShapeError.reason === 'home_symlink' ? 'profile_symlink' : 'profile_not_directory',
+      containerShapeError.detail,
+    );
+  }
+  const containerPermission = fixPermissions(profileContainer, containerMetadata, true);
+  if (containerPermission.error) {
+    return profileFailure(containerPermission.error.reason, containerPermission.error.detail);
+  }
+  containerMetadata = containerPermission.metadata;
+  let rootMetadata;
+  try {
+    rootMetadata = lstatSync(profileRoot);
+  } catch (error) {
+    return profileFailure(
+      error?.code === 'ENOENT' ? 'profile_missing' : 'profile_unavailable',
+      error?.code === 'ENOENT'
+        ? 'DSH did not expose a headless profile.'
+        : `The DSH profile cannot be inspected (${profileRoot}).`,
+    );
+  }
+  const rootShapeError = directoryShapeError(profileRoot, rootMetadata, true);
+  if (rootShapeError) {
+    return profileFailure(
+      rootShapeError.reason === 'home_symlink' ? 'profile_symlink' : 'profile_not_directory',
+      rootShapeError.detail,
+    );
+  }
+  const rootPermission = fixPermissions(profileRoot, rootMetadata, true);
+  if (rootPermission.error) {
+    return profileFailure(rootPermission.error.reason, rootPermission.error.detail);
+  }
+  rootMetadata = rootPermission.metadata;
+  const profileIdentity = fileIdentity(rootMetadata);
   let packageMetadata = null;
   const visit = (directory) => {
     let entries;
@@ -528,9 +1046,48 @@ function inspectProfileTree(home, profileRoot, profilePackage, { repair = false 
   }
   const packageSecurityError = ownerOnlyError(profilePackage, packageMetadata, 'profile_file');
   if (packageSecurityError) return profileFailure(packageSecurityError.reason, packageSecurityError.detail, profileIdentity, fileIdentity(packageMetadata));
+  let finalPackageMetadata = packageMetadata;
+  try {
+    const finalContainer = lstatSync(profileContainer);
+    const finalRoot = lstatSync(profileRoot);
+    const finalPackage = lstatSync(profilePackage);
+    if (finalContainer.isSymbolicLink() || !finalContainer.isDirectory()
+      || finalRoot.isSymbolicLink() || !finalRoot.isDirectory()
+      || finalPackage.isSymbolicLink() || !finalPackage.isFile()
+      || !sameIdentity(fileIdentity(finalContainer), fileIdentity(containerMetadata))
+      || !sameIdentity(fileIdentity(finalRoot), profileIdentity)
+      || !sameIdentity(fileIdentity(finalPackage), fileIdentity(packageMetadata))) {
+      return profileFailure(
+        'profile_replaced',
+        'The materialized DSH profile changed while the profile tree was being checked.',
+        profileIdentity,
+        fileIdentity(packageMetadata),
+      );
+    }
+    const containerSecurityError = ownerOnlyError(profileContainer, finalContainer, 'profile');
+    if (containerSecurityError) {
+      return profileFailure(containerSecurityError.reason, containerSecurityError.detail, profileIdentity, fileIdentity(packageMetadata));
+    }
+    const rootSecurityError = ownerOnlyError(profileRoot, finalRoot, 'profile');
+    if (rootSecurityError) {
+      return profileFailure(rootSecurityError.reason, rootSecurityError.detail, profileIdentity, fileIdentity(packageMetadata));
+    }
+    const finalPackageSecurityError = ownerOnlyError(profilePackage, finalPackage, 'profile_file');
+    if (finalPackageSecurityError) {
+      return profileFailure(finalPackageSecurityError.reason, finalPackageSecurityError.detail, profileIdentity, fileIdentity(finalPackage));
+    }
+    finalPackageMetadata = finalPackage;
+  } catch {
+    return profileFailure(
+      'profile_replaced',
+      'The materialized DSH profile directories could not be revalidated.',
+      profileIdentity,
+      fileIdentity(packageMetadata),
+    );
+  }
   return {
     ok: true,
-    identity: { profile: profileIdentity, package: fileIdentity(packageMetadata) },
+    identity: { profile: profileIdentity, package: fileIdentity(finalPackageMetadata) },
   };
 }
 
@@ -562,6 +1119,7 @@ export function inspectDsh({
   cwd = process.cwd(),
   initialize = true,
   expectedIdentity = null,
+  stateDirectory,
 } = {}) {
   if (typeof home !== 'string' || !path.isAbsolute(home)) {
     return {
@@ -615,6 +1173,23 @@ export function inspectDsh({
     }
   }
 
+  const managedDsh = derivedManagedDshConfig(env, stateDirectory);
+  const trustedManagedHome = managedDsh.source === 'managed-state' ? managedDsh.home : null;
+  const runnerScope = runnerScopeAllowed(
+    source,
+    patchFile,
+    home,
+    trustedManagedHome,
+    managedDsh.stateDirectory,
+  );
+  if (source === DSH_HEADLESS_USAGE_RUNNER_SCOPE && patchFile === DEFAULT_DSH_PATCH_FILE && !runnerScope) {
+    return {
+      ...base,
+      reason: 'runner_untrusted_scope',
+      detail: 'The managed DSH usage runner may be materialized only for the independently configured managed state home.',
+    };
+  }
+
   const secureHome = ensureSecureHome(home);
   if (!secureHome.ok) return { ...base, ...secureHome };
   const homeIdentity = secureHome.identity;
@@ -662,7 +1237,55 @@ export function inspectDsh({
       identity: { home: finalHome.identity },
     };
   }
-  const profile = inspectProfileTree(home, profileRoot, profilePackage, { repair: initialize });
+  // DSH may emit conventional 0775/0664 profile modes.  Harden
+  // and verify the complete generated tree (including profiles/ and the
+  // headless root) before the runner's stricter parent checks and writes.
+  const preparedProfile = inspectProfileTree(home, profileRoot, profilePackage, { repair: initialize });
+  if (!preparedProfile.ok) {
+    return {
+      ...base,
+      reason: preparedProfile.reason,
+      detail: preparedProfile.detail,
+      identity: { home: homeIdentity, ...preparedProfile.identity },
+    };
+  }
+  const preparedIdentity = { home: homeIdentity, ...preparedProfile.identity };
+  const preparedIdentityError = expectedIdentityError(preparedIdentity, expectedIdentity);
+  if (preparedIdentityError) {
+    return { ...base, ...preparedIdentityError, identity: preparedIdentity };
+  }
+  if (runnerScope) {
+    const runner = materializeDshHeadlessUsageRunner({
+      home,
+      source,
+      patchFile,
+      trustedManagedHome,
+      stateDirectory: managedDsh.stateDirectory,
+      initialize,
+    });
+    if (!runner.ok) {
+      return {
+        ...base,
+        reason: runner.reason,
+        detail: runner.detail,
+        identity: { home: homeIdentity },
+      };
+    }
+  }
+  // Revalidate both the home and the now-complete profile without repairing
+  // anything.  This makes runner installation part of the identity window and
+  // ensures a replacement cannot be promoted into readiness.
+  const completedHome = ensureSecureHome(home);
+  if (!completedHome.ok) return { ...base, ...completedHome, identity: preparedIdentity };
+  if (!sameIdentity(homeIdentity, completedHome.identity)) {
+    return {
+      ...base,
+      reason: 'home_replaced',
+      detail: 'The configured DSH home changed while the usage runner was being materialized.',
+      identity: { ...preparedIdentity, home: completedHome.identity },
+    };
+  }
+  const profile = inspectProfileTree(home, profileRoot, profilePackage, { repair: false });
   if (!profile.ok) {
     return {
       ...base,
@@ -672,6 +1295,10 @@ export function inspectDsh({
     };
   }
   const actualIdentity = { home: homeIdentity, ...profile.identity };
+  const materializationIdentityError = expectedIdentityError(actualIdentity, preparedIdentity);
+  if (materializationIdentityError) {
+    return { ...base, ...materializationIdentityError, identity: actualIdentity };
+  }
   const identityError = expectedIdentityError(actualIdentity, expectedIdentity);
   if (identityError) return { ...base, ...identityError, identity: actualIdentity };
   return {

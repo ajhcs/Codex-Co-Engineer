@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { closeSync, openSync } from 'node:fs';
-import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -15,21 +13,31 @@ import {
   TARGET_SCHEMA_VERSION,
   toolSetDigest,
 } from './preflight.mjs';
+import {
+  createExclusiveStateFile,
+  DAEMON_CONTROL_PROTOCOL,
+  inspectStateFile,
+  inspectStateSocket,
+  openAppendStateFile,
+  openStateFileRead,
+  prepareStateDirectory,
+  removeStateFile,
+  resolveStateDirectory,
+  revalidateStateDirectory,
+  stateDirectoryDigest,
+  stateResolutionMessage,
+} from './state.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const USER_HOME = process.env.HOME ?? '';
-const XDG_STATE_ROOT = process.env.XDG_STATE_HOME
-  ?? path.join(USER_HOME, '.local', 'state');
-const STATE_DIR = path.resolve(
-  process.env.CODEX_CO_ENGINEER_STATE_DIR
-    ?? process.env.PLUMBOB_HARNESS_STATE_DIR
-    ?? path.join(XDG_STATE_ROOT, 'codex-co-engineer'),
-);
-const SOCKET_FILE = path.join(STATE_DIR, 'control.sock');
-const LOCK_FILE = path.join(STATE_DIR, 'daemon.lock');
-const DAEMON_LOG = path.join(STATE_DIR, 'daemon.log');
+const STATE_RESOLUTION = resolveStateDirectory();
+const STATE_DIR = STATE_RESOLUTION.directory;
+const SOCKET_FILE = STATE_DIR ? path.join(STATE_DIR, 'control.sock') : null;
+const LOCK_FILE = STATE_DIR ? path.join(STATE_DIR, 'daemon.lock') : null;
+const DAEMON_LOG = STATE_DIR ? path.join(STATE_DIR, 'daemon.log') : null;
 const DAEMON = path.join(PLUGIN_ROOT, 'mcp', 'daemon.mjs');
 let negotiatedProtocolVersion = MCP_PROTOCOL_VERSION;
+let stateHandle;
+let stateDigest;
 
 class DaemonError extends Error {
   constructor(code, message) {
@@ -50,9 +58,21 @@ function isAlive(pid) {
   }
 }
 
+function exactKeys(value, expected) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join('\0') === [...expected].sort().join('\0');
+}
+
+function sameServerIdentity(value) {
+  return exactKeys(value, Object.keys(SERVER_IDENTITY))
+    && value.name === SERVER_IDENTITY.name
+    && value.version === SERVER_IDENTITY.version;
+}
+
 function daemonEnvironment() {
   const names = [
     'HOME',
+    'XDG_STATE_HOME',
     'USER',
     'LOGNAME',
     'SHELL',
@@ -68,6 +88,7 @@ function daemonEnvironment() {
     'CODEX_CO_ENGINEER_RUNTIME_WORKSPACE',
     'CODEX_CO_ENGINEER_ALLOWED_ROOTS',
     'CODEX_CO_ENGINEER_STATE_DIR',
+    'CODEX_TASK_STATE_ROOT',
     'CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS',
     'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
     'CODEX_CO_ENGINEER_DSH_COMMAND',
@@ -119,50 +140,172 @@ function rawRequest(name, args = {}, timeoutMilliseconds = 62000) {
 }
 
 async function daemonReady() {
+  let socketIdentity;
   try {
-    await rawRequest('__ping', {}, 400);
-    return true;
+    socketIdentity = await inspectStateSocket(
+      stateHandle,
+      path.basename(SOCKET_FILE),
+      { required: false },
+    );
+  } catch (error) {
+    throw new DaemonError(
+      error?.code ?? 'state_unavailable',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (!socketIdentity) return false;
+
+  let result;
+  try {
+    result = await rawRequest('__ping', {
+      protocol: DAEMON_CONTROL_PROTOCOL,
+      server_identity: SERVER_IDENTITY,
+      state_directory_digest: stateDigest,
+    }, 400);
   } catch {
     return false;
+  }
+  const valid = exactKeys(result, [
+    'ok',
+    'protocol',
+    'server_identity',
+    'state_directory_digest',
+  ])
+    && result.ok === true
+    && result.protocol === DAEMON_CONTROL_PROTOCOL
+    && sameServerIdentity(result.server_identity)
+    && result.state_directory_digest === stateDigest;
+  if (!valid) return false;
+  try {
+    await inspectStateSocket(
+      stateHandle,
+      path.basename(SOCKET_FILE),
+      { expectedIdentity: socketIdentity },
+    );
+  } catch (error) {
+    throw new DaemonError(
+      error?.code ?? 'state_identity_changed',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  return true;
+}
+
+async function ensureStateReady() {
+  if (!STATE_DIR || !SOCKET_FILE || !LOCK_FILE || !DAEMON_LOG) {
+    throw new DaemonError('state_unavailable', stateResolutionMessage(STATE_RESOLUTION));
+  }
+  try {
+    stateHandle = await prepareStateDirectory(STATE_DIR);
+    await revalidateStateDirectory(stateHandle);
+    stateDigest = stateDirectoryDigest(stateHandle);
+    return stateHandle;
+  } catch (error) {
+    throw new DaemonError(
+      error?.code ?? 'state_unavailable',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+async function revalidateState() {
+  try {
+    await revalidateStateDirectory(stateHandle);
+  } catch (error) {
+    throw new DaemonError(
+      error?.code ?? 'state_identity_changed',
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }
 
 async function ensureDaemon() {
-  await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+  await ensureStateReady();
+  await revalidateState();
   if (await daemonReady()) return;
 
   let launcher = false;
+  let lockIdentity = null;
   try {
-    const lock = await open(LOCK_FILE, 'wx', 0o600);
-    await lock.writeFile(`${process.pid}\n`);
-    await lock.close();
-    launcher = true;
+    await revalidateState();
+    const lock = await createExclusiveStateFile(stateHandle, path.basename(LOCK_FILE));
+    lockIdentity = lock.identity;
+    if (lock.created) {
+      try {
+        await lock.file.writeFile(`${process.pid}\n`);
+      } finally {
+        await lock.file.close();
+      }
+      launcher = true;
+    }
   } catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
+    throw new DaemonError(
+      error?.code ?? 'state_unavailable',
+      error instanceof Error ? error.message : String(error),
+    );
   }
 
   if (launcher) {
-    const logFd = openSync(DAEMON_LOG, 'a', 0o600);
+    await revalidateState();
+    let log;
+    try {
+      log = await openAppendStateFile(stateHandle, path.basename(DAEMON_LOG));
+    } catch (error) {
+      throw new DaemonError(
+        error?.code ?? 'state_unavailable',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     try {
       const daemon = spawn(process.execPath, ['--no-warnings', DAEMON], {
         detached: true,
         env: daemonEnvironment(),
-        stdio: ['ignore', logFd, logFd],
+        stdio: ['ignore', log.file.fd, log.file.fd],
       });
       daemon.unref();
     } finally {
-      closeSync(logFd);
+      await log.file.close();
     }
   }
 
   for (let attempt = 0; attempt < 60; attempt += 1) {
+    await revalidateState();
     if (await daemonReady()) return;
     await sleep(100);
   }
 
   let lockPid = 0;
-  try { lockPid = Number.parseInt(await readFile(LOCK_FILE, 'utf8'), 10); } catch {}
-  if (!isAlive(lockPid)) await unlink(LOCK_FILE).catch(() => {});
+  try {
+    const currentLock = await inspectStateFile(
+      stateHandle,
+      path.basename(LOCK_FILE),
+      { required: false, expectedIdentity: lockIdentity },
+    );
+    if (currentLock) {
+      const openedLock = await openStateFileRead(
+        stateHandle,
+        path.basename(LOCK_FILE),
+        { expectedIdentity: currentLock },
+      );
+      try {
+        lockPid = Number.parseInt(await openedLock.file.readFile('utf8'), 10);
+      } finally {
+        await openedLock.file.close();
+      }
+      if (!isAlive(lockPid)) {
+        await removeStateFile(
+          stateHandle,
+          path.basename(LOCK_FILE),
+          { expectedIdentity: currentLock },
+        );
+      }
+    }
+  } catch (error) {
+    throw new DaemonError(
+      error?.code ?? 'state_unavailable',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   throw new DaemonError('daemon_start_failed', 'The local control daemon did not become ready.');
 }
 
@@ -311,7 +454,7 @@ const GROK_CONFIGURATION_PROPERTIES = {
   permission_mode: {
     type: 'string',
     enum: ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions', 'plan'],
-    description: 'Role-dependent Grok permission mode. Review/verify accept only default or plan and force plan at runtime; implement defaults to and requires noninteractive auto.',
+    description: 'Role-dependent Grok permission mode. Review/verify accept omitted/default/plan/auto for compatibility but normalize to noninteractive auto; the read-only sandbox is required, writable built-in roots are rejected, fallback warnings fail closed, and the runner postflight verifies the target. Implement defaults to and requires noninteractive auto.',
   },
   rules: {
     type: 'string',
@@ -358,7 +501,7 @@ const GROK_CONFIGURATION_PROPERTIES = {
     default: true,
     description: 'Suppress Grok background update checks; defaults true for managed jobs.',
   },
-  no_plan: { type: 'boolean', default: false, description: 'Pass Grok --no-plan for implement only; review/verify retain the forced plan policy.' },
+  no_plan: { type: 'boolean', default: false, description: 'Pass Grok --no-plan for implement only; review/verify reject this flag and use noninteractive auto.' },
   no_subagents: { type: 'boolean', default: false, description: 'Legacy direct switch for Grok --no-subagents. Prefer delegation.enabled; conflicting values are rejected.' },
   no_memory: { type: 'boolean', default: false, description: 'Pass Grok --no-memory.' },
   disable_web_search: { type: 'boolean', default: false, description: 'Pass Grok --disable-web-search.' },
@@ -397,6 +540,7 @@ const DSH_OPTIONS_SCHEMA = {
 // DeepSeek/preflight callers because the runtime rejects those fields before
 // dispatch rather than silently ignoring them.
 const GROK_READ_ONLY_TOOL_PATTERN = '^(?:[Rr]_?[Ee]_?[Aa]_?[Dd]|[Gg]_?[Rr]_?[Ee]_?[Pp]|[Gg]_?[Ll]_?[Oo]_?[Bb]|[Ll]_?[Ss]|[Ff]_?[Ii]_?[Nn]_?[Dd]|[Ww]_?[Ee]_?[Bb]_?[Ff]_?[Ee]_?[Tt]_?[Cc]_?[Hh]|[Ww]_?[Ee]_?[Bb]_?[Ss]_?[Ee]_?[Aa]_?[Rr]_?[Cc]_?[Hh])$';
+const GROK_MCP_PERMISSION_RULE_REJECTION = '[Mm][Cc][Pp][Tt][Oo][Oo][Ll]';
 
 const GROK_ROLE_POLICY = {
   if: {
@@ -417,15 +561,22 @@ const GROK_ROLE_POLICY = {
   },
   else: {
     properties: {
-      permission_mode: { enum: ['default', 'plan'] },
+      permission_mode: { enum: ['default', 'plan', 'auto'] },
       sandbox_profile: { const: 'read-only' },
+      output_format: { enum: ['json', 'streaming-json', 'streaming-messages-json'] },
       allowed_tools: {
         items: { pattern: GROK_READ_ONLY_TOOL_PATTERN },
+      },
+      allow_rules: {
+        items: { not: { pattern: GROK_MCP_PERMISSION_RULE_REJECTION } },
+      },
+      deny_rules: {
+        items: { not: { pattern: GROK_MCP_PERMISSION_RULE_REJECTION } },
       },
       always_approve: { const: false },
       no_plan: { const: false },
     },
-    description: 'Review and verify targets omit permission_mode or use default/plan, retain plan mode, and expose only read-only tools.',
+    description: 'Review and verify targets omit permission_mode or use default/plan/auto compatibility values, normalize to noninteractive auto, retain the read-only sandbox, expose only read-only tools, and deny MCP meta-tools.',
   },
 };
 
@@ -496,6 +647,55 @@ const TOOLS = [
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'capacity',
+    description: 'Read compact, bounded provider capacity and optional usage snapshots. Account remaining or spend is reported as unsupported when the official provider surface does not expose it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        providers: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 3,
+          uniqueItems: true,
+          default: ['codex', 'grok', 'dsh'],
+          items: { type: 'string', enum: ['codex', 'grok', 'dsh'] },
+          description: 'Providers to query; omitted selects all three. Results preserve this order.',
+        },
+        refresh: {
+          type: 'boolean',
+          default: false,
+          description: 'Bypass the bounded in-process snapshot cache.',
+        },
+        max_age_seconds: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 3600,
+          default: 60,
+          description: 'Maximum age for a fresh cached observation, from 0 to 3600 seconds.',
+        },
+        include_usage: {
+          type: 'boolean',
+          default: false,
+          description: 'Include compact historical/session usage where the provider officially exposes it.',
+        },
+        grok_session_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 256,
+          description: 'Optional opaque Grok session selector for session usage.',
+        },
+        dsh_job_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 96,
+          description: 'Optional Co-Engineer DSH job selector for a task receipt.',
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   },
   {
     name: 'runtime',

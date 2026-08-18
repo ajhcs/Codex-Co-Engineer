@@ -91,14 +91,28 @@ try {
 
   const listEnvelope = inspect('tools/list');
   const tools = callResult(listEnvelope).tools;
-  assert.deepEqual(tools.map((tool) => tool.name), ['preflight', 'status', 'runtime', 'run', 'jobs', 'cancel']);
+  assert.deepEqual(tools.map((tool) => tool.name), ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel']);
+  const capacityTool = tools.find((tool) => tool.name === 'capacity');
+  assert.ok(capacityTool, 'capacity tool must be advertised');
+  assert.deepEqual(capacityTool.inputSchema.properties.providers.items.enum, ['codex', 'grok', 'dsh']);
+  assert.deepEqual(capacityTool.inputSchema.properties.providers.default, ['codex', 'grok', 'dsh']);
+  assert.equal(capacityTool.inputSchema.properties.providers.maxItems, 3);
+  assert.equal(capacityTool.inputSchema.properties.providers.uniqueItems, true);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.minimum, 0);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.maximum, 3600);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.default, 60);
+  assert.equal(capacityTool.inputSchema.properties.include_usage.default, false);
+  assert.equal(capacityTool.inputSchema.properties.grok_session_id.maxLength, 256);
+  assert.equal(capacityTool.inputSchema.properties.dsh_job_id.maxLength, 96);
+  assert.equal(capacityTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(capacityTool.annotations, { readOnlyHint: true, openWorldHint: true });
   const runTool = tools.find((tool) => tool.name === 'run');
   const kindPolicy = runTool.inputSchema.allOf.find((policy) => policy.if?.properties?.kind?.const === 'grok_build');
   assert.ok(kindPolicy, 'run schema must gate Grok fields by kind=grok_build');
   assert.equal(kindPolicy.then.if.properties.target_context.required[0], 'role');
   assert.equal(kindPolicy.then.then.properties.permission_mode.const, 'auto');
   assert.deepEqual(kindPolicy.then.then.properties.sandbox_profile.enum, ['workspace', 'read-only', 'strict']);
-  assert.deepEqual(kindPolicy.then.else.properties.permission_mode.enum, ['default', 'plan']);
+  assert.deepEqual(kindPolicy.then.else.properties.permission_mode.enum, ['default', 'plan', 'auto']);
   assert.equal(kindPolicy.then.else.properties.sandbox_profile.const, 'read-only');
   assert.equal(kindPolicy.then.else.properties.always_approve.const, false);
   assert.equal(kindPolicy.then.else.properties.no_plan.const, false);
@@ -136,6 +150,7 @@ try {
   assert.equal(structured.protocol_version, '2025-11-25');
   assert.equal(structured.server_identity.name, 'plumbob-harness-control');
   assert.ok(structured.available_tools.includes('preflight'));
+  assert.ok(structured.available_tools.includes('capacity'));
 
   const grokImplementTarget = { ...args.target_context, role: 'implement' };
   const grokImplementOmitted = structuredResult(inspect('tools/call', 'preflight', {

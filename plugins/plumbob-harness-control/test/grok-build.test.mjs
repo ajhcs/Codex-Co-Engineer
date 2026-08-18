@@ -8,7 +8,9 @@ import {
   grokCapabilityProfile,
   grokBuildFailure,
   grokVersionProbe,
+  GROK_READ_ONLY_PERMISSION_MODE,
   normalizeGrokConfiguration,
+  GROK_READ_ONLY_MCP_DENY_RULE,
 } from '../mcp/grok-build.mjs';
 
 test('Grok argv construction is deterministic and shell-free', () => {
@@ -192,9 +194,23 @@ test('Grok structured output and message flags map to bounded official CLI argv'
 });
 
 test('Grok session and role policy validation fails closed', () => {
-  const reviewDefaults = normalizeGrokConfiguration({}, 'review');
-  assert.equal(reviewDefaults.sandbox_profile, 'read-only');
-  assert.equal(reviewDefaults.permission_mode, 'plan');
+  for (const role of ['review', 'verify']) {
+    for (const requested of [undefined, 'default', 'plan', 'auto']) {
+      const input = requested === undefined ? {} : { permission_mode: requested };
+      const normalized = normalizeGrokConfiguration(input, role);
+      assert.equal(normalized.sandbox_profile, 'read-only');
+      assert.equal(normalized.permission_mode, GROK_READ_ONLY_PERMISSION_MODE);
+      assert.equal(normalized.permission_mode, 'auto');
+      assert.deepEqual(buildGrokArgs({
+        prompt: `review the bounded target (${role})`,
+        cwd: '/tmp/target',
+        configuration: normalized,
+      }).slice(-6), ['--sandbox', 'read-only', '--permission-mode', 'auto', '--deny', GROK_READ_ONLY_MCP_DENY_RULE]);
+      const profile = grokCapabilityProfile(input, role);
+      assert.equal(profile.execution.permission_mode, 'auto');
+      assert.equal(profile.execution.sandbox_profile, 'read-only');
+    }
+  }
   const implementDefaults = normalizeGrokConfiguration({}, 'implement');
   assert.equal(implementDefaults.sandbox_profile, 'workspace');
   assert.equal(implementDefaults.permission_mode, 'auto');
@@ -212,15 +228,31 @@ test('Grok session and role policy validation fails closed', () => {
   );
   assert.throws(
     () => normalizeGrokConfiguration({ always_approve: true }, 'review'),
-    /read-only roles/,
+    /automatic approval/,
   );
   assert.throws(
     () => normalizeGrokConfiguration({ no_plan: true }, 'review'),
-    /forced plan policy/,
+    /connector-managed analysis policy/,
   );
   assert.throws(
     () => normalizeGrokConfiguration({ sandbox_profile: 'strict' }, 'verify'),
     /strict still permits CWD writes/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ output_format: 'plain' }, 'review'),
+    /structured output format.*fail-closed/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ permission_mode: 'acceptEdits' }, 'review'),
+    /write-capable approval modes are rejected/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ permission_mode: 'dontAsk' }, 'verify'),
+    /write-capable approval modes are rejected/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ permission_mode: 'bypassPermissions' }, 'review'),
+    /write-capable approval modes are rejected/,
   );
   assert.throws(
     () => normalizeGrokConfiguration({ permission_mode: 'bypassPermissions' }, 'implement'),
@@ -264,6 +296,41 @@ test('Grok session and role policy validation fails closed', () => {
   );
 });
 
+test('Grok capability disclosure reports executable read-only policy without plan approval gating', () => {
+  const review = grokCapabilityProfile({}, 'review');
+  assert.deepEqual(review.execution, {
+    final_response: true,
+    target_workspace_write: 'requires_verified_read_only_sandbox_and_runner_check',
+    permission_mode: 'auto',
+    mcp_meta_tools: 'denied_for_review_verify',
+    role: 'review',
+    sandbox_profile: 'read-only',
+  });
+  const verify = grokCapabilityProfile({ permission_mode: 'plan' }, 'verify');
+  assert.equal(verify.execution.permission_mode, 'auto');
+  assert.equal(verify.execution.sandbox_profile, 'read-only');
+  assert.equal(verify.execution.final_response, true);
+  const implement = grokCapabilityProfile({}, 'implement');
+  assert.equal(implement.execution.permission_mode, 'auto');
+  assert.equal(implement.execution.sandbox_profile, 'workspace');
+  assert.equal(implement.execution.target_workspace_write, 'bounded_by_target_contract');
+});
+
+test('Grok review policy denies MCP meta-tools and reports always-approve precedence', () => {
+  assert.throws(
+    () => normalizeGrokConfiguration({ allow_rules: ['MCPTool(linear__issues_create)'] }, 'review'),
+    /cannot customize MCPTool permissions/,
+  );
+  assert.throws(
+    () => normalizeGrokConfiguration({ deny_rules: ['MCPTool(*)'] }, 'verify'),
+    /cannot customize MCPTool permissions/,
+  );
+  const implement = grokCapabilityProfile({ always_approve: true }, 'implement');
+  assert.equal(implement.execution.permission_mode, 'auto');
+  assert.equal(implement.execution.effective_permission_mode, 'bypassPermissions');
+  assert.equal(implement.execution.approval_precedence, 'always_approve_overrides_auto');
+});
+
 test('Grok streaming parser ignores unknown and partial records but surfaces explicit errors', () => {
   assert.equal(grokBuildFailure([
     '{"type":"future_event","payload":{"text":"ok"}}',
@@ -273,6 +340,39 @@ test('Grok streaming parser ignores unknown and partial records but surfaces exp
   assert.equal(grokBuildFailure('{"type":"error","message":"unauthenticated"}\n'), 'unauthenticated');
   assert.equal(grokBuildFailure('{"status":"failed","reason":"tool denied"}\n'), 'tool denied');
   assert.equal(grokBuildFailure('{"status":"failure","detail":"provider unavailable"}\n'), 'provider unavailable');
+});
+
+test('Grok streaming parser classifies the final session outcome after blocked tool calls', () => {
+  const recovered = [
+    '{"type":"tool_call","toolCallId":"call_1","status":"in_progress","toolName":"run_terminal_cmd"}',
+    '{"type":"tool_call_update","toolCallId":"call_1","status":"failed","rawOutput":{"error":"denied"}}',
+    '{"type":"text","data":"I could not run that command, but the read-only review is complete."}',
+    '{"type":"end","stopReason":"end_turn","sessionId":"abc"}',
+  ].join('\n');
+  assert.equal(grokBuildFailure(recovered), null);
+
+  const recoveredWithoutEnd = [
+    '{"type":"tool_call_update","status":"blocked","detail":"MCPTool denied"}',
+    '{"type":"text","data":"Review complete."}',
+  ].join('\n');
+  assert.equal(grokBuildFailure(recoveredWithoutEnd), null);
+
+  const terminalFailure = [
+    '{"type":"tool_call_update","status":"blocked","detail":"MCPTool denied"}',
+    '{"type":"end","stopReason":"error","message":"session failed"}',
+  ].join('\n');
+  assert.equal(grokBuildFailure(terminalFailure), 'session failed');
+});
+
+test('Grok streaming parser fails closed on sandbox fallback warnings', () => {
+  assert.match(
+    grokBuildFailure('warning: sandbox could not be applied; continuing without enforcement\n'),
+    /sandbox enforcement was not proven/,
+  );
+  assert.match(
+    grokBuildFailure('{"type":"text","data":"warning: sandbox failed to apply"}\n'),
+    /sandbox enforcement was not proven/,
+  );
 });
 
 test('Grok version probe distinguishes missing from installed without authentication', async (context) => {

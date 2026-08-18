@@ -1,6 +1,6 @@
 {
   "name": "plumbob-harness-control",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "Codex-Co-Engineer gives Codex a bounded control plane for DeepSeek Harness and Grok Build jobs.",
   "author": {
     "name": "Plumbob"

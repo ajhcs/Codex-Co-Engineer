@@ -102,6 +102,14 @@ Optional administrator settings:
   `submissions.json` ledger is written owner-only (`0600`). It stores request
   IDs, hashes, status, and opaque agent/run IDs; it does not store prompts,
   environment-variable values, images, MCP header values, or full transcripts.
+- `CODEX_TASK_STATE_ROOT`: host-provisioned shared durable state root. When
+  `CURSOR_CLOUD_CONTROL_STATE_DIR` is absent, the Cursor ledger uses the
+  absolute `${CODEX_TASK_STATE_ROOT}/cursor-cloud-control` directory. An empty
+  or relative value is rejected and does not fall through to another state
+  location.
+- `XDG_STATE_HOME`: forwarded to the MCP server for the standards-based state
+  fallback. It must be absolute when non-empty; a relative value fails closed
+  instead of falling through to `HOME`.
 - `CURSOR_ARTIFACT_ROOT`: required before downloading an artifact. Downloads
   are limited to this administrator-configured root.
 - `CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS`,
@@ -139,8 +147,12 @@ The local `status` response reports the ledger contract under
 `status.state.ready`, `status.state.source`, and, when unavailable,
 `status.state.reason`/`reasonCode`. Configure
 `CURSOR_CLOUD_CONTROL_STATE_DIR` explicitly when the host needs a known
-persistent owner-only location; the process may otherwise resolve the host's
-`XDG_STATE_HOME` or `HOME` state directory. It never falls back silently to
+persistent owner-only location. If it is absent, the process next uses the
+absolute `CODEX_TASK_STATE_ROOT/cursor-cloud-control` shared location, then
+the host's `XDG_STATE_HOME` or `HOME` state directory. Every non-empty state
+root must be absolute; relative explicit, shared, XDG, or HOME values fail
+closed rather than being silently resolved relative to the current working
+directory. The process never falls back silently to
 `/tmp` or another transient location. If the resolved directory or ledger is
 missing, not owner-only, corrupt, or not writable, mutation tools fail closed
 before calling Cursor. Read-only status and discovery calls remain available

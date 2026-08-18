@@ -18,7 +18,11 @@ or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
    Treat `status.state.ready` as the durable-mutation gate. Prefer setting
    `CURSOR_CLOUD_CONTROL_STATE_DIR` to a host-provisioned persistent
    owner-only directory; the directory is kept at `0700` and the ledger at
-   `0600`. Inspect `status.state.source` and, when it is not ready,
+   `0600`. If it is absent, the server uses the absolute
+   `CODEX_TASK_STATE_ROOT/cursor-cloud-control` shared location before its
+   verified XDG/HOME locations. Every configured non-empty state root must be
+   absolute; relative explicit, shared, XDG, or HOME values fail closed.
+   Inspect `status.state.source` and, when it is not ready,
    `status.state.reason`/`reasonCode`. There is no silent `/tmp` fallback.
    Unsafe or unavailable state causes mutation tools to fail before any
    Cursor provider call, while read-only status and discovery remain usable.

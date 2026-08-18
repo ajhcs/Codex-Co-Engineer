@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { targetIdentityDigest } from '../mcp/preflight.mjs';
+import { targetIdentityDigest, toolSetDigest } from '../mcp/preflight.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -104,6 +104,15 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
         },
       },
     },
+    {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: {
+        name: 'capacity',
+        arguments: { providers: ['codex', 'codex'] },
+      },
+    },
   ];
   const { NODE_TEST_CONTEXT: _testContext, ...serverEnvironment } = process.env;
   const result = spawnSync(process.execPath, [path.join(ROOT, 'mcp', 'server.mjs'), '--stdio'], {
@@ -131,12 +140,25 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
     result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line)).map((message) => [message.id, message]),
   );
   assert.equal(responses.get(1).result.serverInfo.name, 'plumbob-harness-control');
-  assert.equal(responses.get(1).result.serverInfo.version, '2.0.3');
+  assert.equal(responses.get(1).result.serverInfo.version, '2.1.0');
   assert.equal(responses.get(1).result.protocolVersion, '2025-11-25');
   assert.deepEqual(
     responses.get(2).result.tools.map((tool) => tool.name),
-    ['preflight', 'status', 'runtime', 'run', 'jobs', 'cancel'],
+    ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel'],
   );
+  const capacityTool = responses.get(2).result.tools.find((tool) => tool.name === 'capacity');
+  assert.deepEqual(capacityTool.inputSchema.properties.providers.items.enum, ['codex', 'grok', 'dsh']);
+  assert.deepEqual(capacityTool.inputSchema.properties.providers.default, ['codex', 'grok', 'dsh']);
+  assert.equal(capacityTool.inputSchema.properties.providers.maxItems, 3);
+  assert.equal(capacityTool.inputSchema.properties.providers.uniqueItems, true);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.minimum, 0);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.maximum, 3600);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.default, 60);
+  assert.equal(capacityTool.inputSchema.properties.include_usage.default, false);
+  assert.equal(capacityTool.inputSchema.properties.grok_session_id.maxLength, 256);
+  assert.equal(capacityTool.inputSchema.properties.dsh_job_id.maxLength, 96);
+  assert.equal(capacityTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(capacityTool.annotations, { readOnlyHint: true, openWorldHint: true });
   const jobsTool = responses.get(2).result.tools.find((tool) => tool.name === 'jobs');
   assert.deepEqual(jobsTool.inputSchema.properties.action.enum, ['list', 'get', 'wait', 'logs']);
   assert.equal(jobsTool.inputSchema.properties.tail_lines.maximum, 120);
@@ -145,7 +167,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.equal(statusBody.ok, true);
   assert.equal(statusBody.integration, 'control-only');
   assert.equal(statusBody.control_plane.health, 'healthy');
-  assert.equal(statusBody.control_plane.version, '2.0.3');
+  assert.equal(statusBody.control_plane.version, '2.1.0');
   assert.ok(['administrator-allowlisted', 'explicit-target-any-git-root'].includes(statusBody.targeting.mode));
   assert.equal(statusBody.targeting.implement_targets, 'explicit-scoped-workspace');
   assert.equal(statusBody.ui.optional, true);
@@ -175,12 +197,16 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.match(preflight.configuration_digest, /^[0-9a-f]{64}$/);
   assert.equal(preflight.transport, 'stdio');
   assert.equal(preflight.protocol_version, '2025-11-25');
-  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.0.3' });
-  assert.deepEqual(preflight.available_tools, ['preflight', 'status', 'runtime', 'run', 'jobs', 'cancel']);
+  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.1.0' });
+  assert.deepEqual(preflight.available_tools, ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel']);
+  assert.equal(preflight.toolset_digest, toolSetDigest(responses.get(2).result.tools));
 
   const denied = responses.get(5);
   assert.equal(denied.result.isError, true);
   assert.equal(JSON.parse(denied.result.content[0].text).code, 'invalid_kind');
+  const invalidCapacity = responses.get(6);
+  assert.equal(invalidCapacity.result.isError, true);
+  assert.equal(JSON.parse(invalidCapacity.result.content[0].text).code, 'invalid_options');
 
   const runTool = responses.get(2).result.tools.find((tool) => tool.name === 'run');
   assert.deepEqual(runTool.inputSchema.properties.kind.enum, ['deepseek_agent', 'grok_build']);
@@ -190,8 +216,9 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.deepEqual(kindPolicy.then.if.properties.target_context.required, ['role']);
   assert.equal(kindPolicy.then.then.properties.permission_mode.const, 'auto');
   assert.deepEqual(kindPolicy.then.then.properties.sandbox_profile.enum, ['workspace', 'read-only', 'strict']);
-  assert.deepEqual(kindPolicy.then.else.properties.permission_mode.enum, ['default', 'plan']);
+  assert.deepEqual(kindPolicy.then.else.properties.permission_mode.enum, ['default', 'plan', 'auto']);
   assert.equal(kindPolicy.then.else.properties.sandbox_profile.const, 'read-only');
+  assert.deepEqual(kindPolicy.then.else.properties.output_format.enum, ['json', 'streaming-json', 'streaming-messages-json']);
   assert.equal(kindPolicy.then.else.properties.always_approve.const, false);
   assert.equal(kindPolicy.then.else.properties.no_plan.const, false);
   const readOnlyToolPattern = new RegExp(kindPolicy.then.else.properties.allowed_tools.items.pattern);
@@ -201,6 +228,12 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   for (const tool of ['Write', 'Edit', 'Bash']) {
     assert.doesNotMatch(tool, readOnlyToolPattern);
   }
+  const readOnlyPermissionRulePattern = new RegExp(kindPolicy.then.else.properties.allow_rules.items.not.pattern);
+  assert.match('allow MCPTool(linear__issues_create)', readOnlyPermissionRulePattern);
+  assert.match('deny MCPTool(*)', readOnlyPermissionRulePattern);
+  assert.deepEqual(kindPolicy.then.else.properties.deny_rules.items.not, {
+    pattern: kindPolicy.then.else.properties.allow_rules.items.not.pattern,
+  });
   const forbiddenFields = kindPolicy.else.not.anyOf.flatMap((schema) => schema.required);
   assert.ok(forbiddenFields.includes('permission_mode'));
   assert.ok(forbiddenFields.includes('model'));
@@ -228,7 +261,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
     const role = argumentsObject.target_context?.role ?? 'review';
     return role === 'implement'
       ? argumentsObject.permission_mode === 'auto'
-      : ['default', 'plan'].includes(argumentsObject.permission_mode);
+      : ['default', 'plan', 'auto'].includes(argumentsObject.permission_mode);
   };
   const implementTarget = { ...target, role: 'implement' };
   assert.equal(isAcceptedByKindPolicy({ kind: 'grok_build', target_context: implementTarget }), true);

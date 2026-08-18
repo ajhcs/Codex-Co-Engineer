@@ -4,7 +4,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   access,
-  mkdir,
   open,
   readFile,
   rename,
@@ -13,6 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -51,23 +51,29 @@ import {
   normalizeDshOptions,
   resolveDshHome,
 } from './dsh.mjs';
+import { CapacityError, createCapacityReader } from './capacity.mjs';
+import { createDshReceiptReader } from './dsh-receipt.mjs';
+import {
+  inspectStateFile,
+  prepareStateFile,
+  prepareStateDirectory,
+  resolveStateDirectory,
+  revalidateStateDirectory,
+  sameStateIdentity,
+  stateResolutionMessage,
+} from './state.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const USER_HOME = process.env.HOME ?? '';
-const XDG_STATE_ROOT = process.env.XDG_STATE_HOME
-  ?? path.join(USER_HOME, '.local', 'state');
 const WORKSPACE = path.resolve(
   process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE
     ?? process.env.PLUMBOB_HARNESS_WORKSPACE
     ?? path.join(USER_HOME, '.local', 'share', 'codex-co-engineer', 'runtime'),
 );
-const STATE_DIR = path.resolve(
-  process.env.CODEX_CO_ENGINEER_STATE_DIR
-    ?? process.env.PLUMBOB_HARNESS_STATE_DIR
-    ?? path.join(XDG_STATE_ROOT, 'codex-co-engineer'),
-);
-const JOBS_DIR = path.join(STATE_DIR, 'jobs');
-const DATABASE_FILE = path.join(STATE_DIR, 'control.sqlite3');
+const STATE_RESOLUTION = resolveStateDirectory();
+const STATE_DIR = STATE_RESOLUTION.directory;
+const JOBS_DIR = STATE_DIR ? path.join(STATE_DIR, 'jobs') : null;
+const DATABASE_FILE = STATE_DIR ? path.join(STATE_DIR, 'control.sqlite3') : null;
 const DSH = process.env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
 const DSH_HOME_CONFIG = resolveDshHome({ env: process.env, stateDirectory: STATE_DIR });
 const DSH_HOME = DSH_HOME_CONFIG.path;
@@ -124,6 +130,22 @@ const TARGET_CONTEXT_KEYS = new Set([
   'role',
 ]);
 
+// Grok's built-in `read-only` profile explicitly permits writes to these
+// locations.  The runner can detect a changed checkout after the fact, but
+// that is not a prevention boundary.  Refuse review/verify targets rooted in
+// a provider-writable directory until the connector can provision and verify
+// a target-specific custom profile (whose startup failure is fail-closed).
+const GROK_READ_ONLY_WRITABLE_ROOTS = Object.freeze([...new Set([
+  '/tmp',
+  '/var/tmp',
+  '/private/tmp',
+  '/private/var/tmp',
+  os.tmpdir(),
+  process.env.TMPDIR,
+  USER_HOME ? path.join(USER_HOME, '.grok') : null,
+].filter((value) => typeof value === 'string' && value.length > 0)
+  .map((value) => path.resolve(value)))]);
+
 class ToolError extends Error {
   constructor(code, message) {
     super(message);
@@ -133,10 +155,98 @@ class ToolError extends Error {
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 let agentSubmissionTail = Promise.resolve();
+let stateHandle;
+let jobsHandle;
+let databaseStateIdentity;
+let databaseJobsIdentity;
+let databaseFileIdentity;
+let statePreparationTail = Promise.resolve();
 
-async function ensureState() {
-  await mkdir(JOBS_DIR, { recursive: true, mode: 0o700 });
-  database ??= openStore(DATABASE_FILE);
+const SQLITE_STATE_CHILDREN = Object.freeze([
+  'control.sqlite3-wal',
+  'control.sqlite3-shm',
+]);
+
+async function inspectSqliteStateChildren(expectedDatabaseIdentity = null) {
+  const currentDatabaseIdentity = await inspectStateFile(
+    stateHandle,
+    path.basename(DATABASE_FILE),
+    { expectedIdentity: expectedDatabaseIdentity },
+  );
+  for (const child of SQLITE_STATE_CHILDREN) {
+    // SQLite may create and remove WAL sidecars as connections come and go,
+    // so bind the durable database identity while requiring every sidecar
+    // that is present to remain a single owner-only regular file.
+    await inspectStateFile(stateHandle, child, { required: false });
+  }
+  return currentDatabaseIdentity;
+}
+
+async function ensureStateOnce() {
+  if (!STATE_DIR || !JOBS_DIR || !DATABASE_FILE) {
+    throw new ToolError('state_unavailable', stateResolutionMessage(STATE_RESOLUTION));
+  }
+  try {
+    stateHandle = await prepareStateDirectory(STATE_DIR);
+    jobsHandle = await prepareStateDirectory(JOBS_DIR);
+    await revalidateStateDirectory(stateHandle);
+    await revalidateStateDirectory(jobsHandle);
+    const currentStateIdentity = stateHandle.components.at(-1);
+    const currentJobsIdentity = jobsHandle.components.at(-1);
+    if (database) {
+      if (!sameStateIdentity(databaseStateIdentity, currentStateIdentity)
+        || !sameStateIdentity(databaseJobsIdentity, currentJobsIdentity)) {
+        throw new ToolError(
+          'state_identity_changed',
+          'The Co-Engineer state or jobs directory changed after the SQLite ledger was opened; refusing to reuse the old ledger.',
+        );
+      }
+      await inspectSqliteStateChildren(databaseFileIdentity);
+    } else {
+      // DatabaseSync accepts only a path, not an already verified fd. Securely
+      // pre-create (or validate) that path with O_EXCL|O_NOFOLLOW first. The
+      // enclosing identity-bound 0700 directory is the same-uid trust boundary
+      // for the unavoidable interval before DatabaseSync opens the path.
+      const preparedDatabaseIdentity = await prepareStateFile(
+        stateHandle,
+        path.basename(DATABASE_FILE),
+      );
+      for (const child of SQLITE_STATE_CHILDREN) {
+        await inspectStateFile(stateHandle, child, { required: false });
+      }
+      await revalidateStateDirectory(stateHandle);
+      const candidate = openStore(DATABASE_FILE);
+      try {
+        // The ledger must be opened only while both the state and jobs
+        // directory identities still match the prepared handles. Recheck the
+        // database and any SQLite WAL/SHM sidecars immediately after open.
+        await revalidateStateDirectory(stateHandle);
+        await revalidateStateDirectory(jobsHandle);
+        const confirmedDatabaseIdentity = await inspectSqliteStateChildren(
+          preparedDatabaseIdentity,
+        );
+        database = candidate;
+        databaseStateIdentity = currentStateIdentity;
+        databaseJobsIdentity = currentJobsIdentity;
+        databaseFileIdentity = confirmedDatabaseIdentity;
+      } catch (error) {
+        candidate.close();
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw new ToolError(
+      error?.code ?? 'state_unavailable',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function ensureState() {
+  const result = statePreparationTail.then(ensureStateOnce, ensureStateOnce);
+  statePreparationTail = result.catch(() => {});
+  return result;
 }
 
 let database;
@@ -255,6 +365,18 @@ async function startAgentJob(scope, starter) {
 function isPathWithin(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function assertGrokReadOnlyTarget(target) {
+  if (!target || !['review', 'verify'].includes(target.role)) return;
+  const candidate = path.resolve(target.working_directory ?? target.resolved_cwd ?? '');
+  const writableRoot = GROK_READ_ONLY_WRITABLE_ROOTS.find((root) => isPathWithin(root, candidate));
+  if (writableRoot) {
+    throw new ToolError(
+      'grok_read_only_target_unverifiable',
+      `Grok ${target.role} targets cannot be rooted in ${writableRoot}: the built-in read-only profile permits provider writes there. Use a target-specific custom profile with fail-closed startup or a non-writable target root.`,
+    );
+  }
 }
 
 function configuredTargetRoots() {
@@ -851,6 +973,61 @@ function dshWorkerEnvironment(configuration) {
     : dshBaseEnvironment(DSH_HOME);
 }
 
+/**
+ * The usage runner is an adapter-owned control path.  Its two environment
+ * variables must be written after any caller/provider environment so a
+ * provider cannot redirect the receipt to another job or disable collection.
+ */
+function startJobEnvironment(kind, id, env, readiness = dshReadinessCache) {
+  const childEnvironment = { ...env };
+  // These names are connector-owned even when collection is disabled. Strip
+  // any inherited/provider value before deciding whether the verified managed
+  // overlay may receive the authoritative exact-job values.
+  delete childEnvironment.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER;
+  delete childEnvironment.CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH;
+  if (kind === 'deepseek_agent' && verifiedManagedDshOverlay(readiness)) {
+    childEnvironment.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER = '1';
+    childEnvironment.CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH = path.join(
+      JOBS_DIR,
+      `${id}.usage.json`,
+    );
+  }
+  return childEnvironment;
+}
+
+let productionCapacityReader;
+
+/**
+ * Build the provider reader only when capacity is first requested.  The DSH
+ * reader itself is lazy as well: account-only or Codex/Grok requests do not
+ * touch the managed jobs directory, while selected DSH jobs are bound to the
+ * exact control jobs directory and reconciled store lookup.
+ */
+function getProductionCapacityReader() {
+  if (productionCapacityReader) return productionCapacityReader;
+  let dshReceiptReader = null;
+  if (managedDshOverlayConfigured()) {
+    let reader;
+    dshReceiptReader = async (jobId) => {
+      const readiness = requireDeepSeekReady();
+      if (!verifiedManagedDshOverlay(readiness)) {
+        throw new CapacityError(
+          'dsh_receipt_unsupported',
+          'DSH receipts require the verified Co-Engineer managed headless overlay.',
+        );
+      }
+      reader ??= createDshReceiptReader({ jobsDir: JOBS_DIR, loadJob: getJob });
+      return reader(jobId);
+    };
+  }
+  productionCapacityReader = createCapacityReader({ readDshReceipt: dshReceiptReader });
+  return productionCapacityReader;
+}
+
+function readProductionCapacity(args = {}) {
+  return getProductionCapacityReader()(args);
+}
+
 async function startJob({
   kind,
   summary,
@@ -913,7 +1090,7 @@ async function startJob({
     cancel_file: cancelFile,
     command,
     args,
-    env,
+    env: startJobEnvironment(kind, id, env),
     cwd,
     timeout_seconds: timeoutSeconds,
     deadline_at: deadlineAt,
@@ -1021,7 +1198,12 @@ async function statusTool(args) {
       executable: GROK,
       version: grokStatus.version,
       executable_state: grokStatus.executable_state,
-      sandbox: { managed_by: 'grok_cli', enforcement: 'cli_managed' },
+      sandbox: {
+        managed_by: 'grok_cli',
+        requested_profile: 'read-only_for_review_verify',
+        enforcement: 'fallback_warning_fail_closed_runner_postflight',
+        writable_builtin_roots: 'rejected_for_review_verify',
+      },
       capabilities: grokCapabilityProfile(),
       auth_state: grokDiagnostic?.auth_state ?? 'unknown',
       ready: grokDiagnostic?.ok === true && grokDiagnostic.auth_state === 'ready',
@@ -1078,6 +1260,49 @@ async function statusTool(args) {
     };
   }
   return result;
+}
+
+async function capacityTool(args) {
+  try {
+    return await readProductionCapacity(args);
+  } catch (error) {
+    if (error instanceof CapacityError) {
+      throw new ToolError(error.code, error.message);
+    }
+    throw error;
+  }
+}
+
+function isTerminalDshJob(job) {
+  return job?.kind === 'deepseek_agent'
+    && (FINAL_STATES.has(job?.status) || FINAL_STATES.has(job?.lifecycle_state)
+      || FINAL_STATES.has(job?.terminal_state));
+}
+
+/**
+ * Jobs get may include a compact terminal DSH usage snapshot.  Keep this off
+ * list/status/wait/logs: routine lifecycle surfaces must not read receipts or
+ * reveal provider usage metadata.  The capacity reader strips paths and raw
+ * provider fields, and its error shape is a bounded code only.
+ */
+async function terminalDshUsage(job) {
+  if (!isTerminalDshJob(job)) return null;
+  const result = await readProductionCapacity({
+    providers: ['dsh'],
+    dsh_job_id: job.id,
+    include_usage: true,
+    refresh: true,
+    max_age_seconds: 60,
+  });
+  const entry = result.providers?.[0];
+  if (!entry) return { status: 'unavailable', error: { code: 'capacity_query_failed' } };
+  return {
+    status: entry.status,
+    observed_at: entry.observed_at ?? null,
+    freshness: entry.freshness ?? { state: 'unknown', age_seconds: null },
+    usage: entry.usage ?? null,
+    ...(entry.error ? { error: entry.error } : {}),
+  };
 }
 
 function grokAuthDoctor() {
@@ -1430,6 +1655,7 @@ async function preflightTool(args) {
   }
   if (kind === 'grok_build') {
     configuration.grok_configuration = normalizeGrokForTool(args, target.role);
+    assertGrokReadOnlyTarget(target);
     grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
   }
   configuration.configuration_digest = sha256Digest(configuration);
@@ -1488,6 +1714,7 @@ async function runTool(args) {
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
     const grokConfiguration = normalizeGrokForTool(args, target.role);
+    assertGrokReadOnlyTarget(target);
     const grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
     const effectiveConfiguration = agentConfiguration({
       kind: args.kind,
@@ -1737,7 +1964,7 @@ async function jobsTool(args) {
     ? null
     : await readLogPage(job.log_file, afterCursor, LOG_PAGE_MAX_BYTES);
   const currentLogBytes = await logBytes(job.log_file);
-  return {
+  const response = {
     ok: true,
     limits: WAIT_LIMITS,
     effective_parameters: {
@@ -1752,6 +1979,11 @@ async function jobsTool(args) {
     next_cursor: String(currentLogBytes),
     log_delta: logDelta,
   };
+  if (args.action === 'get') {
+    const usage = await terminalDshUsage(job);
+    if (usage) response.dsh_usage = usage;
+  }
+  return response;
 }
 
 async function cancelTool(args) {
@@ -1774,6 +2006,17 @@ function validateToolArguments(name, args) {
   if (name === 'preflight' || name === 'run') return;
   if (name === 'status') {
     rejectUnknownToolFields(args, new Set(['recent_limit', 'diagnostics']), name);
+    return;
+  }
+  if (name === 'capacity') {
+    rejectUnknownToolFields(args, new Set([
+      'providers',
+      'refresh',
+      'max_age_seconds',
+      'include_usage',
+      'grok_session_id',
+      'dsh_job_id',
+    ]), name);
     return;
   }
   if (name === 'runtime') {
@@ -1803,6 +2046,7 @@ function validateToolArguments(name, args) {
 export async function dispatchControl(name, args = {}) {
   validateToolArguments(name, args);
   if (name === 'status') return statusTool(args);
+  if (name === 'capacity') return capacityTool(args);
   if (name === 'runtime') return runtimeTool(args);
   if (name === 'preflight') return preflightTool(args);
   if (name === 'run') return runTool(args);
@@ -1815,7 +2059,10 @@ export const __testing = Object.freeze({
   configuredTargetRoots,
   executionScopesOverlap,
   deepseekReadiness,
+  getProductionCapacityReader,
   prepareTarget,
+  assertGrokReadOnlyTarget,
+  startJobEnvironment,
 });
 
 export { ToolError };

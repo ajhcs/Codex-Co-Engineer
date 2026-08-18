@@ -1,0 +1,21 @@
+{
+  "name": "plumbob-acpx-runtime-vendor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Reproducible build workspace for the embedded ACPX runtime bundle.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "node ./build.mjs",
+    "test:publish-provenance": "node --test ./publish-provenance.test.mjs",
+    "test:reproducible": "node --test --test-isolation=none ./reproducible.test.mjs",
+    "verify:publish-provenance": "node ./verify-publish-provenance.mjs"
+  },
+  "dependencies": {
+    "acpx": "0.13.0",
+    "esbuild": "0.28.2"
+  }
+}

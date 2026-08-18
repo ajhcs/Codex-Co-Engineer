@@ -22,3 +22,20 @@
             contextWindow: 1048576
             maxTokens: !!js Number(process.env.CODEX_CO_ENGINEER_DSH_MAX_TOKENS ?? '131072')
             input: [text, image]
+
+# The adapter sets CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER only after it
+# has materialized the managed asset into the profile directory. DSH patch
+# names are literal module specifiers (top-level !!js is not evaluated), so a
+# separate row is selected with a relative module path and the shipped row is
+# disabled only for managed receipt runs. The asset requires the exact
+# CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH at execution time.
+- id: headless-runner
+  disabled: !!js process.env.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER !== undefined
+
+- insert:
+    - id: headless-usage-runner
+      name: './dsh-headless-usage-runner.mjs'
+      inject: [headlessStartup]
+      disabled: !!js process.env.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER === undefined
+      config:
+        task: !!js ctx.headlessStartup.task
