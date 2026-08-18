@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, link, lstat, mkdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { CursorApiError, DEFAULT_MAX_ARTIFACT_BYTES } from './client.mjs';
@@ -38,6 +38,8 @@ async function ensureParents(root, relative) {
 
 export async function saveArtifact(bytes, destination, { env = process.env, overwrite = false } = {}) {
   if (!(bytes instanceof Uint8Array)) throw new CursorApiError('artifact_download_failed', 'Artifact download did not return bytes.');
+  const byteCount = bytes.byteLength;
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
   const root = await safeRoot(env);
   const relative = assertSafeRelativeDestination(destination);
   const absolute = path.resolve(root, relative);
@@ -69,7 +71,7 @@ export async function saveArtifact(bytes, destination, { env = process.env, over
     if (error?.code === 'EEXIST') throw new CursorApiError('destination_exists', 'Artifact destination exists; pass overwrite=true to replace it.');
     throw new CursorApiError('artifact_write_failed', 'Artifact could not be written safely.');
   }
-  return { path: absolute, relativePath: relative, bytes: bytes.byteLength, mode: 'owner-only' };
+  return { path: absolute, relativePath: relative, bytes: byteCount, byteCount, sha256, mode: 'owner-only' };
 }
 
 export function maxArtifactBytes(env = process.env) {

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { targetIdentityDigest } from '../mcp/preflight.mjs';
+import { targetIdentityDigest, toolSetDigest } from '../mcp/preflight.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -104,6 +104,15 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
         },
       },
     },
+    {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: {
+        name: 'capacity',
+        arguments: { providers: ['codex', 'codex'] },
+      },
+    },
   ];
   const { NODE_TEST_CONTEXT: _testContext, ...serverEnvironment } = process.env;
   const result = spawnSync(process.execPath, [path.join(ROOT, 'mcp', 'server.mjs'), '--stdio'], {
@@ -131,12 +140,25 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
     result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line)).map((message) => [message.id, message]),
   );
   assert.equal(responses.get(1).result.serverInfo.name, 'plumbob-harness-control');
-  assert.equal(responses.get(1).result.serverInfo.version, '2.0.1');
+  assert.equal(responses.get(1).result.serverInfo.version, '2.1.0');
   assert.equal(responses.get(1).result.protocolVersion, '2025-11-25');
   assert.deepEqual(
     responses.get(2).result.tools.map((tool) => tool.name),
-    ['preflight', 'status', 'runtime', 'run', 'jobs', 'cancel'],
+    ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel'],
   );
+  const capacityTool = responses.get(2).result.tools.find((tool) => tool.name === 'capacity');
+  assert.deepEqual(capacityTool.inputSchema.properties.providers.items.enum, ['codex', 'grok', 'dsh']);
+  assert.deepEqual(capacityTool.inputSchema.properties.providers.default, ['codex', 'grok', 'dsh']);
+  assert.equal(capacityTool.inputSchema.properties.providers.maxItems, 3);
+  assert.equal(capacityTool.inputSchema.properties.providers.uniqueItems, true);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.minimum, 0);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.maximum, 3600);
+  assert.equal(capacityTool.inputSchema.properties.max_age_seconds.default, 60);
+  assert.equal(capacityTool.inputSchema.properties.include_usage.default, false);
+  assert.equal(capacityTool.inputSchema.properties.grok_session_id.maxLength, 256);
+  assert.equal(capacityTool.inputSchema.properties.dsh_job_id.maxLength, 96);
+  assert.equal(capacityTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(capacityTool.annotations, { readOnlyHint: true, openWorldHint: true });
   const jobsTool = responses.get(2).result.tools.find((tool) => tool.name === 'jobs');
   assert.deepEqual(jobsTool.inputSchema.properties.action.enum, ['list', 'get', 'wait', 'logs']);
   assert.equal(jobsTool.inputSchema.properties.tail_lines.maximum, 120);
@@ -145,15 +167,28 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.equal(statusBody.ok, true);
   assert.equal(statusBody.integration, 'control-only');
   assert.equal(statusBody.control_plane.health, 'healthy');
-  assert.equal(statusBody.control_plane.version, '2.0.1');
+  assert.equal(statusBody.control_plane.version, '2.1.0');
   assert.ok(['administrator-allowlisted', 'explicit-target-any-git-root'].includes(statusBody.targeting.mode));
   assert.equal(statusBody.targeting.implement_targets, 'explicit-scoped-workspace');
   assert.equal(statusBody.ui.optional, true);
   assert.ok(statusBody.headless_agent);
   assert.equal(statusBody.credentials.model_api_key_available, false);
   assert.equal(statusBody.workspace.dsh_command, 'dsh');
+  assert.ok(['verified-managed-overlay', 'unknown'].includes(statusBody.headless_agent.capability_state));
+  if (statusBody.headless_agent.capability_state === 'verified-managed-overlay') {
+    assert.deepEqual(statusBody.headless_agent.capabilities.model.connector_input_modalities, ['text']);
+    assert.equal(statusBody.headless_agent.capabilities.execution.image_input_exposed, false);
+  } else {
+    assert.equal(Object.hasOwn(statusBody.headless_agent, 'capabilities'), false);
+  }
   assert.equal(statusBody.grok_build.kind, 'grok_build');
   assert.equal(statusBody.grok_build.auth_state, 'unknown');
+  assert.deepEqual(statusBody.grok_build.capabilities.transport, {
+    selected: 'direct-headless',
+    acp: 'not_exposed',
+  });
+  assert.equal(statusBody.grok_build.capabilities.delegation.requested, 'cli-default');
+  assert.equal(statusBody.grok_build.capabilities.delegation.effective, 'unknown');
 
   const preflight = responses.get(4).result.structuredContent;
   assert.equal(preflight.target_fingerprint, fingerprint);
@@ -162,21 +197,91 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.match(preflight.configuration_digest, /^[0-9a-f]{64}$/);
   assert.equal(preflight.transport, 'stdio');
   assert.equal(preflight.protocol_version, '2025-11-25');
-  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.0.1' });
-  assert.deepEqual(preflight.available_tools, ['preflight', 'status', 'runtime', 'run', 'jobs', 'cancel']);
+  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.1.0' });
+  assert.deepEqual(preflight.available_tools, ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel']);
+  assert.equal(preflight.toolset_digest, toolSetDigest(responses.get(2).result.tools));
 
   const denied = responses.get(5);
   assert.equal(denied.result.isError, true);
   assert.equal(JSON.parse(denied.result.content[0].text).code, 'invalid_kind');
+  const invalidCapacity = responses.get(6);
+  assert.equal(invalidCapacity.result.isError, true);
+  assert.equal(JSON.parse(invalidCapacity.result.content[0].text).code, 'invalid_options');
 
   const runTool = responses.get(2).result.tools.find((tool) => tool.name === 'run');
   assert.deepEqual(runTool.inputSchema.properties.kind.enum, ['deepseek_agent', 'grok_build']);
+  const kindPolicy = runTool.inputSchema.allOf.find((policy) => policy.if?.properties?.kind?.const === 'grok_build');
+  assert.ok(kindPolicy);
+  assert.deepEqual(kindPolicy.if.required, ['kind']);
+  assert.deepEqual(kindPolicy.then.if.properties.target_context.required, ['role']);
+  assert.equal(kindPolicy.then.then.properties.permission_mode.const, 'auto');
+  assert.deepEqual(kindPolicy.then.then.properties.sandbox_profile.enum, ['workspace', 'read-only', 'strict']);
+  assert.deepEqual(kindPolicy.then.else.properties.permission_mode.enum, ['default', 'plan', 'auto']);
+  assert.equal(kindPolicy.then.else.properties.sandbox_profile.const, 'read-only');
+  assert.deepEqual(kindPolicy.then.else.properties.output_format.enum, ['json', 'streaming-json', 'streaming-messages-json']);
+  assert.equal(kindPolicy.then.else.properties.always_approve.const, false);
+  assert.equal(kindPolicy.then.else.properties.no_plan.const, false);
+  const readOnlyToolPattern = new RegExp(kindPolicy.then.else.properties.allowed_tools.items.pattern);
+  for (const tool of ['Read', 'Grep', 'Glob', 'LS', 'Find', 'WebFetch', 'WebSearch']) {
+    assert.match(tool, readOnlyToolPattern);
+  }
+  for (const tool of ['Write', 'Edit', 'Bash']) {
+    assert.doesNotMatch(tool, readOnlyToolPattern);
+  }
+  const readOnlyPermissionRulePattern = new RegExp(kindPolicy.then.else.properties.allow_rules.items.pattern);
+  assert.match('Read(*)', readOnlyPermissionRulePattern);
+  assert.match('Grep(src/**)', readOnlyPermissionRulePattern);
+  assert.doesNotMatch('*', readOnlyPermissionRulePattern);
+  assert.doesNotMatch('Bash(*)', readOnlyPermissionRulePattern);
+  assert.deepEqual(kindPolicy.then.else.properties.deny_rules.items.not, {
+    pattern: '[Mm][Cc][Pp][Tt][Oo][Oo][Ll]',
+  });
+  const forbiddenFields = kindPolicy.else.not.anyOf.flatMap((schema) => schema.required);
+  assert.ok(forbiddenFields.includes('permission_mode'));
+  assert.ok(forbiddenFields.includes('model'));
+  assert.ok(forbiddenFields.includes('agent'));
+  assert.ok(forbiddenFields.includes('delegation'));
+  assert.ok(forbiddenFields.includes('no_subagents'));
+  const dshPolicy = runTool.inputSchema.allOf.find((policy) => policy.if?.properties?.kind?.const === 'deepseek_agent');
+  assert.ok(dshPolicy);
+  assert.deepEqual(dshPolicy.else.not.required, ['dsh_options']);
+  assert.equal(runTool.inputSchema.properties.dsh_options.additionalProperties, false);
+  assert.equal(runTool.inputSchema.properties.dsh_options.properties.model.const, 'muse-spark-1.2-contributor');
+  assert.deepEqual(runTool.inputSchema.properties.dsh_options.properties.tool_mode.enum, ['native', 'code', 'both']);
+  assert.equal(runTool.inputSchema.properties.dsh_options.properties.max_tokens.maximum, 131072);
+  assert.match(runTool.inputSchema.properties.dsh_options.description, /text-only/);
+  assert.match(runTool.inputSchema.properties.prompt.description, /Text-only/);
+
+  // The repository has no JSON Schema validator dependency, so keep these
+  // fixtures at the advertised policy boundary and make the intended
+  // acceptance/rejection cases explicit in the contract test.
+  const isAcceptedByKindPolicy = (argumentsObject) => {
+    const isGrok = argumentsObject.kind === 'grok_build';
+    const hasGrokField = forbiddenFields.some((field) => Object.hasOwn(argumentsObject, field));
+    if (!isGrok && hasGrokField) return false;
+    if (!isGrok || !Object.hasOwn(argumentsObject, 'permission_mode')) return true;
+    const role = argumentsObject.target_context?.role ?? 'review';
+    return role === 'implement'
+      ? argumentsObject.permission_mode === 'auto'
+      : ['default', 'plan', 'auto'].includes(argumentsObject.permission_mode);
+  };
+  const implementTarget = { ...target, role: 'implement' };
+  assert.equal(isAcceptedByKindPolicy({ kind: 'grok_build', target_context: implementTarget }), true);
+  assert.equal(isAcceptedByKindPolicy({ kind: 'grok_build', target_context: implementTarget, permission_mode: 'auto' }), true);
+  assert.equal(isAcceptedByKindPolicy({ kind: 'deepseek_agent', target_context: target, permission_mode: 'auto' }), false);
+  assert.equal(isAcceptedByKindPolicy({ kind: 'preflight', target_context: target, model: 'grok-4.6' }), false);
   assert.deepEqual(
     runTool.inputSchema.properties.output_format.enum,
     ['plain', 'json', 'streaming-json', 'streaming-messages-json'],
   );
   assert.equal(runTool.inputSchema.properties.verbatim.type, 'boolean');
   assert.equal(runTool.inputSchema.properties.include_partial_messages.type, 'boolean');
+  assert.equal(runTool.inputSchema.properties.agent.pattern, '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$');
+  assert.deepEqual(runTool.inputSchema.properties.delegation.required, ['enabled']);
+  assert.equal(runTool.inputSchema.properties.delegation.additionalProperties, false);
+  assert.match(runTool.inputSchema.properties.agent.description, /main-session/);
+  assert.match(runTool.inputSchema.properties.agent.description, /shadow/);
+  assert.match(runTool.inputSchema.properties.delegation.properties.enabled.description, /Actual delegation usage.*unknown/);
   assert.deepEqual(
     runTool.inputSchema.properties.json_schema.oneOf.map((schema) => schema.type),
     ['boolean', 'object'],

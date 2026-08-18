@@ -2,6 +2,9 @@
 
 Provider credentials are accepted only from the server environment or a
 protected file outside the repository. They are never valid tool arguments.
+Once configured, those credentials are standing authorization for task-scoped
+provider calls; the control planes do not ask for per-job data-egress approval.
+Writes, destructive Git, deployments, and PR creation remain separately controlled.
 For `grok_build`, `MODEL_API_KEY` is not required or passed to the child;
 Grok's OAuth/session state remains under the user's normal home and an
 administrator may provide `XAI_API_KEY` through the daemon environment. The
@@ -32,6 +35,14 @@ leader sockets, restore/worktree/ref commands, agent/agents bundles, and
 interactive login/update commands are not proxied by this release because they
 would bypass the target, lifecycle, or credential contract. The adapter's
 bounded parser owns the durable output contract.
+
+Pinned ACPX, bounded ACP helpers, and a Grok outer-boundary implementation are
+packaged only for conformance. They are not connected to a public sessions or
+coding-dispatch tool; direct Grok still uses the CLI-managed sandbox. The outer
+experiment accepts an attested owner-only auth file, not `XAI_API_KEY`, and
+still awaits real host/systemd acceptance. Grok and DSH harness-internal
+subagents record compact requested/effective evidence; effectiveness stays
+`unknown` unless provider output proves a child ran.
 
 ## Cursor Cloud Control
 

@@ -1,22 +1,55 @@
 import { lstat, readFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import path from 'node:path';
+import {
+  normalizeAgentUsage,
+  parseRateLimitHeaders,
+  providerErrorCode,
+  retryAfterDelayMs,
+} from './capacity.mjs';
 import { redactText } from './redaction.mjs';
+import {
+  DEFAULT_MODEL_CATALOG_MAX_ITEMS,
+  DEFAULT_MODEL_CATALOG_TTL_MS,
+  ModelCatalogCache,
+} from './models.mjs';
 
 export const DEFAULT_API_ORIGIN = 'https://api.cursor.com';
 export const API_VERSION = 'v1';
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+export const DEFAULT_REPOSITORY_TIMEOUT_MS = 60_000;
 export const DEFAULT_MAX_RESPONSE_BYTES = 2_000_000;
 export const DEFAULT_MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 export const DEFAULT_MAX_REQUEST_BYTES = 25 * 1024 * 1024;
+export const DEFAULT_MAX_ARTIFACT_REDIRECTS = 5;
 
 export function defaultApiKeyFile(env = process.env) {
   return path.resolve(path.join(env.XDG_CONFIG_HOME ?? path.join(env.HOME ?? '.', '.config'), 'cursor-cloud-control', 'api-key'));
 }
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const responseDeadlines = new WeakMap();
+const responseMetadata = new WeakMap();
+
+function requestTimeoutError() {
+  return new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
+}
+
+function remainingDeadline(deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw requestTimeoutError();
+  return remaining;
+}
 
 export class CursorApiError extends Error {
-  constructor(code, message, { status, details, retryable = false, ambiguous = false } = {}) {
+  constructor(code, message, {
+    status,
+    details,
+    retryable = false,
+    ambiguous = false,
+    providerCode: providerCodeValue,
+    rateWindow,
+  } = {}) {
     super(message);
     this.name = 'CursorApiError';
     this.code = code;
@@ -24,7 +57,13 @@ export class CursorApiError extends Error {
     this.details = details;
     this.retryable = retryable;
     this.ambiguous = ambiguous;
+    this.providerCode = providerCodeValue;
+    this.rateWindow = rateWindow;
   }
+}
+
+export function getResponseMetadata(value) {
+  return value && typeof value === 'object' ? responseMetadata.get(value) ?? null : null;
 }
 
 function validOrigin(value) {
@@ -103,6 +142,7 @@ function classifyHttp(status) {
 }
 
 async function boundedBody(response, maxBytes, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  if (timeoutMs <= 0) throw requestTimeoutError();
   const declared = Number(response.headers?.get?.('content-length') ?? 0);
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new CursorApiError('response_too_large', 'Cursor response exceeded the configured size limit.');
@@ -113,7 +153,7 @@ async function boundedBody(response, maxBytes, timeoutMs = DEFAULT_REQUEST_TIMEO
     try {
       text = await Promise.race([
         response.text(),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.')), timeoutMs); }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(requestTimeoutError()), timeoutMs); }),
       ]);
     } finally { clearTimeout(timer); }
     if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new CursorApiError('response_too_large', 'Cursor response exceeded the configured size limit.');
@@ -139,14 +179,14 @@ async function boundedBody(response, maxBytes, timeoutMs = DEFAULT_REQUEST_TIMEO
       chunks.push(value);
     }
   } catch (error) {
-    if (timedOut) throw new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
+    if (timedOut) throw requestTimeoutError();
     throw error;
   } finally {
     clearTimeout(timer);
     reader.releaseLock?.();
   }
 
-  if (timedOut) throw new CursorApiError('request_timeout', 'Cursor response exceeded the configured time bound.');
+  if (timedOut) throw requestTimeoutError();
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -157,6 +197,107 @@ function contentType(response) {
   return String(response.headers?.get?.('content-type') ?? '').toLowerCase().split(';', 1)[0].trim();
 }
 
+const ARTIFACT_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const ARTIFACT_METADATA_HOSTS = new Set([
+  'instance-data',
+  'instance-data.ec2.internal',
+  'metadata',
+  'metadata.azure.com',
+  'metadata.azure.internal',
+  'metadata.google.com',
+  'metadata.google.internal',
+]);
+
+function unsafeIpv4(hostname) {
+  const octets = hostname.split('.').map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [first, second, third] = octets;
+  return first === 0
+    || first === 10
+    || first === 100 && second >= 64 && second <= 127
+    || first === 127
+    || first === 169 && second === 254
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && second === 0 && third === 0
+    || first === 192 && second === 0 && third === 2
+    || first === 192 && second === 88 && third === 99
+    || first === 192 && second === 168
+    || first === 198 && (second === 18 || second === 19)
+    || first === 198 && second === 51 && third === 100
+    || first === 203 && second === 0 && third === 113
+    || first >= 224;
+}
+
+function parseIpv6(hostname) {
+  const value = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const sections = value.split('::');
+  if (sections.length > 2) return null;
+  const parseSection = (section) => {
+    if (!section) return [];
+    const values = section.split(':');
+    const groups = [];
+    for (const part of values) {
+      if (part.includes('.')) {
+        const octets = part.split('.').map((entry) => Number(entry));
+        if (octets.length !== 4 || octets.some((entry) => !Number.isInteger(entry) || entry < 0 || entry > 255)) return null;
+        groups.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+        groups.push(Number.parseInt(part, 16));
+      }
+    }
+    return groups;
+  };
+  const left = parseSection(sections[0]);
+  const right = sections.length === 2 ? parseSection(sections[1]) : [];
+  if (!left || !right) return null;
+  if (sections.length === 1) return left.length === 8 ? left : null;
+  if (left.length + right.length >= 8) return null;
+  return [...left, ...Array(8 - left.length - right.length).fill(0), ...right];
+}
+
+function unsafeIpv6(hostname) {
+  const groups = parseIpv6(hostname);
+  if (!groups) return false;
+  const allZero = groups.every((group) => group === 0);
+  const loopback = allZero || groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
+  const uniqueLocal = (groups[0] & 0xfe00) === 0xfc00;
+  const linkLocal = (groups[0] & 0xffc0) === 0xfe80;
+  const siteLocal = (groups[0] & 0xffc0) === 0xfec0;
+  const multicast = (groups[0] & 0xff00) === 0xff00;
+  const ipv4Mapped = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+  const ipv4Compatible = groups.slice(0, 6).every((group) => group === 0);
+  if (ipv4Mapped) {
+    const first = groups[6] >> 8;
+    const second = groups[6] & 0xff;
+    const third = groups[7] >> 8;
+    const fourth = groups[7] & 0xff;
+    return unsafeIpv4(`${first}.${second}.${third}.${fourth}`);
+  }
+  return loopback || uniqueLocal || linkLocal || siteLocal || multicast || ipv4Compatible;
+}
+
+function validateArtifactUrl(value) {
+  let parsed;
+  try { parsed = value instanceof URL ? value : new URL(value); } catch {
+    throw new CursorApiError('invalid_artifact_url', 'Cursor returned an invalid artifact URL.');
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  const normalizedHost = hostname.replace(/^\[|\]$/g, '');
+  const ipVersion = isIP(normalizedHost);
+  const unsafeHost = ARTIFACT_METADATA_HOSTS.has(hostname)
+    || hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || hostname.endsWith('.internal')
+    || ipVersion === 4 && unsafeIpv4(normalizedHost)
+    || ipVersion === 6 && unsafeIpv6(normalizedHost);
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !hostname || unsafeHost) {
+    throw new CursorApiError('invalid_artifact_url', 'Cursor returned an unsafe artifact URL.');
+  }
+  return parsed;
+}
+
 export class CursorApiClient {
   constructor({
     apiKey,
@@ -164,14 +305,21 @@ export class CursorApiClient {
     origin = process.env.CURSOR_API_ORIGIN ?? DEFAULT_API_ORIGIN,
     fetchImpl = globalThis.fetch,
     requestTimeoutMs = integerEnv('CURSOR_CLOUD_CONTROL_REQUEST_TIMEOUT_MS', DEFAULT_REQUEST_TIMEOUT_MS, 250, 60_000),
+    repositoryTimeoutMs = integerEnv('CURSOR_CLOUD_CONTROL_REPOSITORY_TIMEOUT_MS', DEFAULT_REPOSITORY_TIMEOUT_MS, 1_000, 60_000),
     maxResponseBytes = integerEnv('CURSOR_CLOUD_CONTROL_MAX_RESPONSE_BYTES', DEFAULT_MAX_RESPONSE_BYTES, 1024, 20_000_000),
+    modelCatalogTtlMs = DEFAULT_MODEL_CATALOG_TTL_MS,
+    modelCatalogMaxItems = DEFAULT_MODEL_CATALOG_MAX_ITEMS,
   } = {}) {
     this.apiKey = apiKey ?? null;
     this.authScheme = String(authScheme).toLowerCase();
     this.origin = validOrigin(origin ?? DEFAULT_API_ORIGIN);
     this.fetchImpl = fetchImpl;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.repositoryTimeoutMs = repositoryTimeoutMs;
     this.maxResponseBytes = maxResponseBytes;
+    // Keep discovery cache instance-owned: an instance is bound to one API
+    // origin and credential, so catalogs can never cross client boundaries.
+    this.modelCatalog = new ModelCatalogCache({ ttlMs: modelCatalogTtlMs, maxItems: modelCatalogMaxItems });
     this.secrets = this.apiKey ? [this.apiKey] : [];
     if (typeof this.fetchImpl !== 'function') throw new CursorApiError('fetch_unavailable', 'Node fetch is unavailable.');
   }
@@ -188,10 +336,12 @@ export class CursorApiClient {
   async request(pathname, { method = 'GET', query, body, accept = 'application/json', lastEventId, timeoutMs = this.requestTimeoutMs, retryRead = method === 'GET' } = {}) {
     const url = this.url(pathname, query);
     const attempts = retryRead && method === 'GET' ? 3 : 1;
+    const deadline = Date.now() + timeoutMs;
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const remaining = remainingDeadline(deadline);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const timer = setTimeout(() => controller.abort(), remaining);
       const headers = { Accept: accept, Authorization: this.authHeader() };
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
       if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -213,21 +363,52 @@ export class CursorApiClient {
           ? error
           : new CursorApiError(error?.name === 'AbortError' ? 'request_timeout' : 'network_error', 'Cursor API request failed.', { retryable: true });
         lastError = wrapped;
-        if (attempt + 1 < attempts) { await sleep(100 * (2 ** attempt)); continue; }
+        if (attempt + 1 < attempts && Date.now() < deadline) {
+          await sleep(Math.min(100 * (2 ** attempt), remainingDeadline(deadline)));
+          continue;
+        }
         throw wrapped;
       }
       clearTimeout(timer);
       if (!response.ok) {
         let detail = '';
-        try { detail = await boundedBody(response, Math.min(this.maxResponseBytes, 100_000), this.requestTimeoutMs); } catch {}
+        try {
+          detail = await boundedBody(response, Math.min(this.maxResponseBytes, 100_000), remainingDeadline(deadline));
+        } catch (error) {
+          if (error?.code === 'request_timeout') throw error;
+        }
         const [code, retryable] = classifyHttp(response.status);
         const safeDetail = detail ? redactText(detail, this.secrets) : '';
         const message = safeDetail ? `Cursor API returned HTTP ${response.status}: ${safeDetail}` : `Cursor API returned HTTP ${response.status}.`;
-        const error = new CursorApiError(code, message, { status: response.status, retryable });
+        const providerCodeValue = providerErrorCode(detail);
+        const rateWindow = parseRateLimitHeaders(response.headers);
+        const effectiveRetryable = providerCodeValue === 'usage_limit_exceeded' ? false : retryable;
+        const hasRetryAfter = Boolean(rateWindow && Object.hasOwn(rateWindow, 'retryAfter'));
+        const retryAfterMs = hasRetryAfter ? retryAfterDelayMs(rateWindow.retryAfter) : undefined;
+        const metadata = {
+          ...(providerCodeValue ? { providerCode: providerCodeValue } : {}),
+          ...(rateWindow ? { rateWindow } : {}),
+        };
+        const error = new CursorApiError(code, message, {
+          status: response.status,
+          retryable: effectiveRetryable,
+          ...(providerCodeValue ? { providerCode: providerCodeValue } : {}),
+          ...(rateWindow ? { rateWindow } : {}),
+          ...(Object.keys(metadata).length > 0 ? { details: metadata } : {}),
+        });
         lastError = error;
-        if (retryable && attempt + 1 < attempts) { await sleep(100 * (2 ** attempt)); continue; }
+        if (effectiveRetryable && attempt + 1 < attempts && Date.now() < deadline) {
+          const remaining = remainingDeadline(deadline);
+          // A provider Retry-After is authoritative. If it cannot be parsed,
+          // or would outlive this request's deadline, return the retryable
+          // error rather than issuing an immediate request against the limit.
+          if (hasRetryAfter && (retryAfterMs === undefined || retryAfterMs >= remaining)) throw error;
+          await sleep(hasRetryAfter ? retryAfterMs : Math.min(100 * (2 ** attempt), remaining));
+          continue;
+        }
         throw error;
       }
+      responseDeadlines.set(response, deadline);
       return response;
     }
     throw lastError ?? new CursorApiError('network_error', 'Cursor API request failed.');
@@ -240,11 +421,22 @@ export class CursorApiClient {
     if (!['application/json', 'application/problem+json', 'text/json'].includes(type)) {
       throw new CursorApiError('invalid_content_type', 'Cursor API returned a non-JSON response.');
     }
-    const text = await boundedBody(response, this.maxResponseBytes, this.requestTimeoutMs);
-    if (!text.trim()) return {};
-    try { return JSON.parse(text); } catch {
-      throw new CursorApiError('invalid_json', 'Cursor API returned invalid JSON.');
+    const deadline = responseDeadlines.get(response) ?? (Date.now() + (options.timeoutMs ?? this.requestTimeoutMs));
+    const text = await boundedBody(response, this.maxResponseBytes, remainingDeadline(deadline));
+    let parsed;
+    if (!text.trim()) parsed = {};
+    else {
+      try { parsed = JSON.parse(text); } catch {
+        throw new CursorApiError('invalid_json', 'Cursor API returned invalid JSON.');
+      }
     }
+    if (parsed && typeof parsed === 'object') {
+      responseMetadata.set(parsed, {
+        observedAt: new Date().toISOString(),
+        rateWindow: parseRateLimitHeaders(response.headers),
+      });
+    }
+    return parsed;
   }
 
   async stream(pathname, { lastEventId, timeoutMs = this.requestTimeoutMs } = {}) {
@@ -262,28 +454,80 @@ export class CursorApiClient {
     return response;
   }
 
-  async fetchPresigned(urlValue, { maxBytes = DEFAULT_MAX_ARTIFACT_BYTES, timeoutMs = this.requestTimeoutMs } = {}) {
-    let parsed;
-    try { parsed = new URL(urlValue); } catch { throw new CursorApiError('invalid_artifact_url', 'Cursor returned an invalid artifact URL.'); }
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new CursorApiError('invalid_artifact_url', 'Cursor returned an unsafe artifact URL.');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response;
-    try {
-      response = await this.fetchImpl(parsed, { method: 'GET', headers: { Accept: '*/*' }, signal: controller.signal });
-    } catch (error) {
-      throw new CursorApiError(error?.name === 'AbortError' ? 'request_timeout' : 'network_error', 'Artifact download failed.');
-    } finally { clearTimeout(timer); }
-    if (!response.ok) throw new CursorApiError('artifact_download_failed', `Artifact download returned HTTP ${response.status}.`, { status: response.status });
-    return boundedBytes(response, maxBytes, timeoutMs);
+  async fetchPresigned(urlValue, { maxBytes = DEFAULT_MAX_ARTIFACT_BYTES, timeoutMs = this.requestTimeoutMs, maxRedirects = DEFAULT_MAX_ARTIFACT_REDIRECTS } = {}) {
+    if (!Number.isInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 10) {
+      throw new CursorApiError('invalid_configuration', 'maxRedirects must be an integer between 0 and 10.');
+    }
+    let current = validateArtifactUrl(urlValue);
+    const deadline = Date.now() + timeoutMs;
+    let redirects = 0;
+    while (true) {
+      const remaining = remainingDeadline(deadline);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remaining);
+      let response;
+      try {
+        response = await this.fetchImpl(current, {
+          method: 'GET',
+          // Presigned artifact hosts must never receive the Cursor API key.
+          headers: { Accept: '*/*' },
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error instanceof CursorApiError) throw error;
+        throw new CursorApiError(error?.name === 'AbortError' ? 'request_timeout' : 'network_error', 'Artifact download failed.');
+      } finally { clearTimeout(timer); }
+
+      if (ARTIFACT_REDIRECT_STATUSES.has(response.status)) {
+        if (redirects >= maxRedirects) {
+          await response.body?.cancel?.().catch(() => {});
+          throw new CursorApiError('artifact_redirect_limit', 'Artifact download exceeded the redirect limit.');
+        }
+        const location = response.headers?.get?.('location');
+        await response.body?.cancel?.().catch(() => {});
+        if (!location) throw new CursorApiError('artifact_download_failed', `Artifact redirect returned HTTP ${response.status} without a location.`, { status: response.status });
+        let next;
+        try { next = new URL(location, current); } catch {
+          throw new CursorApiError('invalid_artifact_url', 'Cursor returned an invalid artifact redirect.');
+        }
+        validateArtifactUrl(next);
+        current = next;
+        redirects += 1;
+        continue;
+      }
+      if (!response.ok) throw new CursorApiError('artifact_download_failed', `Artifact download returned HTTP ${response.status}.`, { status: response.status });
+      return boundedBytes(response, maxBytes, remainingDeadline(deadline));
+    }
   }
 
   me() { return this.json('/v1/me'); }
-  models() { return this.json('/v1/models'); }
-  repositories() { return this.json('/v1/repositories'); }
+  models(options = {}) {
+    return this.modelCatalog.get(() => this.json('/v1/models'), options);
+  }
+  clearModelCatalog() { this.modelCatalog.clear(); }
+  // Cursor documents this endpoint as slow and rate-limited to one call per
+  // user per minute. Give it one longer attempt instead of applying the
+  // generic three-attempt GET retry policy.
+  repositories() {
+    return this.json('/v1/repositories', {
+      timeoutMs: this.repositoryTimeoutMs,
+      retryRead: false,
+    });
+  }
   listAgents(query) { return this.json('/v1/agents', { query }); }
   getAgent(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}`); }
-  createAgent(body) { return this.json('/v1/agents', { method: 'POST', body, retryRead: false }); }
+  createAgent(body) {
+    const timeoutMs = Array.isArray(body?.repos) && body.repos.length > 0
+      ? this.repositoryTimeoutMs
+      : this.requestTimeoutMs;
+    return this.json('/v1/agents', {
+      method: 'POST',
+      body,
+      retryRead: false,
+      timeoutMs,
+    });
+  }
   listRuns(agentId, query) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { query }); }
   getRun(agentId, runId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}`); }
   createRun(agentId, body) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { method: 'POST', body, retryRead: false }); }
@@ -292,7 +536,16 @@ export class CursorApiClient {
     const path = `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream`;
     return this.stream(path, options);
   }
-  usage(agentId, runId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/usage`, { query: runId ? { runId } : undefined }); }
+  async usage(agentId, runId) {
+    const payload = await this.json(`/v1/agents/${encodeURIComponent(agentId)}/usage`, { query: runId ? { runId } : undefined });
+    const metadata = getResponseMetadata(payload);
+    return normalizeAgentUsage(payload, {
+      scope: runId ? 'run' : 'agent',
+      requestedRunId: runId,
+      observedAt: metadata?.observedAt,
+      rateWindow: metadata?.rateWindow,
+    });
+  }
   artifacts(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/artifacts`); }
   artifactDownload(agentId, artifactPath) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/artifacts/download`, { query: { path: artifactPath } }); }
   archive(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/archive`, { method: 'POST', retryRead: false }); }

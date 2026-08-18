@@ -26,7 +26,11 @@ integration fixture runs the same assertion end to end:
 node scripts/inspector-preflight.mjs
 ```
 
+Preflight remains target/configuration attestation and does not query provider
+capacity. A current candidate should advertise the explicit read-only
+`capacity` tool in `available_tools`; call it separately when routing needs
+Codex, Grok, or DSH usage data.
+
 Inspector configuration files should be passed with `--config`; a missing or
 malformed explicit config must fail. Do not permit Inspector's writable
 default catalog to select a workspace for release automation.
-

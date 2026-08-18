@@ -1,8 +1,19 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
-import { access, lstat, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  access,
+  lstat,
+  opendir,
+  readFile,
+  readlink,
+  realpath,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 import {
@@ -14,6 +25,7 @@ import {
   updateJob,
 } from './store.mjs';
 import { grokBuildFailure } from './grok-build.mjs';
+import { TARGET_SCHEMA_VERSION } from './preflight.mjs';
 
 const specPath = process.argv[2];
 
@@ -35,6 +47,112 @@ function elapsedSeconds(startedAt, finishedAt) {
 }
 
 const HEARTBEAT_INTERVAL_MS = 15000;
+// A provider command is launched as the leader of a detached process group.
+// The command can exit while a child it spawned is still running, so the
+// runner must close that group before it snapshots the target checkout. Keep
+// the cleanup bounded: a provider-owned descendant that ignores SIGTERM gets
+// SIGKILL, and a group that still cannot be observed as drained fails closed.
+const PROCESS_GROUP_TERM_GRACE_MS = 1000;
+const PROCESS_GROUP_DRAIN_TIMEOUT_MS = 1000;
+const PROCESS_GROUP_POLL_INTERVAL_MS = 25;
+// A detached descendant can escape the provider's group while retaining an
+// inherited stdout/stderr pipe. Never let finalization wait on that reader.
+const OUTPUT_DRAIN_TIMEOUT_MS = 1000;
+const HOSTILE_GROK_PROJECT_NAMES = Object.freeze([
+  '.grok',
+  '.cursor',
+  '.claude',
+  '.grok.json',
+  '.grokrc',
+  '.grokrc.json',
+  'grok.config.json',
+  '.mcp',
+  '.mcp.json',
+  'mcp.json',
+]);
+
+function processGroupSignalTarget(pgid) {
+  // Detached process groups and negative-PID signalling are POSIX semantics.
+  // Windows keeps the existing direct-child behaviour; the provider adapters
+  // supported by this plugin run on Linux/macOS hosts today.
+  return process.platform === 'win32' ? pgid : -pgid;
+}
+
+function processGroupExists(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(processGroupSignalTarget(pgid), 0);
+    return true;
+  } catch (error) {
+    // EPERM means the group exists but cannot be probed by this uid. Treating
+    // it as present is the safe choice; ESRCH is the only drained result.
+    return error?.code === 'EPERM';
+  }
+}
+
+function signalProcessGroup(pgid, signal) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(processGroupSignalTarget(pgid), signal);
+    return true;
+  } catch {
+    // The group may have drained between the probe and the signal.
+    return false;
+  }
+}
+
+function waitForProcessGroup(pgid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (!processGroupExists(pgid)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, Math.min(PROCESS_GROUP_POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    };
+    poll();
+  });
+}
+
+async function terminateProcessGroup(pgid) {
+  const result = {
+    drained: true,
+    signalSent: null,
+    forced: false,
+  };
+  // There is no portable process-group probe on Windows. The direct child is
+  // already observed as exited at every normal call site, so there is no
+  // additional group to drain there.
+  if (process.platform === 'win32' || !processGroupExists(pgid)) return result;
+
+  if (signalProcessGroup(pgid, 'SIGTERM')) result.signalSent = 'SIGTERM';
+  if (await waitForProcessGroup(pgid, PROCESS_GROUP_TERM_GRACE_MS)) return result;
+
+  result.forced = signalProcessGroup(pgid, 'SIGKILL');
+  if (result.forced) result.signalSent = 'SIGKILL';
+  result.drained = await waitForProcessGroup(pgid, PROCESS_GROUP_DRAIN_TIMEOUT_MS);
+  return result;
+}
+// `git status --ignored=matching` intentionally reports an ignored directory
+// as one entry. Hashing only that directory's metadata misses edits to files
+// already inside it, while recursively walking without a bound lets a model
+// turn target verification into an unbounded resource operation. Keep the
+// integrity walk deliberately small and fail closed when the cap is reached.
+const MAX_IGNORED_INTEGRITY_ENTRIES = 1024;
+const MAX_IGNORED_INTEGRITY_BYTES = 16 * 1024 * 1024;
+
+class IgnoredIntegrityLimitError extends Error {
+  constructor(relativePath, limit, unit) {
+    super(`ignored integrity snapshot exceeds the bounded ${unit} limit of ${limit}: ${relativePath}`);
+    this.name = 'IgnoredIntegrityLimitError';
+    this.code = 'IGNORED_INTEGRITY_LIMIT';
+  }
+}
 
 function outputRedactions(spec) {
   const values = [
@@ -64,13 +182,43 @@ function sanitizeOutput(value, fragments) {
 }
 
 function captureSanitizedLines(stream, writer, fragments) {
-  if (!stream) return Promise.resolve();
-  return new Promise((resolve) => {
-    const input = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    input.on('line', (line) => writer.write(`${sanitizeOutput(line, fragments)}\n`));
-    input.on('close', resolve);
-    input.on('error', resolve);
+  if (!stream) return { promise: Promise.resolve(true), abort() {} };
+  let settled = false;
+  let resolveCapture;
+  const promise = new Promise((resolve) => { resolveCapture = resolve; });
+  const input = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const finish = (drained) => {
+    if (settled) return;
+    settled = true;
+    resolveCapture(drained);
+  };
+  input.on('line', (line) => writer.write(`${sanitizeOutput(line, fragments)}\n`));
+  input.on('close', () => finish(true));
+  input.on('error', () => finish(false));
+  stream.on('error', () => finish(false));
+  return {
+    promise,
+    abort() {
+      if (settled) return;
+      finish(false);
+      input.close();
+      stream.destroy();
+    },
+  };
+}
+
+async function drainCapturedOutput(captures, timeoutMs) {
+  const captureResults = Promise.all(captures.map((capture) => capture.promise));
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
   });
+  const result = await Promise.race([captureResults, timeout]);
+  if (timer) clearTimeout(timer);
+  if (result !== null) return result.every(Boolean);
+  for (const capture of captures) capture.abort();
+  await Promise.allSettled(captures.map((capture) => capture.promise));
+  return false;
 }
 
 function fixedDeadlineMs(spec, acceptedJob) {
@@ -86,10 +234,12 @@ function failureClassFor(reason, outcome) {
   if (outcome === 'completed') return null;
   if (outcome === 'timeout') return 'timeout';
   if (outcome === 'cancelled') return 'cancelled';
+  if (reason === 'no_workspace_change') return 'contract_violation';
   if (reason === 'adapter_error' || reason === 'target_preflight_failed'
     || reason === 'scope_verification_failed' || reason === 'scope_violation'
     || reason === 'ignored_file_change' || reason === 'read_only_violation'
-    || reason === 'patch_capture_failed') return 'tool_error';
+    || reason === 'patch_capture_failed' || reason === 'process_group_cleanup_failed'
+    || reason === 'output_drain_failed') return 'tool_error';
   if (reason === 'protocol_error') return 'protocol_error';
   return 'process_failure';
 }
@@ -160,15 +310,198 @@ async function symlinkInPath(root, relativePath) {
   return null;
 }
 
-function changedPaths(before, after) {
-  const paths = new Set([...before.keys(), ...after.keys()]);
-  return [...paths].filter((changedPath) => before.get(changedPath) !== after.get(changedPath)).sort();
+function changedPaths(before, after, beforeEvidence = new Map(), afterEvidence = new Map()) {
+  const paths = new Set([
+    ...before.keys(),
+    ...after.keys(),
+    ...beforeEvidence.keys(),
+    ...afterEvidence.keys(),
+  ]);
+  return [...paths].filter((changedPath) => before.get(changedPath) !== after.get(changedPath)
+    || beforeEvidence.get(changedPath) !== afterEvidence.get(changedPath)).sort();
 }
 
-async function gitCommonDirectory(cwd, root) {
+function fileEvidence(file) {
+  return new Promise((resolve) => {
+    const digest = createHash('sha256');
+    const stream = createReadStream(file);
+    stream.on('data', (chunk) => digest.update(chunk));
+    stream.on('end', () => resolve(`file:${digest.digest('hex')}`));
+    stream.on('error', (error) => resolve(`unreadable:${error?.code ?? error?.message ?? 'unknown'}`));
+  });
+}
+
+function boundedFileEvidence(file, relativePath, budget) {
+  return new Promise((resolve, reject) => {
+    const digest = createHash('sha256');
+    const stream = createReadStream(file);
+    let bytes = 0;
+    let rejected = false;
+    const rejectLimit = () => {
+      if (rejected) return;
+      rejected = true;
+      stream.destroy();
+      reject(new IgnoredIntegrityLimitError(relativePath, MAX_IGNORED_INTEGRITY_BYTES, 'byte'));
+    };
+    stream.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (budget.bytes + bytes > MAX_IGNORED_INTEGRITY_BYTES) {
+        rejectLimit();
+        return;
+      }
+      digest.update(chunk);
+    });
+    stream.on('end', () => {
+      if (rejected) return;
+      budget.bytes += bytes;
+      resolve(`file:${digest.digest('hex')}`);
+    });
+    stream.on('error', (error) => {
+      if (rejected) return;
+      reject(error);
+    });
+  });
+}
+
+async function pathEvidence(root, relativePath) {
+  const normalized = normalizedRepoPath(relativePath);
+  if (!normalized || normalized === '.') return 'invalid';
+  const file = path.join(root, normalized);
+  try {
+    const info = await lstat(file);
+    if (info.isSymbolicLink()) {
+      return `symlink:${await readlink(file).catch(() => '<unreadable>')}`;
+    }
+    if (info.isFile()) {
+      const digest = await fileEvidence(file);
+      return `${digest}:mode:${info.mode.toString(8)}`;
+    }
+    return `${info.isDirectory() ? 'directory' : 'special'}:${info.size}:${info.mtimeNs ?? info.mtimeMs}`;
+  } catch (error) {
+    return `missing:${error?.code ?? error?.message ?? 'unknown'}`;
+  }
+}
+
+async function snapshotIgnoredDirectory(root, relativePath, evidence, status, budget) {
+  const pending = [{ absolutePath: path.join(root, relativePath), relativePath }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    let directory;
+    try {
+      directory = await opendir(current.absolutePath);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        evidence.set(current.relativePath, `missing:${error.code}`);
+        continue;
+      }
+      throw error;
+    }
+    try {
+      for await (const entry of directory) {
+        const childRelativePath = path.posix.join(current.relativePath, entry.name);
+        const childAbsolutePath = path.join(root, childRelativePath);
+        budget.entries += 1;
+        if (budget.entries > MAX_IGNORED_INTEGRITY_ENTRIES) {
+          throw new IgnoredIntegrityLimitError(
+            childRelativePath,
+            MAX_IGNORED_INTEGRITY_ENTRIES,
+            'entry',
+          );
+        }
+        let info;
+        try {
+          info = await lstat(childAbsolutePath);
+        } catch (error) {
+          if (error?.code === 'ENOENT') {
+            evidence.set(childRelativePath, `missing:${error.code}`);
+            status.set(childRelativePath, '!!');
+            continue;
+          }
+          throw error;
+        }
+        status.set(childRelativePath, '!!');
+        if (info.isDirectory()) {
+          evidence.set(
+            childRelativePath,
+            `directory:${info.size}:${info.mtimeNs ?? info.mtimeMs}`,
+          );
+          pending.push({ absolutePath: childAbsolutePath, relativePath: childRelativePath });
+        } else if (info.isFile()) {
+          if (budget.bytes + info.size > MAX_IGNORED_INTEGRITY_BYTES) {
+            throw new IgnoredIntegrityLimitError(
+              childRelativePath,
+              MAX_IGNORED_INTEGRITY_BYTES,
+              'byte',
+            );
+          }
+          evidence.set(
+            childRelativePath,
+            `${await boundedFileEvidence(childAbsolutePath, childRelativePath, budget)}:mode:${info.mode.toString(8)}`,
+          );
+        } else if (info.isSymbolicLink()) {
+          evidence.set(
+            childRelativePath,
+            `symlink:${await readlink(childAbsolutePath).catch(() => '<unreadable>')}`,
+          );
+        } else {
+          evidence.set(
+            childRelativePath,
+            `special:${info.size}:${info.mtimeNs ?? info.mtimeMs}`,
+          );
+        }
+      }
+    } finally {
+      await directory.close().catch(() => {});
+    }
+  }
+}
+
+async function snapshotEvidence(root, status) {
+  const evidence = new Map();
+  const budget = { entries: 0, bytes: 0 };
+  for (const relativePath of [...status.keys()]) {
+    const normalized = normalizedRepoPath(relativePath);
+    const absolutePath = normalized ? path.join(root, normalized) : null;
+    if (status.get(relativePath) === '!!' && absolutePath) {
+      const info = await lstat(absolutePath).catch(() => null);
+      if (info?.isDirectory()) {
+        await snapshotIgnoredDirectory(root, normalized, evidence, status, budget);
+        continue;
+      }
+    }
+    evidence.set(relativePath, await pathEvidence(root, relativePath));
+  }
+  return evidence;
+}
+
+async function symlinkInScope(root, relativePath, budget) {
+  const normalized = normalizedRepoPath(relativePath);
+  if (!normalized) return 'path escapes Git root';
+  const absolutePath = path.join(root, normalized);
+  const info = await lstat(absolutePath).catch((error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!info?.isDirectory()) return null;
+
+  // Reuse the bounded integrity walker. It uses lstat before deciding whether
+  // to recurse, so symlinked directories are recorded and never followed.
+  const evidence = new Map();
+  const status = new Map([[normalized, '!!']]);
+  await snapshotIgnoredDirectory(root, normalized, evidence, status, budget);
+  for (const [candidate, value] of evidence) {
+    if (value.startsWith('symlink:')) return `${candidate} (${value})`;
+  }
+  return null;
+}
+
+async function gitCommonDirectory(cwd) {
   const common = gitCommand(cwd, ['rev-parse', '--git-common-dir']);
   if (!common.ok || !common.output) return null;
-  return realpath(path.resolve(root, common.output)).catch(() => null);
+  // Git emits a relative path relative to the command's working directory
+  // (for example, `../../.git` from a nested checkout directory), not the
+  // repository root. Resolve it against the same cwd used for rev-parse.
+  return realpath(path.resolve(cwd, common.output)).catch(() => null);
 }
 
 async function gitSnapshot(cwd) {
@@ -176,19 +509,139 @@ async function gitSnapshot(cwd) {
   if (!root.ok) return { ok: false, error: root.error || 'Git root detection failed.' };
   const head = gitCommand(cwd, ['rev-parse', 'HEAD']);
   if (!head.ok) return { ok: false, error: head.error || 'Git HEAD detection failed.' };
-  const common = await gitCommonDirectory(cwd, root.output);
+  const common = await gitCommonDirectory(cwd);
   if (!common) return { ok: false, error: 'Git common directory detection failed.' };
   const status = gitCommand(cwd, [
     'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching',
   ], true);
   if (!status.ok) return { ok: false, error: status.error || 'Git status failed.' };
+  const statusMap = gitStatusMap(status.output);
+  let evidence;
+  try {
+    evidence = await snapshotEvidence(root.output, statusMap);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof IgnoredIntegrityLimitError
+        ? error.message
+        : `Ignored integrity snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   return {
     ok: true,
     root: root.output,
     common,
     head: head.output.toLowerCase(),
-    status: gitStatusMap(status.output),
+    status: statusMap,
+    evidence,
   };
+}
+
+function normalizedDirectoryIdentity(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const device = typeof value.device === 'string' || typeof value.device === 'number'
+    ? String(value.device)
+    : '';
+  const inode = typeof value.inode === 'string' || typeof value.inode === 'number'
+    ? String(value.inode)
+    : '';
+  if (!device || !inode) return null;
+  return { device, inode };
+}
+
+function targetIdentityExpectation(target) {
+  const hasWorkspaceIdentity = Object.hasOwn(target, 'workspace_identity');
+  const hasCwdIdentity = Object.hasOwn(target, 'cwd_identity');
+  if (!hasWorkspaceIdentity && !hasCwdIdentity) {
+    // Runner specs written before identity fields were introduced remain
+    // readable. Current control-generated target contexts must carry both
+    // identities so a replacement checkout at the same path cannot pass.
+    if (target.schema_version === TARGET_SCHEMA_VERSION) {
+      return {
+        ok: false,
+        error: 'target_context is missing workspace_identity and cwd_identity.',
+      };
+    }
+    return { ok: true, required: false };
+  }
+  if (!hasWorkspaceIdentity || !hasCwdIdentity) {
+    return {
+      ok: false,
+      error: 'target_context must include both workspace_identity and cwd_identity.',
+    };
+  }
+  const workspace = normalizedDirectoryIdentity(target.workspace_identity);
+  const cwd = normalizedDirectoryIdentity(target.cwd_identity);
+  if (!workspace || !cwd) {
+    return {
+      ok: false,
+      error: 'target_context workspace_identity and cwd_identity must contain device and inode values.',
+    };
+  }
+  return { ok: true, required: true, workspace, cwd };
+}
+
+async function directoryIdentity(directory) {
+  const info = await stat(directory);
+  if (!info.isDirectory()) throw new Error('path is not a directory');
+  return { device: String(info.dev), inode: String(info.ino) };
+}
+
+function identityLabel(identity) {
+  return `${identity.device}:${identity.inode}`;
+}
+
+async function verifyTargetIdentities(target) {
+  const expected = targetIdentityExpectation(target);
+  if (!expected.ok || !expected.required) return expected;
+  let actual;
+  try {
+    actual = {
+      workspace: await directoryIdentity(target.expected_git_root),
+      cwd: await directoryIdentity(target.working_directory),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `target directory identity could not be read: ${error instanceof Error ? error.message : String(error)}.`,
+    };
+  }
+  const mismatches = [];
+  if (identityLabel(expected.workspace) !== identityLabel(actual.workspace)) {
+    mismatches.push(`workspace expected ${identityLabel(expected.workspace)}, found ${identityLabel(actual.workspace)}`);
+  }
+  if (identityLabel(expected.cwd) !== identityLabel(actual.cwd)) {
+    mismatches.push(`cwd expected ${identityLabel(expected.cwd)}, found ${identityLabel(actual.cwd)}`);
+  }
+  if (mismatches.length > 0) {
+    return { ok: false, error: `target directory identity mismatch: ${mismatches.join('; ')}.` };
+  }
+  return { ok: true, required: true, actual };
+}
+
+async function hostileGrokProjectConfig(root, cwd) {
+  const relative = path.relative(root, cwd);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return { error: 'working directory escapes the expected Git root' };
+  }
+  const directories = [root];
+  let current = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    directories.push(current);
+  }
+  for (const directory of directories) {
+    for (const name of HOSTILE_GROK_PROJECT_NAMES) {
+      const candidate = path.join(directory, name);
+      try {
+        await lstat(candidate);
+        return { path: path.relative(root, candidate) || name };
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return { error: `could not inspect ${path.relative(root, candidate) || name}` };
+      }
+    }
+  }
+  return null;
 }
 
 async function preflightTarget(spec) {
@@ -225,17 +678,42 @@ async function preflightTarget(spec) {
       error: `Target preflight refused: expected Git common directory ${target.git_common_directory}, found ${snapshot.common}.`,
     };
   }
+  const identityCheck = await verifyTargetIdentities(target);
+  if (!identityCheck.ok) {
+    return { ok: false, error: `Target preflight refused: ${identityCheck.error}` };
+  }
   const recheckedCwd = await realpath(spec.cwd).catch(() => null);
   const recheckedRoot = await realpath(target.expected_git_root).catch(() => null);
   if (recheckedCwd !== spec.cwd || recheckedRoot !== target.expected_git_root) {
     return { ok: false, error: 'Target preflight refused: target paths changed during preflight.' };
   }
+  const recheckedIdentity = await verifyTargetIdentities(target);
+  if (!recheckedIdentity.ok) {
+    return { ok: false, error: `Target preflight refused: ${recheckedIdentity.error} during preflight.` };
+  }
+  if (spec.kind === 'grok_build') {
+    const hostile = await hostileGrokProjectConfig(target.expected_git_root, spec.cwd);
+    if (hostile?.path) {
+      return { ok: false, error: `Target preflight refused: project-local Grok/compatibility/MCP configuration is forbidden (${hostile.path}).` };
+    }
+    if (hostile?.error) {
+      return { ok: false, error: `Target preflight refused: ${hostile.error}.` };
+    }
+  }
+  const scopeBudget = { entries: 0, bytes: 0 };
   for (const allowedPath of target.allowed_paths ?? []) {
     const symlink = await symlinkInPath(target.expected_git_root, allowedPath);
     if (symlink) {
       return {
         ok: false,
         error: `Target preflight refused: allowed path ${allowedPath} contains a symlink or escapes the Git root (${symlink}).`,
+      };
+    }
+    const nestedSymlink = await symlinkInScope(target.expected_git_root, allowedPath, scopeBudget);
+    if (nestedSymlink) {
+      return {
+        ok: false,
+        error: `Target preflight refused: allowed path ${allowedPath} contains a symlink or escapes the Git root (${nestedSymlink}).`,
       };
     }
   }
@@ -257,20 +735,24 @@ async function capturePatch(spec, allowedPaths) {
   }
   // Compare against HEAD so staged and unstaged tracked edits are both
   // recoverable; plain `git diff` would silently omit staged model changes.
-  const tracked = gitCommand(spec.cwd, ['diff', 'HEAD', '--no-ext-diff', '--binary', '--', ...allowedPaths]);
+  // `allowedPaths` are always Git-root-relative. Run the pathspec commands
+  // from the root as well, because Git resolves pathspecs relative to the
+  // `-C` directory when the model's working directory is nested.
+  const gitRoot = verified.root;
+  const tracked = gitCommand(gitRoot, ['diff', 'HEAD', '--no-ext-diff', '--binary', '--', ...allowedPaths]);
   if (!tracked.ok) return false;
   const fragments = tracked.output ? [tracked.output] : [];
   const untracked = gitCommand(
-    spec.cwd,
+    gitRoot,
     ['ls-files', '--others', '--exclude-standard', '-z', '--', ...allowedPaths],
     true,
   );
   if (untracked.ok) {
     for (const relativePath of untracked.output.split('\0').filter(Boolean)) {
       const result = spawnSync('git', [
-        '-C', spec.cwd,
+        '-C', gitRoot,
         'diff', '--no-index', '--no-ext-diff', '--binary', '--', '/dev/null', relativePath,
-      ], { cwd: spec.cwd, encoding: 'utf8', timeout: 15000 });
+      ], { cwd: gitRoot, encoding: 'utf8', timeout: 15000 });
       if ((result.status === 0 || result.status === 1) && result.stdout) {
         fragments.push(result.stdout.trim());
       }
@@ -340,6 +822,10 @@ async function main() {
   let currentPhase = 'started';
   let terminalStateCommitted = false;
   let childExitAt = null;
+  let processGroupCleanup = null;
+  let processGroupCleanupFailed = false;
+  let outputCaptures = [];
+  let outputDrainFailed = false;
 
   const deadlineExpired = () => deadlineMs !== null && Date.now() >= deadlineMs;
   const finishTerminal = (outcome, patch, payload = null) => {
@@ -368,17 +854,29 @@ async function main() {
   const forward = (signal) => {
     signalSent = signal;
     if (!child?.pid) return;
-    try {
-      process.kill(-child.pid, signal);
-    } catch {
-      // The child may have already exited.
+    signalProcessGroup(child.pid, signal);
+  };
+  const cleanupChildGroup = async () => {
+    if (processGroupCleanup) return processGroupCleanup;
+    processGroupCleanup = await terminateProcessGroup(child?.pid);
+    processGroupCleanupFailed = !processGroupCleanup.drained;
+    if (processGroupCleanup.signalSent === 'SIGKILL') {
+      signalSent = 'SIGKILL';
+      forcedKill = true;
+    } else if (processGroupCleanup.signalSent === 'SIGTERM' && !signalSent) {
+      signalSent = 'SIGTERM';
     }
+    return processGroupCleanup;
+  };
+  const abortOutputReaders = () => {
+    for (const capture of outputCaptures) capture.abort();
   };
   const onDeadline = () => {
     if (timedOut || terminalStateCommitted) return;
     timedOut = true;
     timedOutAt = Date.now();
     signalSent = 'SIGTERM';
+    abortOutputReaders();
     void updateHeartbeat({ deadline_reached: true }).catch(() => {});
     forward('SIGTERM');
     forceTimer = setTimeout(() => {
@@ -507,14 +1005,28 @@ async function main() {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    const outputCaptured = Promise.all([
+    outputCaptures = [
       captureSanitizedLines(child.stdout, logWriter, fragments),
       captureSanitizedLines(child.stderr, logWriter, fragments),
-    ]);
+    ];
 
+    // Use `exit`, not `close`: a descendant that inherits stdio can keep the
+    // streams open after the direct provider process has exited. We must see
+    // that direct exit first, terminate its process group, and only then wait
+    // for stream closure and take the final workspace snapshot.
     const resultPromise = new Promise((resolve) => {
-      child.once('error', (error) => resolve({ error }));
-      child.once('close', (code, signal) => resolve({ code, signal }));
+      let settled = false;
+      child.once('error', (error) => {
+        if (settled) return;
+        settled = true;
+        resolve({ error });
+      });
+      child.once('exit', (code, signal) => {
+        if (settled) return;
+        childExitAt = Date.now();
+        settled = true;
+        resolve({ code, signal });
+      });
     });
     const workingAt = Date.now();
     const working = transitionJob(database, spec.id, 'working', {
@@ -530,6 +1042,7 @@ async function main() {
     }, { child_pid: child.pid ?? null });
     if (!working.changed && working.job?.terminal_state) {
       forward('SIGTERM');
+      await cleanupChildGroup();
       return;
     }
     currentPhase = 'working';
@@ -538,15 +1051,19 @@ async function main() {
     await updateHeartbeat();
 
     const result = await resultPromise;
-    await outputCaptured;
+    // A provider may have forked a background worker and exited cleanly. The
+    // worker remains in the detached process group, so it must be terminated
+    // and observed as drained before any status/patch publication.
+    await cleanupChildGroup();
+    outputDrainFailed = !await drainCapturedOutput(outputCaptures, OUTPUT_DRAIN_TIMEOUT_MS);
     await new Promise((resolve) => logWriter.end(resolve));
     logWriter = null;
-    childExitAt = Date.now();
     const cancelTimestamp = await readFile(spec.cancel_file, 'utf8')
       .then((value) => Date.parse(value.trim().split(/\r?\n/, 1)[0]))
       .catch(() => Number.NaN);
     const cancellationRequested = Number.isFinite(cancelTimestamp) || await exists(spec.cancel_file);
     const cancellationBeforeExit = cancellationRequested
+      && childExitAt !== null
       && (!Number.isFinite(cancelTimestamp) || cancelTimestamp <= childExitAt);
     const cancellationWins = cancellationBeforeExit && (!timedOut
       || timedOutAt === null || !Number.isFinite(cancelTimestamp) || cancelTimestamp <= timedOutAt);
@@ -557,7 +1074,7 @@ async function main() {
     const bytes = await fileSize(spec.log_file);
     if (bytes !== lastLogBytes) {
       lastLogBytes = bytes;
-      lastOutputAt = new Date(childExitAt).toISOString();
+      lastOutputAt = new Date(childExitAt ?? Date.now()).toISOString();
     }
     let outcome;
     let terminationReason;
@@ -597,26 +1114,52 @@ async function main() {
     let workspaceTainted = outcome === 'timeout' || outcome === 'cancelled' ? true : null;
     let changed = [];
     let patchAvailable = false;
-    if (preflight.target) {
+    if (processGroupCleanupFailed) {
+      workspaceTainted = true;
+      if (outcome !== 'timeout' && outcome !== 'cancelled') {
+        outcome = 'failed';
+        terminationReason = 'process_group_cleanup_failed';
+      }
+      error = `${error ? `${error} ` : ''}Provider process group did not drain within the bounded cleanup window; final workspace verification and patch publication were withheld.`;
+    }
+    if (outputDrainFailed) {
+      workspaceTainted = true;
+      if (!processGroupCleanupFailed && outcome !== 'timeout' && outcome !== 'cancelled') {
+        outcome = 'failed';
+        terminationReason = 'output_drain_failed';
+      }
+      error = `${error ? `${error} ` : ''}Provider output streams did not drain within the bounded cleanup window; final workspace verification and patch publication were withheld.`;
+    }
+    if (preflight.target && !processGroupCleanupFailed && !outputDrainFailed) {
       const postflight = await gitSnapshot(spec.cwd);
+      const postflightIdentity = postflight.ok
+        ? await verifyTargetIdentities(preflight.target)
+        : { ok: false, error: 'target directory identity could not be verified.' };
       if (!postflight.ok && outcome !== 'timeout' && outcome !== 'cancelled') {
         outcome = 'failed';
         terminationReason = 'scope_verification_failed';
         error = `Target scope verification failed: ${postflight.error}`;
+      } else if (postflight.ok && !postflightIdentity.ok && outcome !== 'timeout' && outcome !== 'cancelled') {
+        outcome = 'failed';
+        terminationReason = 'scope_verification_failed';
+        error = `Target scope verification failed: ${postflightIdentity.error}`;
       } else if (postflight.ok) {
-        changed = changedPaths(preflight.snapshot.status, postflight.status);
+        changed = changedPaths(
+          preflight.snapshot.status,
+          postflight.status,
+          preflight.snapshot.evidence,
+          postflight.evidence,
+        );
         workspaceChanged = changed.length > 0;
-        const outOfScope = changed.filter((changedPath) => !pathAllowed(
-          changedPath,
-          preflight.target.allowed_paths,
-        ));
+        const ignoredChanges = changed.filter((changedPath) =>
+          preflight.snapshot.status.get(changedPath) === '!!'
+          || postflight.status.get(changedPath) === '!!');
+        const outOfScope = changed.filter((changedPath) => !ignoredChanges.includes(changedPath)
+          && !pathAllowed(changedPath, preflight.target.allowed_paths));
         const rootOrHeadChanged = postflight.root !== preflight.target.expected_git_root
           || (preflight.target.git_common_directory
             && postflight.common !== preflight.target.git_common_directory)
           || !postflight.head.startsWith(preflight.target.expected_head.toLowerCase());
-        const ignoredChanges = changed.filter((changedPath) =>
-          preflight.snapshot.status.get(changedPath) === '!!'
-          || postflight.status.get(changedPath) === '!!');
         const symlinkedPaths = [];
         for (const changedPath of changed) {
           const symlink = await symlinkInPath(preflight.target.expected_git_root, changedPath);
@@ -646,6 +1189,10 @@ async function main() {
           outcome = 'failed';
           terminationReason = 'read_only_violation';
           error = `Target ${preflight.target.role} run changed files: ${changed.join(', ')}.`;
+        } else if (outcome === 'completed' && preflight.target.role === 'implement' && !workspaceChanged) {
+          outcome = 'failed';
+          terminationReason = 'no_workspace_change';
+          error = 'Target implement run completed without changing any allowed workspace path.';
         }
         if (scopeSafe && outcome === 'completed' && preflight.target.role === 'implement' && workspaceChanged
           && !deadlineExpired()) {
@@ -735,6 +1282,8 @@ async function main() {
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (forceTimer) clearTimeout(forceTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (!processGroupCleanup) await cleanupChildGroup().catch(() => {});
+    abortOutputReaders();
     if (logWriter) logWriter.end();
     database.close();
   }

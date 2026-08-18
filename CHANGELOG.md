@@ -31,8 +31,9 @@ All notable public changes to Codex-Co-Engineer are recorded here.
   bounded policy fields with role ceilings, streaming-log parsing, OAuth-aware
   status diagnostics, and fake-CLI coverage.
 - Bounded typed JSON Schema structured output, exact prompt transport, and
-  partial Messages-format streaming controls; review/verify retain forced plan
-  mode.
+  partial Messages-format streaming controls; review/verify normalize legacy
+  permission aliases to noninteractive `auto` under the hard read-only
+  sandbox.
 - Documentation for official installation/authentication prerequisites and the
   deliberate ACP, worktree, prompt-file, and system-prompt-override omissions.
 - Cursor Cloud Control plugin with typed Cursor Cloud Agents API v1 lifecycle,
@@ -41,15 +42,51 @@ All notable public changes to Codex-Co-Engineer are recorded here.
   and artifact path/overwrite protections.
 - Cursor MCP preflight, plugin validation, unit coverage, and package inventory
   checks alongside the existing Co-Engineer release gate.
+- Explicit read-only Co-Engineer `capacity` tool for official Codex App Server
+  rate-limit/credit data, Grok ACP billing/session usage, and exact DSH job
+  receipts; unsupported account capacity and spend remain unknown.
+- Pinned ACPX runtime, bounded ACP transport/ledger/schema/resource helpers,
+  and a Bubblewrap-based Grok outer-boundary conformance suite. These modules
+  are packaged but remain gated and unwired: there is no public sessions tool
+  and direct Grok dispatch does not use the outer boundary.
 
 ### Changed
 
-- Co-Engineer is versioned `2.0.1` because the supported worker-kind contract
+- Co-Engineer is versioned `2.1.0`; the supported worker-kind contract
   is now exactly `deepseek_agent` and `grok_build`.
+- Public direct Grok dispatch keeps sandbox enforcement inside the official
+  CLI. The separately packaged outer-boundary experiment is not runtime-wired
+  and still requires real host/systemd acceptance.
+- Review and verify dispatch rejects catch-all/write-capable permission rules,
+  refuses project-local Grok, Cursor/Claude compatibility, or MCP configuration
+  before provider startup, and isolates Grok capacity probes from repository
+  working directories.
+- Co-Engineer `2.1.0` uses Grok's noninteractive `auto` permission mode for
+  implement jobs and fails closed when an implement run exits without an
+  allowed workspace change.
+- Cursor Cloud Control `0.2.0` gives repository discovery and repository-backed
+  creation one bounded 60-second attempt, never retries the strictly
+  rate-limited inventory endpoint, and degrades discovery timeouts into an
+  explicit unavailable result.
 - DeepSeek Harness is invoked directly in the attested target checkout and is
   validated independently through its own CLI version.
+- DeepSeek headless and web jobs use a managed absolute DSH profile/state root,
+  materialize the bundled Muse Spark 1.2 Contributor overlay without reading a
+  provider key, and fail closed with a readiness reason instead of falling
+  back to a protected `~/.dsh` path.
 - Root and plugin documentation now describe every MCP tool, accepted worker
   kind, required target fields, monitoring call, and credential boundary.
+- Co-Engineer status remains a compact health check; provider capacity reads
+  are explicit, selector-aware, compactly cached, and stale-on-refresh-failure.
+- Grok ACP is limited to read-only capacity telemetry; coding dispatch remains
+  on the direct headless CLI interface.
+- Configured provider credentials are standing authorization for task-scoped
+  calls; no per-job egress prompt is added. Grok and DSH harness-internal
+  subagents can be requested, while receipts keep actual effectiveness
+  `unknown` unless provider evidence proves delegation occurred.
+- Cursor model discovery is dynamic, custom subagents remain typed and
+  bounded, identity responses omit personal fields, and write-mode repository
+  dispatch requires an immutable starting commit.
 
 ### Removed
 

@@ -75,16 +75,28 @@ not exposed. Bounded typed `json_schema` input is supported for structured JSON
 output; ACP (`grok agent stdio`) is documented but intentionally deferred until
 it can preserve the same target and lifecycle guarantees.
 
+Configured Grok, DSH, and Cursor credentials are standing authorization for
+task-scoped provider work; the control planes do not add a per-job data-egress
+prompt. Repository writes, destructive Git operations, deployments, and PR
+creation retain their normal task authority and safety controls.
+
 ## Co-Engineer tools
 
-The plugin exposes six stable MCP tools:
+The plugin exposes seven stable MCP tools:
 
 - `preflight` attests the target, configuration digest, protocol, and tool set.
 - `status` reports DeepSeek, Grok, credential-presence, UI, and recent-job state.
+- `capacity` reads compact Codex/Grok capacity and exact DSH job-token evidence.
 - `runtime` starts or stops the optional plugin-owned loopback DeepSeek UI.
 - `run` dispatches exactly `deepseek_agent` or `grok_build`.
 - `jobs` lists, inspects, waits for, or cursor-pages managed jobs.
 - `cancel` cancels one exact plugin-owned job.
+
+DSH/Muse dollar spend, account quota remaining, and reset time remain
+`unknown`: the installed harness does not prove them. Experimental ACPX session
+transport and the Bubblewrap-based Grok outer runtime are packaged only as
+gated conformance components. They are not wired to a public MCP `sessions`
+tool or to direct `grok_build` dispatch in this release.
 
 Every dispatch requires the versioned target contract, caller-supplied target
 fingerprint, stable request ID, and bounded timeout. See the

@@ -1,6 +1,17 @@
 version = 1
 authority = "local-exact-tree"
 
+# The order is authoritative: host admission, candidate validation, exact ACPX
+# bootstrap, product tests, provider-free integration checks, one reproducible
+# build, live provenance, then the two owned package inventories.
+
+[[stages]]
+name = "release-prerequisites"
+kind = "preflight"
+command = ["node", "scripts/release-prerequisites.mjs"]
+failure_class = "environment_blocked"
+timeout_seconds = 15
+
 [[stages]]
 name = "release-validation"
 kind = "preflight"
@@ -9,41 +20,102 @@ failure_class = "product_test_failed"
 timeout_seconds = 60
 
 [[stages]]
-name = "unit"
+name = "acpx-bootstrap"
+kind = "bootstrap"
+command = ["npm", "--prefix", "tools/acpx-vendor", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+failure_class = "environment_blocked"
+timeout_seconds = 180
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
+
+[[stages]]
+name = "co-engineer-unit"
 kind = "unit_tests"
 command = ["npm", "--prefix", "plugins/plumbob-harness-control", "test"]
-timeout_seconds = 120
-quiet_seconds = 15
+failure_class = "product_test_failed"
+timeout_seconds = 300
+quiet_seconds = 30
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
 
 [[stages]]
 name = "cursor-cloud-unit"
 kind = "unit_tests"
 command = ["npm", "--prefix", "plugins/cursor-cloud-control", "test"]
+failure_class = "product_test_failed"
+timeout_seconds = 180
+quiet_seconds = 30
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
+
+[[stages]]
+name = "acpx-fake-provenance-unit"
+kind = "unit_tests"
+command = ["npm", "--prefix", "tools/acpx-vendor", "run", "test:publish-provenance"]
+failure_class = "product_test_failed"
 timeout_seconds = 120
-quiet_seconds = 15
+quiet_seconds = 30
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
+
+[[stages]]
+name = "plugin-activation-fixture"
+kind = "integration_tests"
+command = ["node", "scripts/plugin-activation-fixture.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 60
+
+[[stages]]
+name = "grok-outer-real-bwrap"
+kind = "integration_tests"
+command = ["node", "--test", "plugins/plumbob-harness-control/test/grok-outer-sandbox.test.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 120
+quiet_seconds = 30
+env = { GROK_OUTER_REQUIRE_REAL = "1" }
 
 [[stages]]
 name = "mcp-inspector"
 kind = "integration_tests"
 command = ["node", "scripts/inspector-preflight.mjs"]
-timeout_seconds = 60
-quiet_seconds = 15
+failure_class = "product_test_failed"
+timeout_seconds = 120
+quiet_seconds = 30
+env = { MCP_INSPECTOR_COMMAND = "mcp-inspector" }
 
 [[stages]]
 name = "cursor-mcp-preflight"
 kind = "integration_tests"
 command = ["node", "scripts/cursor-inspector-preflight.mjs"]
-timeout_seconds = 60
-quiet_seconds = 15
+failure_class = "product_test_failed"
+timeout_seconds = 120
+quiet_seconds = 30
+env = { MCP_INSPECTOR_COMMAND = "mcp-inspector" }
 
 [[stages]]
-name = "package-inventory"
+name = "acpx-reproducible-build"
+kind = "build"
+command = ["npm", "--prefix", "tools/acpx-vendor", "run", "test:reproducible"]
+failure_class = "product_test_failed"
+timeout_seconds = 180
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
+
+[[stages]]
+name = "acpx-publish-provenance"
+kind = "security_checks"
+command = ["npm", "--prefix", "tools/acpx-vendor", "run", "verify:publish-provenance"]
+failure_class = "product_test_failed"
+timeout_seconds = 180
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
+
+[[stages]]
+name = "co-engineer-package-inventory"
 kind = "artifact_verification"
-command = ["npm", "--cache", "/tmp/codex-co-engineer-npm-cache", "pack", "./plugins/plumbob-harness-control", "--dry-run", "--json"]
+command = ["npm", "pack", "./plugins/plumbob-harness-control", "--dry-run", "--ignore-scripts", "--offline", "--json"]
+failure_class = "product_test_failed"
 timeout_seconds = 60
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
 
 [[stages]]
 name = "cursor-package-inventory"
 kind = "artifact_verification"
-command = ["npm", "--cache", "/tmp/codex-co-engineer-npm-cache", "pack", "./plugins/cursor-cloud-control", "--dry-run", "--json"]
+command = ["npm", "pack", "./plugins/cursor-cloud-control", "--dry-run", "--ignore-scripts", "--offline", "--json"]
+failure_class = "product_test_failed"
 timeout_seconds = 60
+env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }

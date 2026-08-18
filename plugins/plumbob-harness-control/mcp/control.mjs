@@ -4,7 +4,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   access,
-  mkdir,
   open,
   readFile,
   rename,
@@ -13,6 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -36,27 +36,50 @@ import {
 } from './preflight.mjs';
 import {
   buildGrokArgs,
+  grokCapabilityProfile,
   grokVersionProbe,
   normalizeGrokConfiguration,
 } from './grok-build.mjs';
+import {
+  DEFAULT_DSH_PATCH_FILE,
+  dshBaseEnvironment,
+  dshCapabilityProfile,
+  dshChildEnvironment,
+  dshReadinessMessage,
+  dshVersionProbe,
+  inspectDsh,
+  normalizeDshOptions,
+  resolveDshHome,
+} from './dsh.mjs';
+import { CapacityError, createCapacityReader } from './capacity.mjs';
+import { createDshReceiptReader } from './dsh-receipt.mjs';
+import {
+  inspectStateFile,
+  prepareStateFile,
+  prepareStateDirectory,
+  resolveStateDirectory,
+  revalidateStateDirectory,
+  sameStateIdentity,
+  stateResolutionMessage,
+} from './state.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const USER_HOME = process.env.HOME ?? '';
-const XDG_STATE_ROOT = process.env.XDG_STATE_HOME
-  ?? path.join(USER_HOME, '.local', 'state');
 const WORKSPACE = path.resolve(
   process.env.CODEX_CO_ENGINEER_RUNTIME_WORKSPACE
     ?? process.env.PLUMBOB_HARNESS_WORKSPACE
     ?? path.join(USER_HOME, '.local', 'share', 'codex-co-engineer', 'runtime'),
 );
-const STATE_DIR = path.resolve(
-  process.env.CODEX_CO_ENGINEER_STATE_DIR
-    ?? process.env.PLUMBOB_HARNESS_STATE_DIR
-    ?? path.join(XDG_STATE_ROOT, 'codex-co-engineer'),
-);
-const JOBS_DIR = path.join(STATE_DIR, 'jobs');
-const DATABASE_FILE = path.join(STATE_DIR, 'control.sqlite3');
+const STATE_RESOLUTION = resolveStateDirectory();
+const STATE_DIR = STATE_RESOLUTION.directory;
+const JOBS_DIR = STATE_DIR ? path.join(STATE_DIR, 'jobs') : null;
+const DATABASE_FILE = STATE_DIR ? path.join(STATE_DIR, 'control.sqlite3') : null;
 const DSH = process.env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
+const DSH_HOME_CONFIG = resolveDshHome({ env: process.env, stateDirectory: STATE_DIR });
+const DSH_HOME = DSH_HOME_CONFIG.path;
+const DSH_PATCH_FILE = DSH_HOME_CONFIG.source === 'managed-state'
+  ? DEFAULT_DSH_PATCH_FILE
+  : null;
 const GROK = process.env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
 const GROK_ENVIRONMENT_NAMES = Object.freeze([
   'HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR',
@@ -86,7 +109,6 @@ const ACTIVE_STATES = new Set([
   'accepted', 'started', 'working',
   'queued', 'starting', 'running', 'cancelling',
 ]);
-const TESTED_DSH_VERSION = '0.1.0-rc.6';
 const PLUGIN_VERSION = SERVER_IDENTITY.version;
 const WAIT_LIMITS = Object.freeze({
   list_limit: { minimum: 1, maximum: 25, default: 10 },
@@ -95,6 +117,7 @@ const WAIT_LIMITS = Object.freeze({
   log_page_bytes: { minimum: 1, maximum: 12000, default: 12000 },
 });
 const LOG_PAGE_MAX_BYTES = WAIT_LIMITS.log_page_bytes.maximum;
+const COMPACT_JOB_TEXT_MAX_LENGTH = 160;
 const TARGET_ROLES = new Set(['review', 'implement', 'verify']);
 const TARGET_MODES = new Set(['default', 'explicit']);
 const TARGET_CONTEXT_KEYS = new Set([
@@ -107,6 +130,22 @@ const TARGET_CONTEXT_KEYS = new Set([
   'role',
 ]);
 
+// Grok's built-in `read-only` profile explicitly permits writes to these
+// locations.  The runner can detect a changed checkout after the fact, but
+// that is not a prevention boundary.  Refuse review/verify targets rooted in
+// a provider-writable directory until the connector can provision and verify
+// a target-specific custom profile (whose startup failure is fail-closed).
+const GROK_READ_ONLY_WRITABLE_ROOTS = Object.freeze([...new Set([
+  '/tmp',
+  '/var/tmp',
+  '/private/tmp',
+  '/private/var/tmp',
+  os.tmpdir(),
+  process.env.TMPDIR,
+  USER_HOME ? path.join(USER_HOME, '.grok') : null,
+].filter((value) => typeof value === 'string' && value.length > 0)
+  .map((value) => path.resolve(value)))]);
+
 class ToolError extends Error {
   constructor(code, message) {
     super(message);
@@ -116,10 +155,98 @@ class ToolError extends Error {
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 let agentSubmissionTail = Promise.resolve();
+let stateHandle;
+let jobsHandle;
+let databaseStateIdentity;
+let databaseJobsIdentity;
+let databaseFileIdentity;
+let statePreparationTail = Promise.resolve();
 
-async function ensureState() {
-  await mkdir(JOBS_DIR, { recursive: true, mode: 0o700 });
-  database ??= openStore(DATABASE_FILE);
+const SQLITE_STATE_CHILDREN = Object.freeze([
+  'control.sqlite3-wal',
+  'control.sqlite3-shm',
+]);
+
+async function inspectSqliteStateChildren(expectedDatabaseIdentity = null) {
+  const currentDatabaseIdentity = await inspectStateFile(
+    stateHandle,
+    path.basename(DATABASE_FILE),
+    { expectedIdentity: expectedDatabaseIdentity },
+  );
+  for (const child of SQLITE_STATE_CHILDREN) {
+    // SQLite may create and remove WAL sidecars as connections come and go,
+    // so bind the durable database identity while requiring every sidecar
+    // that is present to remain a single owner-only regular file.
+    await inspectStateFile(stateHandle, child, { required: false });
+  }
+  return currentDatabaseIdentity;
+}
+
+async function ensureStateOnce() {
+  if (!STATE_DIR || !JOBS_DIR || !DATABASE_FILE) {
+    throw new ToolError('state_unavailable', stateResolutionMessage(STATE_RESOLUTION));
+  }
+  try {
+    stateHandle = await prepareStateDirectory(STATE_DIR);
+    jobsHandle = await prepareStateDirectory(JOBS_DIR);
+    await revalidateStateDirectory(stateHandle);
+    await revalidateStateDirectory(jobsHandle);
+    const currentStateIdentity = stateHandle.components.at(-1);
+    const currentJobsIdentity = jobsHandle.components.at(-1);
+    if (database) {
+      if (!sameStateIdentity(databaseStateIdentity, currentStateIdentity)
+        || !sameStateIdentity(databaseJobsIdentity, currentJobsIdentity)) {
+        throw new ToolError(
+          'state_identity_changed',
+          'The Co-Engineer state or jobs directory changed after the SQLite ledger was opened; refusing to reuse the old ledger.',
+        );
+      }
+      await inspectSqliteStateChildren(databaseFileIdentity);
+    } else {
+      // DatabaseSync accepts only a path, not an already verified fd. Securely
+      // pre-create (or validate) that path with O_EXCL|O_NOFOLLOW first. The
+      // enclosing identity-bound 0700 directory is the same-uid trust boundary
+      // for the unavoidable interval before DatabaseSync opens the path.
+      const preparedDatabaseIdentity = await prepareStateFile(
+        stateHandle,
+        path.basename(DATABASE_FILE),
+      );
+      for (const child of SQLITE_STATE_CHILDREN) {
+        await inspectStateFile(stateHandle, child, { required: false });
+      }
+      await revalidateStateDirectory(stateHandle);
+      const candidate = openStore(DATABASE_FILE);
+      try {
+        // The ledger must be opened only while both the state and jobs
+        // directory identities still match the prepared handles. Recheck the
+        // database and any SQLite WAL/SHM sidecars immediately after open.
+        await revalidateStateDirectory(stateHandle);
+        await revalidateStateDirectory(jobsHandle);
+        const confirmedDatabaseIdentity = await inspectSqliteStateChildren(
+          preparedDatabaseIdentity,
+        );
+        database = candidate;
+        databaseStateIdentity = currentStateIdentity;
+        databaseJobsIdentity = currentJobsIdentity;
+        databaseFileIdentity = confirmedDatabaseIdentity;
+      } catch (error) {
+        candidate.close();
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw new ToolError(
+      error?.code ?? 'state_unavailable',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function ensureState() {
+  const result = statePreparationTail.then(ensureStateOnce, ensureStateOnce);
+  statePreparationTail = result.catch(() => {});
+  return result;
 }
 
 let database;
@@ -238,6 +365,18 @@ async function startAgentJob(scope, starter) {
 function isPathWithin(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function assertGrokReadOnlyTarget(target) {
+  if (!target || !['review', 'verify'].includes(target.role)) return;
+  const candidate = path.resolve(target.working_directory ?? target.resolved_cwd ?? '');
+  const writableRoot = GROK_READ_ONLY_WRITABLE_ROOTS.find((root) => isPathWithin(root, candidate));
+  if (writableRoot) {
+    throw new ToolError(
+      'grok_read_only_target_unverifiable',
+      `Grok ${target.role} targets cannot be rooted in ${writableRoot}: the built-in read-only profile permits provider writes there. Use a target-specific custom profile with fail-closed startup or a non-writable target root.`,
+    );
+  }
 }
 
 function configuredTargetRoots() {
@@ -588,6 +727,57 @@ function publicJob(job) {
   };
 }
 
+function compactText(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value);
+  return text.length <= COMPACT_JOB_TEXT_MAX_LENGTH
+    ? text
+    : `${text.slice(0, COMPACT_JOB_TEXT_MAX_LENGTH - 1)}…`;
+}
+
+function publicLifecycleState(job) {
+  return job.lifecycle_state ?? ({
+    queued: 'accepted',
+    starting: 'started',
+    running: 'working',
+    cancelling: 'working',
+    succeeded: 'completed',
+    timed_out: 'timeout',
+    uncertain: 'failed',
+  }[job.status] ?? job.status);
+}
+
+/**
+ * The status/list surfaces are intentionally summaries.  Keep provider
+ * configuration, target contracts, prompts, logs, and lifecycle history on
+ * the explicit jobs get path so routine health checks remain small and safe.
+ */
+function compactJob(job) {
+  const targetContext = storedJson(job.target_context);
+  const effectiveConfiguration = storedJson(job.effective_configuration);
+  const role = targetContext?.role ?? effectiveConfiguration?.role ?? null;
+  return {
+    id: job.id,
+    kind: publicJobKind(job.kind),
+    role: TARGET_ROLES.has(role) ? role : null,
+    status: publicLifecycleState(job),
+    terminal_state: job.terminal_state ?? null,
+    failure_class: compactText(job.failure_class),
+    created_at: job.created_at,
+    started_at: job.started_at ?? null,
+    finished_at: job.finished_at ?? null,
+    deadline_at: job.deadline_at ?? null,
+    last_activity_at: job.last_activity_at ?? null,
+    elapsed_seconds: typeof job.elapsed_seconds === 'number' ? job.elapsed_seconds : null,
+    stalled: storedBoolean(job.stalled),
+    termination_reason: compactText(job.termination_reason),
+    partial_output_available: storedBoolean(job.partial_output_available),
+    workspace_changed: storedBoolean(job.workspace_changed),
+    workspace_tainted: storedBoolean(job.workspace_tainted),
+    log_bytes: typeof job.log_bytes === 'number' ? job.log_bytes : null,
+  };
+}
+
 function redactLog(value) {
   return String(value)
     .replace(/((?:api[_-]?key|authorization|bearer|access[_-]?token|secret)\s*[:=]\s*)[^\s,]+/gi, '$1[REDACTED]')
@@ -688,24 +878,154 @@ function versions() {
     });
     return concise(result.stdout || result.stderr || 'unavailable', 80);
   };
+  const dshVersion = dshVersionProbe(DSH, process.env, DSH_HOME);
   versionCache = {
-    deepseek_harness: run(DSH, ['--version']),
+    deepseek_harness: dshVersion.version ?? dshVersion.detail ?? 'unavailable',
     grok: run(GROK, ['--version'], grokEnvironment()),
   };
   versionCache.compatible = {
-    deepseek_harness: versionCache.deepseek_harness.includes(TESTED_DSH_VERSION),
+    deepseek_harness: dshVersion.compatible,
   };
   return versionCache;
 }
 
-function requireDeepSeekCompatible() {
-  const current = versions();
-  if (!current.compatible.deepseek_harness) {
-    throw new ToolError(
-      'unsupported_runtime_version',
-      `DeepSeek jobs require DeepSeek Harness ${TESTED_DSH_VERSION}; inspect status for the detected version.`,
+let dshReadinessCache;
+function deepseekReadiness() {
+  // Keep only a compact identity snapshot between calls.  Every call still
+  // lstat-checks the home/profile and compares it with the snapshot, so a
+  // replaced directory or profile cannot remain trusted for daemon lifetime.
+  const status = inspectDsh({
+    command: DSH,
+    home: DSH_HOME,
+    source: DSH_HOME_CONFIG.source,
+    patchFile: DSH_PATCH_FILE,
+    cwd: PLUGIN_ROOT,
+    env: process.env,
+    initialize: !dshReadinessCache?.ok,
+    expectedIdentity: dshReadinessCache?.ok ? dshReadinessCache.identity : null,
+  });
+  if (status.ok) dshReadinessCache = status;
+  else dshReadinessCache = null;
+  return status;
+}
+
+function requireDeepSeekReady() {
+  const prepared = deepseekReadiness();
+  if (!prepared.ok) {
+    throw new ToolError('dsh_unavailable', dshReadinessMessage(prepared));
+  }
+  // This second, initialization-free check is deliberately adjacent to the
+  // caller's spawn.  It catches home/profile replacement after status or
+  // preflight succeeded without rerunning the DSH provider-free setup.
+  const status = inspectDsh({
+    command: DSH,
+    home: DSH_HOME,
+    source: DSH_HOME_CONFIG.source,
+    patchFile: DSH_PATCH_FILE,
+    cwd: PLUGIN_ROOT,
+    env: process.env,
+    initialize: false,
+    expectedIdentity: prepared.identity,
+  });
+  if (!status.ok) {
+    dshReadinessCache = null;
+    throw new ToolError('dsh_unavailable', dshReadinessMessage(status));
+  }
+  dshReadinessCache = status;
+  return status;
+}
+
+function managedDshOverlayConfigured() {
+  return DSH_HOME_CONFIG.source === 'managed-state'
+    && DSH_PATCH_FILE === DEFAULT_DSH_PATCH_FILE;
+}
+
+function verifiedManagedDshOverlay(status) {
+  return status?.ok === true && managedDshOverlayConfigured();
+}
+
+function normalizeDshForTool(value) {
+  if (!managedDshOverlayConfigured()) {
+    if (value !== undefined) {
+      throw new ToolError(
+        'dsh_options_unavailable',
+        'dsh_options require the verified Co-Engineer managed headless overlay; custom DSH homes have an unknown capability/configuration surface.',
+      );
+    }
+    return null;
+  }
+  try {
+    return normalizeDshOptions(value ?? {});
+  } catch (error) {
+    throw new ToolError('invalid_dsh_configuration', error?.message ?? 'Invalid dsh_options.');
+  }
+}
+
+function dshCapabilities(readiness, configuration = {}) {
+  return verifiedManagedDshOverlay(readiness)
+    ? dshCapabilityProfile(configuration)
+    : null;
+}
+
+function dshWorkerEnvironment(configuration) {
+  return configuration
+    ? dshChildEnvironment(DSH_HOME, configuration)
+    : dshBaseEnvironment(DSH_HOME);
+}
+
+/**
+ * The usage runner is an adapter-owned control path.  Its two environment
+ * variables must be written after any caller/provider environment so a
+ * provider cannot redirect the receipt to another job or disable collection.
+ */
+function startJobEnvironment(kind, id, env, readiness = dshReadinessCache) {
+  const childEnvironment = { ...env };
+  // These names are connector-owned even when collection is disabled. Strip
+  // any inherited/provider value before deciding whether the verified managed
+  // overlay may receive the authoritative exact-job values.
+  delete childEnvironment.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER;
+  delete childEnvironment.CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH;
+  if (kind === 'deepseek_agent' && verifiedManagedDshOverlay(readiness)) {
+    childEnvironment.CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER = '1';
+    childEnvironment.CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH = path.join(
+      JOBS_DIR,
+      `${id}.usage.json`,
     );
   }
+  return childEnvironment;
+}
+
+let productionCapacityReader;
+
+/**
+ * Build the provider reader only when capacity is first requested.  The DSH
+ * reader itself is lazy as well: account-only or Codex/Grok requests do not
+ * touch the managed jobs directory, while selected DSH jobs are bound to the
+ * exact control jobs directory and reconciled store lookup.
+ */
+function getProductionCapacityReader() {
+  if (productionCapacityReader) return productionCapacityReader;
+  let dshReceiptReader = null;
+  if (managedDshOverlayConfigured()) {
+    let reader;
+    dshReceiptReader = async (jobId) => {
+      const readiness = requireDeepSeekReady();
+      if (!verifiedManagedDshOverlay(readiness)) {
+        throw new CapacityError(
+          'dsh_receipt_unsupported',
+          'DSH receipts require the verified Co-Engineer managed headless overlay.',
+        );
+      }
+      reader ??= createDshReceiptReader({ jobsDir: JOBS_DIR, loadJob: getJob });
+      return reader(jobId);
+    };
+  }
+  productionCapacityReader = createCapacityReader({ readDshReceipt: dshReceiptReader });
+  return productionCapacityReader;
+}
+
+function readProductionCapacity(args = {}) {
+  return getProductionCapacityReader()(args);
 }
 
 async function startJob({
@@ -770,7 +1090,7 @@ async function startJob({
     cancel_file: cancelFile,
     command,
     args,
-    env,
+    env: startJobEnvironment(kind, id, env),
     cwd,
     timeout_seconds: timeoutSeconds,
     deadline_at: deadlineAt,
@@ -838,17 +1158,35 @@ async function statusTool(args) {
   const listening = await portOpen();
   const detectedVersions = versions();
   const grokStatus = grokVersionProbe(GROK, PLUGIN_ROOT, grokEnvironment());
+  const deepseekStatus = deepseekReadiness();
+  // The default path deliberately avoids a provider request.  When the
+  // caller explicitly asks for diagnostics, use that bounded read-only probe
+  // as the source of truth for the summary returned in this same response.
+  const grokDiagnostic = args.diagnostics === true ? grokAuthDoctor() : null;
   const deepseekConfigured = detectedVersions.compatible.deepseek_harness;
+  const deepseekReady = deepseekConfigured && deepseekStatus.ok;
+  const deepseekCapabilities = deepseekReady ? dshCapabilities(deepseekStatus) : null;
   const uiState = web && listening ? 'running' : listening ? 'occupied_unmanaged' : web ? web.status : 'stopped';
   const result = {
     ok: true,
     integration: 'control-only',
     control_plane: { health: 'healthy', version: PLUGIN_VERSION, transport: 'unix_socket', ledger: 'sqlite_wal' },
     headless_agent: {
-      availability: deepseekConfigured ? 'available' : 'unavailable',
-      configured: deepseekConfigured,
+      availability: deepseekReady ? 'available' : 'unavailable',
+      configured: deepseekConfigured && deepseekStatus.configured,
+      usable: deepseekReady,
       kind: 'deepseek_agent',
       version_compatible: detectedVersions.compatible.deepseek_harness,
+      readiness_reason: deepseekReady ? null : deepseekStatus.reason,
+      readiness_detail: deepseekReady ? null : deepseekStatus.detail,
+      dsh_home: deepseekStatus.home,
+      dsh_home_source: deepseekStatus.source,
+      profile: deepseekStatus.profile,
+      capability_state: deepseekCapabilities ? 'verified-managed-overlay' : 'unknown',
+      capability_note: deepseekCapabilities
+        ? null
+        : 'Capabilities are reported only for the verified Co-Engineer managed headless overlay; custom or unavailable profiles remain unknown.',
+      ...(deepseekCapabilities ? { capabilities: deepseekCapabilities } : {}),
     },
     grok_build: {
       kind: 'grok_build',
@@ -860,11 +1198,18 @@ async function statusTool(args) {
       executable: GROK,
       version: grokStatus.version,
       executable_state: grokStatus.executable_state,
-      auth_state: 'unknown',
-      ready: false,
-      auth_note: grokStatus.executable_state === 'missing'
+      sandbox: {
+        managed_by: 'grok_cli',
+        requested_profile: 'read-only_for_review_verify',
+        enforcement: 'fallback_warning_fail_closed_runner_postflight',
+        writable_builtin_roots: 'rejected_for_review_verify',
+      },
+      capabilities: grokCapabilityProfile(),
+      auth_state: grokDiagnostic?.auth_state ?? 'unknown',
+      ready: grokDiagnostic?.ok === true && grokDiagnostic.auth_state === 'ready',
+      auth_note: grokDiagnostic?.note ?? (grokStatus.executable_state === 'missing'
         ? 'Install the official Grok Build CLI and authenticate it with `grok login` (or provide XAI_API_KEY) before dispatch.'
-        : 'Auth remains unknown in the default status path; call status with diagnostics=true to run the documented read-only `grok models` probe. Status never opens a browser or starts a coding request.',
+        : 'Auth remains unknown in the default status path; call status with diagnostics=true to run the documented read-only `grok models` probe. Status never opens a browser or starts a coding request.'),
       api_key_available: Boolean(process.env.XAI_API_KEY),
     },
     targeting: {
@@ -893,23 +1238,71 @@ async function statusTool(args) {
     credential_setup: { protected_file: MODEL_API_KEY_FILE },
     workspace: {
       path: WORKSPACE,
-      deepseek_configured: deepseekConfigured,
+      deepseek_configured: deepseekReady,
+      deepseek_executable_compatible: deepseekConfigured,
       dsh_command: DSH,
-      dsh_home_configured: Boolean(process.env.DSH_HOME),
+      dsh_home: deepseekStatus.home,
+      dsh_home_configured: deepseekStatus.configured,
+      dsh_home_source: deepseekStatus.source,
+      dsh_profile: deepseekStatus.profile,
+      dsh_ready: deepseekReady,
       grok_command: GROK,
     },
     versions: detectedVersions,
     jobs: {
       active: jobs.filter((job) => ACTIVE_STATES.has(job.status)).length,
-      recent: jobs.slice(0, recentLimit).map(publicJob),
+      recent: jobs.slice(0, recentLimit).map(compactJob),
     },
   };
-  if (args.diagnostics === true) {
+  if (grokDiagnostic) {
     result.diagnostics = {
-      grok_build: grokAuthDoctor(),
+      grok_build: grokDiagnostic,
     };
   }
   return result;
+}
+
+async function capacityTool(args) {
+  try {
+    return await readProductionCapacity(args);
+  } catch (error) {
+    if (error instanceof CapacityError) {
+      throw new ToolError(error.code, error.message);
+    }
+    throw error;
+  }
+}
+
+function isTerminalDshJob(job) {
+  return job?.kind === 'deepseek_agent'
+    && (FINAL_STATES.has(job?.status) || FINAL_STATES.has(job?.lifecycle_state)
+      || FINAL_STATES.has(job?.terminal_state));
+}
+
+/**
+ * Jobs get may include a compact terminal DSH usage snapshot.  Keep this off
+ * list/status/wait/logs: routine lifecycle surfaces must not read receipts or
+ * reveal provider usage metadata.  The capacity reader strips paths and raw
+ * provider fields, and its error shape is a bounded code only.
+ */
+async function terminalDshUsage(job) {
+  if (!isTerminalDshJob(job)) return null;
+  const result = await readProductionCapacity({
+    providers: ['dsh'],
+    dsh_job_id: job.id,
+    include_usage: true,
+    refresh: true,
+    max_age_seconds: 60,
+  });
+  const entry = result.providers?.[0];
+  if (!entry) return { status: 'unavailable', error: { code: 'capacity_query_failed' } };
+  return {
+    status: entry.status,
+    observed_at: entry.observed_at ?? null,
+    freshness: entry.freshness ?? { state: 'unknown', age_seconds: null },
+    usage: entry.usage ?? null,
+    ...(entry.error ? { error: entry.error } : {}),
+  };
 }
 
 function grokAuthDoctor() {
@@ -956,19 +1349,29 @@ async function runtimeTool(args) {
     const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
-    requireDeepSeekCompatible();
+    requireDeepSeekReady();
     const managed = await activeWebJob();
     const listening = await portOpen();
     if (managed && listening) return { ok: true, already_running: true, job: publicJob(managed) };
     if (listening) {
       throw new ToolError('port_occupied', `Port ${WEB_PORT} is occupied by an unmanaged process.`);
     }
+    requireDeepSeekReady();
+    const runtimeDshConfiguration = normalizeDshForTool(undefined);
     const job = await startJob({
       kind: 'dsh_web',
       summary: 'DeepSeek Harness web UI',
       command: DSH,
-      args: ['--profile', 'web', '--host', WEB_HOST, '--port', String(WEB_PORT)],
-      env: { DSH_PERMISSION_MODE: 'workspace-write', DSH_TELEMETRY_MODE: 'DISABLED' },
+      args: [
+        '--profile', 'web',
+        ...(DSH_PATCH_FILE ? ['--patch', DSH_PATCH_FILE] : []),
+        '--host', WEB_HOST,
+        '--port', String(WEB_PORT),
+      ],
+      env: {
+        ...dshWorkerEnvironment(runtimeDshConfiguration),
+        DSH_PERMISSION_MODE: 'workspace-write',
+      },
       url: `http://${WEB_HOST}:${WEB_PORT}`,
       timeoutSeconds,
       cwd,
@@ -1087,6 +1490,7 @@ function agentConfiguration({
   timeoutSeconds,
   cwd,
   target,
+  dshConfiguration = null,
   grokConfiguration = null,
 }) {
   const configuration = {
@@ -1119,6 +1523,9 @@ function agentConfiguration({
         ? 'read-only-process-contract'
         : 'workspace-write',
     target_context: target,
+    ...(kind === 'deepseek_agent' && dshConfiguration
+      ? { dsh_configuration: dshConfiguration }
+      : {}),
     ...(kind === 'grok_build' ? { grok_configuration: grokConfiguration } : {}),
   };
   configuration.configuration_digest = sha256Digest(configuration);
@@ -1127,6 +1534,8 @@ function agentConfiguration({
 
 const GROK_CONFIGURATION_FIELDS = new Set([
   'model',
+  'agent',
+  'delegation',
   'output_format',
   'json_schema',
   'verbatim',
@@ -1152,6 +1561,7 @@ const GROK_CONFIGURATION_FIELDS = new Set([
   'experimental_memory',
   'fork_session',
 ]);
+const DSH_CONFIGURATION_FIELDS = new Set(['dsh_options']);
 
 function grokInput(args) {
   return Object.fromEntries([...GROK_CONFIGURATION_FIELDS]
@@ -1179,6 +1589,7 @@ function preflightAllowedFields(args) {
     'timeout_seconds',
     'target_context',
     'expected_target_fingerprint',
+    ...DSH_CONFIGURATION_FIELDS,
     ...GROK_CONFIGURATION_FIELDS,
   ]);
   for (const field of Object.keys(args)) {
@@ -1205,16 +1616,23 @@ async function preflightTool(args) {
     throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent or grok_build.');
   }
   const commonFields = new Set(['schema_version', 'kind', 'request_id', 'prompt', 'timeout_seconds', 'target_context', 'expected_target_fingerprint']);
-  const kindFields = kind === 'grok_build' ? GROK_CONFIGURATION_FIELDS : new Set();
+  const kindFields = kind === 'grok_build'
+    ? GROK_CONFIGURATION_FIELDS
+    : kind === 'deepseek_agent'
+      ? DSH_CONFIGURATION_FIELDS
+      : new Set();
   for (const field of Object.keys(args)) {
     if (!commonFields.has(field) && !kindFields.has(field)) {
       throw new ToolError('invalid_argument', `preflight.${field} is not supported for kind=${kind}.`);
     }
   }
   if (args.prompt !== undefined
-    && (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000)) {
-    throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters.');
+    && (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000
+      || /[\u0000\u007f]/.test(args.prompt))) {
+    throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 text characters without NUL or DEL controls.');
   }
+  let dshReadiness = null;
+  if (kind === 'deepseek_agent') dshReadiness = requireDeepSeekReady();
   if (args.request_id !== undefined) requestId(args.request_id);
   const configuration = {
     schema_version: CONFIG_SCHEMA_VERSION,
@@ -1228,8 +1646,17 @@ async function preflightTool(args) {
     target_fingerprint: targetFingerprint,
     target_context: target,
   };
+  let grokCapabilities = null;
+  let deepseekCapabilities = null;
+  if (kind === 'deepseek_agent') {
+    const dshConfiguration = normalizeDshForTool(args.dsh_options);
+    if (dshConfiguration) configuration.dsh_configuration = dshConfiguration;
+    deepseekCapabilities = dshCapabilities(dshReadiness, dshConfiguration ?? {});
+  }
   if (kind === 'grok_build') {
     configuration.grok_configuration = normalizeGrokForTool(args, target.role);
+    assertGrokReadOnlyTarget(target);
+    grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
   }
   configuration.configuration_digest = sha256Digest(configuration);
   return {
@@ -1246,6 +1673,11 @@ async function preflightTool(args) {
     server_identity: SERVER_IDENTITY,
     available_tools: null,
     configuration,
+    ...(deepseekCapabilities
+      ? { capabilities: { deepseek_agent: deepseekCapabilities } }
+      : grokCapabilities
+        ? { capabilities: { grok_build: grokCapabilities } }
+        : {}),
   };
 }
 
@@ -1282,6 +1714,8 @@ async function runTool(args) {
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
     const grokConfiguration = normalizeGrokForTool(args, target.role);
+    assertGrokReadOnlyTarget(target);
+    const grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
     const effectiveConfiguration = agentConfiguration({
       kind: args.kind,
       id,
@@ -1297,7 +1731,14 @@ async function runTool(args) {
       effective_configuration: effectiveConfiguration,
     });
     const existing = await findRequest(id, fingerprint);
-    if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
+    if (existing) {
+      return {
+        ok: true,
+        deduplicated: true,
+        job: publicJob(existing),
+        capabilities: { grok_build: grokCapabilities },
+      };
+    }
     const activeTask = [
       'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
       targetPreamble(target),
@@ -1337,6 +1778,7 @@ async function runTool(args) {
       ok: true,
       job: publicJob(job),
       effective_configuration: effectiveConfiguration,
+      capabilities: { grok_build: grokCapabilities },
       next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
     };
   }
@@ -1349,10 +1791,12 @@ async function runTool(args) {
       'timeout_seconds',
       'target_context',
       'expected_target_fingerprint',
+      'dsh_options',
     ]);
     rejectUnsupportedRunFields(args, allowed, args.kind);
-    if (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000) {
-      throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 characters.');
+    if (typeof args.prompt !== 'string' || args.prompt.trim().length < 1 || args.prompt.length > 12000
+      || /[\u0000\u007f]/.test(args.prompt)) {
+      throw new ToolError('invalid_prompt', 'prompt must contain 1 to 12000 text characters without NUL or DEL controls.');
     }
     if (!Object.hasOwn(args, 'target_context')) {
       throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
@@ -1360,6 +1804,10 @@ async function runTool(args) {
     const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
     assertTargetFingerprint(expectedFingerprint, targetFingerprint);
+    const dshConfiguration = normalizeDshForTool(args.dsh_options);
+    const deepseekCapabilities = dshConfiguration
+      ? dshCapabilityProfile(dshConfiguration)
+      : null;
     const effectiveConfiguration = agentConfiguration({
       kind: args.kind,
       id,
@@ -1367,6 +1815,7 @@ async function runTool(args) {
       timeoutSeconds,
       cwd,
       target,
+      dshConfiguration,
     });
     const fingerprint = requestFingerprint({
       kind: args.kind,
@@ -1374,9 +1823,18 @@ async function runTool(args) {
       effective_configuration: effectiveConfiguration,
     });
     const existing = await findRequest(id, fingerprint);
-    if (existing) return { ok: true, deduplicated: true, job: publicJob(existing) };
+    if (existing) {
+      return {
+        ok: true,
+        deduplicated: true,
+        job: publicJob(existing),
+        ...(deepseekCapabilities
+          ? { capabilities: { deepseek_agent: deepseekCapabilities } }
+          : {}),
+      };
+    }
     requireCredential();
-    requireDeepSeekCompatible();
+    requireDeepSeekReady();
     const activeTask = [
       'This is the active user task. Complete it now; do not treat it as setup or a request for another task.',
       targetPreamble(target),
@@ -1387,27 +1845,37 @@ async function runTool(args) {
       working_directory: cwd,
       expected_git_root: target?.expected_git_root ?? null,
       git_common_directory: target?.git_common_directory ?? null,
-    }, () => startJob({
-      kind: 'deepseek_agent',
-      summary: `DeepSeek task ${id}`,
-      command: DSH,
-      args: ['--profile', 'headless', activeTask],
-      env: {
-        DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
-        DSH_TELEMETRY_MODE: 'DISABLED',
-      },
-      requestId: id,
-      requestFingerprint: fingerprint,
-      timeoutSeconds,
-      cwd,
-      targetContext: target,
-      effectiveConfiguration,
-      redactions: [args.prompt],
-    }));
+    }, () => {
+      requireDeepSeekReady();
+      return startJob({
+        kind: 'deepseek_agent',
+        summary: `DeepSeek task ${id}`,
+        command: DSH,
+        args: [
+          '--profile', 'headless',
+          ...(DSH_PATCH_FILE ? ['--patch', DSH_PATCH_FILE] : []),
+          activeTask,
+        ],
+        env: {
+          ...dshWorkerEnvironment(dshConfiguration),
+          DSH_PERMISSION_MODE: target.role === 'implement' ? 'workspace-write' : 'read-only',
+        },
+        requestId: id,
+        requestFingerprint: fingerprint,
+        timeoutSeconds,
+        cwd,
+        targetContext: target,
+        effectiveConfiguration,
+        redactions: [args.prompt],
+      });
+    });
     return {
       ok: true,
       job: publicJob(job),
       effective_configuration: effectiveConfiguration,
+      ...(deepseekCapabilities
+        ? { capabilities: { deepseek_agent: deepseekCapabilities } }
+        : {}),
       next: 'Use jobs action=wait with until=terminal, or jobs action=logs for cursor pages.',
     };
   }
@@ -1438,7 +1906,7 @@ async function jobsTool(args) {
     return {
       ok: true,
       limits: WAIT_LIMITS,
-      jobs: (await listJobs(limit)).map(publicJob),
+      jobs: (await listJobs(limit)).map(compactJob),
     };
   }
   if (!['get', 'wait', 'logs'].includes(args.action)) {
@@ -1496,7 +1964,7 @@ async function jobsTool(args) {
     ? null
     : await readLogPage(job.log_file, afterCursor, LOG_PAGE_MAX_BYTES);
   const currentLogBytes = await logBytes(job.log_file);
-  return {
+  const response = {
     ok: true,
     limits: WAIT_LIMITS,
     effective_parameters: {
@@ -1511,6 +1979,11 @@ async function jobsTool(args) {
     next_cursor: String(currentLogBytes),
     log_delta: logDelta,
   };
+  if (args.action === 'get') {
+    const usage = await terminalDshUsage(job);
+    if (usage) response.dsh_usage = usage;
+  }
+  return response;
 }
 
 async function cancelTool(args) {
@@ -1533,6 +2006,17 @@ function validateToolArguments(name, args) {
   if (name === 'preflight' || name === 'run') return;
   if (name === 'status') {
     rejectUnknownToolFields(args, new Set(['recent_limit', 'diagnostics']), name);
+    return;
+  }
+  if (name === 'capacity') {
+    rejectUnknownToolFields(args, new Set([
+      'providers',
+      'refresh',
+      'max_age_seconds',
+      'include_usage',
+      'grok_session_id',
+      'dsh_job_id',
+    ]), name);
     return;
   }
   if (name === 'runtime') {
@@ -1562,6 +2046,7 @@ function validateToolArguments(name, args) {
 export async function dispatchControl(name, args = {}) {
   validateToolArguments(name, args);
   if (name === 'status') return statusTool(args);
+  if (name === 'capacity') return capacityTool(args);
   if (name === 'runtime') return runtimeTool(args);
   if (name === 'preflight') return preflightTool(args);
   if (name === 'run') return runTool(args);
@@ -1573,7 +2058,11 @@ export async function dispatchControl(name, args = {}) {
 export const __testing = Object.freeze({
   configuredTargetRoots,
   executionScopesOverlap,
+  deepseekReadiness,
+  getProductionCapacityReader,
   prepareTarget,
+  assertGrokReadOnlyTarget,
+  startJobEnvironment,
 });
 
 export { ToolError };

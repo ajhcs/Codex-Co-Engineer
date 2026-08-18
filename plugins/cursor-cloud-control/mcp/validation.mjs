@@ -5,12 +5,26 @@ export const MAX_IMAGES = 5;
 export const MAX_REPOS = 20;
 export const MAX_ENV_VARS = 50;
 export const MAX_MCP_SERVERS = 50;
+export const MAX_MCP_SCOPES = 50;
 export const MAX_SUBAGENTS = 20;
 export const MAX_PAGE_SIZE = 100;
-export const AGENT_ID_PATTERN = /^bc-[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/;
+export const AGENT_ID_PATTERN = /^bc-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 export const RUN_ID_PATTERN = /^run-[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/;
 export const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 export const COMMIT_PATTERN = /^[0-9a-f]{40}$/i;
+export const RESERVED_SUBAGENT_NAMES = Object.freeze([
+  'explore',
+  'shell',
+  'debug',
+  'computerUse',
+  'cursorGuide',
+]);
+
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,254}$/;
+// OAuth 2.0 scope-token: printable ASCII except DQUOTE and backslash. The
+// reference schema still carries only environment variable names; this check
+// applies after the MCP process resolves each value.
+const SCOPE_PATTERN = /^[\x21\x23-\x5B\x5D-\x7E]{1,256}$/;
 
 export class InputError extends Error {
   constructor(code, message, details = undefined) {
@@ -103,7 +117,7 @@ function pageFields(value, { includeArchived = false } = {}) {
 
 function image(value, path) {
   object(value, path);
-  unknown(value, ['data', 'mimeType', 'url'], path);
+  unknown(value, ['data', 'mimeType', 'url', 'dimension'], path);
   const hasData = value.data !== undefined;
   const hasUrl = value.url !== undefined;
   if (hasData === hasUrl) fail(`${path} must contain exactly one of data or url.`);
@@ -115,7 +129,15 @@ function image(value, path) {
       fail(`${path}.mimeType is not supported.`);
     }
   } else {
+    if (value.mimeType !== undefined) fail(`${path}.mimeType must be omitted when url is provided.`);
     url(value.url, `${path}.url`);
+  }
+  if (value.dimension !== undefined) {
+    object(value.dimension, `${path}.dimension`);
+    unknown(value.dimension, ['width', 'height'], `${path}.dimension`);
+    required(value.dimension, ['width', 'height'], `${path}.dimension`);
+    integer(value.dimension.width, `${path}.dimension.width`, { min: 1 });
+    integer(value.dimension.height, `${path}.dimension.height`, { min: 1 });
   }
 }
 
@@ -160,7 +182,7 @@ function envVars(value, path = 'arguments.envVars') {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(name) || name.startsWith('CURSOR_')) {
       fail(`${path} contains an invalid or reserved variable name.`);
     }
-    string(value[name], `${path}.${name}`, { min: 0, max: 4096 });
+    string(value[name], `${path}.${name}`, { min: 1, max: 4096 });
   }
 }
 
@@ -172,6 +194,62 @@ function safeHeaderName(value, path) {
   }
 }
 
+function headerName(value, path) {
+  string(value, path, { min: 1, max: 128 });
+  if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value)) fail(`${path} is not a valid header name.`);
+  return value;
+}
+
+function envReference(value, path) {
+  string(value, path, { min: 1, max: 255, pattern: ENV_NAME_PATTERN });
+  if (value.startsWith('CURSOR_')) fail(`${path} uses a reserved environment variable name.`);
+  return value;
+}
+
+function authEnv(value, path) {
+  object(value, path);
+  unknown(value, ['CLIENT_ID', 'CLIENT_SECRET', 'scopes'], path);
+  required(value, ['CLIENT_ID'], path);
+  envReference(value.CLIENT_ID, `${path}.CLIENT_ID`);
+  if (value.CLIENT_SECRET !== undefined) envReference(value.CLIENT_SECRET, `${path}.CLIENT_SECRET`);
+  if (value.scopes !== undefined) {
+    if (!Array.isArray(value.scopes) || value.scopes.length < 1 || value.scopes.length > MAX_MCP_SCOPES) {
+      fail(`${path}.scopes must contain 1-${MAX_MCP_SCOPES} environment variable references.`);
+    }
+    value.scopes.forEach((scope, index) => envReference(scope, `${path}.scopes[${index}]`));
+  }
+}
+
+function headerEnv(value, path) {
+  object(value, path);
+  const names = Object.keys(value);
+  if (names.length > 50) fail(`${path} is too large.`);
+  const seen = new Set();
+  for (const [headerNameValue, envName] of Object.entries(value)) {
+    headerName(headerNameValue, `${path}.${headerNameValue}`);
+    const normalized = headerNameValue.toLowerCase();
+    if (seen.has(normalized)) fail(`${path} contains duplicate header names.`);
+    seen.add(normalized);
+    envReference(envName, `${path}.${headerNameValue}`);
+  }
+}
+
+function mcpEnvironmentReferences(entry, path) {
+  const refs = new Set();
+  const add = (value, refPath) => {
+    if (refs.has(value)) fail(`${refPath} duplicates another secret environment reference.`);
+    refs.add(value);
+  };
+  if (entry.authEnv) {
+    add(entry.authEnv.CLIENT_ID, `${path}.authEnv.CLIENT_ID`);
+    if (entry.authEnv.CLIENT_SECRET !== undefined) add(entry.authEnv.CLIENT_SECRET, `${path}.authEnv.CLIENT_SECRET`);
+    for (const [index, scope] of (entry.authEnv.scopes ?? []).entries()) add(scope, `${path}.authEnv.scopes[${index}]`);
+  }
+  for (const [headerNameValue, envName] of Object.entries(entry.headerEnv ?? {})) {
+    add(envName, `${path}.headerEnv.${headerNameValue}`);
+  }
+}
+
 function mcpServers(value, path = 'arguments.mcpServers') {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > MAX_MCP_SERVERS) fail(`${path} must contain at most ${MAX_MCP_SERVERS} servers.`);
@@ -179,7 +257,7 @@ function mcpServers(value, path = 'arguments.mcpServers') {
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
     object(entry, base);
-    unknown(entry, ['name', 'type', 'url', 'command', 'args', 'env', 'headers'], base);
+    unknown(entry, ['name', 'type', 'url', 'command', 'args', 'env', 'headers', 'authEnv', 'headerEnv'], base);
     required(entry, ['name'], base);
     string(entry.name, `${base}.name`, { min: 1, max: 100 });
     if (names.has(entry.name)) fail(`${base}.name must be unique.`);
@@ -191,6 +269,8 @@ function mcpServers(value, path = 'arguments.mcpServers') {
       string(entry.command, `${base}.command`, { min: 1, max: 512 });
       if (entry.url !== undefined) fail(`${base}.url is not valid for a stdio server.`);
       if (entry.headers !== undefined) fail(`${base}.headers is not valid for a stdio server.`);
+      if (entry.authEnv !== undefined) fail(`${base}.authEnv is not valid for a stdio server.`);
+      if (entry.headerEnv !== undefined) fail(`${base}.headerEnv is not valid for a stdio server.`);
       if (entry.args !== undefined) {
         if (!Array.isArray(entry.args) || entry.args.length > 100) fail(`${base}.args is too large.`);
         entry.args.forEach((arg, argIndex) => string(arg, `${base}.args[${argIndex}]`, { max: 1000 }));
@@ -205,16 +285,89 @@ function mcpServers(value, path = 'arguments.mcpServers') {
       if (entry.headers !== undefined) {
         object(entry.headers, `${base}.headers`);
         if (Object.keys(entry.headers).length > 50) fail(`${base}.headers is too large.`);
+        const literalHeaderNames = new Set();
         for (const [headerName, headerValue] of Object.entries(entry.headers)) {
           safeHeaderName(headerName, `${base}.headers.${headerName}`);
+          const normalizedHeaderName = headerName.toLowerCase();
+          if (literalHeaderNames.has(normalizedHeaderName)) fail(`${base}.headers contains duplicate header names.`);
+          literalHeaderNames.add(normalizedHeaderName);
           string(headerValue, `${base}.headers.${headerName}`, { max: 4096 });
           if (/bearer\s|basic\s|token|secret|password|api[-_]?key|crsr_/i.test(headerValue)) {
             fail(`${base}.headers contains a likely credential.`);
           }
         }
       }
+      if (entry.authEnv !== undefined) authEnv(entry.authEnv, `${base}.authEnv`);
+      if (entry.headerEnv !== undefined) {
+        headerEnv(entry.headerEnv, `${base}.headerEnv`);
+        const literalHeaders = new Set(Object.keys(entry.headers ?? {}).map((name) => name.toLowerCase()));
+        for (const headerNameValue of Object.keys(entry.headerEnv)) {
+          if (literalHeaders.has(headerNameValue.toLowerCase())) {
+            fail(`${base}.headerEnv.${headerNameValue} conflicts with a literal header.`);
+          }
+        }
+      }
+      if (entry.authEnv !== undefined || entry.headerEnv !== undefined) mcpEnvironmentReferences(entry, base);
     }
   });
+}
+
+function resolveEnvironmentValue(name, env, path) {
+  const value = env?.[name];
+  if (typeof value !== 'string' || !value.trim()) fail(`${path} references a missing or empty environment variable.`);
+  return value;
+}
+
+function resolveScopeValue(name, env, path) {
+  const value = resolveEnvironmentValue(name, env, path);
+  if (!SCOPE_PATTERN.test(value)) fail(`${path} resolved to an invalid OAuth scope.`);
+  return value;
+}
+
+/**
+ * Resolve the intentionally small secret-reference wrapper into Cursor's
+ * documented remote MCP shape. The input is already structurally validated;
+ * this function only reads the MCP process environment and returns a copy.
+ */
+export function materializeMcpServers(value, env = process.env) {
+  if (value === undefined) return { servers: undefined, secrets: [] };
+  const secrets = [];
+  const addSecret = (secret) => { if (!secrets.includes(secret)) secrets.push(secret); };
+  const servers = value.map((entry, index) => {
+    const base = `arguments.mcpServers[${index}]`;
+    if (entry.type === 'stdio' || (!entry.type && !entry.url)) return { ...entry };
+    const materialized = { ...entry };
+    delete materialized.authEnv;
+    delete materialized.headerEnv;
+    if (entry.authEnv !== undefined) {
+      const auth = {
+        CLIENT_ID: resolveEnvironmentValue(entry.authEnv.CLIENT_ID, env, `${base}.authEnv.CLIENT_ID`),
+      };
+      addSecret(auth.CLIENT_ID);
+      if (entry.authEnv.CLIENT_SECRET !== undefined) {
+        auth.CLIENT_SECRET = resolveEnvironmentValue(entry.authEnv.CLIENT_SECRET, env, `${base}.authEnv.CLIENT_SECRET`);
+        addSecret(auth.CLIENT_SECRET);
+      }
+      if (entry.authEnv.scopes !== undefined) {
+        auth.scopes = entry.authEnv.scopes.map((name, scopeIndex) => {
+          const scope = resolveScopeValue(name, env, `${base}.authEnv.scopes[${scopeIndex}]`);
+          addSecret(scope);
+          return scope;
+        });
+      }
+      materialized.auth = auth;
+    }
+    if (entry.headerEnv !== undefined) {
+      materialized.headers = { ...(entry.headers ?? {}) };
+      for (const [headerNameValue, envName] of Object.entries(entry.headerEnv)) {
+        const headerValue = resolveEnvironmentValue(envName, env, `${base}.headerEnv.${headerNameValue}`);
+        addSecret(headerValue);
+        materialized.headers[headerNameValue] = headerValue;
+      }
+    }
+    return materialized;
+  });
+  return { servers, secrets };
 }
 
 function repo(value, path) {
@@ -228,7 +381,7 @@ function repo(value, path) {
 
 function repos(value, path = 'arguments.repos') {
   if (value === undefined) return;
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_REPOS) fail(`${path} must contain 1-${MAX_REPOS} repositories.`);
+  if (!Array.isArray(value) || value.length > MAX_REPOS) fail(`${path} must contain at most ${MAX_REPOS} repositories.`);
   value.forEach((entry, index) => repo(entry, `${path}[${index}]`));
 }
 
@@ -236,7 +389,7 @@ function subagents(value, path = 'arguments.customSubagents') {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > MAX_SUBAGENTS) fail(`${path} must contain at most ${MAX_SUBAGENTS} entries.`);
   const names = new Set();
-  const reserved = new Set(['explore', 'debug', 'shell', 'computerUse', 'computer_use']);
+  const reserved = new Set(RESERVED_SUBAGENT_NAMES);
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
     object(entry, base);
@@ -245,8 +398,8 @@ function subagents(value, path = 'arguments.customSubagents') {
     string(entry.name, `${base}.name`, { min: 1, max: 100 });
     if (reserved.has(entry.name) || names.has(entry.name)) fail(`${base}.name is reserved or duplicated.`);
     names.add(entry.name);
-    string(entry.description, `${base}.description`, { min: 1, max: 4000 });
-    string(entry.prompt, `${base}.prompt`, { min: 1, max: MAX_PROMPT_CHARS });
+    string(entry.description, `${base}.description`, { min: 1, max: 1000 });
+    string(entry.prompt, `${base}.prompt`, { min: 1, max: 8192 });
     if (entry.model !== undefined) {
       if (entry.model === 'inherit') string(entry.model, `${base}.model`, { min: 7, max: 7 });
       else if (typeof entry.model === 'string') string(entry.model, `${base}.model`, { min: 1, max: 200 });
@@ -321,16 +474,27 @@ function validateAction(value, actions, path = 'arguments.action') {
   if (!actions.includes(value.action)) fail(`${path} must be one of ${actions.join(', ')}.`);
 }
 
+const IMAGE_DIMENSION_SCHEMA = {
+  type: 'object',
+  properties: {
+    width: { type: 'integer', minimum: 1 },
+    height: { type: 'integer', minimum: 1 },
+  },
+  required: ['width', 'height'],
+  additionalProperties: false,
+};
+
 const IMAGE_SCHEMA = {
   type: 'object',
   properties: {
     data: { type: 'string', minLength: 4, maxLength: Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 8, pattern: '^[A-Za-z0-9+/=_-]+$' },
     mimeType: { type: 'string', minLength: 1, maxLength: 100, enum: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] },
     url: { type: 'string', format: 'uri', maxLength: 2048 },
+    dimension: IMAGE_DIMENSION_SCHEMA,
   },
   oneOf: [
-    { required: ['data', 'mimeType'] },
-    { required: ['url'] },
+    { required: ['data', 'mimeType'], not: { required: ['url'] } },
+    { required: ['url'], not: { anyOf: [{ required: ['data'] }, { required: ['mimeType'] }] } },
   ],
   additionalProperties: false,
 };
@@ -391,7 +555,7 @@ const REPO_SCHEMA = {
 const ENV_VARS_SCHEMA = {
   type: 'object',
   maxProperties: MAX_ENV_VARS,
-  patternProperties: { '^[A-Za-z_][A-Za-z0-9_]{0,254}$': { type: 'string', maxLength: 4096 } },
+  patternProperties: { '^[A-Za-z_][A-Za-z0-9_]{0,254}$': { type: 'string', minLength: 1, maxLength: 4096 } },
   additionalProperties: false,
 };
 
@@ -399,6 +563,26 @@ const HEADER_SCHEMA = {
   type: 'object',
   maxProperties: 50,
   patternProperties: { "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$": { type: 'string', maxLength: 4096 } },
+  additionalProperties: false,
+};
+
+const ENV_REFERENCE_SCHEMA = { type: 'string', minLength: 1, maxLength: 255, pattern: ENV_NAME_PATTERN.source };
+
+const AUTH_ENV_SCHEMA = {
+  type: 'object',
+  properties: {
+    CLIENT_ID: ENV_REFERENCE_SCHEMA,
+    CLIENT_SECRET: ENV_REFERENCE_SCHEMA,
+    scopes: { type: 'array', minItems: 1, maxItems: MAX_MCP_SCOPES, items: ENV_REFERENCE_SCHEMA },
+  },
+  required: ['CLIENT_ID'],
+  additionalProperties: false,
+};
+
+const HEADER_ENV_SCHEMA = {
+  type: 'object',
+  maxProperties: 50,
+  patternProperties: { "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$": ENV_REFERENCE_SCHEMA },
   additionalProperties: false,
 };
 
@@ -412,6 +596,8 @@ const MCP_SERVER_SCHEMA = {
     args: { type: 'array', maxItems: 100, items: { type: 'string', maxLength: 1000 } },
     env: ENV_VARS_SCHEMA,
     headers: HEADER_SCHEMA,
+    authEnv: AUTH_ENV_SCHEMA,
+    headerEnv: HEADER_ENV_SCHEMA,
   },
   required: ['name'],
   additionalProperties: false,
@@ -428,15 +614,16 @@ const SUBAGENT_SCHEMA = {
   type: 'object',
   properties: {
     name: { type: 'string', minLength: 1, maxLength: 100 },
-    description: { type: 'string', minLength: 1, maxLength: 4000 },
-    prompt: { type: 'string', minLength: 1, maxLength: MAX_PROMPT_CHARS },
+    description: { type: 'string', minLength: 1, maxLength: 1000 },
+    prompt: { type: 'string', minLength: 1, maxLength: 8192 },
     model: MODEL_REFERENCE_SCHEMA,
   },
   required: ['name', 'description', 'prompt'],
+  not: { properties: { name: { enum: RESERVED_SUBAGENT_NAMES } } },
   additionalProperties: false,
 };
 
-const REPOS_SCHEMA = { type: 'array', minItems: 1, maxItems: MAX_REPOS, items: REPO_SCHEMA };
+const REPOS_SCHEMA = { type: 'array', maxItems: MAX_REPOS, items: REPO_SCHEMA };
 const MCP_SERVERS_SCHEMA = { type: 'array', maxItems: MAX_MCP_SERVERS, items: MCP_SERVER_SCHEMA };
 const SUBAGENTS_SCHEMA = { type: 'array', maxItems: MAX_SUBAGENTS, items: SUBAGENT_SCHEMA };
 
@@ -445,12 +632,15 @@ export const TOOL_SCHEMAS = Object.freeze({
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['local', 'identity', 'models', 'repositories'] },
+      limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE },
+      detail: { type: 'boolean' },
+      refresh: { type: 'boolean' },
     },
     oneOf: [
       { properties: { action: { const: 'local' } }, required: [], additionalProperties: false },
       { properties: { action: { const: 'identity' } }, required: ['action'], additionalProperties: false },
-      { properties: { action: { const: 'models' } }, required: ['action'], additionalProperties: false },
-      { properties: { action: { const: 'repositories' } }, required: ['action'], additionalProperties: false },
+      { properties: { action: { const: 'models' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE }, detail: { type: 'boolean' }, refresh: { type: 'boolean' } }, required: ['action'], additionalProperties: false },
+      { properties: { action: { const: 'repositories' }, limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE } }, required: ['action'], additionalProperties: false },
     ],
     additionalProperties: false,
     description: 'Local configuration or safe read-only identity/model/repository discovery. Defaults to local.',
@@ -535,9 +725,19 @@ export const TOOL_SCHEMAS = Object.freeze({
 export function validateToolInput(toolName, raw) {
   const value = object(raw ?? {});
   if (toolName === 'status') {
-    unknown(value, ['action'], 'arguments');
     value.action ??= 'local';
     validateAction(value, ['local', 'identity', 'models', 'repositories']);
+    if (value.action === 'models') {
+      unknown(value, ['action', 'limit', 'detail', 'refresh'], 'arguments');
+      integer(value.limit, 'arguments.limit', { min: 1, max: MAX_PAGE_SIZE, optional: true });
+      boolean(value.detail, 'arguments.detail', true);
+      boolean(value.refresh, 'arguments.refresh', true);
+    } else if (value.action === 'repositories') {
+      unknown(value, ['action', 'limit'], 'arguments');
+      integer(value.limit, 'arguments.limit', { min: 1, max: MAX_PAGE_SIZE, optional: true });
+    } else {
+      unknown(value, ['action'], 'arguments');
+    }
     return value;
   }
   if (toolName === 'agents') {

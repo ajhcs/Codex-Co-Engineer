@@ -12,7 +12,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'plumbob-harness-control');
-  assert.equal(manifest.version, '2.0.1');
+  assert.equal(manifest.version, '2.1.0');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.composerIcon, './assets/icon.svg');
   assert.equal(manifest.interface.logo, './assets/co-engineer.png');

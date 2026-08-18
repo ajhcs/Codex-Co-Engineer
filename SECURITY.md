@@ -39,14 +39,19 @@ repository contents, or unredacted payloads.
 - Logs retain bounded redacted diagnostics, not full prompts or payloads.
 - Implement jobs are limited to declared relative paths and independently
   checked before a patch artifact is released.
+- Configured provider credentials are standing authorization for task-scoped
+  provider calls. This removes redundant per-job egress prompts, not the
+  authorization requirements for writes, destructive Git, deployments, or PRs.
 
-Grok role policy is fail-closed: review and verify force the `plan` permission
-mode plus the `read-only` sandbox (the official `strict` profile still permits
-CWD writes), reject automatic approval and write-capable allow rules, and
-reject every user option that would widen that read-only ceiling. Implement
-jobs reject the unbounded `off`/`devbox` sandboxes and bypass permission modes,
-use the bounded workspace sandbox by default, and remain subject to the final
-Git scope verifier. Even when an operator explicitly requests
+Grok role policy is fail-closed: review and verify normalize omitted, legacy
+`default`/`plan`, and explicit `auto` permission inputs to noninteractive
+`auto`, where blocked tool calls fail back to the model. They always use the
+`read-only` sandbox (the official `strict` profile still permits CWD writes),
+reject automatic approval and write-capable allow rules, and reject every user
+option that would widen that read-only ceiling. Implement jobs reject the
+unbounded `off`/`devbox` sandboxes and bypass permission modes, use the bounded
+workspace sandbox by default, and remain subject to the final Git scope
+verifier. Even when an operator explicitly requests
 `--always-approve`, the verifier withholds a patch on any out-of-scope or
 read-only mutation.
 
@@ -70,3 +75,10 @@ untrusted: downloads require an administrator-configured root, reject
 traversal and symlink escape, default to no overwrite, and are never executed.
 Permanent agent deletion is irreversible and requires an exact ID-bound
 confirmation value; archive is the reversible alternative.
+
+The packaged ACPX and Grok outer-boundary modules are experimental conformance
+components, not public dispatch paths. No MCP sessions tool is exposed and
+direct Grok execution still uses the official CLI-managed sandbox. The outer
+experiment accepts only an attested owner-only authentication file; it does
+not forward `XAI_API_KEY`, and it is not production-ready until real
+host/systemd acceptance succeeds.
