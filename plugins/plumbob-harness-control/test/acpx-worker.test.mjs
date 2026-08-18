@@ -280,7 +280,10 @@ test('worker pins the one repository fixture and launches its verified source by
   const agentStat = await lstat(fakeAgentPath);
   assert.equal(agentStat.uid, process.getuid());
   assert.equal(agentStat.nlink, 1);
-  assert.equal((agentStat.mode & 0o022), 0, 'fixture must not be group/world writable');
+  // Shared Git worktrees may honor core.sharedRepository by checking a tracked
+  // 100644 fixture out as 0664. The worker captures and launches only the exact
+  // pinned bytes, so group-write is compatible; world-write is not.
+  assert.equal((agentStat.mode & 0o002), 0, 'fixture must not be world writable');
   assert.equal((agentStat.mode & 0o111), 0, 'fixture must not be executable');
   const runtimeConstruction = source.slice(
     source.indexOf('async function createRuntime'),

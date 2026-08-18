@@ -283,7 +283,11 @@ async function verifyPinnedAgent() {
   const mode = before.mode & MODE_MASK;
   if (before.uid !== currentUid()) throw new Error('pinned fake-agent owner mismatch.');
   if (before.nlink !== 1) throw new Error('pinned fake-agent must have exactly one hard link.');
-  if ((mode & 0o400) === 0 || (mode & 0o111) !== 0 || (mode & 0o022) !== 0) {
+  // Git may materialize tracked 100644 files as 0664 in a shared repository.
+  // This disabled fixture is executed only from the exact digest-verified bytes
+  // captured below, never from its mutable pathname. World-writable or
+  // executable source remains unsafe.
+  if ((mode & 0o400) === 0 || (mode & 0o111) !== 0 || (mode & 0o002) !== 0) {
     throw new Error('pinned fake-agent mode is unsafe.');
   }
   const sourceBytes = await readFile(expectedPath);
