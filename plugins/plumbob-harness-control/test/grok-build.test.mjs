@@ -8,10 +8,19 @@ import {
   grokCapabilityProfile,
   grokBuildFailure,
   grokVersionProbe,
+  GROK_REASONING_EFFORTS,
   GROK_READ_ONLY_PERMISSION_MODE,
   normalizeGrokConfiguration,
   GROK_READ_ONLY_MCP_DENY_RULE,
 } from '../mcp/grok-build.mjs';
+
+test('Grok reasoning values match the installed 1.0.4 CLI contract', () => {
+  assert.deepEqual(GROK_REASONING_EFFORTS, ['low', 'medium', 'high', 'xhigh']);
+  assert.throws(
+    () => normalizeGrokConfiguration({ reasoning_effort: 'minimal' }, 'verify'),
+    /reasoning_effort must be one of low, medium, high, xhigh/,
+  );
+});
 
 test('Grok argv construction is deterministic and shell-free', () => {
   const configuration = normalizeGrokConfiguration({

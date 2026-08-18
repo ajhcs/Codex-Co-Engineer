@@ -1327,12 +1327,12 @@ function grokAuthDoctor() {
   const output = redactLog(concise(`${result.stdout ?? ''}\n${result.stderr ?? ''}`, 240));
   const unauthenticated = /(?:login|auth|credential|unauthori[sz]ed|token)/i.test(output);
   return {
-    ok: result.status === 0,
-    auth_state: result.status === 0 ? 'ready' : unauthenticated ? 'unauthenticated' : 'unknown',
+    ok: result.status === 0 && !unauthenticated,
+    auth_state: unauthenticated ? 'unauthenticated' : result.status === 0 ? 'ready' : 'unknown',
     executable_state: executable.executable_state,
     exit_code: result.status,
     detail: output || null,
-    note: result.status === 0
+    note: result.status === 0 && !unauthenticated
       ? 'The official Grok models probe completed without starting a coding task.'
       : unauthenticated
         ? 'Authenticate with `grok login` or provide XAI_API_KEY; status never opens a browser.'

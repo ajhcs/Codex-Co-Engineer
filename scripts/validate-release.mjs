@@ -6,6 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVER_IDENTITY } from '../plugins/plumbob-harness-control/mcp/preflight.mjs';
 import { SERVER_IDENTITY as CURSOR_SERVER_IDENTITY } from '../plugins/cursor-cloud-control/mcp/server.mjs';
+import {
+  FOUNDATION_TOOLS as CURSOR_LOCAL_FOUNDATION_TOOLS,
+  SERVER_IDENTITY as CURSOR_LOCAL_SERVER_IDENTITY,
+  TOOLS as CURSOR_LOCAL_TOOLS,
+} from '../plugins/cursor-cloud-control/mcp/local.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const required = [
@@ -70,10 +75,13 @@ const required = [
   'plugins/cursor-cloud-control/package.json',
   'plugins/cursor-cloud-control/README.md',
   'plugins/cursor-cloud-control/mcp/server.mjs',
+  'plugins/cursor-cloud-control/mcp/local.mjs',
   'plugins/cursor-cloud-control/mcp/ledger.mjs',
   'plugins/cursor-cloud-control/skills/control-cursor-cloud-agents/SKILL.md',
+  'plugins/cursor-cloud-control/skills/control-cursor-local-cli/SKILL.md',
   'plugins/cursor-cloud-control/test/client.test.mjs',
   'plugins/cursor-cloud-control/test/ledger.test.mjs',
+  'plugins/cursor-cloud-control/test/local.test.mjs',
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs',
   'scripts/inspector-preflight.mjs', 'scripts/cursor-inspector-preflight.mjs',
   'scripts/plugin-activation-fixture.mjs', 'scripts/target-fingerprint.mjs',
@@ -124,6 +132,7 @@ const manifest = await json('plugins/plumbob-harness-control/.codex-plugin/plugi
 const packageJson = await json('plugins/plumbob-harness-control/package.json');
 const cursorManifest = await json('plugins/cursor-cloud-control/.codex-plugin/plugin.json');
 const cursorPackage = await json('plugins/cursor-cloud-control/package.json');
+const cursorMcp = await json('plugins/cursor-cloud-control/.mcp.json');
 const vendorPackage = await json('tools/acpx-vendor/package.json');
 const lockBytes = await readFile(path.join(ROOT, 'tools/acpx-vendor/package-lock.json'));
 const lock = JSON.parse(lockBytes);
@@ -131,20 +140,40 @@ const runtimeManifest = await json('plugins/plumbob-harness-control/assets/acpx-
 const configurationSchema = await json('config/configuration.schema.json');
 const configurationExample = await json('config/configuration.example.json');
 
-if (manifest.version !== '2.1.0' || packageJson.version !== '2.1.0'
-  || SERVER_IDENTITY.version !== '2.1.0'
-  || manifest.version !== packageJson.version
-  || packageJson.version !== SERVER_IDENTITY.version) {
-  fail('Co-Engineer manifest, package, and MCP server versions must remain pinned at 2.1.0.');
+if (manifest.version !== '2.1.1' || packageJson.version !== '2.1.1'
+  || SERVER_IDENTITY.version !== '2.1.1'
+  || manifest.version !== packageJson.version) {
+  fail('Co-Engineer manifest, package, and MCP server versions must remain pinned at 2.1.1.');
 }
 if (manifest.interface.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
-if (cursorManifest.version !== '0.2.0' || cursorPackage.version !== '0.2.0'
-  || CURSOR_SERVER_IDENTITY.version !== '0.2.0'
+if (cursorManifest.version !== '0.3.0' || cursorPackage.version !== '0.3.0'
+  || CURSOR_SERVER_IDENTITY.version !== '0.3.0'
+  || CURSOR_LOCAL_SERVER_IDENTITY.version !== '0.1.0'
   || cursorManifest.version !== cursorPackage.version
   || cursorPackage.version !== CURSOR_SERVER_IDENTITY.version) {
-  fail('Cursor manifest, package, and MCP server versions must remain pinned at 0.2.0.');
+  fail('Cursor manifest, package, and cloud MCP server versions must remain pinned at 0.3.0; local wire identity must remain 0.1.0.');
 }
 if (cursorManifest.interface.displayName !== 'Cursor Cloud Control') fail('Cursor public display name mismatch.');
+if (JSON.stringify(CURSOR_LOCAL_FOUNDATION_TOOLS.map((tool) => tool.name)) !== JSON.stringify(['status', 'run', 'runs'])
+  || JSON.stringify(CURSOR_LOCAL_TOOLS.map((tool) => tool.name)) !== JSON.stringify(['status'])) {
+  fail('Cursor local foundation must retain status/run/runs contracts while the shipped MCP catalog exposes status only.');
+}
+const localServer = cursorMcp.mcpServers?.['cursor-local-control'];
+if (!localServer || localServer.command !== 'node'
+  || JSON.stringify(localServer.args) !== JSON.stringify(['--no-warnings', './mcp/local.mjs', '--stdio'])
+  || localServer.tool_timeout_sec !== 65) {
+  fail('Cursor local MCP server identity or bounded command changed.');
+}
+for (const variable of [
+  'CURSOR_LOCAL_CLI_BIN', 'CURSOR_LOCAL_CLI_SHA256',
+  'CURSOR_LOCAL_CLI_SANDBOX_BIN', 'CURSOR_LOCAL_CLI_SANDBOX_SHA256',
+  'CURSOR_LOCAL_CLI_API_KEY', 'CURSOR_LOCAL_CLI_HOME',
+  'CURSOR_LOCAL_CLI_CONFIG_DIR', 'CURSOR_LOCAL_CLI_WORKSPACE_ROOTS',
+  'CURSOR_LOCAL_CONTROL_STATE_DIR', 'XDG_STATE_HOME', 'HOME',
+]) {
+  if (!localServer.env_vars?.includes(variable)) fail(`Cursor local MCP manifest is missing ${variable}.`);
+}
+if (localServer.env_vars?.includes('CURSOR_LOCAL_CLI_ENABLE_RUNS')) fail('Cursor local MCP manifest must not ship an execution activation switch.');
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') {
   fail('Co-Engineer package test script must explicitly select test/*.test.mjs.');
 }
@@ -316,8 +345,8 @@ const scanned = [
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs',
 ];
 const forbidden = [
-  new RegExp(`/${['home', 'plumbob'].join('/')}\\b`, 'g'),
-  new RegExp(`/${['mnt', 'd', 'Coding Projects', 'CheapTesting'].join('/')}\\b`, 'g'),
+  /\/home\/[A-Za-z0-9._-]+\b/g,
+  /\/mnt\/[A-Za-z0-9._-]+\/Coding Projects\/[A-Za-z0-9._-]+\b/g,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
 ];

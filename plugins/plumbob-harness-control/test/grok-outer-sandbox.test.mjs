@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
@@ -23,10 +24,12 @@ import {
   cleanupGrokOuterSandbox,
   createGrokReviewInvocation,
   GROK_OUTER_SANDBOX_ENV,
+  GROK_OUTER_TARGET_CONTRACT_SCHEMA_VERSION,
   GrokOuterSandboxError,
   prepareGrokOuterSandbox,
   spawnGrokOuterSandbox,
 } from '../mcp/grok-outer-sandbox.mjs';
+import { sha256Digest, TARGET_SCHEMA_VERSION, targetIdentityDigest } from '../mcp/preflight.mjs';
 
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(TEST_ROOT, 'fixtures', 'grok-outer-fake.sh');
@@ -64,6 +67,16 @@ async function sha256(source) {
     stream.once('end', resolve);
   });
   return hash.digest('hex');
+}
+
+async function authMetadata(source) {
+  const entry = await lstat(source, { bigint: true });
+  return {
+    device: String(entry.dev),
+    inode: String(entry.ino),
+    size: String(entry.size),
+    mtimeNs: String(entry.mtimeNs),
+  };
 }
 
 function normalizeProbeOutput(result) {
@@ -139,6 +152,85 @@ async function systemFileDescriptors() {
   return result;
 }
 
+function runGit(args, extraEnvironment = {}) {
+  const result = spawnSync('git', args, {
+    cwd: '/',
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_OPTIONAL_LOCKS: '0',
+      ...extraEnvironment,
+    },
+    shell: false,
+    encoding: 'utf8',
+    timeout: 5_000,
+    maxBuffer: 16 * 1024,
+  });
+  assert.equal(result.status, 0, normalizeProbeOutput(result));
+  return result.stdout.trim();
+}
+
+async function initializeGitTarget({ root, working, common }) {
+  runGit(['init', '-q', `--separate-git-dir=${common}`, root]);
+  // Keep the indirection relocatable so the same .git file resolves inside
+  // the synthetic /workspace root.
+  await writeFile(path.join(root, '.git'), 'gitdir: .git-common\n', { mode: 0o600 });
+  const tracked = path.join(working, 'tracked.txt');
+  await writeFile(tracked, 'tracked target fixture\n', { mode: 0o600 });
+  runGit(['-C', root, 'add', path.relative(root, tracked)]);
+  runGit([
+    '-C', root,
+    '-c', 'user.name=Grok Outer Test',
+    '-c', 'user.email=grok-outer@example.invalid',
+    'commit', '-qm', 'target fixture',
+  ], {
+    GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z',
+    GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z',
+  });
+  return runGit(['-C', working, 'rev-parse', '--verify', 'HEAD']);
+}
+
+async function makeTargetContract({ root, working, common }, {
+  expectedHead,
+  allowedPaths = ['.'],
+  role = 'review',
+} = {}) {
+  assert.match(expectedHead, /^[a-f0-9]{40}$/);
+  const rootEntry = await lstat(root, { bigint: true });
+  const workingEntry = await lstat(working, { bigint: true });
+  const workspaceIdentity = { device: String(rootEntry.dev), inode: String(rootEntry.ino) };
+  const cwdIdentity = { device: String(workingEntry.dev), inode: String(workingEntry.ino) };
+  const fingerprint = targetIdentityDigest({
+    mode: 'explicit',
+    resolved_workspace: root,
+    resolved_cwd: working,
+    git_common_directory: common,
+    git_head: expectedHead,
+    workspace_identity: workspaceIdentity,
+    cwd_identity: cwdIdentity,
+  });
+  return {
+    schema_version: TARGET_SCHEMA_VERSION,
+    mode: 'explicit',
+    working_directory: working,
+    expected_git_root: root,
+    resolved_workspace: root,
+    resolved_cwd: working,
+    git_common_directory: common,
+    expected_head: expectedHead,
+    observed_head: expectedHead,
+    allowed_paths: [...allowedPaths],
+    role,
+    target_fingerprint: fingerprint,
+    workspace_identity: workspaceIdentity,
+    cwd_identity: cwdIdentity,
+    isolation: 'read-only-process-contract',
+  };
+}
+
 async function makeTree() {
   const base = await mkdtemp('/tmp/grok-outer-test-');
   const root = path.join(base, 'project');
@@ -152,7 +244,7 @@ async function makeTree() {
   const memory = path.join(grokHome, 'memory');
   const agents = path.join(grokHome, 'agents');
   await mkdir(working, { recursive: true, mode: 0o700 });
-  await mkdir(common, { mode: 0o700 });
+  const expectedHead = await initializeGitTarget({ root, working, common });
   await mkdir(jobs, { mode: 0o700 });
   await mkdir(sessions, { recursive: true, mode: 0o700 });
   await mkdir(skills, { mode: 0o700 });
@@ -170,11 +262,7 @@ async function makeTree() {
   await chmod(providerPath, 0o700);
   return {
     base, root, working, common, jobs, home, grokHome, sessions, skills, memory, agents, providerPath,
-    target: {
-      working_directory: working,
-      expected_git_root: root,
-      git_common_directory: common,
-    },
+    target: await makeTargetContract({ root, working, common }, { expectedHead }),
   };
 }
 
@@ -248,7 +336,7 @@ test('typed invocation maps the full normalized review contract and rejects raw 
     () => createGrokReviewInvocation({ ...base, model: '../../provider' }),
     (error) => error instanceof GrokOuterSandboxError && error.code === 'invalid_invocation',
   );
-  for (const reasoning_effort of ['none', 'minimal', 'xhigh']) {
+  for (const reasoning_effort of ['low', 'medium', 'xhigh']) {
     assert.equal(createGrokReviewInvocation({ ...base, reasoning_effort }).configuration.reasoning_effort,
       reasoning_effort);
   }
@@ -294,6 +382,129 @@ test('typed invocation maps the full normalized review contract and rejects raw 
     () => buildGrokOuterSandboxArgv({ prepared: {}, invocation: { ...invocation } }),
     (error) => error instanceof GrokOuterSandboxError && error.code === 'invalid_prepared_state',
   );
+});
+
+test('the fake provider refuses the real user home before any probe or state write', async () => {
+  await rm(PROBE_HOST_MARKER, { force: true });
+  const result = spawnSync('/bin/sh', [FIXTURE, '--version'], {
+    cwd: '/tmp',
+    env: { ...process.env, HOME: homedir() },
+    shell: false,
+    encoding: 'utf8',
+    timeout: 3_000,
+  });
+  assert.equal(result.status, 78);
+  assert.match(normalizeProbeOutput(result), /RESULT fatal=unsafe-fixture-home/);
+  await assert.rejects(lstat(PROBE_HOST_MARKER), (error) => error?.code === 'ENOENT');
+  await assertCwdClean();
+});
+
+test('the fake provider accepts only a named temporary fixture home', async () => {
+  const fixtureHome = await mkdtemp('/tmp/grok-outer-fixture-home-');
+  try {
+    await rm(PROBE_HOST_MARKER, { force: true });
+    const result = spawnSync('/bin/sh', [FIXTURE, '--version'], {
+      cwd: '/tmp',
+      env: { ...process.env, HOME: fixtureHome },
+      shell: false,
+      encoding: 'utf8',
+      timeout: 3_000,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), 'fake-grok-outer 2.0');
+  } finally {
+    await rm(PROBE_HOST_MARKER, { force: true });
+    await rm(fixtureHome, { recursive: true, force: true });
+  }
+});
+
+test('target contract is strict, canonical, and caller-fingerprint bound before provider access', async () => {
+  const tree = await makeTree();
+  const inertOptions = {
+    bwrap: {
+      source: path.join(tree.base, 'inert-bwrap'),
+      sha256: '0'.repeat(64),
+      format: 'static-elf',
+      version: 'never-probed',
+    },
+    provider: {
+      source: path.join(tree.base, 'inert-provider'),
+      sha256: '0'.repeat(64),
+      format: 'static-elf',
+      version: 'never-probed',
+    },
+    runtimeClosure: [],
+    systemFiles: {},
+    jobsRoot: tree.jobs,
+    hostHome: tree.home,
+    jobId: 'target-contract',
+    ttlMs: 1_000,
+  };
+  try {
+    await assert.rejects(
+      prepareGrokOuterSandbox({ ...inertOptions, target: { ...tree.target, unexpected: true } }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'unknown_field',
+    );
+    await assert.rejects(
+      prepareGrokOuterSandbox({
+        ...inertOptions,
+        target: { ...tree.target, expected_head: 'b'.repeat(40) },
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'target_head_mismatch',
+    );
+    await assert.rejects(
+      prepareGrokOuterSandbox({
+        ...inertOptions,
+        target: { ...tree.target, target_fingerprint: '0'.repeat(64) },
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'target_fingerprint_mismatch',
+    );
+    await assert.rejects(
+      prepareGrokOuterSandbox({
+        ...inertOptions,
+        target: { ...tree.target, role: 'implement' },
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'unsupported_role',
+    );
+    await assert.rejects(
+      prepareGrokOuterSandbox({
+        ...inertOptions,
+        target: { ...tree.target, allowed_paths: ['../escape'] },
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'invalid_target',
+    );
+    await assert.rejects(
+      prepareGrokOuterSandbox({
+        ...inertOptions,
+        target: { ...tree.target, allowed_paths: ['review'] },
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'unsupported_allowed_paths',
+    );
+    await assert.rejects(
+      prepareGrokOuterSandbox({
+        ...inertOptions,
+        target: { ...tree.target, target_fingerprint: 'not-a-digest' },
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'invalid_target_fingerprint',
+    );
+    await writeFile(path.join(tree.working, 'tracked.txt'), 'drifted target fixture\n');
+    runGit(['-C', tree.root, 'add', 'review/tracked.txt']);
+    runGit([
+      '-C', tree.root,
+      '-c', 'user.name=Grok Outer Test',
+      '-c', 'user.email=grok-outer@example.invalid',
+      'commit', '-qm', 'drift target',
+    ], {
+      GIT_AUTHOR_DATE: '2000-01-02T00:00:00Z',
+      GIT_COMMITTER_DATE: '2000-01-02T00:00:00Z',
+    });
+    await assert.rejects(
+      prepareGrokOuterSandbox({ ...inertOptions, target: tree.target }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'target_head_mismatch',
+    );
+  } finally {
+    await rm(tree.base, { recursive: true, force: true });
+  }
 });
 
 test('target, hostile config, native mount, and both writable-overlap directions fail before any provider probe', async () => {
@@ -385,15 +596,20 @@ test('target, hostile config, native mount, and both writable-overlap directions
     const nestedWorking = path.join(nestedTarget, 'work');
     const nestedCommon = path.join(nestedTarget, '.git-common');
     await mkdir(nestedWorking, { recursive: true, mode: 0o700 });
-    await mkdir(nestedCommon, { mode: 0o700 });
+    const nestedExpectedHead = await initializeGitTarget({
+      root: nestedTarget,
+      working: nestedWorking,
+      common: nestedCommon,
+    });
+    const nestedTargetContract = await makeTargetContract({
+      root: nestedTarget,
+      working: nestedWorking,
+      common: nestedCommon,
+    }, { expectedHead: nestedExpectedHead });
     await assert.rejects(
       prepareGrokOuterSandbox({
         ...commonOptions,
-        target: {
-          working_directory: nestedWorking,
-          expected_git_root: nestedTarget,
-          git_common_directory: nestedCommon,
-        },
+        target: nestedTargetContract,
         jobId: 'contains-target',
       }),
       (error) => error instanceof GrokOuterSandboxError && error.code === 'target_writable_overlap',
@@ -424,6 +640,9 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
       await mkdir(compatibilityRoot, { mode: 0o700 });
       await writeFile(path.join(compatibilityRoot, 'import-marker'), `hostile ${name} import marker\n`, { mode: 0o600 });
     }
+    const hostAuthPath = path.join(tree.grokHome, 'auth.json');
+    const hostAuthBefore = await readFile(hostAuthPath, 'utf8');
+    const hostAuthMetadataBefore = await authMetadata(hostAuthPath);
     let prepared;
     try {
       prepared = await prepareGrokOuterSandbox(await makeRealOptions(
@@ -440,7 +659,7 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
       'provider --version probe escaped its Bubblewrap envelope');
 
     const invocation = createGrokReviewInvocation({
-      operation: 'verify',
+      operation: 'review',
       prompt: 'boundary-review',
       model: 'grok-4.6',
       output_format: 'streaming-messages-json',
@@ -503,7 +722,6 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
       ['--sandbox', 'read-only', '--permission-mode', 'auto']);
     assert.ok(argv.some((value, index) => value === '--deny' && argv[index + 1] === 'MCPTool'));
 
-    const hostAuthBefore = await readFile(path.join(tree.grokHome, 'auth.json'), 'utf8');
     const run = await spawnGrokOuterSandbox({ prepared, invocation });
     assert.equal(Object.isFrozen(run.child), true);
     assert.deepEqual(Object.keys(run.child).sort(),
@@ -521,6 +739,7 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
     const results = resultMap(stdout);
     assert.deepEqual(results, {
       prompt: 'boundary-review',
+      sandbox_home: 'dedicated',
       xai_api_key: 'absent',
       job_owner: 'boundary',
       target: 'denied',
@@ -558,7 +777,9 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
     const actualEnvironmentKeys = environmentKeys(stdout);
     assert.ok(actualEnvironmentKeys.every((key) => allowedRuntimeKeys.has(key)),
       `unexpected provider environment: ${actualEnvironmentKeys.join(', ')}`);
-    assert.equal(await readFile(path.join(tree.grokHome, 'auth.json'), 'utf8'), hostAuthBefore,
+    assert.deepEqual(await authMetadata(hostAuthPath), hostAuthMetadataBefore,
+      'private auth refresh changed host auth inode, size, or mtime');
+    assert.equal(await readFile(hostAuthPath, 'utf8'), hostAuthBefore,
       'private auth refresh modified host auth');
     await assert.rejects(lstat(path.join(tree.working, 'grok-outer-target-write')), (error) => error?.code === 'ENOENT');
     await assert.rejects(lstat(path.join(tree.common, 'grok-outer-common-write')), (error) => error?.code === 'ENOENT');
@@ -573,6 +794,26 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
     assert.equal(run.receipt.provenance.provider.sha256, (await descriptor(tree.providerPath, 'script')).sha256);
     assert.equal(run.receipt.provenance.provider.format, 'script');
     assert.equal('source' in run.receipt.provenance.provider, false);
+    assert.equal(run.receipt.target.target_fingerprint, tree.target.target_fingerprint);
+    assert.equal(run.receipt.target.expected_head, tree.target.expected_head);
+    assert.deepEqual(run.receipt.target.allowed_paths, tree.target.allowed_paths);
+    assert.equal(run.receipt.target.role, 'review');
+    assert.equal(run.receipt.target.mode, 'explicit');
+    assert.equal(run.receipt.target.resolved_workspace, tree.root);
+    assert.equal(run.receipt.target.resolved_cwd, tree.working);
+    const expectedTargetContractDigest = sha256Digest({
+      schema_version: GROK_OUTER_TARGET_CONTRACT_SCHEMA_VERSION,
+      target_schema_version: TARGET_SCHEMA_VERSION,
+      mode: 'explicit',
+      expected_head: tree.target.expected_head,
+      allowed_paths: ['.'],
+      role: 'review',
+      target_fingerprint: tree.target.target_fingerprint,
+    });
+    assert.equal(prepared.target_contract_digest, expectedTargetContractDigest);
+    assert.equal(run.receipt.target.target_contract_digest, expectedTargetContractDigest);
+    assert.equal(run.receipt.target_contract_digest, expectedTargetContractDigest);
+    assert.equal(Object.isFrozen(run.receipt.target), true);
     assert.deepEqual(run.receipt.spawn_contract, {
       detached: true, process_group: 'child-pid', shell: false, die_with_parent: true,
     });
@@ -592,6 +833,21 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
       spawnGrokOuterSandbox({ prepared: forgedInvocationPrepared, invocation: forgedInvocation }),
       (error) => error instanceof GrokOuterSandboxError && error.code === 'invalid_prepared_state',
     );
+
+    const roleMismatchPrepared = await prepareGrokOuterSandbox({
+      ...(await makeRealOptions(tree, bwrap, 'role-mismatch', 10_000, tree.providerPath, busybox)),
+      target: { ...tree.target, role: 'verify' },
+    });
+    assert.notEqual(roleMismatchPrepared.target.target_contract_digest,
+      prepared.target.target_contract_digest, 'role did not change the canonical target contract digest');
+    await assert.rejects(
+      spawnGrokOuterSandbox({
+        prepared: roleMismatchPrepared,
+        invocation: createGrokReviewInvocation({ operation: 'review', prompt: 'role mismatch' }),
+      }),
+      (error) => error instanceof GrokOuterSandboxError && error.code === 'target_role_mismatch',
+    );
+    await assert.rejects(lstat(roleMismatchPrepared.private_home), (error) => error?.code === 'ENOENT');
 
     const unknownSpawnFieldPrepared = await prepareGrokOuterSandbox(
       await makeRealOptions(tree, bwrap, 'unknown-spawn-field', 10_000, tree.providerPath, busybox),

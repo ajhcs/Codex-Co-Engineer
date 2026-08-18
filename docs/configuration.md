@@ -22,6 +22,17 @@ input. Portable `CODEX_CO_ENGINEER_*` names are preferred. Legacy
 | `CODEX_CO_ENGINEER_GROK_COMMAND` | Direct official Grok executable; defaults to `grok` and is passed without a shell. |
 | `XAI_API_KEY` | Optional xAI API key consumed by the official Grok CLI. OAuth/session state is owned by Grok under the normal user home. |
 
+The MCP launcher resolves the protected key file once and forwards that path to
+the daemon as `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, including when the legacy
+`PLUMBOB_HARNESS_MODEL_API_KEY_FILE` alias was used. This keeps an activated
+daemon bound to the same owner-only file as its MCP parent.
+Daemon readiness also includes a digest of that canonical path and its
+filesystem metadata, never the key contents. Same-version replacement is
+identity-bound to the exact daemon process and socket, and the daemon atomically
+enters a draining state only when it has no active jobs. Version upgrades fail
+closed until the old daemon is stopped or Codex is restarted; an older daemon
+is never sent an unauthenticated compatibility shutdown.
+
 Defaults follow `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, and `PATH`; no public code
 contains a personal home, workspace, or credential path. The adapter fails
 closed when the resolved state/DSH root is not writable, so a sandbox cannot

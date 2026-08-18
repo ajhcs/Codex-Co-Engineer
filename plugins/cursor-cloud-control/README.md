@@ -1,4 +1,4 @@
-# Cursor Cloud Control
+# Cursor Cloud Control and Local Control
 
 Cursor Cloud Control is a typed MCP control plane for the official Cursor
 Cloud Agents API v1. It lets Codex discover the authenticated account, models,
@@ -6,6 +6,18 @@ and GitHub repositories; return a compact authenticated identity projection;
 create durable agents; submit follow-up runs; observe
 bounded polling or SSE; cancel runs; read usage; handle artifacts; and archive,
 unarchive, or permanently delete agents.
+
+The same package contains a separate `cursor-local-control` MCP server
+for the locally installed Cursor Agent CLI. Its foundation has exactly three
+typed contracts—`status`, `run`, and `runs`—but the process-facing catalog
+currently exposes only read-only `status` (with `local`, `auth`, and
+`permissions` actions) pending host acceptance. It is deliberately not a
+wrapper for the Cloud API. Local credentials, permission configuration, process lifecycle,
+worktrees, logs, IDs, and owner-only receipts are separate from the Cloud
+surface and its `submissions.json` ledger. Local status/auth/permissions
+diagnostics are available in this release; provider execution remains
+deliberately fail-closed and unwired pending real Cursor plus Bubblewrap host
+acceptance inside a native boundary.
 
 The implementation is intentionally a control plane, not a generic HTTP
 proxy. Every operation is mapped to a documented v1 endpoint and every tool
@@ -158,6 +170,73 @@ missing, not owner-only, corrupt, or not writable, mutation tools fail closed
 before calling Cursor. Read-only status and discovery calls remain available
 so the state problem can be diagnosed without submitting work.
 
+### Cursor Local Control
+
+The second MCP server, `cursor-local-control`, is a separate local process
+adapter. Its foundation has exactly three typed contracts, while the shipped
+MCP catalog exposes only `status` until host acceptance proves the complete
+boundary. It never imports the Cloud API client, reads `submissions.json`,
+accepts Cloud IDs, or writes Cloud receipts.
+
+Provision these administrator-only environment values before using local
+status:
+
+- `CURSOR_LOCAL_CLI_BIN`: absolute path to `cursor-agent` or
+  `cursor-local-agent`. The generic `agent` alias is rejected so an existing
+  Grok alias cannot be shadowed.
+- `CURSOR_LOCAL_CLI_SHA256`: administrator-pinned SHA-256 digest for the
+  executable. Status reports digest drift; an unpinned or changed binary is
+  never eligible for execution.
+- `CURSOR_LOCAL_CLI_SANDBOX_BIN`: absolute path to the administrator-selected
+  native `bwrap` binary. Only `bwrap` is accepted.
+- `CURSOR_LOCAL_CLI_SANDBOX_SHA256`: administrator-pinned SHA-256 digest for
+  that native sandbox. Status runs a harmless read-only-root preflight and
+  reports `sandbox.ready`; this preflight alone does not enable provider runs.
+- `CURSOR_LOCAL_CLI_API_KEY`: optional local-only API key environment value.
+  The adapter maps it to the child process's `CURSOR_API_KEY`; it never takes
+  the Cloud key file implicitly and never accepts a key as a tool argument.
+- `CURSOR_LOCAL_CLI_HOME`: owner-only (`0700`) directory reserved to isolate
+  CLI authentication and Cursor worktrees in a future accepted run surface.
+- `CURSOR_LOCAL_CLI_CONFIG_DIR`: required owner-only (`0700`) directory whose
+  `cli-config.json` is administrator-managed. The config must be schema v1,
+  non-unrestricted, and deny `Mcp(*:*)`; read-only runs additionally require
+  `Write(**)` and `Shell(*)` in `permissions.deny` for a future read-only
+  execution profile.
+- `CURSOR_LOCAL_CLI_WORKSPACE_ROOTS`: absolute, colon-separated workspace
+  allowlist. Tool callers cannot broaden it.
+- `CURSOR_LOCAL_CONTROL_STATE_DIR`: owner-only (`0700`) local ledger root;
+  absent this, the adapter uses an absolute `XDG_STATE_HOME` or `HOME` local
+  state path ending in `cursor-local-control`.
+
+The local `status` tool is available for binary, compact auth, permission, and
+sandbox inspection. The `run` and `runs` foundation schemas are retained for
+review and versioning, but this release intentionally advertises only
+`status` and keeps provider execution disabled. Direct calls to `run` or
+`runs` fail closed with `foundation_not_exposed`, and therefore never spawn or
+adopt Cursor. The shipped MCP manifest does not include an activation switch.
+
+The deferred invocation contract retains explicit `read_only` and
+`implement` modes for compatibility testing. A future host-acceptance release
+must prove the real Cursor binary, worktree creation, resource limits,
+permission enforcement, cancellation, and receipt behavior inside the native
+boundary before enabling either mode. Until then, do not describe local runs
+as operational or use this surface for provider execution.
+
+Host-acceptance blockers are explicit: the current Bubblewrap code is only a
+provider-free status preflight (its prototype root read-only bind is not a
+complete host confidentiality or network boundary); a real Cursor process
+must be exercised with resource limits and an audited filesystem/network
+policy. The future lifecycle test must also prove graceful termination,
+forced escalation, process-group ownership, and receipt recovery across MCP
+restarts. Digest pins alone are not an execution attestation.
+
+The CLI invocation is based on Cursor's documented [headless](https://cursor.com/docs/cli/headless),
+[parameter](https://cursor.com/docs/cli/reference/parameters),
+[authentication](https://cursor.com/docs/cli/reference/authentication), and
+[permission](https://cursor.com/docs/cli/reference/permissions) contracts.
+The adapter intentionally does not expose `login`, `logout`, `update`, ACP,
+workers, arbitrary shell commands, or arbitrary MCP configuration.
+
 ## Safe operating model
 
 Create defaults are deliberately conservative:
@@ -176,6 +255,12 @@ Create defaults are deliberately conservative:
   network or timeout leaves acceptance uncertain, the ledger marks the
   submission `uncertain` and the same request ID cannot silently create a
   duplicate.
+- create receipts separate caller-requested configuration from provider
+  verification. Repository starting refs, the effective model, and the remote
+  workspace head/branch remain explicitly unverified unless Cursor returns a
+  documented attestation. The legacy `effectiveConfiguration` field is retained
+  as a deprecated caller-derived alias and must not be treated as provider
+  evidence.
 
 Cursor Cloud Agents run on a durable Cursor-managed VM/workspace. A durable
 agent persists conversation and workspace state across runs. Repository URLs,
@@ -209,8 +294,13 @@ one-attempt transport bound.
 prompt and may select a model, environment, repositories, prompt images,
 session environment variables, inline MCP servers (including remote `authEnv`
 and `headerEnv` references), custom subagents, and `agent`/`plan` mode. The
-result includes an effective configuration and opaque
-agent/run receipts rather than plaintext sensitive inputs.
+result includes `requestedConfiguration`, a `providerVerification` block, and
+opaque agent/run receipts rather than plaintext sensitive inputs. The
+`providerVerification` block reports repository starting refs, model
+resolution, and remote workspace identity as `unverified` when the provider
+does not attest them. For 0.2.x compatibility, `effectiveConfiguration` is
+still present with `provenance: "caller-derived"` and `deprecated: true`; it is
+only a legacy alias for the requested configuration.
 
 `runs` supports `list`, `get`, `followup`, `wait`, `stream`, and `cancel`.
 `stream` parses fragmented SSE chunks, multiline data, comments, heartbeats,

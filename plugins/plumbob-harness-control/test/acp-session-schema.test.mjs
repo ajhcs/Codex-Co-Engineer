@@ -206,14 +206,14 @@ test('compact projections drop prompts, provider IDs, raw frames, credentials, a
     events: Array.from({ length: 300 }, (_, index) => ({
       seq: index + 1,
       type: 'text',
-      text: index === 0 ? 'sk_live_abcdefghijklmnop at C:/Users/name/token' : 'x'.repeat(20_000),
+      text: index === 0 ? 'sensitive-marker-abcdefghijklmnop at C:/Users/name/token' : 'x'.repeat(20_000),
       raw: 'secret',
     })),
   });
   assert.equal(stream.events.length <= ACP_SESSION_LIMITS.stream_events, true);
   assert.equal(Buffer.byteLength(JSON.stringify(stream), 'utf8') <= ACP_SESSION_LIMITS.stream_bytes, true);
   assert.equal(JSON.stringify(stream).includes('secret'), false);
-  assert.equal(JSON.stringify(stream).includes('sk_live_'), false);
+  assert.equal(JSON.stringify(stream).includes('sensitive-marker-'), false);
   assert.equal(JSON.stringify(stream).includes('C:/Users'), false);
   assert.equal(stream.events.every((event) => !Object.hasOwn(event, 'text')), true);
   assert.equal(stream.has_more, true);
@@ -249,7 +249,7 @@ test('response projection does not reflect arbitrary provider or metadata string
   );
   const projected = projectAcpSessionResponse('create', {
     provider: 'cursor-local-acp',
-    state: 'sk_live_abcdefghijklmnop',
+    state: 'sensitive-marker-abcdefghijklmnop',
     status: 'C:/Users/name/token',
     error_code: 'TOKEN=secret value',
     effective_model: '/private/model path',

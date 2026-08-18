@@ -450,6 +450,15 @@ export async function launchAcpResourceBoundary({ prepared, adapter, stdio = 'pi
       if (earlyExit) fail('launcher_exited', `systemd-run exited before unit verification (${compact(JSON.stringify(earlyExit))}).`);
       const shown = await showUnit(host, record.unit);
       if (shown.result.status === 0 && shown.properties.LoadState === 'loaded') {
+        // systemd can report a newly loaded transient scope before it has
+        // assigned the generation marker. Do not treat that short window as
+        // a spoofed unit; wait for the marker before validating or mutating
+        // the scope. A marker that is present but invalid still fails closed
+        // through validateUnit below.
+        if (!INVOCATION_ID.test(shown.properties.InvocationID ?? '')) {
+          await host.sleep(25);
+          continue;
+        }
         validateUnit(record, shown.properties);
         verified = shown.properties;
         break;

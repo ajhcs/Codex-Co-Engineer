@@ -1,8 +1,8 @@
 {
   "name": "cursor-cloud-control",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
-  "description": "Cursor Cloud Control: a typed MCP control plane for Cursor Cloud Agents API v1.",
+  "description": "Cursor Cloud Control plus a distinct typed, fail-closed Cursor Local CLI status surface.",
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"

@@ -3,8 +3,8 @@
 Last verified: 2026-08-17
 
 This document defines how Codex should use Grok Build, DeepSeek Harness (DSH),
-Cursor Cloud Agents, and Codex-native agents without requiring the user to
-operate their CLIs or dashboards.
+Cursor Cloud Agents, the local Cursor CLI, and Codex-native agents without
+requiring the user to operate their CLIs or dashboards.
 
 ## Design rule
 
@@ -154,6 +154,13 @@ IDs. It should cache and expose the account catalog compactly, pass an explicit
 selection unchanged, and report an omitted selection as `account-default`.
 The current official API documents no resolved-model response field, so
 effective model remains `unknown` for now; do not infer it from the request.
+The same rule applies to repository `startingRef` and the remote workspace
+head/branch: a create request or receipt acceptance is not checkout
+attestation. Cursor Cloud Control therefore records caller input under
+`requestedConfiguration` and exposes `providerVerification` as
+`unverified` until a documented provider response field proves the effective
+ref, model, or workspace. Its 0.3.x `effectiveConfiguration` field is a
+deprecated caller-derived compatibility alias, not evidence of provider state.
 
 Cloud API v1 supports:
 
@@ -195,6 +202,37 @@ Sources:
 - [Cursor API overview](https://cursor.com/docs/api)
 - [Cursor SDK release](https://cursor.com/changelog/sdk-release)
 - [Cursor SDK subagent/tool updates](https://cursor.com/changelog/sdk-updates-jun-2026)
+
+## Cursor Local CLI
+
+The `cursor-local-control` MCP server is a separately packaged, typed adapter
+for the administrator-installed Cursor Agent CLI on Plumbob. Its foundation
+retains three contracts (`status`, `run`, and `runs`), but the shipped wire
+catalog exposes only `status` (with local/auth/permissions actions): provider
+dispatch and process lifecycle are intentionally unexposed and fail-closed
+pending real Cursor plus Bubblewrap host acceptance. Local IDs, state,
+credentials, permissions, worktrees, and receipts never share the Cursor
+Cloud ledger. The local wire identity is versioned independently at 0.1.0
+inside Cursor package 0.3.0.
+
+The deferred adapter contract requires an explicit absolute workspace in an
+administrator-owned allowlist, an owner-only CLI home and permission
+configuration, and a dedicated Cursor executable path. It specifies Ask mode
+for read-only work and an isolated worktree for implementation in a future
+accepted foundation, but neither provider run mode is operational in this
+release. Generic
+`agent` aliases, Cloud IDs, arbitrary shell commands, login/update commands,
+and arbitrary MCP configuration are rejected. Status may report a pinned,
+provider-free native sandbox preflight, but a digest or preflight alone is not
+an execution attestation; direct foundation calls return
+`foundation_not_exposed` in this release.
+
+Sources:
+
+- [Cursor CLI installation](https://cursor.com/docs/cli/installation)
+- [Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)
+- [Cursor CLI headless mode](https://cursor.com/docs/cli/headless)
+- [Cursor CLI permissions](https://cursor.com/docs/cli/reference/permissions)
 
 ## Codex-native routing
 

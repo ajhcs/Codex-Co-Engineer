@@ -1,20 +1,50 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { targetIdentityDigest, toolSetDigest } from '../mcp/preflight.mjs';
+import { DAEMON_CONTROL_PROTOCOL, prepareStateDirectory, stateDirectoryDigest } from '../mcp/state.mjs';
+import { SERVER_IDENTITY } from '../mcp/preflight.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+async function daemonProcessMatches(record) {
+  try {
+    const statText = await readFile(`/proc/${record.pid}/stat`, 'utf8');
+    const closingParenthesis = statText.lastIndexOf(')');
+    if (closingParenthesis < 0) return false;
+    const fields = statText.slice(closingParenthesis + 2).trim().split(/\s+/u);
+    return fields[0] !== 'Z' && fields[19] === record.start_time;
+  } catch {
+    return false;
+  }
+}
+
 async function stopDaemon(socketFile) {
+  const stateDirectory = path.dirname(socketFile);
+  const [socketMetadata, daemonRecord, prepared] = await Promise.all([
+    lstat(socketFile),
+    readFile(path.join(stateDirectory, 'daemon.pid'), 'utf8').then(JSON.parse),
+    prepareStateDirectory(stateDirectory),
+  ]);
   await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketFile);
     socket.once('connect', () => {
-      socket.write(`${JSON.stringify({ id: 'test-shutdown', name: '__shutdown', args: {} })}\n`);
+      socket.write(`${JSON.stringify({
+        id: 'test-shutdown',
+        name: '__shutdown',
+        args: {
+          protocol: DAEMON_CONTROL_PROTOCOL,
+          server_identity: SERVER_IDENTITY,
+          state_directory_digest: stateDirectoryDigest(prepared),
+          process_identity: { pid: daemonRecord.pid, start_time: daemonRecord.start_time },
+          socket_identity: { dev: String(socketMetadata.dev), ino: String(socketMetadata.ino) },
+        },
+      })}\n`);
     });
     socket.once('error', reject);
     socket.once('data', () => {
@@ -123,6 +153,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
       CODEX_CO_ENGINEER_RUNTIME_WORKSPACE: targetDirectory,
       PLUMBOB_HARNESS_STATE_DIR: state,
       PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS: '60',
+      CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: path.join(state, 'canonical-model-api-key'),
       PLUMBOB_HARNESS_MODEL_API_KEY_FILE: path.join(state, 'missing-model-api-key'),
     },
     input: `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`,
@@ -140,7 +171,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
     result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line)).map((message) => [message.id, message]),
   );
   assert.equal(responses.get(1).result.serverInfo.name, 'plumbob-harness-control');
-  assert.equal(responses.get(1).result.serverInfo.version, '2.1.0');
+  assert.equal(responses.get(1).result.serverInfo.version, '2.1.1');
   assert.equal(responses.get(1).result.protocolVersion, '2025-11-25');
   assert.deepEqual(
     responses.get(2).result.tools.map((tool) => tool.name),
@@ -167,12 +198,16 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.equal(statusBody.ok, true);
   assert.equal(statusBody.integration, 'control-only');
   assert.equal(statusBody.control_plane.health, 'healthy');
-  assert.equal(statusBody.control_plane.version, '2.1.0');
+  assert.equal(statusBody.control_plane.version, '2.1.1');
   assert.ok(['administrator-allowlisted', 'explicit-target-any-git-root'].includes(statusBody.targeting.mode));
   assert.equal(statusBody.targeting.implement_targets, 'explicit-scoped-workspace');
   assert.equal(statusBody.ui.optional, true);
   assert.ok(statusBody.headless_agent);
   assert.equal(statusBody.credentials.model_api_key_available, false);
+  assert.equal(
+    statusBody.credential_setup.protected_file,
+    path.join(state, 'canonical-model-api-key'),
+  );
   assert.equal(statusBody.workspace.dsh_command, 'dsh');
   assert.ok(['verified-managed-overlay', 'unknown'].includes(statusBody.headless_agent.capability_state));
   if (statusBody.headless_agent.capability_state === 'verified-managed-overlay') {
@@ -197,7 +232,7 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   assert.match(preflight.configuration_digest, /^[0-9a-f]{64}$/);
   assert.equal(preflight.transport, 'stdio');
   assert.equal(preflight.protocol_version, '2025-11-25');
-  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.1.0' });
+  assert.deepEqual(preflight.server_identity, { name: 'plumbob-harness-control', version: '2.1.1' });
   assert.deepEqual(preflight.available_tools, ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel']);
   assert.equal(preflight.toolset_digest, toolSetDigest(responses.get(2).result.tools));
 
@@ -286,6 +321,60 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
     runTool.inputSchema.properties.json_schema.oneOf.map((schema) => schema.type),
     ['boolean', 'object'],
   );
+
+  await stopDaemon(path.join(state, 'control.sock'));
+});
+
+test('MCP launches a fresh daemon when the protected key-file binding changes', async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'plumbob-binding-refresh-test-'));
+  const state = path.join(root, 'state');
+  const firstKeyPath = path.join(root, 'first-model-key');
+  const secondKeyPath = path.join(root, 'second-model-key');
+  context.after(async () => rm(root, { recursive: true, force: true }));
+
+  const requestInput = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
+    {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'status', arguments: { recent_limit: 0 } },
+    },
+  ].map((request) => JSON.stringify(request)).join('\n') + '\n';
+
+  const runWithKeyPath = (keyPath) => spawnSync(
+    process.execPath,
+    [path.join(ROOT, 'mcp', 'server.mjs'), '--stdio'],
+    {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        MODEL_API_KEY: '',
+        CODEX_CO_ENGINEER_STATE_DIR: state,
+        CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: keyPath,
+        CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS: '1',
+      },
+      input: requestInput,
+      encoding: 'utf8',
+      timeout: 15000,
+    },
+  );
+
+  const first = runWithKeyPath(firstKeyPath);
+  assert.equal(first.status, 0, first.stderr);
+  const firstDaemon = JSON.parse(await readFile(path.join(state, 'daemon.pid'), 'utf8'));
+  assert.equal(await daemonProcessMatches(firstDaemon), true);
+  const second = runWithKeyPath(secondKeyPath);
+  assert.equal(second.status, 0, second.stderr);
+  const secondResponses = second.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.ok(secondResponses[1]?.result?.content, JSON.stringify({ stdout: second.stdout, stderr: second.stderr }));
+  const secondStatus = JSON.parse(secondResponses[1].result.content[0].text);
+  assert.ok(secondStatus.credential_setup, JSON.stringify({ status: secondStatus, stderr: second.stderr }));
+  assert.equal(secondStatus.credential_setup.protected_file, secondKeyPath);
+  const secondDaemon = JSON.parse(await readFile(path.join(state, 'daemon.pid'), 'utf8'));
+  assert.notEqual(secondDaemon.pid, firstDaemon.pid);
+  assert.equal(await daemonProcessMatches(firstDaemon), false);
+  assert.equal(await daemonProcessMatches(secondDaemon), true);
 
   await stopDaemon(path.join(state, 'control.sock'));
 });

@@ -1,7 +1,7 @@
 {
   "name": "cursor-cloud-control",
-  "version": "0.2.0",
-  "description": "A typed, safety-first control plane for Cursor Cloud Agents API v1.",
+  "version": "0.3.0",
+  "description": "Typed, safety-first Cursor Cloud Agents and local Cursor CLI control planes with separate state and receipts.",
   "author": {
     "name": "Plumbob"
   },
@@ -18,13 +18,14 @@
   "interface": {
     "displayName": "Cursor Cloud Control",
     "shortDescription": "Safely operate Cursor Cloud Agents.",
-    "longDescription": "Use a typed MCP control plane for Cursor Cloud Agents API v1: discover resources, create and follow up runs, stream bounded progress, inspect usage and artifacts, cancel runs, and archive or delete agents with explicit safety barriers.",
+    "longDescription": "Use separate typed MCP surfaces for Cursor Cloud Agents API v1 and the local Cursor CLI. Cloud discovery and bounded agent lifecycle are operational; the local surface provides compact binary/auth/permission/sandbox status while its versioned run foundation remains intentionally unexposed pending real host acceptance. Local and cloud state, credentials, and receipts never mix.",
     "developerName": "Plumbob",
     "category": "Developer Tools",
     "capabilities": [
       "Interactive",
       "Read",
-      "Write"
+      "Write",
+      "Local CLI Status"
     ],
     "defaultPrompt": [
       "Show Cursor Cloud Control status.",

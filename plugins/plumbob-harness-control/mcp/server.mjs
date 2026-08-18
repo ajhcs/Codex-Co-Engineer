@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { lstat, readFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -13,6 +14,7 @@ import {
   TARGET_SCHEMA_VERSION,
   toolSetDigest,
 } from './preflight.mjs';
+import { MODEL_API_KEY_FILE, modelApiKeyBindingDigest } from './secrets.mjs';
 import {
   createExclusiveStateFile,
   DAEMON_CONTROL_PROTOCOL,
@@ -33,11 +35,13 @@ const STATE_RESOLUTION = resolveStateDirectory();
 const STATE_DIR = STATE_RESOLUTION.directory;
 const SOCKET_FILE = STATE_DIR ? path.join(STATE_DIR, 'control.sock') : null;
 const LOCK_FILE = STATE_DIR ? path.join(STATE_DIR, 'daemon.lock') : null;
+const DAEMON_PID_FILE = STATE_DIR ? path.join(STATE_DIR, 'daemon.pid') : null;
 const DAEMON_LOG = STATE_DIR ? path.join(STATE_DIR, 'daemon.log') : null;
 const DAEMON = path.join(PLUGIN_ROOT, 'mcp', 'daemon.mjs');
 let negotiatedProtocolVersion = MCP_PROTOCOL_VERSION;
 let stateHandle;
 let stateDigest;
+let credentialBindingDigest;
 
 class DaemonError extends Error {
   constructor(code, message) {
@@ -56,6 +60,179 @@ function isAlive(pid) {
   } catch {
     return false;
   }
+}
+
+function processStartTime(statText) {
+  const closingParenthesis = statText.lastIndexOf(')');
+  if (closingParenthesis < 0) return null;
+  return statText.slice(closingParenthesis + 2).trim().split(/\s+/u)[19] ?? null;
+}
+
+async function inspectDaemonProcess(pid) {
+  if (!Number.isInteger(pid) || pid < 2 || pid === process.pid) return null;
+  try {
+    const processDirectory = await lstat(`/proc/${pid}`);
+    if (typeof process.getuid === 'function' && processDirectory.uid !== process.getuid()) return null;
+    const [commandLine, statText] = await Promise.all([
+      readFile(`/proc/${pid}/cmdline`, 'utf8'),
+      readFile(`/proc/${pid}/stat`, 'utf8'),
+    ]);
+    const argv = commandLine.split('\0').filter(Boolean);
+    return {
+      pid,
+      start_time: processStartTime(statText),
+      state: statText.slice(statText.lastIndexOf(')') + 2).trim().split(/\s+/u)[0] ?? null,
+      command_matches: argv.includes(DAEMON),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameDaemonProcess(actual, expected) {
+  return actual?.pid === expected?.pid
+    && actual.start_time === expected.start_time
+    && actual.command_matches === true
+    && actual.state !== 'Z';
+}
+
+async function readDaemonPidRecord() {
+  if (!DAEMON_PID_FILE) return null;
+  let identity;
+  try {
+    identity = await inspectStateFile(
+      stateHandle,
+      path.basename(DAEMON_PID_FILE),
+      { required: false },
+    );
+  } catch {
+    return null;
+  }
+  if (!identity) return null;
+  try {
+    const opened = await openStateFileRead(
+      stateHandle,
+      path.basename(DAEMON_PID_FILE),
+      { expectedIdentity: identity },
+    );
+    try {
+      const record = JSON.parse(await opened.file.readFile('utf8'));
+      const validLegacyRecord = exactKeys(record, ['pid', 'start_time']);
+      const validCurrentRecord = exactKeys(record, ['pid', 'uid', 'argv', 'start_time'])
+        && typeof process.getuid === 'function'
+        && record.uid === process.getuid()
+        && Array.isArray(record.argv)
+        && JSON.stringify(record.argv) === JSON.stringify([process.execPath, '--no-warnings', DAEMON]);
+      if ((!validLegacyRecord && !validCurrentRecord)
+        || !Number.isInteger(record.pid)
+        || record.pid < 2
+        || typeof record.start_time !== 'string'
+        || record.start_time.length === 0) return null;
+      return { identity, record: { pid: record.pid, start_time: record.start_time } };
+    } finally {
+      await opened.file.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function shutdownVerifiedDaemon(socketIdentity) {
+  const traceFailure = () => false;
+  const pidFile = await readDaemonPidRecord();
+  if (!pidFile) return traceFailure('pid-file');
+  const ownedProcess = await inspectDaemonProcess(pidFile.record.pid);
+  if (!sameDaemonProcess(ownedProcess, pidFile.record)) return traceFailure('process-proof');
+  try {
+    await inspectStateSocket(
+      stateHandle,
+      path.basename(SOCKET_FILE),
+      { expectedIdentity: socketIdentity },
+    );
+  } catch {
+    return traceFailure('socket-proof');
+  }
+
+  try {
+    const response = await rawRequest('__shutdown', {
+      protocol: DAEMON_CONTROL_PROTOCOL,
+      server_identity: SERVER_IDENTITY,
+      state_directory_digest: stateDigest,
+      process_identity: pidFile.record,
+      socket_identity: { dev: socketIdentity.dev, ino: socketIdentity.ino },
+    }, 1000);
+    if (!exactKeys(response, ['ok']) || response.ok !== true) return traceFailure('shutdown-response');
+  } catch {
+    return traceFailure('shutdown-request');
+  }
+
+  const waitForExit = async (milliseconds) => {
+    const deadline = Date.now() + milliseconds;
+    while (Date.now() < deadline) {
+      if (!sameDaemonProcess(await inspectDaemonProcess(pidFile.record.pid), pidFile.record)) return true;
+      await sleep(50);
+    }
+    return !sameDaemonProcess(await inspectDaemonProcess(pidFile.record.pid), pidFile.record);
+  };
+  if (!await waitForExit(2000)) {
+    const stillOwned = await inspectDaemonProcess(pidFile.record.pid);
+    if (!sameDaemonProcess(stillOwned, pidFile.record)) return traceFailure('term-proof');
+    try {
+      process.kill(pidFile.record.pid, 'SIGTERM');
+    } catch {
+      return traceFailure('term-send');
+    }
+    if (!await waitForExit(1000)) {
+      const stillOwnedAfterTerm = await inspectDaemonProcess(pidFile.record.pid);
+      if (!sameDaemonProcess(stillOwnedAfterTerm, pidFile.record)) return traceFailure('kill-proof');
+      try {
+        process.kill(pidFile.record.pid, 'SIGKILL');
+      } catch {
+        return traceFailure('kill-send');
+      }
+      if (!await waitForExit(1000)) return traceFailure('kill-timeout');
+    }
+  }
+
+  try {
+    const remainingSocket = await inspectStateSocket(
+      stateHandle,
+      path.basename(SOCKET_FILE),
+      { required: false },
+    );
+    if (remainingSocket) {
+      if (remainingSocket.dev !== socketIdentity.dev || remainingSocket.ino !== socketIdentity.ino) {
+        return traceFailure('cleanup-socket-identity');
+      }
+      await removeStateSocket(
+        stateHandle,
+        path.basename(SOCKET_FILE),
+        { expectedIdentity: remainingSocket },
+      );
+    }
+  } catch {
+    return traceFailure('cleanup-socket');
+  }
+  try {
+    const remainingPidFile = await inspectStateFile(
+      stateHandle,
+      path.basename(DAEMON_PID_FILE),
+      { required: false },
+    );
+    if (remainingPidFile) {
+      if (remainingPidFile.dev !== pidFile.identity.dev || remainingPidFile.ino !== pidFile.identity.ino) {
+        return traceFailure('cleanup-pid-identity');
+      }
+      await removeStateFile(
+        stateHandle,
+        path.basename(DAEMON_PID_FILE),
+        { expectedIdentity: remainingPidFile },
+      );
+    }
+  } catch {
+    return traceFailure('cleanup-pid');
+  }
+  return true;
 }
 
 function exactKeys(value, expected) {
@@ -99,9 +276,14 @@ function daemonEnvironment() {
     'PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS',
     'PLUMBOB_HARNESS_MODEL_API_KEY_FILE',
   ];
-  return Object.fromEntries(
+  const environment = Object.fromEntries(
     names.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]),
   );
+  // Always bind the daemon to the resolved owner-only key-file path.  This
+  // preserves the legacy alias while ensuring a daemon launched by an MCP
+  // process cannot silently resolve a different profile after activation.
+  environment.CODEX_CO_ENGINEER_MODEL_API_KEY_FILE = MODEL_API_KEY_FILE;
+  return environment;
 }
 
 function rawRequest(name, args = {}, timeoutMilliseconds = 62000) {
@@ -161,8 +343,18 @@ async function daemonReady() {
       protocol: DAEMON_CONTROL_PROTOCOL,
       server_identity: SERVER_IDENTITY,
       state_directory_digest: stateDigest,
+      credential_binding_digest: credentialBindingDigest,
     }, 400);
-  } catch {
+  } catch (error) {
+    if (error?.code === 'daemon_identity_mismatch') {
+      const stopped = await shutdownVerifiedDaemon(socketIdentity);
+      if (!stopped) {
+        throw new DaemonError(
+          'daemon_identity_mismatch',
+          'A stale Co-Engineer daemon could not be identity-bound and safely drained. Stop the old daemon or restart Codex before activating this version.',
+        );
+      }
+    }
     return false;
   }
   const valid = exactKeys(result, [
@@ -170,11 +362,13 @@ async function daemonReady() {
     'protocol',
     'server_identity',
     'state_directory_digest',
+    'credential_binding_digest',
   ])
     && result.ok === true
     && result.protocol === DAEMON_CONTROL_PROTOCOL
     && sameServerIdentity(result.server_identity)
-    && result.state_directory_digest === stateDigest;
+    && result.state_directory_digest === stateDigest
+    && result.credential_binding_digest === credentialBindingDigest;
   if (!valid) return false;
   try {
     await inspectStateSocket(
@@ -199,6 +393,7 @@ async function ensureStateReady() {
     stateHandle = await prepareStateDirectory(STATE_DIR);
     await revalidateStateDirectory(stateHandle);
     stateDigest = stateDirectoryDigest(stateHandle);
+    credentialBindingDigest = await modelApiKeyBindingDigest(MODEL_API_KEY_FILE);
     return stateHandle;
   } catch (error) {
     throw new DaemonError(
@@ -437,7 +632,7 @@ const GROK_CONFIGURATION_PROPERTIES = {
   },
   reasoning_effort: {
     type: 'string',
-    enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    enum: ['low', 'medium', 'high', 'xhigh'],
     description: 'Maps to stable --reasoning-effort (with --effort as the CLI alias).',
   },
   max_turns: {

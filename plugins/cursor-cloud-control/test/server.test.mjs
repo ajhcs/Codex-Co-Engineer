@@ -402,6 +402,9 @@ test('create maps official fields, safe defaults, redacted receipts, and dedupli
   assert.equal(createCall[1].envVars.DEMO_VALUE, 'unit-secret-value');
   const second = await handleToolCall('agents', args, service);
   assert.equal(second.structuredContent.receipt.duplicate, true);
+  assert.equal(second.structuredContent.receipt.effectiveConfiguration.deprecated, true);
+  assert.ok(second.structuredContent.receipt.requestedConfiguration);
+  assert.equal(second.structuredContent.receipt.providerVerification.verification, 'unverified');
   assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
   const pr = await handleToolCall('agents', { action: 'create', requestId: 'create-pr-request-1', prompt: { text: 'open a PR' }, autoCreatePR: true }, service);
   assert.equal(pr.structuredContent.receipt.effectiveConfiguration.skipReviewerRequest, true);
@@ -423,6 +426,46 @@ test('create receipts separate requested model while leaving effective model unk
     effectiveSource: 'unknown',
   });
   assert.deepEqual(client.calls.find((call) => call[0] === 'createAgent')[1].model, requested);
+});
+
+test('create receipts keep requested refs separate from unverified provider state', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const requestedRef = '4b516f55149bccb0936e20da4c4bcb6c8cc2e95c';
+  const result = await handleToolCall('agents', {
+    action: 'create',
+    requestId: 'create-ref-verification-1',
+    prompt: { text: 'inspect the requested revision' },
+    model: { id: 'provider-requested' },
+    repos: [{ url: 'https://github.com/example/repo', startingRef: requestedRef }],
+    mode: 'plan',
+  }, service);
+
+  const receipt = result.structuredContent.receipt;
+  assert.equal(result.structuredContent.ok, true);
+  assert.deepEqual(receipt.requestedConfiguration.repositories, [{
+    url: 'https://github.com/example/repo',
+    startingRef: requestedRef,
+  }]);
+  assert.equal(receipt.effectiveConfiguration.provenance, 'caller-derived');
+  assert.equal(receipt.effectiveConfiguration.deprecated, true);
+  assert.match(receipt.effectiveConfiguration.deprecation, /requestedConfiguration/);
+
+  assert.equal(receipt.providerVerification.verification, 'unverified');
+  assert.equal(receipt.providerVerification.source, 'provider-response-unavailable');
+  assert.equal(receipt.providerVerification.model.effectiveKnown, false);
+  assert.equal(receipt.providerVerification.workspace.effectiveKnown, false);
+  assert.deepEqual(receipt.providerVerification.repositories[0].startingRef, {
+    requested: requestedRef,
+    requestedSource: 'caller',
+    effective: null,
+    effectiveKnown: false,
+    effectiveSource: 'unknown',
+    verification: 'unverified',
+  });
+  assert.deepEqual(client.calls.find((call) => call[0] === 'createAgent')[1].repos, [{
+    url: 'https://github.com/example/repo',
+    startingRef: requestedRef,
+  }]);
 });
 
 test('create forwards explicit empty repositories and image dimensions unchanged', async (context) => {
