@@ -22,6 +22,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # The unwired host-boundary tests deliberately reject a writable runtime
+      # and require the fixed /usr/bin/rg production path. setup-node installs
+      # Node group-writable in its ephemeral tool cache, while ubuntu-latest no
+      # longer guarantees ripgrep, so normalize those diagnostic prerequisites.
+      - name: Provision host-boundary test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+          chmod go-w "$(realpath "$(command -v node)")"
       - run: npm install --global @modelcontextprotocol/inspector@2.2.0
       # The production-shaped Bubblewrap prerequisite and strict real-boundary
       # test require the Codex host's fd-bind-capable static bwrap. GitHub's
