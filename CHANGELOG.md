@@ -57,8 +57,10 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 - Public direct Grok dispatch keeps sandbox enforcement inside the official
   CLI. The separately packaged outer-boundary experiment is not runtime-wired
   and still requires real host/systemd acceptance.
-- Review and verify dispatch rejects catch-all/write-capable permission rules
-  and refuses project-local Grok or MCP configuration before provider startup.
+- Review and verify dispatch rejects catch-all/write-capable permission rules,
+  refuses project-local Grok, Cursor/Claude compatibility, or MCP configuration
+  before provider startup, and isolates Grok capacity probes from repository
+  working directories.
 - Co-Engineer `2.1.0` uses Grok's noninteractive `auto` permission mode for
   implement jobs and fails closed when an implement run exits without an
   allowed workspace change.

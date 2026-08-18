@@ -60,6 +60,8 @@ const PROCESS_GROUP_POLL_INTERVAL_MS = 25;
 const OUTPUT_DRAIN_TIMEOUT_MS = 1000;
 const HOSTILE_GROK_PROJECT_NAMES = Object.freeze([
   '.grok',
+  '.cursor',
+  '.claude',
   '.grok.json',
   '.grokrc',
   '.grokrc.json',
@@ -692,7 +694,7 @@ async function preflightTarget(spec) {
   if (spec.kind === 'grok_build') {
     const hostile = await hostileGrokProjectConfig(target.expected_git_root, spec.cwd);
     if (hostile?.path) {
-      return { ok: false, error: `Target preflight refused: project-local Grok/MCP configuration is forbidden (${hostile.path}).` };
+      return { ok: false, error: `Target preflight refused: project-local Grok/compatibility/MCP configuration is forbidden (${hostile.path}).` };
     }
     if (hostile?.error) {
       return { ok: false, error: `Target preflight refused: ${hostile.error}.` };

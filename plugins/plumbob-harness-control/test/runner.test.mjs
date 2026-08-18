@@ -634,8 +634,15 @@ test('detached runner refuses a directory scope containing a symlink before prov
   assert.equal(await readFile(marker, 'utf8').catch(() => null), null);
 });
 
-test('grok runner rejects project-local Grok and MCP configuration before provider execution', async (context) => {
-  for (const [index, name] of ['.grok', '.mcp.json', 'grok.config.json'].entries()) {
+test('grok runner rejects project-local Grok, compatibility, and MCP configuration before provider execution', async (context) => {
+  for (const [index, name] of [
+    '.grok',
+    '.mcp.json',
+    'grok.config.json',
+    '.cursor/mcp.json',
+    '.cursor/hooks.json',
+    '.claude/settings.json',
+  ].entries()) {
     const marker = path.join(os.tmpdir(), `plumbob-hostile-grok-config-${process.pid}-${Date.now()}-${index}.marker`);
     context.after(() => rm(marker, { force: true }));
     const result = await runTargetFixture(context, {
@@ -648,12 +655,15 @@ test('grok runner rejects project-local Grok and MCP configuration before provid
       beforeDispatch: async (target) => {
         const candidate = path.join(target.directory, name);
         if (name === '.grok') await mkdir(candidate);
-        else await writeFile(candidate, '{}\n');
+        else {
+          await mkdir(path.dirname(candidate), { recursive: true });
+          await writeFile(candidate, '{}\n');
+        }
       },
     });
     assert.equal(result.job.status, 'failed');
     assert.equal(result.job.termination_reason, 'target_preflight_failed');
-    assert.match(result.job.error, /project-local Grok\/MCP configuration is forbidden/);
+    assert.match(result.job.error, /project-local Grok\/compatibility\/MCP configuration is forbidden/);
     assert.equal(await readFile(marker, 'utf8').catch(() => null), null);
   }
 });

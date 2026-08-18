@@ -4,6 +4,7 @@ import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 import {
   GROK_BILLING_METHOD,
+  GROK_CAPACITY_SAFE_CWD,
   GROK_SESSION_USAGE_METHOD,
   GrokCapacityError,
   normalizeGrokBilling,
@@ -294,6 +295,23 @@ test('readGrokCapacity uses only bounded ACP requests and optional session telem
   assert.equal(value.session_usage_status, 'available');
   assert.equal(value.session_usage.cost_usd, 0.002);
   assert.deepEqual(capture.child.stopped, ['SIGTERM']);
+});
+
+test('readGrokCapacity never inherits a repository cwd by default', async () => {
+  const capture = {};
+  const spawnProcess = fakeSpawn((request) => {
+    if (request.method === 'initialize') {
+      return { jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } };
+    }
+    if (request.method === GROK_BILLING_METHOD) {
+      return { jsonrpc: '2.0', id: request.id, result: { config: { creditUsagePercent: 1 } } };
+    }
+    throw new Error(`unexpected method ${request.method}`);
+  }, capture);
+
+  await readGrokCapacity({ spawn_process: spawnProcess, now });
+  assert.equal(capture.options.cwd, GROK_CAPACITY_SAFE_CWD);
+  assert.notEqual(capture.options.cwd, process.cwd());
 });
 
 test('optional session usage failure does not discard a valid billing snapshot', async () => {

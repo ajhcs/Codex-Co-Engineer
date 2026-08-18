@@ -12,6 +12,12 @@ const DEFAULT_MAX_OUTPUT_BYTES = BOUNDED_RPC_MAX_OUTPUT_BYTES;
 const DEFAULT_MAX_LINES = BOUNDED_RPC_MAX_LINES;
 const MAX_HISTORY_COUNT = 256;
 const MAX_MODELS = 32;
+// Capacity is an account-only ACP query. Never inherit the MCP server or
+// caller's repository cwd: Grok discovers project MCPs, hooks, rules, skills,
+// and compatibility configuration by walking from cwd to the Git root. POSIX
+// root is outside any user-writable repository and exists on every supported
+// host (Windows is rejected by the bounded transport before spawn).
+export const GROK_CAPACITY_SAFE_CWD = '/';
 const MAX_MODEL_NAME = 128;
 const COST_TICKS_PER_USD = 10_000_000_000;
 export class GrokCapacityError extends Error {
@@ -241,7 +247,7 @@ export async function readGrokCapacity(options = {}) {
     wire: 'jsonrpc2',
     command,
     args: ['agent', 'stdio'],
-    cwd: options.cwd ? controlSafe(options.cwd, 4096, 'cwd') : undefined,
+    cwd: options.cwd ? controlSafe(options.cwd, 4096, 'cwd') : GROK_CAPACITY_SAFE_CWD,
     timeoutMs,
     maxOutputBytes,
     maxLines,
