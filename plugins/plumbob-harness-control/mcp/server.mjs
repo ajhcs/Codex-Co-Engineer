@@ -540,6 +540,7 @@ const DSH_OPTIONS_SCHEMA = {
 // DeepSeek/preflight callers because the runtime rejects those fields before
 // dispatch rather than silently ignoring them.
 const GROK_READ_ONLY_TOOL_PATTERN = '^(?:[Rr]_?[Ee]_?[Aa]_?[Dd]|[Gg]_?[Rr]_?[Ee]_?[Pp]|[Gg]_?[Ll]_?[Oo]_?[Bb]|[Ll]_?[Ss]|[Ff]_?[Ii]_?[Nn]_?[Dd]|[Ww]_?[Ee]_?[Bb]_?[Ff]_?[Ee]_?[Tt]_?[Cc]_?[Hh]|[Ww]_?[Ee]_?[Bb]_?[Ss]_?[Ee]_?[Aa]_?[Rr]_?[Cc]_?[Hh])$';
+const GROK_READ_ONLY_PERMISSION_RULE_PATTERN = '^(?:[Rr][Ee][Aa][Dd]|[Gg][Rr][Ee][Pp]|[Gg][Ll][Oo][Bb]|[Ll][Ss]|[Ff][Ii][Nn][Dd]|[Ww][Ee][Bb]_?[Ff][Ee][Tt][Cc][Hh]|[Ww][Ee][Bb]_?[Ss][Ee][Aa][Rr][Cc][Hh])(?:\\([^()\\u0000-\\u001f\\u007f]*\\))?$';
 const GROK_MCP_PERMISSION_RULE_REJECTION = '[Mm][Cc][Pp][Tt][Oo][Oo][Ll]';
 
 const GROK_ROLE_POLICY = {
@@ -568,7 +569,7 @@ const GROK_ROLE_POLICY = {
         items: { pattern: GROK_READ_ONLY_TOOL_PATTERN },
       },
       allow_rules: {
-        items: { not: { pattern: GROK_MCP_PERMISSION_RULE_REJECTION } },
+        items: { pattern: GROK_READ_ONLY_PERMISSION_RULE_PATTERN },
       },
       deny_rules: {
         items: { not: { pattern: GROK_MCP_PERMISSION_RULE_REJECTION } },

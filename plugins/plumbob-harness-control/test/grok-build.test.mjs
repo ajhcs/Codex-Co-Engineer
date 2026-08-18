@@ -272,7 +272,17 @@ test('Grok session and role policy validation fails closed', () => {
   );
   assert.throws(
     () => normalizeGrokConfiguration({ allow_rules: ['Bash git status'] }, 'review'),
-    /cannot allow write-capable/,
+    /explicit read-only tool rule/,
+  );
+  for (const rule of ['*', '**', 'Bash(*)', 'Edit(*)', 'Read(*) || Bash(*)']) {
+    assert.throws(
+      () => normalizeGrokConfiguration({ allow_rules: [rule] }, 'review'),
+      /explicit read-only tool rule/,
+    );
+  }
+  assert.deepEqual(
+    normalizeGrokConfiguration({ allow_rules: ['Read(*)', 'Grep(src/**)'] }, 'verify').allow_rules,
+    ['Read(*)', 'Grep(src/**)'],
   );
   assert.throws(
     () => normalizeGrokConfiguration({ include_partial_messages: true }, 'implement'),

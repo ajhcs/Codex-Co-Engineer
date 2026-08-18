@@ -274,6 +274,9 @@ leader sockets, restore/worktree/ref controls, login/update commands,
 interactive UI commands, and agent/agents bundle selection are intentionally
 outside this release: each would bypass the target-bound prompt contract,
 lifecycle ownership, or credential boundary.
+Direct review and verify dispatch also rejects catch-all permission grants and
+project-local Grok or MCP configuration before provider startup; callers must
+use only explicit read-only tool rules and the connector-owned configuration.
 The connector keeps a fixed bounded streaming parser, so unbounded/raw output
 schemas and provider-specific output contracts are not accepted.
 

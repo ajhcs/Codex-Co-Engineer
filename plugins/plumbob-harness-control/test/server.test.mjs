@@ -228,11 +228,13 @@ test('MCP handshake exposes strict preflight identity and guarded status', async
   for (const tool of ['Write', 'Edit', 'Bash']) {
     assert.doesNotMatch(tool, readOnlyToolPattern);
   }
-  const readOnlyPermissionRulePattern = new RegExp(kindPolicy.then.else.properties.allow_rules.items.not.pattern);
-  assert.match('allow MCPTool(linear__issues_create)', readOnlyPermissionRulePattern);
-  assert.match('deny MCPTool(*)', readOnlyPermissionRulePattern);
+  const readOnlyPermissionRulePattern = new RegExp(kindPolicy.then.else.properties.allow_rules.items.pattern);
+  assert.match('Read(*)', readOnlyPermissionRulePattern);
+  assert.match('Grep(src/**)', readOnlyPermissionRulePattern);
+  assert.doesNotMatch('*', readOnlyPermissionRulePattern);
+  assert.doesNotMatch('Bash(*)', readOnlyPermissionRulePattern);
   assert.deepEqual(kindPolicy.then.else.properties.deny_rules.items.not, {
-    pattern: kindPolicy.then.else.properties.allow_rules.items.not.pattern,
+    pattern: '[Mm][Cc][Pp][Tt][Oo][Oo][Ll]',
   });
   const forbiddenFields = kindPolicy.else.not.anyOf.flatMap((schema) => schema.required);
   assert.ok(forbiddenFields.includes('permission_mode'));

@@ -58,6 +58,16 @@ const PROCESS_GROUP_POLL_INTERVAL_MS = 25;
 // A detached descendant can escape the provider's group while retaining an
 // inherited stdout/stderr pipe. Never let finalization wait on that reader.
 const OUTPUT_DRAIN_TIMEOUT_MS = 1000;
+const HOSTILE_GROK_PROJECT_NAMES = Object.freeze([
+  '.grok',
+  '.grok.json',
+  '.grokrc',
+  '.grokrc.json',
+  'grok.config.json',
+  '.mcp',
+  '.mcp.json',
+  'mcp.json',
+]);
 
 function processGroupSignalTarget(pgid) {
   // Detached process groups and negative-PID signalling are POSIX semantics.
@@ -607,6 +617,31 @@ async function verifyTargetIdentities(target) {
   return { ok: true, required: true, actual };
 }
 
+async function hostileGrokProjectConfig(root, cwd) {
+  const relative = path.relative(root, cwd);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return { error: 'working directory escapes the expected Git root' };
+  }
+  const directories = [root];
+  let current = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    directories.push(current);
+  }
+  for (const directory of directories) {
+    for (const name of HOSTILE_GROK_PROJECT_NAMES) {
+      const candidate = path.join(directory, name);
+      try {
+        await lstat(candidate);
+        return { path: path.relative(root, candidate) || name };
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return { error: `could not inspect ${path.relative(root, candidate) || name}` };
+      }
+    }
+  }
+  return null;
+}
+
 async function preflightTarget(spec) {
   const target = spec.target_context;
   if (!target) return { ok: true, target: null };
@@ -653,6 +688,15 @@ async function preflightTarget(spec) {
   const recheckedIdentity = await verifyTargetIdentities(target);
   if (!recheckedIdentity.ok) {
     return { ok: false, error: `Target preflight refused: ${recheckedIdentity.error} during preflight.` };
+  }
+  if (spec.kind === 'grok_build') {
+    const hostile = await hostileGrokProjectConfig(target.expected_git_root, spec.cwd);
+    if (hostile?.path) {
+      return { ok: false, error: `Target preflight refused: project-local Grok/MCP configuration is forbidden (${hostile.path}).` };
+    }
+    if (hostile?.error) {
+      return { ok: false, error: `Target preflight refused: ${hostile.error}.` };
+    }
   }
   const scopeBudget = { entries: 0, bytes: 0 };
   for (const allowedPath of target.allowed_paths ?? []) {

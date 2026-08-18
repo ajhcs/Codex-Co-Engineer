@@ -113,6 +113,7 @@ const READ_ONLY_TOOLS = new Set([
   'webfetch',
   'websearch',
 ]);
+const READ_ONLY_PERMISSION_RULE = /^(?:read|grep|glob|ls|find|web_?fetch|web_?search)(?:\([^()\u0000-\u001f\u007f]*\))?$/i;
 
 export class GrokBuildError extends Error {
   constructor(code, message) {
@@ -204,6 +205,10 @@ function hasMcpToolRule(value) {
 
 function readOnlyToolList(value) {
   return value.every((item) => READ_ONLY_TOOLS.has(item.toLowerCase().replaceAll('_', '')));
+}
+
+function readOnlyPermissionRuleList(value) {
+  return value.every((item) => READ_ONLY_PERMISSION_RULE.test(item));
 }
 
 /**
@@ -375,11 +380,11 @@ export function normalizeGrokConfiguration(input = {}, role = 'review') {
     if (allowedTools.length > 0 && !readOnlyToolList(allowedTools)) {
       invalid('allowed_tools', 'read-only roles may only allow read-only tools.');
     }
-    if (allowRules.some(hasWriteCapability)) {
-      invalid('allow_rules', 'read-only roles cannot allow write-capable tools or commands.');
-    }
     if (allowRules.some(hasMcpToolRule) || denyRules.some(hasMcpToolRule)) {
       invalid('permission_rules', 'read-only roles cannot customize MCPTool permissions; MCP meta-tools are denied by the connector.');
+    }
+    if (allowRules.some(hasWriteCapability) || !readOnlyPermissionRuleList(allowRules)) {
+      invalid('allow_rules', 'read-only roles may only allow an explicit read-only tool rule.');
     }
   } else {
     if (['dontAsk', 'bypassPermissions'].includes(permissionMode)) {
