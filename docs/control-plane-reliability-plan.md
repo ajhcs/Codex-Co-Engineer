@@ -45,7 +45,7 @@ gate.
 
 The initial mixed tree contained Co-Engineer 2.0.3 and Cursor 0.1.1 work beside
 an unrelated untracked `inline-keys` plugin. This candidate targets
-Co-Engineer 2.1.1 and Cursor 0.3.0; its local Cursor wire identity is
+Co-Engineer 2.1.2 and Cursor 0.3.0; its local Cursor wire identity is
 independently versioned 0.1.0; `inline-keys` remains outside the release.
 
 Observed baseline behavior:

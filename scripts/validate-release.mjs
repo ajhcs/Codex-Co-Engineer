@@ -140,10 +140,10 @@ const runtimeManifest = await json('plugins/plumbob-harness-control/assets/acpx-
 const configurationSchema = await json('config/configuration.schema.json');
 const configurationExample = await json('config/configuration.example.json');
 
-if (manifest.version !== '2.1.1' || packageJson.version !== '2.1.1'
-  || SERVER_IDENTITY.version !== '2.1.1'
+if (manifest.version !== '2.1.2' || packageJson.version !== '2.1.2'
+  || SERVER_IDENTITY.version !== '2.1.2'
   || manifest.version !== packageJson.version) {
-  fail('Co-Engineer manifest, package, and MCP server versions must remain pinned at 2.1.1.');
+  fail('Co-Engineer manifest, package, and MCP server versions must remain pinned at 2.1.2.');
 }
 if (manifest.interface.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
 if (cursorManifest.version !== '0.3.0' || cursorPackage.version !== '0.3.0'

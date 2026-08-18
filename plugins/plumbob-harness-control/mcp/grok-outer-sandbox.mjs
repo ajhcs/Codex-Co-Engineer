@@ -193,7 +193,12 @@ function childFacade(state, stdout, stderr) {
     },
     async cancel() {
       state.terminationReason ??= 'cancelled';
-      await terminateChild(state);
+      try {
+        await terminateChild(state);
+      } catch (error) {
+        await state.settleCleanupFailure?.(error);
+        throw error;
+      }
     },
   };
   return Object.freeze(facade);
@@ -543,7 +548,6 @@ function mountArguments({ resources, environment, chdir, providerArgs, providerP
     '--share-net',
     '--disable-userns',
     '--assert-userns-disabled',
-    '--new-session',
     '--clearenv',
     '--tmpfs', '/',
   ];
@@ -797,28 +801,37 @@ async function terminateChildNow(state) {
     await observeChildExit(state);
     return;
   }
-  try { process.kill(-child.pid, 'SIGTERM'); } catch (error) {
-    if (error?.code !== 'ESRCH') throw error;
-  }
+  const signalOwnedTree = (signal) => {
+    let unexpected = null;
+    try { process.kill(-child.pid, signal); } catch (error) {
+      if (error?.code !== 'ESRCH') unexpected = error;
+    }
+    try { child.kill(signal); } catch (error) {
+      if (error?.code !== 'ESRCH' && unexpected === null) unexpected = error;
+    }
+    if (unexpected) throw unexpected;
+  };
+  signalOwnedTree('SIGTERM');
   const groupExitedAfterTerm = await waitForProcessGroupExit(
     child.pid, GROK_OUTER_SANDBOX_LIMITS.ttlKillGraceMs,
   );
   if (!groupExitedAfterTerm || childIsRunning(child)) {
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-    } catch (error) {
-      if (error?.code !== 'ESRCH') throw error;
-      if (childIsRunning(child)) {
-        try { process.kill(child.pid, 'SIGKILL'); } catch (fallbackError) {
-          if (fallbackError?.code !== 'ESRCH') throw fallbackError;
-        }
-      }
-    }
+    signalOwnedTree('SIGKILL');
   }
-  await Promise.all([
+  let [childExited, groupExited] = await Promise.all([
     observeChildExit(state, GROK_OUTER_SANDBOX_LIMITS.ttlKillGraceMs),
     waitForProcessGroupExit(child.pid, GROK_OUTER_SANDBOX_LIMITS.ttlKillGraceMs),
   ]);
+  if (!childExited || !groupExited || childIsRunning(child)) {
+    signalOwnedTree('SIGKILL');
+    [childExited, groupExited] = await Promise.all([
+      observeChildExit(state, GROK_OUTER_SANDBOX_LIMITS.ttlKillGraceMs),
+      waitForProcessGroupExit(child.pid, GROK_OUTER_SANDBOX_LIMITS.ttlKillGraceMs),
+    ]);
+  }
+  if (!childExited || !groupExited || childIsRunning(child)) {
+    fail('sandbox_cleanup_failed', 'The owned Grok sandbox process tree did not drain after SIGKILL.');
+  }
 }
 
 function terminateChild(state) {
@@ -1312,6 +1325,7 @@ export async function prepareGrokOuterSandbox(options) {
       child: null,
       timer: null,
       completion: null,
+      settleCleanupFailure: null,
       cleanupPromise: null,
       terminationPromise: null,
       exitObservation: null,
@@ -1416,6 +1430,9 @@ async function expireState(state) {
   try {
     if (childGroupNeedsTermination(state.child)) state.terminationReason ??= 'ttl_expired';
     if (childGroupNeedsTermination(state.child)) await terminateChild(state);
+  } catch (error) {
+    await state.settleCleanupFailure?.(error);
+    throw error;
   } finally {
     await cleanupState(state);
   }
@@ -1434,6 +1451,9 @@ export async function cleanupGrokOuterSandbox(prepared) {
   try {
     if (childGroupNeedsTermination(state.child)) state.terminationReason ??= 'cancelled';
     if (childGroupNeedsTermination(state.child)) await terminateChild(state);
+  } catch (error) {
+    await state.settleCleanupFailure?.(error);
+    throw error;
   } finally {
     await cleanupState(state);
   }
@@ -1477,19 +1497,37 @@ export async function spawnGrokOuterSandbox(options) {
   state.exitObservation = null;
   const completion = new Promise((resolve) => {
     let settled = false;
-    const finish = async (code, signal, error = null) => {
+    const finish = async (code, signal, error = null, forcedCleanupFailure = null) => {
       if (settled) return;
       settled = true;
+      let cleanupFailure = forcedCleanupFailure;
+      if (!cleanupFailure) {
+        try {
+          if (childGroupNeedsTermination(child)) await terminateChild(state);
+        } catch (cleanupError) {
+          cleanupFailure = cleanupError;
+        }
+      }
       try {
-        if (childGroupNeedsTermination(child)) await terminateChild(state);
-      } catch {}
-      await cleanupState(state);
-      const outcome = state.terminationReason
+        await cleanupState(state);
+      } catch (cleanupError) {
+        cleanupFailure ??= cleanupError;
+      }
+      const outcome = cleanupFailure
+        ? 'cleanup_failed'
+        : state.terminationReason
         ?? (error ? 'spawn_error' : signal ? 'signalled' : 'exited');
-      resolve(Object.freeze({ code, signal, error: error?.code ?? null, outcome, cleaned: true }));
+      resolve(Object.freeze({
+        code,
+        signal,
+        error: cleanupFailure?.code ?? error?.code ?? null,
+        outcome,
+        cleaned: cleanupFailure === null,
+      }));
     };
     child.once('error', (error) => finish(null, null, error));
     child.once('exit', (code, signal) => finish(code, signal));
+    state.settleCleanupFailure = (error) => finish(null, null, null, error);
   });
   state.completion = completion;
   const publicChild = childFacade(state, child.stdout, child.stderr);

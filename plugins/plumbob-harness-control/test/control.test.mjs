@@ -473,7 +473,8 @@ for argument in "$@"; do
     exit 0
   fi
 done
-printf '%s|%s|%s|%s|%s\\n' "$DSH_TOOLS_MODE" "$CODEX_CO_ENGINEER_DSH_MODEL" "$CODEX_CO_ENGINEER_DSH_MAX_TOKENS" "$CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER" "$CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH" > "$DSH_HOME/child-env.txt"
+if [ -n "$MODEL_API_KEY" ]; then credential=present; else credential=missing; fi
+printf '%s|%s|%s|%s|%s|%s\\n' "$DSH_TOOLS_MODE" "$CODEX_CO_ENGINEER_DSH_MODEL" "$CODEX_CO_ENGINEER_DSH_MAX_TOKENS" "$CODEX_CO_ENGINEER_DSH_HEADLESS_USAGE_RUNNER" "$CODEX_CO_ENGINEER_DSH_USAGE_RECEIPT_PATH" "$credential" > "$DSH_HOME/child-env.txt"
 printf 'completed fixture\\n'
 `, { mode: 0o755 });
   const previous = {
@@ -573,6 +574,7 @@ printf 'completed fixture\\n'
       '4096',
       '1',
       path.join(state, 'jobs', `${run.job.id}.usage.json`),
+      'present',
     ],
   );
 });
