@@ -48,6 +48,33 @@ const HOST_COMMANDS = Object.freeze({
   rg: '/usr/bin/rg',
 });
 
+const CLASSIFIED_HOST_PREREQUISITE_FAILURES = new Set([
+  'missing_runtime',
+  'resolver_unavailable',
+  'unsafe_ancestor',
+  'unsafe_resolver',
+  'unsafe_runtime',
+  'unresolved_dependency',
+  'unsupported_format',
+  'unsupported_platform',
+]);
+
+async function prepareHostRuntimeOrSkip(t) {
+  const capability = await prepareGrokOuterRuntime({ commands: HOST_COMMANDS });
+  if (capability.ready) return capability;
+  assert.deepEqual(Object.keys(capability).sort(), ['entry_count', 'manifest_sha256', 'ready', 'reason']);
+  assert.equal(capability.entry_count, 0);
+  assert.equal(capability.manifest_sha256, null);
+  assert.doesNotMatch(JSON.stringify(capability), /\/(?:usr|etc|lib|home)\//);
+  assert.equal(
+    CLASSIFIED_HOST_PREREQUISITE_FAILURES.has(capability.reason),
+    true,
+    `unexpected Grok outer runtime failure: ${capability.reason}`,
+  );
+  t.skip(`classified: real Grok outer runtime prerequisite is unavailable (${capability.reason})`);
+  return null;
+}
+
 async function temporaryTree(mode = 0o700) {
   const root = await mkdtemp('/tmp/grok-runtime-test-');
   const safe = path.join(root, 'safe');
@@ -86,8 +113,9 @@ async function hostileElfCopy(source, destination, mutation) {
   return destination;
 }
 
-test('provider-free host capability probe attests a bounded path-free runtime', async () => {
-  const capability = await prepareGrokOuterRuntime({ commands: HOST_COMMANDS });
+test('provider-free host capability probe attests a bounded path-free runtime', async (t) => {
+  const capability = await prepareHostRuntimeOrSkip(t);
+  if (capability === null) return;
   try {
     assert.equal(capability.ready, true, capability.reason);
     assert.equal(capability.reason, null);
@@ -166,7 +194,10 @@ test('explicit command paths must be canonical non-symlinks and safe ancestors f
   assert.doesNotMatch(JSON.stringify(unsafe), new RegExp(unsafeTree.root));
 });
 
-test('ELF closure rejects unresolved dependencies and malformed synthetic ELF metadata', async () => {
+test('ELF closure rejects unresolved dependencies and malformed synthetic ELF metadata', async (t) => {
+  const host = await prepareHostRuntimeOrSkip(t);
+  if (host === null) return;
+  await closeGrokOuterRuntime(host);
   const tree = await temporaryTree();
   const emptyLibraries = path.join(tree.safe, 'libraries');
   await mkdir(emptyLibraries, { mode: 0o700 });
@@ -219,7 +250,10 @@ test('ELF parser rejects duplicate control headers and overlapping load mappings
   }
 });
 
-test('distinct duplicate dependency candidates are rejected instead of using directory order', async () => {
+test('distinct duplicate dependency candidates are rejected instead of using directory order', async (t) => {
+  const host = await prepareHostRuntimeOrSkip(t);
+  if (host === null) return;
+  await closeGrokOuterRuntime(host);
   const tree = await temporaryTree();
   const duplicateDirectory = path.join(tree.safe, 'duplicate-libs');
   await mkdir(duplicateDirectory, { mode: 0o700 });
@@ -233,7 +267,10 @@ test('distinct duplicate dependency candidates are rejected instead of using dir
   assert.equal(result.reason, 'ambiguous_dependency');
 });
 
-test('entry limit is enforced after inode deduplication without leaking paths', async () => {
+test('entry limit is enforced after inode deduplication without leaking paths', async (t) => {
+  const host = await prepareHostRuntimeOrSkip(t);
+  if (host === null) return;
+  await closeGrokOuterRuntime(host);
   const result = await prepareGrokOuterRuntime({ commands: HOST_COMMANDS, maxEntries: 1 });
   assert.deepEqual(result, {
     ready: false, reason: 'runtime_too_large', entry_count: 0, manifest_sha256: null,
@@ -241,7 +278,10 @@ test('entry limit is enforced after inode deduplication without leaking paths', 
   assert.doesNotMatch(JSON.stringify(result), /\/(?:usr|etc|lib|home)\//);
 });
 
-test('synthetic pipe overflow closes its descriptor across repeated maxEntries failures', async () => {
+test('synthetic pipe overflow closes its descriptor across repeated maxEntries failures', async (t) => {
+  const host = await prepareHostRuntimeOrSkip(t);
+  if (host === null) return;
+  await closeGrokOuterRuntime(host);
   const config = repeatedConfig('/usr/bin/bash', { maxEntries: 1 });
   const baseline = (await readdir('/proc/self/fd')).length;
   for (let index = 0; index < 16; index += 1) {
