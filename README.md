@@ -15,7 +15,7 @@ allows existing Codex configurations to migrate without a server-name break.
 
 ```text
 plugins/plumbob-harness-control/   Codex plugin, MCP facade, skill, and tests
-plugins/cursor-cloud-control/      Typed Cursor Cloud Agents API v1 control plane
+plugins/cursor-cloud-control/      Typed Cursor Cloud and Local CLI control planes
 config/                            non-secret configuration examples
 docs/                              target, preflight, data, and release policy
 examples/                          redacted contract and receipt examples
@@ -31,7 +31,9 @@ runtimes.
 
 ## Quick start
 
-1. Install Node.js 24 or newer.
+1. Install Node.js 24 or newer. Runtime packages support Node 24+, while the
+   reproducible maintainer release gate is intentionally pinned to Node major
+   24.
 2. Install and configure DeepSeek Harness using its upstream documentation when
    using DeepSeek jobs. For Grok Build, install the official CLI and
    authenticate it separately (`grok login` or device auth); the MCP server

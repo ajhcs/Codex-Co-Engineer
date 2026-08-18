@@ -13,6 +13,12 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { buildGrokArgs, normalizeGrokConfiguration } from './grok-build.mjs';
+import {
+  normalizeDigest,
+  sha256Digest,
+  TARGET_SCHEMA_VERSION,
+  targetIdentityDigest,
+} from './preflight.mjs';
 
 /**
  * Provider-free, fail-closed containment for Grok review/verify jobs.
@@ -25,6 +31,7 @@ import { buildGrokArgs, normalizeGrokConfiguration } from './grok-build.mjs';
 
 export const GROK_OUTER_SANDBOX_ROLE = 'review-or-verify';
 export const GROK_OUTER_SANDBOX_POLICY_VERSION = 2;
+export const GROK_OUTER_TARGET_CONTRACT_SCHEMA_VERSION = 'codex-co-engineer.grok-outer-target-contract.v1';
 export const GROK_OUTER_JOB_ENV_KEY = 'CODEX_COENGINEER_JOB_ID';
 export const GROK_OUTER_SANDBOX_ENV = Object.freeze({
   HOME: '/home/grok',
@@ -72,6 +79,11 @@ const INVOCATIONS = new WeakSet();
 const SAFE_JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const TARGET_HEAD = /^[a-f0-9]{40}$/i;
+const TARGET_MODES = new Set(['explicit']);
+const TARGET_ROLES = new Set(['review', 'verify']);
+const TARGET_ALLOWED_PATH_MAXIMUM = 240;
+const GIT_HEAD_OUTPUT_MAXIMUM = 4 * 1024;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const NOFOLLOW = fsConstants.O_NOFOLLOW;
 const DIRECTORY = fsConstants.O_DIRECTORY;
@@ -818,13 +830,134 @@ async function removePrivateHome(privateHome) {
   if (privateHome) await rm(privateHome, { recursive: true, force: true });
 }
 
+function normalizeTargetAllowedPath(value, field) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > TARGET_ALLOWED_PATH_MAXIMUM
+    || value.includes('\0') || path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value)) {
+    fail('invalid_target', `${field} must contain short, relative paths.`);
+  }
+  const normalized = path.posix.normalize(value.replaceAll('\\', '/'));
+  if (normalized.startsWith('/') || normalized === '..' || normalized.startsWith('../')) {
+    fail('invalid_target', `${field} cannot escape the expected Git root.`);
+  }
+  return normalized === '.' ? '.' : normalized.replace(/^\.\//, '');
+}
+
+function validateTargetIdentity(value, expected, field) {
+  assertExactKeys(value, ['device', 'inode'], field, ['device', 'inode']);
+  if (typeof value.device !== 'string' || typeof value.inode !== 'string'
+    || value.device !== expected.device || value.inode !== expected.inode) {
+    fail('target_identity_mismatch', `${field} does not match the canonical target directory identity.`);
+  }
+  return Object.freeze({ device: expected.device, inode: expected.inode });
+}
+
+async function targetDirectoryIdentity(source, field) {
+  try {
+    const entry = await lstat(source, { bigint: true });
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      fail('invalid_target', `${field} must resolve to a directory.`);
+    }
+    return Object.freeze({ device: String(entry.dev), inode: String(entry.ino) });
+  } catch (error) {
+    if (error instanceof GrokOuterSandboxError) throw error;
+    fail('target_identity_failed', `Could not inspect ${field}: ${error.message}`);
+  }
+}
+
+function observeGitHead(workingDirectory) {
+  const result = spawnSync('git', [
+    '-C', workingDirectory,
+    'rev-parse', '--verify', 'HEAD',
+  ], {
+    cwd: '/',
+    env: {
+      PATH: '/usr/bin:/bin',
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_OPTIONAL_LOCKS: '0',
+    },
+    shell: false,
+    encoding: 'utf8',
+    timeout: 5_000,
+    maxBuffer: GIT_HEAD_OUTPUT_MAXIMUM,
+  });
+  if (result.signal || result.status !== 0 || (result.error && result.status === null)) {
+    fail('target_head_unavailable', 'The canonical target Git HEAD could not be independently observed.', {
+      status: result.status,
+      signal: result.signal,
+      error: result.error?.code ?? null,
+    });
+  }
+  const observedHead = result.stdout.trim();
+  if (!TARGET_HEAD.test(observedHead)) {
+    fail('target_head_unavailable', 'The canonical target Git HEAD was not a full 40-character revision.');
+  }
+  return observedHead.toLowerCase();
+}
+
+function targetContractDigest({ mode, expectedHead, allowedPaths, role, targetFingerprint }) {
+  return sha256Digest({
+    schema_version: GROK_OUTER_TARGET_CONTRACT_SCHEMA_VERSION,
+    target_schema_version: TARGET_SCHEMA_VERSION,
+    mode,
+    expected_head: expectedHead,
+    allowed_paths: allowedPaths,
+    role,
+    target_fingerprint: targetFingerprint,
+  });
+}
+
 function validateTargetInput(target) {
-  assertExactKeys(target, ['working_directory', 'expected_git_root', 'git_common_directory'], 'target',
-    ['working_directory', 'expected_git_root', 'git_common_directory']);
+  assertExactKeys(target, [
+    'schema_version', 'mode', 'working_directory', 'expected_git_root', 'git_common_directory',
+    'expected_head', 'allowed_paths', 'role', 'target_fingerprint',
+    'resolved_workspace', 'resolved_cwd', 'observed_head', 'workspace_identity', 'cwd_identity',
+    'isolation',
+  ], 'target', [
+    'working_directory', 'expected_git_root', 'git_common_directory',
+    'expected_head', 'allowed_paths', 'role', 'target_fingerprint',
+  ]);
+  if (target.schema_version !== undefined && target.schema_version !== TARGET_SCHEMA_VERSION) {
+    fail('invalid_target', `target.schema_version must be ${TARGET_SCHEMA_VERSION}.`);
+  }
+  if (target.mode !== undefined && !TARGET_MODES.has(target.mode)) {
+    fail('invalid_target', 'target.mode must be explicit for the Grok outer sandbox.');
+  }
+  if (typeof target.expected_head !== 'string' || !TARGET_HEAD.test(target.expected_head)) {
+    fail('invalid_target', 'target.expected_head must be a full 40-character Git revision.');
+  }
+  if (!Array.isArray(target.allowed_paths) || target.allowed_paths.length < 1 || target.allowed_paths.length > 200) {
+    fail('invalid_target', 'target.allowed_paths must contain 1 to 200 relative paths.');
+  }
+  const allowedPaths = target.allowed_paths.map((value, index) =>
+    normalizeTargetAllowedPath(value, `target.allowed_paths[${index}]`));
+  if (new Set(allowedPaths).size !== allowedPaths.length) {
+    fail('invalid_target', 'target.allowed_paths must not contain duplicates.');
+  }
+  if (allowedPaths.length !== 1 || allowedPaths[0] !== '.') {
+    fail('unsupported_allowed_paths',
+      'The Grok outer sandbox currently accepts only allowed_paths=["."]; selective visibility is not yet implemented.');
+  }
+  if (typeof target.role !== 'string' || !TARGET_ROLES.has(target.role)) {
+    fail('unsupported_role', 'target.role must be review or verify for the Grok outer sandbox.');
+  }
+  const targetFingerprint = normalizeDigest(target.target_fingerprint);
+  if (!targetFingerprint) {
+    fail('invalid_target_fingerprint', 'target.target_fingerprint must be a SHA-256 digest.');
+  }
+  return {
+    mode: target.mode ?? 'explicit',
+    expectedHead: target.expected_head.toLowerCase(),
+    allowedPaths,
+    role: target.role,
+    targetFingerprint,
+  };
 }
 
 async function prepareTarget(target) {
-  validateTargetInput(target);
+  const validated = validateTargetInput(target);
   const root = await canonicalDirectory(target.expected_git_root, 'target.expected_git_root');
   const working = await canonicalDirectory(target.working_directory, 'target.working_directory');
   const common = await canonicalDirectory(target.git_common_directory, 'target.git_common_directory');
@@ -832,12 +965,75 @@ async function prepareTarget(target) {
   if (!isWithin(root, common)) {
     fail('unsupported_git_layout', 'git_common_directory outside expected_git_root is not supported by this minimal-root policy.');
   }
+  const workspaceIdentity = await targetDirectoryIdentity(root, 'target.expected_git_root');
+  const cwdIdentity = await targetDirectoryIdentity(working, 'target.working_directory');
+  const observedHead = observeGitHead(working);
+  if (observedHead !== validated.expectedHead) {
+    fail('target_head_mismatch', 'target.expected_head does not match the independently observed Git HEAD.', {
+      expected: validated.expectedHead,
+      observed: observedHead,
+    });
+  }
+  const expectedFingerprint = targetIdentityDigest({
+    mode: validated.mode,
+    resolved_workspace: root,
+    resolved_cwd: working,
+    git_common_directory: common,
+    git_head: observedHead,
+    workspace_identity: workspaceIdentity,
+    cwd_identity: cwdIdentity,
+  });
+  if (validated.targetFingerprint !== expectedFingerprint) {
+    fail('target_fingerprint_mismatch', 'target.target_fingerprint does not match the canonical target identity.', {
+      expected: expectedFingerprint,
+      received: validated.targetFingerprint,
+    });
+  }
+  if (target.resolved_workspace !== undefined && target.resolved_workspace !== root) {
+    fail('target_identity_mismatch', 'target.resolved_workspace does not match expected_git_root.');
+  }
+  if (target.resolved_cwd !== undefined && target.resolved_cwd !== working) {
+    fail('target_identity_mismatch', 'target.resolved_cwd does not match working_directory.');
+  }
+  if (target.observed_head !== undefined
+    && (typeof target.observed_head !== 'string' || target.observed_head.toLowerCase() !== observedHead)) {
+    fail('target_head_mismatch', 'target.observed_head does not match expected_head.');
+  }
+  if (target.workspace_identity !== undefined) {
+    validateTargetIdentity(target.workspace_identity, workspaceIdentity, 'target.workspace_identity');
+  }
+  if (target.cwd_identity !== undefined) {
+    validateTargetIdentity(target.cwd_identity, cwdIdentity, 'target.cwd_identity');
+  }
+  if (target.isolation !== undefined && target.isolation !== 'read-only-process-contract') {
+    fail('invalid_target', 'target.isolation must be read-only-process-contract.');
+  }
   const relativeWorking = path.relative(root, working).split(path.sep).join('/');
   const relativeCommon = path.relative(root, common).split(path.sep).join('/');
+  const contractDigest = targetContractDigest({
+    mode: validated.mode,
+    expectedHead: observedHead,
+    allowedPaths: validated.allowedPaths,
+    role: validated.role,
+    targetFingerprint: expectedFingerprint,
+  });
   return {
+    schema_version: TARGET_SCHEMA_VERSION,
+    mode: validated.mode,
     working_directory: working,
     expected_git_root: root,
+    resolved_workspace: root,
+    resolved_cwd: working,
     git_common_directory: common,
+    expected_head: observedHead,
+    observed_head: observedHead,
+    allowed_paths: Object.freeze([...validated.allowedPaths]),
+    role: validated.role,
+    target_fingerprint: expectedFingerprint,
+    target_contract_digest: contractDigest,
+    workspace_identity: workspaceIdentity,
+    cwd_identity: cwdIdentity,
+    isolation: 'read-only-process-contract',
     sandbox_working_directory: relativeWorking ? `/workspace/${relativeWorking}` : '/workspace',
     sandbox_git_common_directory: relativeCommon ? `/workspace/${relativeCommon}` : '/workspace',
   };
@@ -1085,6 +1281,7 @@ export async function prepareGrokOuterSandbox(options) {
       role: GROK_OUTER_SANDBOX_ROLE,
       job_id: options.jobId,
       target: Object.freeze({ ...target }),
+      target_contract_digest: target.target_contract_digest,
       private_home: privateHome,
       native_mounts: Object.freeze(nativeRecords.map((record) => Object.freeze({
         name: record.name, destination: record.destination, writable: record.writable,
@@ -1155,6 +1352,10 @@ function finalResources(state) {
 }
 
 function executionPlan(state, invocation) {
+  if (!INVOCATIONS.has(invocation)) fail('invalid_invocation', 'Only createGrokReviewInvocation output is accepted.');
+  if (invocation.operation !== state.target.role) {
+    fail('target_role_mismatch', 'invocation.operation must match the authoritative target.role.');
+  }
   const config = invocation.configuration;
   const native = new Set(state.nativeNames);
   if ((config.session_id || config.resume || config.continue_session || config.fork_session)
@@ -1299,6 +1500,8 @@ export async function spawnGrokOuterSandbox(options) {
     network_namespace: 'shared',
     nested_user_namespaces: 'disabled-and-asserted',
     provider_policy: Object.freeze({ sandbox: 'read-only', permission_mode: 'auto', denied_tools: Object.freeze(['MCPTool']) }),
+    target: prepared.target,
+    target_contract_digest: prepared.target_contract_digest,
     invocation_contract: invocation.contract,
     provenance: prepared.provenance,
     spawn_contract: Object.freeze({ detached: true, process_group: 'child-pid', shell: false, die_with_parent: true }),

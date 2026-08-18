@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import {
   access,
@@ -822,6 +822,7 @@ async function main() {
   let currentPhase = 'started';
   let terminalStateCommitted = false;
   let childExitAt = null;
+  let cancellationPresentAtExit = false;
   let processGroupCleanup = null;
   let processGroupCleanupFailed = false;
   let outputCaptures = [];
@@ -1023,6 +1024,11 @@ async function main() {
       });
       child.once('exit', (code, signal) => {
         if (settled) return;
+        // Preserve causal ordering at the direct-child exit event. Reading the
+        // cancel file only after descendant cleanup lets a cleanup-time request
+        // with equal/coarse wall-clock time incorrectly override a completed
+        // provider. A request can win only if it was already visible here.
+        cancellationPresentAtExit = existsSync(spec.cancel_file);
         childExitAt = Date.now();
         settled = true;
         resolve({ code, signal });
@@ -1061,8 +1067,10 @@ async function main() {
     const cancelTimestamp = await readFile(spec.cancel_file, 'utf8')
       .then((value) => Date.parse(value.trim().split(/\r?\n/, 1)[0]))
       .catch(() => Number.NaN);
-    const cancellationRequested = Number.isFinite(cancelTimestamp) || await exists(spec.cancel_file);
-    const cancellationBeforeExit = cancellationRequested
+    const cancellationRequested = cancellationPresentAtExit
+      || Number.isFinite(cancelTimestamp)
+      || await exists(spec.cancel_file);
+    const cancellationBeforeExit = cancellationPresentAtExit
       && childExitAt !== null
       && (!Number.isFinite(cancelTimestamp) || cancelTimestamp <= childExitAt);
     const cancellationWins = cancellationBeforeExit && (!timedOut

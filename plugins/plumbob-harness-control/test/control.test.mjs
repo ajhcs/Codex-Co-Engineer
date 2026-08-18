@@ -154,6 +154,18 @@ test('status probes Grok independently of a missing default workspace', async (c
   assert.equal(diagnosticStatus.grok_build.auth_note, diagnosticStatus.diagnostics.grok_build.note);
   await writeFile(fakeGrok, `#!/bin/sh
 if [ "$1" = "models" ]; then
+  printf "You are not authenticated.\nDefault model: grok-4.6\n"
+  exit 0
+fi
+printf "grok 1.0.4 (test)\n"
+`, { mode: 0o755 });
+  const misleadingSuccessStatus = await dispatchControl('status', { recent_limit: 0, diagnostics: true });
+  assert.equal(misleadingSuccessStatus.diagnostics.grok_build.ok, false);
+  assert.equal(misleadingSuccessStatus.diagnostics.grok_build.auth_state, 'unauthenticated');
+  assert.equal(misleadingSuccessStatus.grok_build.auth_state, 'unauthenticated');
+  assert.equal(misleadingSuccessStatus.grok_build.ready, false);
+  await writeFile(fakeGrok, `#!/bin/sh
+if [ "$1" = "models" ]; then
   printf "login required: credentials unavailable\\n" >&2
   exit 1
 fi

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
 import { CursorCloudService, runStdio } from '../plugins/cursor-cloud-control/mcp/server.mjs';
+import { CursorLocalService, runStdio as runLocalStdio } from '../plugins/cursor-cloud-control/mcp/local.mjs';
 
 const requests = [
   { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
@@ -108,3 +109,31 @@ assert.deepEqual(statusBranch('repositories').properties.limit, { type: 'integer
 assert.equal(responses[2].result.structuredContent.ok, true);
 assert.equal(responses[2].result.structuredContent.status.credentials.configured, false);
 process.stdout.write(`cursor MCP preflight passed (${tools.length} tools, no network)\n`);
+
+const localRequests = [
+  { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
+  { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+  { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'status', arguments: { action: 'local' } } },
+  { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'run', arguments: {} } },
+];
+const localOutput = [];
+const localOutputStream = new Writable({ write(chunk, _encoding, callback) { localOutput.push(chunk.toString()); callback(); } });
+const localEnv = {
+  ...process.env,
+  HOME: '/tmp/cursor-local-control-preflight-home',
+  CURSOR_LOCAL_CLI_BIN: `/tmp/cursor-local-control-preflight-missing-${process.pid}`,
+  CURSOR_LOCAL_CONTROL_STATE_DIR: `/tmp/cursor-local-control-preflight-state-${process.pid}`,
+};
+await runLocalStdio({
+  input: Readable.from(`${localRequests.map((request) => JSON.stringify(request)).join('\n')}\n`),
+  output: localOutputStream,
+  service: new CursorLocalService({ env: localEnv }),
+});
+const localResponses = localOutput.join('').trim().split(/\r?\n/).map((line) => JSON.parse(line));
+assert.equal(localResponses[0].result.serverInfo.name, 'cursor-local-control');
+assert.deepEqual(localResponses[1].result.tools.map((tool) => tool.name), ['status']);
+assert.equal(localResponses[2].result.structuredContent.ok, true);
+assert.equal(localResponses[2].result.structuredContent.status.safety.runEnabled, false);
+assert.equal(localResponses[3].result.isError, true);
+assert.equal(localResponses[3].result.structuredContent.error.code, 'foundation_not_exposed');
+process.stdout.write('cursor local MCP preflight passed (status-only catalog, provider-free)\n');

@@ -36,6 +36,8 @@ class FakeAdapter {
     this.collision = false;
     this.spawnError = null;
     this.earlyExit = false;
+    this.invocationDelay = 0;
+    this.showCounts = new Map();
   }
 
   async readText(source) {
@@ -63,6 +65,11 @@ class FakeAdapter {
         value = { Id: unit, LoadState: 'loaded', ActiveState: 'active' };
       }
       if (!value) return { status: 1, stdout: 'LoadState=not-found\n', stderr: 'not found' };
+      if (this.invocationDelay > 0) {
+        const count = (this.showCounts.get(unit) ?? 0) + 1;
+        this.showCounts.set(unit, count);
+        if (count <= this.invocationDelay) value = { ...value, InvocationID: '' };
+      }
       value = this.spoof ? { ...value, ...this.spoof } : value;
       return { status: 0, stdout: Object.entries(value).map(([key, entry]) => `${key}=${entry}`).join('\n'), stderr: '' };
     }
@@ -169,6 +176,39 @@ test('launch uses exact limits, clean environment, fixed worker argv, and reject
       launchAcpResourceBoundary({ prepared, adapter: host }),
       (error) => error instanceof AcpResourceBoundaryError && error.code === 'prepared_state_consumed',
     );
+  } finally {
+    await rm(tree.root, { recursive: true, force: true });
+  }
+});
+
+test('launch waits for a delayed systemd InvocationID instead of rejecting a fresh scope', async () => {
+  const tree = await fixture();
+  try {
+    const host = new FakeAdapter();
+    const probe = await probeAcpResourceBoundary({ adapter: host });
+    const { prepared } = prepareAcpResourceBoundary({ probe, worker: tree.worker, ownershipStore: tree.ownershipStore });
+    host.invocationDelay = 2;
+    const launched = await launchAcpResourceBoundary({ prepared, adapter: host });
+    assert.match(launched.receipt.limits_digest, /^[a-f0-9]{64}$/u);
+    assert.ok((host.showCounts.get(host.spawned.args.find((arg) => arg.startsWith('--unit='))?.slice(7)) ?? 0) >= 2);
+  } finally {
+    await rm(tree.root, { recursive: true, force: true });
+  }
+});
+
+test('launch fails closed when systemd never provides an InvocationID', async () => {
+  const tree = await fixture();
+  try {
+    const host = new FakeAdapter();
+    const probe = await probeAcpResourceBoundary({ adapter: host });
+    const { prepared } = prepareAcpResourceBoundary({ probe, worker: tree.worker, ownershipStore: tree.ownershipStore });
+    host.invocationDelay = 21;
+    await assert.rejects(
+      launchAcpResourceBoundary({ prepared, adapter: host }),
+      (error) => error instanceof AcpResourceBoundaryError && error.code === 'unit_verification_failed',
+    );
+    assert.equal(host.calls.some(({ args }) => args.includes('stop')), false);
+    assert.equal(host.calls.some(({ args }) => args.includes('--signal=KILL')), false);
   } finally {
     await rm(tree.root, { recursive: true, force: true });
   }

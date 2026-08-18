@@ -23,6 +23,32 @@
         "CURSOR_CLOUD_CONTROL_MAX_ARTIFACT_BYTES"
       ],
       "tool_timeout_sec": 65
+    },
+    "cursor-local-control": {
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "--no-warnings",
+        "./mcp/local.mjs",
+        "--stdio"
+      ],
+      "env_vars": [
+        "CURSOR_LOCAL_CLI_BIN",
+        "CURSOR_LOCAL_CLI_SHA256",
+        "CURSOR_LOCAL_CLI_SANDBOX_BIN",
+        "CURSOR_LOCAL_CLI_SANDBOX_SHA256",
+        "CURSOR_LOCAL_CLI_API_KEY",
+        "CURSOR_LOCAL_CLI_HOME",
+        "CURSOR_LOCAL_CLI_CONFIG_DIR",
+        "CURSOR_LOCAL_CLI_WORKSPACE_ROOTS",
+        "CURSOR_LOCAL_CONTROL_STATE_DIR",
+        "XDG_STATE_HOME",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY"
+      ],
+      "tool_timeout_sec": 65
     }
   }
 }

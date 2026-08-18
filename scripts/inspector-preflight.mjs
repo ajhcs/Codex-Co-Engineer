@@ -2,12 +2,17 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { targetIdentityDigest } from '../plugins/plumbob-harness-control/mcp/preflight.mjs';
+import { SERVER_IDENTITY, targetIdentityDigest } from '../plugins/plumbob-harness-control/mcp/preflight.mjs';
+import {
+  DAEMON_CONTROL_PROTOCOL,
+  prepareStateDirectory,
+  stateDirectoryDigest,
+} from '../plugins/plumbob-harness-control/mcp/state.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const targetDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-inspector-target-'));
@@ -18,6 +23,7 @@ const inspectorEnvironment = {
   HOME: stateDirectory,
   CODEX_CO_ENGINEER_STATE_DIR: stateDirectory,
   CODEX_CO_ENGINEER_RUNTIME_WORKSPACE: targetDirectory,
+  CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS: '60',
   PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS: '60',
 };
 // Exercise the verified managed overlay, independent of a caller's custom
@@ -231,12 +237,38 @@ try {
   assert.equal(JSON.parse(deepseekModel.content[0].text).code, 'invalid_argument');
   process.stdout.write(`${JSON.stringify(structured, null, 2)}\n`);
 
-  await new Promise((resolve) => {
-    const socket = net.createConnection(path.join(stateDirectory, 'control.sock'));
-    socket.on('connect', () => socket.write(`${JSON.stringify({ id: 'shutdown', name: '__shutdown', args: {} })}\n`));
-    socket.on('data', () => { socket.end(); resolve(); });
-    socket.on('error', resolve);
-  });
+  const socketFile = path.join(stateDirectory, 'control.sock');
+  let socketMetadata = null;
+  try {
+    socketMetadata = await lstat(socketFile);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  // Some Inspector runtimes reap the detached fixture daemon with the MCP
+  // subprocess. If it remains live, stop it only through the verified identity
+  // protocol used by production; an already-absent socket needs no cleanup.
+  if (socketMetadata) {
+    const [daemonRecord, preparedState] = await Promise.all([
+      readFile(path.join(stateDirectory, 'daemon.pid'), 'utf8').then(JSON.parse),
+      prepareStateDirectory(stateDirectory),
+    ]);
+    await new Promise((resolve) => {
+      const socket = net.createConnection(socketFile);
+      socket.on('connect', () => socket.write(`${JSON.stringify({
+        id: 'shutdown',
+        name: '__shutdown',
+        args: {
+          protocol: DAEMON_CONTROL_PROTOCOL,
+          server_identity: SERVER_IDENTITY,
+          state_directory_digest: stateDirectoryDigest(preparedState),
+          process_identity: { pid: daemonRecord.pid, start_time: daemonRecord.start_time },
+          socket_identity: { dev: String(socketMetadata.dev), ino: String(socketMetadata.ino) },
+        },
+      })}\n`));
+      socket.on('data', () => { socket.end(); resolve(); });
+      socket.on('error', resolve);
+    });
+  }
 } finally {
   await Promise.all([
     rm(targetDirectory, { recursive: true, force: true }),

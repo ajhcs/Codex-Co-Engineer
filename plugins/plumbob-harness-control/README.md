@@ -43,7 +43,9 @@ tools and not Codex-native subagents.
 
 ## Install
 
-1. Install Node.js 24 or newer.
+1. Install Node.js 24 or newer. Runtime packages support Node 24+, while the
+   reproducible maintainer release gate is intentionally pinned to Node major
+   24.
 2. Install and authenticate the official Grok Build CLI separately when using
    `grok_build`, following [xAI's headless CLI instructions](https://docs.x.ai/build/cli/headless-scripting).
    Use `grok login` (or `grok login --device-auth` on a remote host), or

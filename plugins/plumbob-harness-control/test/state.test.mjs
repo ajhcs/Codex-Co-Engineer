@@ -18,6 +18,7 @@ import {
   stateDirectoryDigest,
   stateResolutionMessage,
 } from '../mcp/state.mjs';
+import { modelApiKeyBindingDigest } from '../mcp/secrets.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -44,6 +45,24 @@ function socketRpc(socketFile, message) {
         done(error);
       }
     });
+  });
+}
+
+async function verifiedShutdown(socketFile, prepared) {
+  const [socketMetadata, daemonRecord] = await Promise.all([
+    lstat(socketFile),
+    readFile(path.join(path.dirname(socketFile), 'daemon.pid'), 'utf8').then(JSON.parse),
+  ]);
+  return socketRpc(socketFile, {
+    id: 'verified-test-shutdown',
+    name: '__shutdown',
+    args: {
+      protocol: DAEMON_CONTROL_PROTOCOL,
+      server_identity: SERVER_IDENTITY,
+      state_directory_digest: stateDirectoryDigest(prepared),
+      process_identity: { pid: daemonRecord.pid, start_time: daemonRecord.start_time },
+      socket_identity: { dev: String(socketMetadata.dev), ino: String(socketMetadata.ino) },
+    },
   });
 }
 
@@ -321,6 +340,9 @@ test('server and daemon use the same XDG_STATE_HOME path when no explicit root i
       protocol: DAEMON_CONTROL_PROTOCOL,
       server_identity: SERVER_IDENTITY,
       state_directory_digest: stateDirectoryDigest(prepared),
+      credential_binding_digest: await modelApiKeyBindingDigest(
+        path.join(root, 'missing-model-key'),
+      ),
     },
   });
   assert.deepEqual(exactPing.result, {
@@ -328,13 +350,47 @@ test('server and daemon use the same XDG_STATE_HOME path when no explicit root i
     protocol: DAEMON_CONTROL_PROTOCOL,
     server_identity: SERVER_IDENTITY,
     state_directory_digest: stateDirectoryDigest(prepared),
+    credential_binding_digest: await modelApiKeyBindingDigest(
+      path.join(root, 'missing-model-key'),
+    ),
   });
 
-  await socketRpc(socketFile, {
-    id: 'state-test-shutdown',
+  const mismatchedBindingPing = await socketRpc(socketFile, {
+    id: 'state-test-mismatched-binding-ping',
+    name: '__ping',
+    args: {
+      protocol: DAEMON_CONTROL_PROTOCOL,
+      server_identity: SERVER_IDENTITY,
+      state_directory_digest: stateDirectoryDigest(prepared),
+      credential_binding_digest: await modelApiKeyBindingDigest(
+        path.join(root, 'different-model-key'),
+      ),
+    },
+  });
+  assert.equal(mismatchedBindingPing.error?.code, 'daemon_identity_mismatch');
+
+  const unboundShutdown = await socketRpc(socketFile, {
+    id: 'state-test-unbound-shutdown',
     name: '__shutdown',
     args: {},
   });
+  assert.equal(unboundShutdown.error?.code, 'daemon_identity_mismatch');
+
+  const stillLive = await socketRpc(socketFile, {
+    id: 'state-test-post-rejection-ping',
+    name: '__ping',
+    args: {
+      protocol: DAEMON_CONTROL_PROTOCOL,
+      server_identity: SERVER_IDENTITY,
+      state_directory_digest: stateDirectoryDigest(prepared),
+      credential_binding_digest: await modelApiKeyBindingDigest(
+        path.join(root, 'missing-model-key'),
+      ),
+    },
+  });
+  assert.equal(stillLive.result?.ok, true);
+
+  await verifiedShutdown(socketFile, prepared);
 });
 
 test('server refuses a symlinked SQLite ledger without touching its target', async (context) => {
@@ -381,9 +437,8 @@ test('server refuses a symlinked SQLite ledger without touching its target', asy
   assert.equal(await readFile(external, 'utf8'), 'external-ledger-sentinel');
   assert.equal((await lstat(path.join(state, 'control.sqlite3'))).isSymbolicLink(), true);
 
-  await socketRpc(path.join(state, 'control.sock'), {
-    id: 'state-symlink-test-shutdown',
-    name: '__shutdown',
-    args: {},
-  });
+  await verifiedShutdown(
+    path.join(state, 'control.sock'),
+    await prepareStateDirectory(state),
+  );
 });

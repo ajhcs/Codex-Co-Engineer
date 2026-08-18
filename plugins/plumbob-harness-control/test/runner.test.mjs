@@ -418,7 +418,10 @@ test('detached runner does not let cancellation during group cleanup override di
     stdio: 'ignore',
   });
   await waitForFile(cleanupMarker);
-  await writeFile(cancelFile, `${new Date().toISOString()}\n`);
+  // An intentionally ancient timestamp proves that causal visibility at the
+  // direct exit event, not coarse/caller-controlled wall time, decides
+  // precedence. This file is created only after group cleanup has started.
+  await writeFile(cancelFile, '2000-01-01T00:00:00.000Z\n');
   const exitCode = await new Promise((resolve) => runner.once('exit', resolve));
 
   const completedStore = openStore(databaseFile);

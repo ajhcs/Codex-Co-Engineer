@@ -38,6 +38,14 @@ All notable public changes to Codex-Co-Engineer are recorded here.
   deliberate ACP, worktree, prompt-file, and system-prompt-override omissions.
 - Cursor Cloud Control plugin with typed Cursor Cloud Agents API v1 lifecycle,
   bounded SSE/polling, usage, artifact, and archive/delete operations.
+- Packaged (but not production-exposed) Cursor Local Control foundation for the
+  locally installed Cursor Agent CLI, with separate owner-only state and
+  receipts, explicit read-only and isolated-worktree policies, bounded NDJSON
+  logs, and owned cancellation for later host acceptance. Only local
+  status/auth/permissions diagnostics are ready for use; run dispatch remains
+  fail-closed and unwired pending real Cursor plus Bubblewrap acceptance. The
+  adapter never accepts Cloud IDs or shares Cloud credentials, state, or
+  receipts.
 - Owner-only credential handling, durable mutation ledger, redacted receipts,
   and artifact path/overwrite protections.
 - Cursor MCP preflight, plugin validation, unit coverage, and package inventory
@@ -52,8 +60,14 @@ All notable public changes to Codex-Co-Engineer are recorded here.
 
 ### Changed
 
-- Co-Engineer is versioned `2.1.0`; the supported worker-kind contract
+- Co-Engineer is versioned `2.1.1`; the supported worker-kind contract
   is now exactly `deepseek_agent` and `grok_build`.
+- The Grok auth doctor now treats an exit-zero CLI response that explicitly
+  says the user is unauthenticated as unauthenticated, and the typed Grok
+  reasoning vocabulary is normalized to the installed CLI's supported
+  `low`/`medium`/`high`/`xhigh` values.
+- MCP-launched Co-Engineer daemons are bound to the resolved owner-only model
+  API key file, including when the legacy environment alias is used.
 - Public direct Grok dispatch keeps sandbox enforcement inside the official
   CLI. The separately packaged outer-boundary experiment is not runtime-wired
   and still requires real host/systemd acceptance.
@@ -61,11 +75,14 @@ All notable public changes to Codex-Co-Engineer are recorded here.
   refuses project-local Grok, Cursor/Claude compatibility, or MCP configuration
   before provider startup, and isolates Grok capacity probes from repository
   working directories.
-- Co-Engineer `2.1.0` uses Grok's noninteractive `auto` permission mode for
+- Co-Engineer `2.1.1` uses Grok's noninteractive `auto` permission mode for
   implement jobs and fails closed when an implement run exits without an
   allowed workspace change.
-- Cursor Cloud Control `0.2.0` gives repository discovery and repository-backed
-  creation one bounded 60-second attempt, never retries the strictly
+- Cursor Cloud Control `0.3.0` packages the distinct local Cursor CLI
+  foundation but keeps it unwired and not exposed in the production catalog;
+  only status/auth/permissions diagnostics are ready pending real Cursor plus
+  Bubblewrap host acceptance. Its cloud half gives repository discovery and
+  repository-backed creation one bounded 60-second attempt, never retries the strictly
   rate-limited inventory endpoint, and degrades discovery timeouts into an
   explicit unavailable result.
 - DeepSeek Harness is invoked directly in the attested target checkout and is

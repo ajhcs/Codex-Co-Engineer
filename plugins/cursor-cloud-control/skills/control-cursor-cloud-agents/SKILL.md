@@ -49,10 +49,14 @@ or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
 
 Use `agents` with `action=create`, a concise prompt, and a stable caller
 `requestId` that can be safely reused for reconciliation. The receipt includes
-the effective mode, branch/PR defaults, counts of sensitive inputs, a digest,
-and opaque agent/run IDs. Never infer that a timeout means no agent was
-created. A receipt with `uncertain_submission` requires `agents.get` and
-`runs.list` reconciliation before any new request ID is used.
+the caller `requestedConfiguration`, an explicit `providerVerification` block,
+counts of sensitive inputs, a digest, and opaque agent/run IDs. Treat
+repository starting refs, model resolution, and remote workspace head/branch
+as unverified unless Cursor returns a documented attestation. The legacy
+`effectiveConfiguration` field is marked `provenance: "caller-derived"` and
+`deprecated: true`; it is not provider evidence. Never infer that a timeout
+means no agent was created. A receipt with `uncertain_submission` requires
+`agents.get` and `runs.list` reconciliation before any new request ID is used.
 
 Use `runs` with `action=followup` only for a known agent ID. Follow-ups are
 non-idempotent and are never automatically retried. A stable request ID is

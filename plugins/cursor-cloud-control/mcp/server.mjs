@@ -22,7 +22,7 @@ import {
 
 export const MCP_PROTOCOL_VERSION = '2025-11-25';
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-11-25', '2024-11-05']);
-export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', version: '0.2.0' });
+export const SERVER_IDENTITY = Object.freeze({ name: 'cursor-cloud-control', version: '0.3.0' });
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const TOOL_DESCRIPTIONS = Object.freeze({
@@ -94,7 +94,7 @@ function artifactRootConfigured(env = process.env) {
   return Boolean(value && path.isAbsolute(value));
 }
 
-function effectiveCreateConfiguration(value) {
+function requestedCreateConfiguration(value) {
   const autoCreatePR = value.autoCreatePR ?? false;
   return {
     mode: value.mode ?? 'plan',
@@ -112,6 +112,49 @@ function effectiveCreateConfiguration(value) {
     envVarCount: value.envVars ? Object.keys(value.envVars).length : 0,
     mcpServerCount: value.mcpServers?.length ?? 0,
     customSubagentCount: value.customSubagents?.length ?? 0,
+  };
+}
+
+function legacyEffectiveCreateConfiguration(value) {
+  return {
+    ...requestedCreateConfiguration(value),
+    // Kept for 0.2.x consumers that still read this field.  These values are
+    // caller input and local defaults, not provider attestation.
+    provenance: 'caller-derived',
+    deprecated: true,
+    deprecation: 'Use requestedConfiguration and providerVerification; this legacy alias is not provider-attested.',
+  };
+}
+
+function providerVerification(value) {
+  return {
+    verification: 'unverified',
+    source: 'provider-response-unavailable',
+    // Cursor's documented create response currently does not attest the
+    // resolved model, remote workspace head/branch, or repository checkout.
+    // Keep all three unknown rather than echoing the request as proof.
+    model: {
+      ...summarizeModelSelection(value.model),
+      verification: 'unverified',
+    },
+    workspace: {
+      effective: null,
+      effectiveKnown: false,
+      effectiveSource: 'unknown',
+      verification: 'unverified',
+    },
+    repositories: value.repos?.map((repo) => ({
+      url: repo.url,
+      startingRef: {
+        requested: repo.startingRef ?? null,
+        requestedSource: repo.startingRef === undefined ? 'provider-default' : 'caller',
+        effective: null,
+        effectiveKnown: false,
+        effectiveSource: 'unknown',
+        verification: 'unverified',
+      },
+      ...(repo.prUrl ? { prUrl: repo.prUrl } : {}),
+    })) ?? [],
   };
 }
 
@@ -333,7 +376,17 @@ export class CursorCloudService {
     const digest = requestDigest('create-agent', mapCreateBody(value, value.agentId));
     const began = await this.ledger.begin({ requestId, kind: 'create-agent', digest, agentId });
     if (began.duplicate) {
-      return successResult({ receipt: { requestId, requestDigest: digest, duplicate: true, status: began.record.status, agentId: began.record.agentId, runId: began.record.runId ?? null } });
+      return successResult({ receipt: {
+        requestId,
+        requestDigest: digest,
+        duplicate: true,
+        status: began.record.status,
+        agentId: began.record.agentId,
+        runId: began.record.runId ?? null,
+        requestedConfiguration: requestedCreateConfiguration(value),
+        effectiveConfiguration: legacyEffectiveCreateConfiguration(value),
+        providerVerification: providerVerification(value),
+      } });
     }
     let response;
     try {
@@ -361,7 +414,17 @@ export class CursorCloudService {
       );
     }
     return successResult({
-      receipt: { requestId, requestDigest: digest, duplicate: false, status: 'submitted', agentId: finalized.agentId, runId: finalized.runId, effectiveConfiguration: effectiveCreateConfiguration(value) },
+      receipt: {
+        requestId,
+        requestDigest: digest,
+        duplicate: false,
+        status: 'submitted',
+        agentId: finalized.agentId,
+        runId: finalized.runId,
+        requestedConfiguration: requestedCreateConfiguration(value),
+        effectiveConfiguration: legacyEffectiveCreateConfiguration(value),
+        providerVerification: providerVerification(value),
+      },
       agent: redactValue(agent, this.secrets(operation)),
       run: redactValue(run, this.secrets(operation)),
     });

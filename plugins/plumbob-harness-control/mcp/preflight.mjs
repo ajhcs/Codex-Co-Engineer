@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 
-// These values are deliberately independent from the package version.  A
-// caller can therefore pin the wire/configuration contract while the plugin
-// receives a patch release.
+// These values are versioned with the released plugin so receipts and
+// Inspector preflights identify the exact package surface in use.
 export const CONFIG_SCHEMA_VERSION = 'codex-co-engineer.config.v1';
 export const TARGET_SCHEMA_VERSION = 'codex-co-engineer.target.v1';
 export const MCP_PROTOCOL_VERSION = '2025-11-25';
@@ -13,7 +12,7 @@ export const SUPPORTED_MCP_PROTOCOL_VERSIONS = Object.freeze([
 
 export const SERVER_IDENTITY = Object.freeze({
   name: 'plumbob-harness-control',
-  version: '2.1.0',
+  version: '2.1.1',
 });
 
 function canonicalValue(value) {

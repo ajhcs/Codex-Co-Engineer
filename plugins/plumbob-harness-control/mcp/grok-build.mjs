@@ -12,13 +12,10 @@ export const GROK_OUTPUT_FORMATS = Object.freeze([
   'streaming-messages-json',
 ]);
 export const GROK_REASONING_EFFORTS = Object.freeze([
-  'none',
-  'minimal',
   'low',
   'medium',
   'high',
   'xhigh',
-  'max',
 ]);
 export const GROK_SANDBOX_PROFILES = Object.freeze([
   'off',

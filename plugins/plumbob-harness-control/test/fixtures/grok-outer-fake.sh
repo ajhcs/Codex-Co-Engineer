@@ -2,6 +2,21 @@
 
 # This is deliberately a BusyBox script, not a Node provider.  Its only runtime
 # dependency is the exact static BusyBox inode mounted by the test closure.
+
+# The fixture is allowed to write provider state only in the fixed private home
+# supplied by the outer sandbox or in an explicitly named temporary fixture
+# home. In particular, an accidental unwrapped run must fail before the
+# --version probe or any ~/.grok write can happen.
+fixture_home="${HOME:-}"
+case "$fixture_home" in
+  /home/grok|/tmp/grok-outer-*|/var/tmp/grok-outer-*|/run/user/*/grok-outer-*)
+    ;;
+  *)
+    /usr/bin/busybox printf '%s\n' 'RESULT fatal=unsafe-fixture-home' >&2
+    exit 78
+    ;;
+esac
+
 if [ "${1:-}" = "--version" ]; then
   # If a caller ever probes this provider without Bubblewrap, this host-visible
   # marker exposes the regression.  Inside the synthetic root it is ephemeral.
@@ -54,6 +69,7 @@ check_absent() {
 }
 
 /usr/bin/busybox printf 'RESULT prompt=%s\n' "$prompt"
+/usr/bin/busybox printf '%s\n' 'RESULT sandbox_home=dedicated'
 /usr/bin/busybox printf '%s\n' 'ENV-BEGIN'
 # Never echo a projected API credential. The fixture deliberately proves that
 # even diagnostic output retains only the name and a redaction marker.
