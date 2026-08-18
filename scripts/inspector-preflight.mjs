@@ -175,7 +175,7 @@ try {
   assert.equal(grokImplementAuto.capabilities.grok_build.delegation.requested, 'disabled');
   assert.equal(grokImplementAuto.capabilities.grok_build.delegation.effective, 'unknown');
 
-  const deepseekProfile = structuredResult(inspect('tools/call', 'preflight', {
+  const deepseekEnvelope = inspect('tools/call', 'preflight', {
     ...args,
     kind: 'deepseek_agent',
     dsh_options: {
@@ -183,17 +183,26 @@ try {
       tool_mode: 'both',
       max_tokens: 4096,
     },
-  }));
-  assert.deepEqual(deepseekProfile.configuration.dsh_configuration, {
-    model: 'muse-spark-1.2-contributor',
-    tool_mode: 'both',
-    max_tokens: 4096,
-  });
-  assert.equal(deepseekProfile.capabilities.deepseek_agent.tools.effective_mode, 'both');
-  assert.equal(deepseekProfile.capabilities.deepseek_agent.delegation.subagent.background_mode, 'continuable');
-  assert.equal(deepseekProfile.capabilities.deepseek_agent.delegation.fork.background_mode, 'one-shot');
-  assert.deepEqual(deepseekProfile.capabilities.deepseek_agent.model.connector_input_modalities, ['text']);
-  assert.equal(deepseekProfile.capabilities.deepseek_agent.execution.image_input_exposed, false);
+  }, { allowToolError: true });
+  const deepseekResult = callResult(deepseekEnvelope);
+  const dshReady = deepseekResult.isError !== true;
+  if (deepseekResult.isError === true) {
+    const unavailable = JSON.parse(deepseekResult.content[0].text);
+    assert.equal(unavailable.code, 'dsh_unavailable');
+    assert.equal(unavailable.failure_class, 'tool_error');
+  } else {
+    const deepseekProfile = structuredResult(deepseekEnvelope);
+    assert.deepEqual(deepseekProfile.configuration.dsh_configuration, {
+      model: 'muse-spark-1.2-contributor',
+      tool_mode: 'both',
+      max_tokens: 4096,
+    });
+    assert.equal(deepseekProfile.capabilities.deepseek_agent.tools.effective_mode, 'both');
+    assert.equal(deepseekProfile.capabilities.deepseek_agent.delegation.subagent.background_mode, 'continuable');
+    assert.equal(deepseekProfile.capabilities.deepseek_agent.delegation.fork.background_mode, 'one-shot');
+    assert.deepEqual(deepseekProfile.capabilities.deepseek_agent.model.connector_input_modalities, ['text']);
+    assert.equal(deepseekProfile.capabilities.deepseek_agent.execution.image_input_exposed, false);
+  }
 
   const invalidDshOption = callResult(inspect('tools/call', 'preflight', {
     ...args,
@@ -201,7 +210,10 @@ try {
     dsh_options: { workflow: true },
   }, { allowToolError: true }));
   assert.equal(invalidDshOption.isError, true);
-  assert.equal(JSON.parse(invalidDshOption.content[0].text).code, 'invalid_dsh_configuration');
+  assert.equal(
+    JSON.parse(invalidDshOption.content[0].text).code,
+    dshReady ? 'invalid_dsh_configuration' : 'dsh_unavailable',
+  );
 
   const deepseekPermission = callResult(inspect('tools/call', 'preflight', {
     ...args,
