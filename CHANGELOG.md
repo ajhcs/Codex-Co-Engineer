@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-08-19
+
+### Fixed
+
+- Forward the user-session runtime and D-Bus locators required by transient
+  `systemd --user` services when Codex applies the plugin environment
+  allowlist.
+- Report local process-boundary readiness through `status` and fail local
+  providers closed before creating a worktree, task receipt, or prompt file.
+- Wait for the `systemd-run` client result so queueing failures are classified
+  accurately instead of surfacing as a later unit-inspection failure.
+- Keep the stdio server alive while its newly connected client prepares the
+  first JSON-RPC frame.
+- Exercise the exact manifest-filtered MCP environment in the authoritative
+  release gate.
+
 ## [3.0.0] - 2026-08-19
 
 ### Added

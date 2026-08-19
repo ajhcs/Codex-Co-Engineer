@@ -5,10 +5,24 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { cancelTask, cleanupManagedWorkspace, createWriterWorkspace, launchWorker, submitTask, taskStatus } from '../mcp/v3/supervisor.mjs';
+import {
+  cancelTask,
+  cleanupManagedWorkspace,
+  createWriterWorkspace,
+  launchWorker,
+  submitTask,
+  supervisorStatus,
+  taskStatus,
+} from '../mcp/v3/supervisor.mjs';
 import { createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 
 const SHA = 'a'.repeat(40);
+const readyBoundary = async () => ({
+  ready: true,
+  status: 'prerequisites_ready',
+  provider_started: false,
+  boundary: 'systemd-user-service-cgroup',
+});
 
 test('writer workspace parses noisy pretty JSON and requests a bounded large buffer', async () => {
   const calls = [];
@@ -77,6 +91,7 @@ test('direct local mode uses the caller worktree and does not invoke bootstrap',
       root,
       env: {},
       execute,
+      probeBoundary: readyBoundary,
       launch: async (request) => {
         launches.push(request);
         return { pid: 9001, process_group: 9001, process_start_ticks: '1' };
@@ -119,6 +134,62 @@ test('local create_pr and starting_ref are rejected before workspace creation', 
   }
 });
 
+test('local boundary failure happens before workspace, task, or prompt creation', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-preflight-'));
+  let createCalls = 0;
+  try {
+    await assert.rejects(
+      submitTask({ task_id: 'no-boundary', provider: 'grok', repo: '/repo', prompt: 'do not persist' }, {
+        root,
+        env: {},
+        probeBoundary: async () => ({
+          ready: false,
+          status: 'unavailable',
+          reason: 'systemd_user_manager_unavailable',
+          provider_started: false,
+        }),
+        createWorkspace: async () => { createCalls += 1; },
+      }),
+      (error) => error.code === 'systemd_user_manager_unavailable'
+        && error.message === 'The local systemd user manager is unavailable.',
+    );
+    assert.equal(createCalls, 0);
+    await assert.rejects(readTask(root, 'no-boundary'), (error) => error.code === 'ENOENT');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('status makes boundary health explicit and fails only local providers closed', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-status-'));
+  const providerReadiness = {
+    grok: { installed: true, ready: true, transport: 'acp' },
+    'cursor-local': { installed: true, ready: true, transport: 'acp' },
+    dsh: { installed: true, ready: true, transport: 'acpx' },
+    'cursor-cloud': { installed: true, ready: true, transport: 'cursor-sdk' },
+  };
+  try {
+    const status = await supervisorStatus(root, {
+      probeBoundary: async () => ({
+        ready: false,
+        status: 'unavailable',
+        reason: 'systemd_user_manager_unavailable',
+        provider_started: false,
+      }),
+      readProviderReadiness: async () => structuredClone(providerReadiness),
+    });
+    assert.equal(status.healthy, false);
+    assert.equal(status.local_boundary.reason, 'systemd_user_manager_unavailable');
+    for (const provider of ['grok', 'cursor-local', 'dsh']) {
+      assert.equal(status.readiness[provider].ready, false);
+      assert.equal(status.readiness[provider].reason, 'systemd_user_manager_unavailable');
+    }
+    assert.equal(status.readiness['cursor-cloud'].ready, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('managed launch failure marks the task failed and cleans an abandoned writer lock', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-failure-'));
   const calls = [];
@@ -146,6 +217,7 @@ test('managed launch failure marks the task failed and cleans an abandoned write
         root,
         env: {},
         execute,
+        probeBoundary: readyBoundary,
         createWorkspace: async () => workspace,
         launch: async () => { throw Object.assign(new Error('worker failed at /home/test-user/private?token=secret'), { code: 'worker_failed' }); },
       }),

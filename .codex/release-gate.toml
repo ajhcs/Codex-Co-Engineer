@@ -62,6 +62,13 @@ failure_class = "environment_blocked"
 timeout_seconds = 30
 
 [[stages]]
+name = "codex-mcp-environment"
+kind = "integration_tests"
+command = ["node", "scripts/mcp-environment-preflight.mjs"]
+failure_class = "environment_blocked"
+timeout_seconds = 30
+
+[[stages]]
 name = "acpx-reproducible-build"
 kind = "build"
 command = ["npm", "--prefix", "tools/acpx-vendor", "run", "test:reproducible"]

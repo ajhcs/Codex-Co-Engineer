@@ -24,10 +24,16 @@ function receipt(overrides = {}) {
   };
 }
 
-function fakeChild() {
+function fakeChild(exitCode = 0) {
   const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
   child.kill = () => { child.emit('exit', null, 'SIGTERM'); };
-  queueMicrotask(() => child.emit('spawn'));
+  queueMicrotask(() => {
+    child.emit('spawn');
+    child.exitCode = exitCode;
+    child.emit('exit', exitCode, null);
+  });
   return child;
 }
 
@@ -119,6 +125,34 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
   assert.equal(value.child.pid, 4242);
   assert.equal(calls[0].args.includes('--setenv=MODEL_API_KEY=provider-secret'), true);
   assert.equal(calls[0].args.includes('--property=StandardOutput=append:/state/task.log'), true);
+});
+
+test('reports a failed systemd-run client before attempting unit ownership verification', async () => {
+  let inspectCalls = 0;
+  await assert.rejects(
+    launchProcessBoundary({
+      command: '/usr/bin/node',
+      args: ['worker.mjs'],
+      cwd: '/workspace/repo',
+      env: { HOME: '/home/test-user', PATH: '/bin' },
+      stdio: 'ignore',
+      adapter: {
+        platform: 'linux',
+        uid: 1000,
+        spawn: () => fakeChild(1),
+        execFile: async () => {
+          inspectCalls += 1;
+          return { stdout: 'LoadState=not-found\n' };
+        },
+        readFile: async () => 'populated 0\n',
+        sleep: async () => {},
+      },
+    }),
+    (error) => error instanceof ProcessBoundaryError && error.code === 'systemd_run_failed',
+  );
+  // One best-effort cleanup inspection is allowed, but the launch loop must
+  // not repeatedly poll a unit that systemd-run never queued.
+  assert.ok(inspectCalls <= 1);
 });
 
 test('stop signals all members, escalates only after the owned cgroup stays populated, and is idempotent', async () => {

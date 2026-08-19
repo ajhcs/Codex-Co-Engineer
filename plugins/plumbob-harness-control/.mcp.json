@@ -10,6 +10,8 @@
       ],
       "env_vars": [
         "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
         "HOME",
         "PATH",
         "XDG_CONFIG_HOME",

@@ -122,7 +122,7 @@ async function handle(message) {
       result: {
         protocolVersion: negotiated,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: '3.0.0' },
+        serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: '3.0.1' },
       },
     });
     return;
@@ -147,6 +147,9 @@ async function handle(message) {
 }
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+// A newly spawned stdio server can otherwise exit before its parent has time
+// to write the first JSON-RPC frame when the pipe is initially empty.
+process.stdin.resume();
 input.on('line', (line) => {
   let message;
   try { message = JSON.parse(line); } catch { return; }

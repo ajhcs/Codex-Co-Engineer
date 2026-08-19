@@ -52,10 +52,12 @@ verified.
 
 `npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
 and `worktree-bootstrap` dependency. It does not install or authenticate Grok
-or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or prove
-the systemd/cgroup prerequisite. Call the `status` tool after setup to check
-provider readiness. The release gate and live host acceptance must validate
-the Linux process boundary before local agents run.
+or Cursor Local or validate the Cursor Cloud key. Call `status` after setup.
+Its `local_boundary` object validates the systemd/cgroup prerequisite in the
+MCP process's real environment; Grok, Cursor Local, and DSH are forced to
+`ready: false` when the boundary is unavailable. Local delegation repeats the
+check before creating any workspace or task artifact. The release gate also
+tests a server launched with only the MCP manifest's allowlisted environment.
 
 ## Task inputs
 

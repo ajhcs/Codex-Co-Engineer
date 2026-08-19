@@ -12,10 +12,15 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'plumbob-harness-control');
-  assert.equal(manifest.version, '3.0.0');
+  assert.equal(manifest.version, '3.0.1');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.composerIcon, './assets/icon.svg');
   assert.equal(manifest.interface.logo, './assets/co-engineer.png');
+
+  const mcp = JSON.parse(await readFile(path.join(ROOT, '.mcp.json'), 'utf8'));
+  const environment = mcp.mcpServers['plumbob-harness-control'].env_vars;
+  assert.ok(environment.includes('XDG_RUNTIME_DIR'));
+  assert.ok(environment.includes('DBUS_SESSION_BUS_ADDRESS'));
 
   const icon = await readFile(path.join(ROOT, 'assets', 'icon.svg'), 'utf8');
   assert.match(icon, /aria-label="Co-Engineer"/);

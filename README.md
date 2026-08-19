@@ -55,10 +55,12 @@ bin/set-model-api-key
 
 `npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
 and `worktree-bootstrap` dependency. It does not install or authenticate Grok
-or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or prove
-that the Linux systemd/cgroup process boundary is usable. Call the `status`
-tool after setup to check provider readiness; the release gate and live host
-acceptance must validate the process boundary before starting local agents.
+or Cursor Local or validate the Cursor Cloud key. Call `status` after setup:
+its `local_boundary` result verifies the Linux systemd/cgroup prerequisite in
+the MCP process's actual environment, and local providers are reported
+unavailable when that boundary is unavailable. The release gate also launches
+the MCP through the manifest's exact environment allowlist before accepting a
+local-provider release.
 
 Cursor Cloud uses `CURSOR_API_KEY`,
 `CURSOR_API_KEY_FILE`, or the existing owner-only
@@ -81,7 +83,9 @@ descendants and the worker survives the launching client. This is a
 lifecycle/cleanup boundary, not a sandbox: providers inherit the normal
 environment, network, filesystem, credentials, and shell capabilities. Local
 dispatch fails closed when the Linux systemd/cgroup prerequisite is not
-available. Cursor Cloud runs in the provider's remote environment.
+available. This check occurs before Co-Engineer creates a managed worktree,
+task receipt, or prompt file. Cursor Cloud runs in the provider's remote
+environment and does not depend on the local process boundary.
 
 Cursor Local and DSH's official fallback CLIs take the prompt positionally,
 so it may be visible to other processes running as the same Unix user for the

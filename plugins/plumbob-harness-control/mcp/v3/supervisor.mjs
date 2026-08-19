@@ -31,6 +31,7 @@ import {
 import {
   inspectProcessBoundary,
   launchProcessBoundary,
+  probeProcessBoundary,
   restoreProcessBoundary,
   stopProcessBoundary,
 } from './process-boundary.mjs';
@@ -53,6 +54,16 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   cancelled: 'The task was cancelled before worker startup.',
   provider_startup_failed: 'Provider startup could not be prepared.',
   task_launch_busy: 'Another worker already owns this task launch.',
+  local_boundary_unavailable: 'The local systemd/cgroup process boundary is unavailable.',
+  systemd_user_manager_unavailable: 'The local systemd user manager is unavailable.',
+  systemd_user_cgroup_unverifiable: 'The local systemd user-manager cgroup could not be verified.',
+  systemd_run_unavailable: 'The local systemd-run client is unavailable.',
+  systemd_too_old: 'The local systemd version is too old.',
+  cgroup_v2_unavailable: 'The local unified cgroup v2 hierarchy is unavailable.',
+  linux_required: 'Local providers require Linux.',
+  posix_uid_required: 'Local providers require a normal Linux user identity.',
+  boundary_probe_failed: 'The local process boundary could not be checked.',
+  systemd_run_failed: 'systemd-run could not queue the local worker service.',
   worker_start_failed: 'The worker failed to start.',
 });
 
@@ -113,6 +124,31 @@ async function workerEnvironment(provider, source = process.env) {
   if (!key || key.includes('\0') || Buffer.byteLength(key) > 16 * 1024) fail('invalid_credential_file', 'DSH credential file is invalid.');
   env.MODEL_API_KEY = key;
   return env;
+}
+
+async function localBoundaryReadiness(probe = probeProcessBoundary) {
+  try {
+    const boundary = await probe();
+    if (boundary && typeof boundary === 'object' && typeof boundary.ready === 'boolean') return boundary;
+  } catch {
+    // Return a bounded public result rather than leaking a host command error.
+  }
+  return Object.freeze({
+    ready: false,
+    status: 'unavailable',
+    reason: 'boundary_probe_failed',
+    action: 'Inspect the local systemd user-manager and unified cgroup v2 prerequisites.',
+    provider_started: false,
+  });
+}
+
+function requireLocalBoundary(boundary) {
+  if (boundary.ready) return boundary;
+  const error = new SupervisorError(
+    typeof boundary.reason === 'string' ? boundary.reason : 'local_boundary_unavailable',
+    'The local process boundary is unavailable.',
+  );
+  throw publicStartupError(error, 'local_boundary_unavailable');
 }
 
 function parseJsonSuffix(stdout) {
@@ -414,6 +450,9 @@ export async function submitTask(input, dependencies = {}) {
     if (error instanceof SupervisorError) throw error;
     if (error?.code !== 'ENOENT') throw error;
   }
+  if (input.provider !== 'cursor-cloud') {
+    requireLocalBoundary(await localBoundaryReadiness(dependencies.probeBoundary));
+  }
   let launchEnv;
   try {
     launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env);
@@ -709,7 +748,7 @@ export async function taskStatus(root, taskId) {
   return { task, runtime };
 }
 
-export async function supervisorStatus(root = stateRoot()) {
+export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
   const tasks = await listTasks(root);
   for (let index = 0; index < tasks.length; index += 1) {
     const task = tasks[index];
@@ -717,12 +756,22 @@ export async function supervisorStatus(root = stateRoot()) {
     const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
     tasks[index] = await reconcileInactiveTask(root, task, runtime);
   }
+  const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
+  const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
+  for (const provider of ['grok', 'cursor-local', 'dsh']) {
+    if (!boundary.ready) readiness[provider] = {
+      ...readiness[provider],
+      ready: false,
+      reason: boundary.reason ?? 'local_boundary_unavailable',
+    };
+  }
   return {
-    version: '3.0.0',
-    healthy: true,
+    version: '3.0.1',
+    healthy: boundary.ready,
     active: tasks.filter((task) => ACTIVE.has(task.status)).length,
     providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
-    readiness: await providerReadiness(),
+    local_boundary: boundary,
+    readiness,
     tasks: tasks.slice(0, 20),
   };
 }

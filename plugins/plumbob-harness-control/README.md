@@ -123,10 +123,11 @@ official DSH `0.1.0-rc.7` composition. It writes a key-free DSH ACP
 configuration and owner-only session directory; it does not perform login.
 `npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
 and `worktree-bootstrap` dependencies. It does not install or authenticate
-Grok or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or
-validate the Linux systemd/cgroup process boundary. Call the `status` tool
-after setup to check provider readiness; release and live host acceptance
-perform the process-boundary check before local dispatch.
+Grok or Cursor Local or validate the Cursor Cloud key. Call `status` after
+setup: `local_boundary` verifies the Linux systemd/cgroup prerequisite from
+the MCP process's actual environment, and local providers are reported
+unavailable when it fails. Release acceptance also launches the MCP through
+the manifest's exact environment allowlist before local dispatch is allowed.
 
 Authenticate providers normally so sessions persist across Codex tasks:
 

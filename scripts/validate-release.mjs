@@ -29,7 +29,7 @@ const required = [
   `${PLUGIN}/vendor/dsh-acp-demo/package.json`,
   `${PLUGIN}/skills/control-plumbob-agents/SKILL.md`,
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/inspector-preflight.mjs',
-  'scripts/process-boundary-preflight.mjs',
+  'scripts/process-boundary-preflight.mjs', 'scripts/mcp-environment-preflight.mjs',
   'tools/acpx-vendor/package.json', 'tools/acpx-vendor/package-lock.json',
 ];
 for (const relative of required) {
@@ -45,8 +45,8 @@ const manifest = await json(`${PLUGIN}/.codex-plugin/plugin.json`);
 const packageJson = await json(`${PLUGIN}/package.json`);
 const mcp = await json(`${PLUGIN}/.mcp.json`);
 const serverText = await text(`${PLUGIN}/mcp/v3/server.mjs`);
-if (manifest.version !== '3.0.0' || packageJson.version !== '3.0.0' || !serverText.includes("version: '3.0.0'")) {
-  fail('Plugin manifest, package, and MCP server must all be version 3.0.0.');
+if (manifest.version !== '3.0.1' || packageJson.version !== '3.0.1' || !serverText.includes("version: '3.0.1'")) {
+  fail('Plugin manifest, package, and MCP server must all be version 3.0.1.');
 }
 if (manifest.interface?.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') fail('Unexpected test script.');
@@ -58,7 +58,10 @@ const server = mcp.mcpServers?.['plumbob-harness-control'];
 if (server?.command !== 'node'
   || JSON.stringify(server.args) !== JSON.stringify(['--no-warnings', './mcp/v3/server.mjs', '--stdio'])
   || server.tool_timeout_sec !== 65) fail('MCP launch contract mismatch.');
-for (const variable of ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'CODEX_CO_ENGINEER_STATE_DIR']) {
+for (const variable of [
+  'HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
+  'DBUS_SESSION_BUS_ADDRESS', 'CODEX_CO_ENGINEER_STATE_DIR',
+]) {
   if (!server.env_vars?.includes(variable)) fail(`MCP environment allowlist is missing ${variable}.`);
 }
 

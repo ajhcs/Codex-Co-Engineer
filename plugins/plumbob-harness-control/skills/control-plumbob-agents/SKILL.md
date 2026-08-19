@@ -7,11 +7,13 @@ description: Delegate review and implementation work to Grok, Cursor Local, Curs
 
 Use the five MCP tools for delegation and lifecycle control.
 
-1. Call `status` when provider or supervisor readiness is unknown.
-2. Before local dispatch, ensure the host has Linux, a working
-   `systemd --user` manager, `systemd-run` 244 or newer, and unified cgroup
-   v2. `setup:check` checks CLI/worktree dependencies but not this boundary;
-   release/live acceptance must prove it.
+1. Call `status` when provider or supervisor readiness is unknown. Require
+   `local_boundary.ready: true` before local dispatch; local provider readiness
+   is forced false when the boundary is unavailable.
+2. Local dispatch requires Linux, a working `systemd --user` manager,
+   `systemd-run` 244 or newer, and unified cgroup v2. `setup:check` checks
+   CLI/worktree dependencies; `status`, dispatch preflight, and release/live
+   acceptance validate the boundary from their actual MCP environment.
 3. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh`.
 4. Call `delegate` with a stable task ID, absolute Git root, and clear prompt.
 5. Use `role: "review"` for analysis and `role: "implement"` for changes.
