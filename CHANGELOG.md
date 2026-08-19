@@ -51,6 +51,9 @@
   Explicit `wait_ms` remains a fixed caller-selected connection cap.
 - Public receipt sanitization keeps `prompt_dispatched` lifecycle evidence
   while still omitting raw prompt content.
+- Pin vendored DSH ACP demo peerDependencies to exact `0.1.0-rc.7` and
+  install that same composition explicitly so `npm run setup` cannot
+  resolve a later release candidate such as `dsh-acp@0.1.0-rc.8`.
 
 ### Changed
 

@@ -27,6 +27,47 @@ const commands = Object.freeze({
   dshAcp: env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND?.trim() || 'dsh-acp-demo',
   worktreeBootstrap: 'worktree-bootstrap',
 });
+const DSH_RC7 = '0.1.0-rc.7';
+const vendorPackage = JSON.parse(await readFile(path.join(VENDOR, 'package.json'), 'utf8'));
+
+function dshPeerNames(pkg) {
+  const names = [];
+  for (const [name, spec] of Object.entries(pkg.peerDependencies ?? {})) {
+    if (!name.startsWith('@deepseek-ai/dsh-')) continue;
+    if (spec !== DSH_RC7) throw new Error(`${name} peerDependency must be exact ${DSH_RC7}, found ${spec}`);
+    names.push(name);
+  }
+  if (!names.includes('@deepseek-ai/dsh-acp') || !names.includes('@deepseek-ai/dsh-agent-spine-demo')) {
+    throw new Error('Vendored DSH demo must declare exact dsh-acp and dsh-agent-spine-demo peers.');
+  }
+  return names;
+}
+
+const dshPeers = dshPeerNames(vendorPackage);
+const dshInstall = [...new Set([
+  '@deepseek-ai/dsh',
+  '@deepseek-ai/dsh-llm-pi-ai',
+  '@deepseek-ai/dsh-subprocess-local',
+  '@deepseek-ai/dsh-bash-local',
+  ...dshPeers,
+])].map((name) => `${name}@${DSH_RC7}`);
+
+async function packageVersion(globalRoot, packageName) {
+  const relative = `${packageName}/package.json`;
+  const candidates = packageName.startsWith('@deepseek-ai/dsh-') && packageName !== '@deepseek-ai/dsh-acp-demo'
+    ? [`@deepseek-ai/dsh-acp-demo/node_modules/${relative}`, relative]
+    : [relative];
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(await readFile(path.join(globalRoot, candidate), 'utf8')).version;
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  throw lastError;
+}
 
 async function exists(file) {
   try { await stat(file); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
@@ -87,15 +128,14 @@ async function check() {
     const { stdout } = await run('npm', ['root', '--global'], { cwd: tmpdir(), env: childEnv, encoding: 'utf8', timeout: 10_000 });
     const globalRoot = stdout.trim();
     const versions = {};
-    for (const [name, relative, expected] of [
-      ['dsh', '@deepseek-ai/dsh/package.json', '0.1.0-rc.7'],
-      ['dsh-acp-demo', '@deepseek-ai/dsh-acp-demo/package.json', '0.1.0-rc.7'],
-      ['dsh-acp', '@deepseek-ai/dsh-acp-demo/node_modules/@deepseek-ai/dsh-acp/package.json', '0.1.0-rc.7'],
-      ['dsh-agent-spine-demo', '@deepseek-ai/dsh-acp-demo/node_modules/@deepseek-ai/dsh-agent-spine-demo/package.json', '0.1.0-rc.7'],
-      ['cursor-sdk', '@cursor/sdk/package.json', '1.0.28'],
-      ['acpx', 'acpx/package.json', '0.13.0'],
+    for (const [name, packageName, expected] of [
+      ['dsh', '@deepseek-ai/dsh', DSH_RC7],
+      ['dsh-acp-demo', '@deepseek-ai/dsh-acp-demo', DSH_RC7],
+      ...dshPeers.map((packageName) => [packageName.slice('@deepseek-ai/'.length), packageName, DSH_RC7]),
+      ['cursor-sdk', '@cursor/sdk', '1.0.28'],
+      ['acpx', 'acpx', '0.13.0'],
     ]) {
-      versions[name] = JSON.parse(await readFile(path.join(globalRoot, relative), 'utf8')).version;
+      versions[name] = await packageVersion(globalRoot, packageName);
       if (versions[name] !== expected) throw new Error(`${name} expected ${expected}, found ${versions[name]}`);
     }
     results.packages = { ok: true, versions };
@@ -128,10 +168,7 @@ async function install() {
       '--no-fund',
       'acpx@0.13.0',
       '@cursor/sdk@1.0.28',
-      '@deepseek-ai/dsh@0.1.0-rc.7',
-      '@deepseek-ai/dsh-llm-pi-ai@0.1.0-rc.7',
-      '@deepseek-ai/dsh-subprocess-local@0.1.0-rc.7',
-      '@deepseek-ai/dsh-bash-local@0.1.0-rc.7',
+      ...dshInstall,
       archive,
     ], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
   } finally {

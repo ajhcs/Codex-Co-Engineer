@@ -23,17 +23,17 @@
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-include": "^1.0.6",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
-    "@deepseek-ai/dsh-acp": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-agent-spine-demo": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-app-boot": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session-checkpoint-policy": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session-persistence-jsonl": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session-query-sqlite": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session-query": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-acp": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-agent-spine-demo": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-app-boot": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-session-checkpoint-policy": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-session-query-sqlite": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-session-query": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-agent-instructions": "^0.1.0-rc.7"
+    "@deepseek-ai/dsh-agent-instructions": "0.1.0-rc.7"
   }
 }
