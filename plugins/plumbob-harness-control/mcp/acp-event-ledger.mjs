@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
+import fs, { link, lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TextDecoder } from 'node:util';
@@ -322,7 +322,16 @@ export async function openAcpEventLedger({ state_root: stateRoot, session_id: se
       const lockIdentity = identity(listed);
       let existing;
       try {
-        existing = await open(lockPath, constants.O_RDONLY | NOFOLLOW);
+        // The listing is only an advisory snapshot. A live owner can release
+        // and unlink this exact path before we acquire a descriptor. Retry
+        // without making any path-based ownership decision; all non-ENOENT
+        // failures remain fail-closed below.
+        try {
+          existing = await fs.open(lockPath, constants.O_RDONLY | NOFOLLOW);
+        } catch (error) {
+          if (error?.code === 'ENOENT') return false;
+          throw error;
+        }
         const opened = await existing.stat();
         assertLockFile(opened, { allowCandidateLink: true });
         if (!sameIdentity(lockIdentity, opened) || opened.size < 2 || opened.size > LOCK_PAYLOAD_BYTES) {

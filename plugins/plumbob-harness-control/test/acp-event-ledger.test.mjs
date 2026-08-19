@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import {
+import { constants } from 'node:fs';
+import fs, {
   appendFile,
   chmod,
   link,
   lstat,
   mkdtemp,
   mkdir,
+  open,
   readFile,
   rename,
   rm,
@@ -267,10 +269,11 @@ test('independent processes serialize through the owner-only writer lock', async
   const sessionId = 'process-session';
   const moduleUrl = new URL('../mcp/acp-event-ledger.mjs', import.meta.url).href;
   const script = `
+    import { writeSync } from 'node:fs';
     import { openAcpEventLedger } from ${JSON.stringify(moduleUrl)};
     const ledger = await openAcpEventLedger({ state_root: process.env.LEDGER_ROOT, session_id: process.env.LEDGER_SESSION });
     const result = await ledger.append({ type: 'status', status: 'running' });
-    process.stdout.write(String(result.event.seq));
+    writeSync(1, String(result.event.seq));
     await ledger.close();
   `;
   function child() {
@@ -292,6 +295,45 @@ test('independent processes serialize through the owner-only writer lock', async
   const ledger = await openAcpEventLedger({ state_root: root, session_id: sessionId });
   context.after(() => ledger.close());
   assert.equal((await ledger.inspect()).event_count, 2);
+});
+
+test('retries when a listed lock vanishes before stale-recovery open', async (context) => {
+  const root = await stateFixture(context);
+  const sessionId = 'vanished-lock-session';
+  const ledger = await openAcpEventLedger({ state_root: root, session_id: sessionId });
+  context.after(() => ledger.close());
+  const lockPath = path.join(paths(root, sessionId).session, 'append.lock');
+  const lock = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  const stat = await lock.stat();
+  const payload = Buffer.from(`${JSON.stringify({
+    pid: process.pid,
+    start: '0',
+    nonce: 'a'.repeat(64),
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+  })}\n`, 'utf8');
+  await lock.write(payload, 0, payload.length, 0);
+  await lock.sync();
+  await lock.close();
+
+  const originalOpen = fs.open;
+  let vanished = false;
+  fs.open = async (...args) => {
+    if (!vanished && args[0] === lockPath) {
+      vanished = true;
+      await rm(lockPath, { force: true });
+    }
+    return originalOpen(...args);
+  };
+  try {
+    const result = await ledger.append(event(1));
+    assert.equal(result.event.seq, 1);
+  } finally {
+    fs.open = originalOpen;
+  }
+  assert.equal(vanished, true, 'regression hook must remove the listed lock before open');
+  assert.equal((await ledger.inspect()).last_seq, 1);
+  await assert.rejects(lstat(lockPath), { code: 'ENOENT' });
 });
 
 test('live lock owners are never stolen and a killed owner is recovered without a sequence gap', async (context) => {
