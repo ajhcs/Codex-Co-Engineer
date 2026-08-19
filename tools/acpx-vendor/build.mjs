@@ -18,6 +18,9 @@ const defaultOutputDirectory = join(
 const BUNDLE_NAME = 'acpx-runtime.mjs';
 const MANIFEST_NAME = 'acpx-runtime.manifest.json';
 const NOTICE_NAME = 'acpx-third-party-notices.md';
+const HARDENING_OVERLAY_FILE = 'src/hardening-overlay.mjs';
+const HARDENING_OVERLAY_SOURCE = 'tools/acpx-vendor/src/hardening-overlay.mjs';
+const HARDENING_OVERLAY_SEPARATOR = '\n';
 const REGISTRY_ORIGIN = 'https://registry.npmjs.org';
 const EXPECTED_EXPORTS = [
   'createAcpRuntime',
@@ -297,11 +300,14 @@ const manifestPath = join(outputDirectory, MANIFEST_NAME);
 const noticePath = join(outputDirectory, NOTICE_NAME);
 await mkdir(outputDirectory, { recursive: true });
 
-const [lockBytes, vendorPackageJson] = await Promise.all([
+const [lockBytes, vendorPackageJson, hardeningOverlayBytes] = await Promise.all([
   readFile(lockPath),
   readFile(packagePath, 'utf8').then(JSON.parse),
+  readFile(join(here, HARDENING_OVERLAY_FILE)),
 ]);
 const lockDigest = sha512(lockBytes);
+const hardeningOverlayDigest = sha512(hardeningOverlayBytes);
+assert.ok(hardeningOverlayBytes.length > 0, 'The ACPX hardening overlay must not be empty.');
 const lock = JSON.parse(lockBytes);
 const lockedAcpx = lock.packages['node_modules/acpx'];
 const lockedBundler = lock.packages[`node_modules/${EXPECTED_BUNDLER.name}`];
@@ -331,7 +337,14 @@ const result = await build({
 });
 
 const graph = assertBuildGraph(result.metafile, bundlePath);
-const bundleBytes = await readFile(bundlePath);
+const upstreamBundleBytes = await readFile(bundlePath);
+const upstreamBundleDigest = sha512(upstreamBundleBytes);
+const bundleBytes = Buffer.concat([
+  upstreamBundleBytes,
+  Buffer.from(HARDENING_OVERLAY_SEPARATOR, 'utf8'),
+  hardeningOverlayBytes,
+]);
+await writeFile(bundlePath, bundleBytes);
 const bundleDigest = sha512(bundleBytes);
 assertBundleText(bundleBytes, bundlePath, outputDirectory, graph);
 const importedBundle = await import(
@@ -361,6 +374,12 @@ const manifest = {
     tag: `v${lockedAcpx.version}`,
     commit: EXPECTED_ACPX.commit,
     tarball_integrity: lockedAcpx.integrity,
+    upstream_bundle_sha512: upstreamBundleDigest,
+  },
+  hardening_overlay: {
+    path: HARDENING_OVERLAY_SOURCE,
+    sha512: hardeningOverlayDigest,
+    application: 'append_after_upstream_bundle',
   },
   bundled_packages: manifestPackages,
   dependencies: {

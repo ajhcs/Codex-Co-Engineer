@@ -1,49 +1,94 @@
 # Contributing
 
-Thanks for helping improve Codex-Co-Engineer. Keep the public repository
-focused on the Codex control plane and the DeepSeek Harness integration.
+Thanks for helping improve Codex-Co-Engineer. The project is intentionally a
+thin trusted supervisor for Grok, Cursor Local, Cursor Cloud, and DeepSeek
+Harness (DSH). Keep provider capabilities intact and avoid rebuilding a
+second sandbox, target-attestation layer, daemon, or policy engine.
 
 ## Before opening a pull request
 
+The package supports Node.js 24 and newer. The authoritative release gate is
+deliberately pinned to Node.js 24 for reproducible release evidence.
+
+Local worker acceptance additionally requires Linux, a working
+`systemd --user` manager, `systemd-run` 244 or newer, and unified cgroup v2.
+That scope uses `KillMode=control-group` only for descendant cleanup; it is
+not a sandbox or capability restriction. `npm run setup:check` validates the
+CLI/worktree dependencies, while the release/live acceptance validates this
+host boundary.
+
 ```bash
-node --version                 # Node 24 or newer
-cd plugins/plumbob-harness-control
-npm test
-cd ../..
+node --version
+npm --prefix plugins/plumbob-harness-control test
 node scripts/validate-release.mjs
+node scripts/inspector-preflight.mjs
 git diff --check
 ```
 
-Do not run provider-backed jobs as part of a pull request. Use fixture
-processes, temporary Git repositories, and redacted test data. A change that
-requires an external model should document the manual, opt-in verification
-separately.
+Do not run provider-backed jobs in CI or as an implicit part of a pull
+request. Use fixture processes, temporary Git repositories, and redacted test
+data. Live provider acceptance is an explicit, opt-in host check performed
+after the provider-free gate.
 
-## Code and contract expectations
+## Public contract
 
-- Preserve `plumbob-harness-control` as the stable MCP compatibility ID.
-- Validate configuration before resolving a target or starting a process.
-- Require exactly one target for every dispatch; never infer it from prompt
-  prose or silently fall back after an explicit-target error.
-- Canonicalize target/configuration input before hashing and compare the
-  caller-supplied fingerprint.
-- Keep absolute deadlines independent from progress heartbeats.
-- Emit one terminal state and distinguish client, transport, protocol,
-  process-startup, tool, timeout, and cancellation failures.
-- Keep credentials, full prompts, protected data, and unredacted payloads out
-  of logs, artifacts, tests, and documentation.
+- Preserve `plumbob-harness-control` as the stable MCP identifier and keep
+  the five-tool surface small.
+- Local tasks use ACP first and may use the same provider's CLI only when ACP
+  fails before prompt dispatch. Never replay an accepted prompt.
+- `workspace_mode: "managed"` is the default for local tasks and creates one
+  `worktree-bootstrap` worktree, branch, and writer. An explicit
+  `workspace_mode: "direct"` is allowed only when the caller intentionally
+  accepts mutation of the supplied checkout.
+- `create_pr` is valid only for Cursor Cloud. Local tasks must reject it;
+  their commits and handoff are reviewed by Codex before any push or PR.
+- Cursor Cloud tasks require a provider-accessible remote and an exact,
+  immutable commit SHA in `starting_ref` that has already been pushed.
+- Provider authentication is persistent and normal. Do not add login tokens,
+  API keys, or credentials to MCP arguments, prompts, task records, fixtures,
+  logs, or Git.
+- Codex is the final reviewer and merge authority. Provider agents may use
+  their normal shell, dependency-installation, and coding capabilities.
+
+## Handoff and cleanup
+
+A successful local task does not silently delete its worktree: the worktree
+is retained for inspection. The provider worker records a handoff when it can;
+the authoritative manual command is:
+
+```bash
+worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
+```
+
+Before accepting a change, inspect the handoff, commits, diff, tests, and
+ownership evidence. After merge or deliberate discard, inspect the exact
+writer lock. Clean a dead lock only with its reported ID:
+
+```bash
+worktree-bootstrap lock inspect TASK --repo /absolute/worktree
+worktree-bootstrap lock clean TASK --repo /absolute/worktree \
+  --policy dead-local --lock-id LOCK_ID
+git worktree remove /absolute/worktree
+```
+
+Remove only the corresponding branch and terminal task-state directory after
+the receipt is no longer needed. Never delete the whole state root or another
+task's worktree. Direct-mode tasks have no managed worktree to clean, so
+review their caller checkout explicitly.
 
 ## Public/private boundary
 
-Never commit `Secrets/`, `.dsh/`, local state, model registries, provider keys,
-or personal Codex configuration. Use
-the redacted files under `config/` and `examples/` as templates. If a test
-needs a credential-shaped value, generate it in memory or in a temporary
-directory and assert only redacted behavior.
+Never commit provider keys, local state, ACP/DSH session files, personal Codex
+configuration, or private repository material. The public package must remain
+free of personal paths, credentials, and machine-specific receipts. Prompts
+and selected repository content may leave the machine for the provider chosen
+by the operator; tests must use redacted or synthetic data.
 
 ## Pull requests and releases
 
-Describe the target contract, lifecycle effects, compatibility impact, and
-verification performed. A release PR must pass CI, the release inventory
-check, MCP Inspector preflight checks, and a clean package-inventory review.
-Update `CHANGELOG.md` for user-visible behavior.
+Use focused commits and describe the behavior, lifecycle effects, provider
+compatibility, and verification performed. A release PR must pass CI, the
+release inventory check, MCP Inspector preflight, ACPX provenance/reproducible
+checks, and package-inventory review. Update `CHANGELOG.md` for
+user-visible behavior. Codex reviews and merges the release PR only after
+those checks and any explicit live acceptance are complete.

@@ -1,67 +1,117 @@
 # Data handling
 
-Provider credentials are accepted only from the server environment or a
-protected file outside the repository. They are never valid tool arguments.
-Once configured, those credentials are standing authorization for task-scoped
-provider calls; the control planes do not ask for per-job data-egress approval.
-Writes, destructive Git, deployments, and PR creation remain separately controlled.
-For `grok_build`, `MODEL_API_KEY` is not required or passed to the child;
-Grok's OAuth/session state remains under the user's normal home and an
-administrator may provide `XAI_API_KEY` through the daemon environment. The
-official CLI is invoked directly with an argv vector, never through a shell.
+Codex-Co-Engineer starts trusted peer coding agents. Selecting Grok, Cursor
+Local, Cursor Cloud, or DSH authorizes that provider to receive the task
+prompt and the repository material needed for the task. Providers may run
+shell commands, install dependencies, and modify their assigned workspace or
+remote branch. Do not delegate a repository or prompt that the selected
+provider is not authorized to process.
 
-Job records store prompt hashes and lengths, opaque summaries, canonical
-configuration digests, and bounded diagnostics. The runner sanitizes exact
-prompt fragments and credential-shaped strings before child output is written
-to the connector log. Read APIs apply redaction again as defense in depth.
+## Workspace boundary
 
-Do not submit credentials, private keys, protected health information,
-production-only data, or unredacted customer payloads to an external model.
-Provider-backed jobs are never run in CI.
+Local tasks use ACP first and a same-provider CLI fallback only when ACP fails
+before prompt dispatch. DSH ACPX has no authoritative prompt-sent
+acknowledgement, so it becomes `dispatch_uncertain` after spawn and is never
+replayed through CLI. Managed local tasks use one
+`worktree-bootstrap` worktree and branch per task. Direct mode is an explicit
+opt-in and permits mutation of the caller's supplied checkout.
 
-Local state may still contain repository-derived model output. Keep the state
-directory owner-only, apply retention appropriate to the repository, and do
-not attach it wholesale to public issues.
+The official Cursor Local and DSH fallback CLIs accept their prompt as a
+positional argument. During that fallback only, another process running as the
+same host user may be able to observe the prompt in the process argument list.
+Grok fallback uses an owner-only prompt file. Prefer ACP for sensitive prompts
+and do not use the local CLI fallback on a host where the same-user process
+boundary is not trusted.
 
-## Grok Build
+Local worker launch requires Linux with a working `systemd --user` manager,
+`systemd-run` 244 or newer, and unified cgroup v2. Co-Engineer places the
+worker in a manager-owned transient systemd user service with
+`KillMode=control-group` solely so cancellation reaches detached descendants
+and the worker survives the launching client. This is a lifecycle/cleanup
+boundary, not a sandbox: the provider's environment, credentials, network,
+filesystem, and shell capabilities are inherited unchanged. Local dispatch
+fails closed when it cannot verify this boundary. `setup:check` validates
+DSH/ACPX, Cursor SDK, and worktree dependencies but does not install or
+authenticate Grok/Cursor Local or replace the release/live cgroup check.
 
-Grok `streaming-json` (or `streaming-messages-json`) records are retained only
-as bounded, redacted lifecycle logs. Unknown and incomplete future event types
-are tolerated; explicit provider/agent error records and nonzero exits fail the
-job. A typed JSON Schema object/boolean is capped at 16 KiB and forces JSON
-output; arbitrary output contracts are not accepted. The ACP `grok agent stdio`
-interface, prompt-file/prompt-JSON modes, system-prompt override, debug files,
-leader sockets, restore/worktree/ref commands, agent/agents bundles, and
-interactive login/update commands are not proxied by this release because they
-would bypass the target, lifecycle, or credential contract. The adapter's
-bounded parser owns the durable output contract.
+If managed bootstrap fails before it emits an authoritative receipt/path,
+Co-Engineer cannot safely identify or delete an unknown worktree. Inspect
+`git worktree list` and the `worktree-bootstrap` lock tooling, and clean only
+an exact task/lock that is identified there.
 
-Pinned ACPX, bounded ACP helpers, and a Grok outer-boundary implementation are
-packaged only for conformance. They are not connected to a public sessions or
-coding-dispatch tool; direct Grok still uses the CLI-managed sandbox. The outer
-experiment accepts an attested owner-only auth file, not `XAI_API_KEY`, and
-still awaits real host/systemd acceptance. Grok and DSH harness-internal
-subagents record compact requested/effective evidence; effectiveness stays
-`unknown` unless provider output proves a child ran.
+Cursor Cloud receives a remote repository reference and an exact pushed
+starting commit SHA. It does not see unpushed local commits. Its provider-
+managed branch and any requested PR remain remote artifacts until Codex
+reviews them.
 
-## Cursor Cloud Control
+An exact SHA reachable only from a feature branch can remain invisible to
+Cursor until the branch is provider-visible through an open pull request or
+the default branch. Create the draft PR (or make the commit reachable from
+the default branch) before final Cloud acceptance. If the provider returns
+HTTP 400 for an otherwise-valid SHA, surface it as a visibility failure in
+the receipt and fix reachability before retrying; do not blindly replay the
+task.
 
-The sibling Cursor Cloud Control plugin is an explicit egress boundary for
-Cursor Cloud Agents API v1. It sends only fields selected by its typed create
-or follow-up schemas: prompt text/images, model selection, repository and
-environment targets, and explicitly supplied run integrations. Cursor owns the
-durable VM/workspace, repository clone, branch, PR, and cloud retention
-semantics. Nested cloud subagent streams are not independently addressable by
-the v1 API and are not synthesized locally.
+`create_pr` is a Cursor Cloud-only request. Local tasks reject it and return
+their branch/handoff for Codex to inspect before any push or PR creation.
 
-`CURSOR_API_KEY` or the default XDG/HOME owner-only config file is read by the
-MCP process. The local submission ledger contains only a request ID, operation
-kind, SHA-256 configuration digest, status, and opaque agent/run IDs. Prompt
-text, image data, environment-variable values, MCP headers, and transcripts
-are not persisted. Error, event, and artifact metadata responses are redacted
-before they return to Codex.
+## Credentials
 
-Artifact downloads require `CURSOR_ARTIFACT_ROOT` and a safe relative
-destination. The plugin verifies the exact listed artifact path, bounds the
-response, rejects path traversal and symlink escape, writes atomically with
-owner-only permissions, and does not execute or render the result.
+Grok and Cursor Local use their normal persistent CLI login/session state.
+Cursor Cloud uses its normal API key, and DSH uses its normal owner-only
+model-key file. Credentials are never accepted as MCP arguments and are not
+written to task records. Provider workers inherit the trusted user's normal
+environment; use a dedicated account or narrower environment if that trust
+model is not appropriate.
+
+Do not put credentials in prompts, repository files, origin URLs, fixtures, or
+provider instructions. If a prompt contains a secret accidentally, treat the
+provider transcript and task state as exposed and rotate the secret.
+
+## Local state
+
+State is stored below the owner-only
+`$XDG_STATE_HOME/codex-co-engineer` or
+`~/.local/state/codex-co-engineer` directory. Task directories are
+`0700`; records, prompts, events, logs, requests, and runtime files are
+`0600`. ACP session data and DSH session persistence are owner-only as well.
+
+State contains:
+
+- prompt text and a SHA-256 prompt identifier;
+- bounded provider events/results and worker diagnostics;
+- local repository/worktree paths, branch names, and commit references;
+- opaque local session, cloud agent, run, branch, and PR identifiers.
+
+It can contain sensitive private-repository context. Do not publish or commit
+the state directory. Terminal task state is retained for inspection until the
+operator deliberately removes that exact task directory after handoff.
+
+## Handoff and cleanup
+
+Terminal managed tasks retain their worktree and branch; completion does not
+silently delete evidence. Poll `task`, inspect the receipt, and run:
+
+```bash
+worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
+```
+
+After merge or deliberate discard, inspect the exact writer lock. A dead lock
+may be cleaned only with the exact ID and policy:
+
+```bash
+worktree-bootstrap lock inspect TASK --repo /absolute/worktree
+worktree-bootstrap lock clean TASK --repo /absolute/worktree \
+  --policy dead-local --lock-id LOCK_ID
+git worktree remove /absolute/worktree
+```
+
+Remove only the matching branch and terminal task-state directory after the
+receipt is no longer needed. Direct-mode tasks have no managed worktree; review
+the caller checkout explicitly. Use `cancel` for an active task and verify
+that the owned local process group or remote cloud run has stopped. Never
+replay a prompt-dispatched task.
+
+Live provider checks do not run in GitHub Actions. Public package validation
+checks the packed source for credentials, personal paths, and obsolete runtime
+files; live receipts stay on the owner host.

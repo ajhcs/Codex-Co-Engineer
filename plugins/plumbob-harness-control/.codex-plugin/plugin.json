@@ -1,7 +1,7 @@
 {
   "name": "plumbob-harness-control",
-  "version": "2.1.2",
-  "description": "Codex-Co-Engineer gives Codex a bounded control plane for DeepSeek Harness and Grok Build jobs.",
+  "version": "3.0.0",
+  "description": "Codex-Co-Engineer delegates real coding work to Grok, Cursor Local, Cursor Cloud, and DeepSeek Harness through a thin ACP-first supervisor.",
   "author": {
     "name": "Plumbob"
   },
@@ -12,15 +12,17 @@
     "deepseek-harness",
     "grok-build",
     "control-plane",
-    "target-fingerprint",
+    "cursor",
+    "acp",
+    "worktrees",
     "mcp"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex-Co-Engineer",
-    "shortDescription": "Control DeepSeek and Grok Build jobs",
-    "longDescription": "Use Codex-Co-Engineer as Codex's control plane for bounded DeepSeek Harness and Grok Build jobs. Every job is target-bound, fingerprintable, observable, and cancellable without opening a shell.",
+    "shortDescription": "Delegate work to Grok, Cursor Local/Cloud, and DSH",
+    "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Local tasks support managed or explicitly direct workspaces and require a Linux manager-owned transient systemd user service with a cgroup cleanup boundary; Cloud tasks start from pushed immutable commit SHAs. Codex retains review and merge authority.",
     "developerName": "Plumbob",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,9 +32,9 @@
     ],
     "defaultPrompt": [
       "Show Codex-Co-Engineer status.",
-      "Run a target-bound DeepSeek Harness task and monitor its lifecycle.",
-      "Run a target-bound Grok Build task with typed CLI controls.",
-      "Preflight the selected target with MCP Inspector."
+      "Delegate a review to Grok, Cursor, or DSH.",
+      "Run parallel implementation tasks in managed worktrees.",
+      "Use Cursor Cloud with a pushed commit SHA and optional PR."
     ],
     "brandColor": "#111111",
     "composerIcon": "./assets/icon.svg",

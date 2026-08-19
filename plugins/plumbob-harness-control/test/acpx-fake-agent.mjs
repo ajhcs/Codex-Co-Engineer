@@ -1,4 +1,4 @@
-/* Minimal ACP stdio agent used only by acpx-worker.test.mjs. */
+/* Minimal ACP stdio agent used by the v3 ACP worker tests. */
 
 import { spawn } from 'node:child_process';
 import { appendFile, writeFile } from 'node:fs/promises';
@@ -161,6 +161,17 @@ async function handleRequest(message) {
       errorResponse(id, -32077, `provider rendered argv and prompt: ${text}`);
       return;
     }
+    if (text.includes('queue-overflow')) {
+      for (let index = 0; index < 1_200; index += 1) {
+        sessionUpdate(params.sessionId, `queue-overflow-${index}-${'x'.repeat(5_000)}`);
+      }
+      await finishPrompt(id, params.sessionId);
+      return;
+    }
+    if (text.includes('hostile-timeout')) {
+      pendingPrompts.set(id, { sessionId: params.sessionId, timer: null, hostileTimeout: true });
+      return;
+    }
     sessionUpdate(params.sessionId, text.includes('large') ? 'x'.repeat(5000) : 'fake-chunk-1');
     if (text.includes('large')) sessionUpdate(params.sessionId, 'fake-chunk-2');
     if (text.includes('output-overflow')) {
@@ -189,10 +200,6 @@ async function handleRequest(message) {
       pendingPrompts.get(id).permissionId = permissionId;
       return;
     }
-    if (text.includes('hostile-timeout')) {
-      pendingPrompts.set(id, { sessionId: params.sessionId, timer: null, hostileTimeout: true });
-      return;
-    }
     if (text.includes('slow') || text.includes('cancel')) {
       const timer = setTimeout(() => finishPrompt(id, params.sessionId), 2_000);
       pendingPrompts.set(id, { sessionId: params.sessionId, timer });
@@ -216,6 +223,9 @@ async function handleRequest(message) {
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+// Keep the stdio fixture alive even when Node decides the readline wrapper has
+// no pending work between protocol frames.
+process.stdin.resume();
 input.on('line', (line) => {
   let message;
   try {

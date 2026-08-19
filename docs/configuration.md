@@ -1,52 +1,103 @@
 # Configuration
 
-Codex-Co-Engineer validates two versioned schemas:
+Codex-Co-Engineer has no project policy file. Provider authentication is
+normal persistent login/session state or an owner-only key file. The setup
+command installs the pinned local composition and creates the default DSH
+configuration; it never performs login on the user's behalf.
 
-- operation configuration: `codex-co-engineer.config.v1`
-- target configuration: `codex-co-engineer.target.v1`
-
-Unknown fields are rejected. Runtime installation paths and credentials come
-from environment variables; target authority always comes from the strict tool
-input. Portable `CODEX_CO_ENGINEER_*` names are preferred. Legacy
-`PLUMBOB_HARNESS_*` names remain compatibility aliases.
+## Host environment
 
 | Variable | Purpose |
 | --- | --- |
-| `DSH_HOME` | Optional absolute DeepSeek Harness profile/state home. When omitted, Co-Engineer uses `dsh-home` beneath the configured state directory and never falls back to the protected per-user DSH home. |
-| `CODEX_CO_ENGINEER_DSH_HOME` | Preferred explicit absolute DSH profile/state home; relative paths fail closed. |
-| `CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` | Default Git workspace used only by an explicit `target_context.mode: "default"`; not prompt authority. |
-| `CODEX_CO_ENGINEER_ALLOWED_ROOTS` | Path-delimited administrator root allowlist. |
-| `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only SQLite, lifecycle, redacted-log state, and the default managed DSH profile/state root. |
-| `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Optional key file outside the clone. |
-| `CODEX_CO_ENGINEER_DSH_COMMAND` | DSH executable name or absolute path. |
-| `CODEX_CO_ENGINEER_GROK_COMMAND` | Direct official Grok executable; defaults to `grok` and is passed without a shell. |
-| `XAI_API_KEY` | Optional xAI API key consumed by the official Grok CLI. OAuth/session state is owned by Grok under the normal user home. |
+| `CODEX_CO_ENGINEER_STATE_DIR` | Absolute owner-only task-state root. Defaults to the XDG state directory. |
+| `CODEX_CO_ENGINEER_GROK_COMMAND` | Grok CLI executable. Defaults to `grok`. |
+| `CODEX_CO_ENGINEER_CURSOR_COMMAND` | Cursor Local executable. Defaults to `cursor-agent`. |
+| `CODEX_CO_ENGINEER_DSH_COMMAND` | DSH CLI fallback executable. Defaults to `dsh`. |
+| `CODEX_CO_ENGINEER_ACPX_COMMAND` | ACPX executable used for DSH. Defaults to `acpx`. |
+| `CODEX_CO_ENGINEER_DSH_ACP_COMMAND` | DSH ACP adapter executable. Defaults to `dsh-acp-demo`. |
+| `CODEX_CO_ENGINEER_DSH_ACP_CONFIG` | Absolute DSH ACP YAML path. |
+| `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Owner-only Muse/DSH model key file. |
+| `CURSOR_API_KEY_FILE` | Owner-only Cursor Cloud API key file. |
+| `MODEL_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` | Optional process-level provider credentials. |
 
-The MCP launcher resolves the protected key file once and forwards that path to
-the daemon as `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, including when the legacy
-`PLUMBOB_HARNESS_MODEL_API_KEY_FILE` alias was used. This keeps an activated
-daemon bound to the same owner-only file as its MCP parent.
-Daemon readiness also includes a digest of that canonical path and its
-filesystem metadata, never the key contents. Same-version replacement is
-identity-bound to the exact daemon process and socket, and the daemon atomically
-enters a draining state only when it has no active jobs. Version upgrades fail
-closed until the old daemon is stopped or Codex is restarted; an older daemon
-is never sent an unauthenticated compatibility shutdown.
+The default DSH configuration is
+`~/.config/codex-co-engineer/dsh-acp.yml`; its model key defaults to
+`~/.config/codex-co-engineer/model-api-key`. Cursor Cloud also recognizes
+the existing owner-only `~/.config/cursor-cloud-control/api-key`.
 
-Defaults follow `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, and `PATH`; no public code
-contains a personal home, workspace, or credential path. The adapter fails
-closed when the resolved state/DSH root is not writable, so a sandbox cannot
-silently fall back to `~/.dsh` and surface a later `EROFS` profile error.
+Run the following from the installed plugin package directory—the directory
+containing `package.json` and `bin/setup.mjs`:
 
-DeepSeek Harness is invoked directly in the attested target working directory.
-Co-Engineer does not generate or rewrite an MCP backend patch and has no
-dependency on an evaluation lab or another coding-agent runtime. Configure the
-provider and any DeepSeek plugins through the selected DSH profile before
-starting Codex.
+```bash
+npm run setup
+npm run setup:check
+```
 
-`grok_build` does not call `requireCredential()` for `MODEL_API_KEY`. The
-official CLI owns OAuth/session state; use `grok login` or device auth outside
-the MCP request, or set `XAI_API_KEY` in the daemon process environment. The
-daemon allowlist carries only this process-level credential and the explicit
-`CODEX_CO_ENGINEER_GROK_COMMAND`; no MCP field can set an executable, provider
-URL, environment map, or credential.
+In a source checkout, that directory is
+`plugins/plumbob-harness-control`. For a Codex-managed installation, use the
+package path reported by Codex or its plugin manager instead of assuming a
+project-relative path.
+
+The package supports Node.js 24 and newer. The exact release gate is pinned
+to Node.js 24 so release receipts are reproducible.
+
+Local worker launch additionally requires Linux with a working
+`systemd --user` manager, `systemd-run` 244 or newer, and a unified cgroup
+v2 hierarchy. The manager-owned transient systemd user service uses
+`KillMode=control-group` only to make cancellation reach detached descendants
+and let the worker survive the launching client; it is not a sandbox and does
+not restrict environment, network, filesystem, credentials, or provider shell
+capabilities. Local dispatch fails closed when this boundary cannot be
+verified.
+
+`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
+and `worktree-bootstrap` dependency. It does not install or authenticate Grok
+or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or prove
+the systemd/cgroup prerequisite. Call the `status` tool after setup to check
+provider readiness. The release gate and live host acceptance must validate
+the Linux process boundary before local agents run.
+
+## Task inputs
+
+Repository paths, prompts, roles, deadlines, and workspace/PR intent are
+inputs to `delegate`; they are not global policy.
+
+### Local providers
+
+`workspace_mode: "managed"` is the default. It creates one locked
+`worktree-bootstrap` worktree and branch per task. Set
+`workspace_mode: "direct"` only when direct mutation of the supplied checkout
+is intentional. Direct mode does not create a disposable worktree.
+
+### Cursor Cloud
+
+Cursor Cloud requires a provider-accessible Git origin and an exact immutable
+commit SHA in `starting_ref`. The SHA must already be pushed; a local branch
+name or unpushed work is not an acceptable cloud starting point.
+An exact SHA reachable only from a feature branch can remain invisible to
+Cursor until the branch is provider-visible through an open pull request or
+the default branch. Create the draft PR (or make the commit reachable from
+the default branch) before final Cloud acceptance. Surface an HTTP 400 for an
+otherwise-valid SHA as a provider visibility failure and fix reachability
+before retrying.
+`create_pr` is supported only for Cursor Cloud and defaults to `false`.
+Local tasks reject `create_pr`; Codex inspects their handoff and commits
+before deciding whether to push or open a PR.
+
+## Authentication
+
+Authenticate Grok and Cursor Local with their normal CLIs. DSH uses the
+owner-only model key, and Cursor Cloud uses its normal API key. Credentials
+must not be placed in MCP arguments, prompts, receipts, fixtures, or Git.
+Provider login state persists in the provider's normal user configuration
+between Codex tasks.
+
+## State and retention
+
+Task records, prompts, events, worker logs, runtime identities, and session
+data live under the owner-only state root
+`$XDG_STATE_HOME/codex-co-engineer` or
+`~/.local/state/codex-co-engineer`. Task directories are `0700`; files are
+`0600`. Terminal task state is retained until the operator removes that
+exact task directory after handoff and review. Never delete the whole state
+root or another task's state as cleanup.

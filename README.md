@@ -1,160 +1,222 @@
 # Codex-Co-Engineer
 
-Codex-Co-Engineer is a public, Codex-first control plane for the standalone
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the
-official [Grok Build CLI](https://docs.x.ai/build/cli/headless-scripting). Codex is
-the chief engineer and operator; these are bounded peer workers.
-The worker kinds are exactly `deepseek_agent` and `grok_build`; version 2 has no
-Prime Intellect integration or runtime dependency.
+Codex-Co-Engineer is a small stdio MCP supervisor that lets Codex delegate
+real review and implementation work to authenticated peer coding agents:
 
-The stable plugin and MCP identifier is `plumbob-harness-control`. The public
-product name is **Codex-Co-Engineer**. Keeping the technical identifier stable
-allows existing Codex configurations to migrate without a server-name break.
+- Grok Build on the local host
+- Cursor Local
+- Cursor Cloud
+- DeepSeek Harness (DSH) with Muse Spark
 
-## Release contents
+Codex remains the chief engineer, reviewer, and merge authority. Providers
+retain their normal coding capabilities, persistent logins, shell access, and
+dependency installation. Co-Engineer adds lifecycle tracking, optional local
+worktree isolation, bounded cancellation, and useful receipts—not another
+sandbox or policy engine.
 
-```text
-plugins/plumbob-harness-control/   Codex plugin, MCP facade, skill, and tests
-plugins/cursor-cloud-control/      Typed Cursor Cloud and Local CLI control planes
-config/                            non-secret configuration examples
-docs/                              target, preflight, data, and release policy
-examples/                          redacted contract and receipt examples
-scripts/                           dependency-free release validation
-.github/workflows/                 CI and package checks
-```
+The stable plugin identifier is `plumbob-harness-control`. Version 3 exposes
+five tools: `status`, `delegate`, `task`, `tasks`, and `cancel`.
 
-The public tree does not contain generated DSH packages, model registries,
-session logs, provider credentials, or personal Codex configuration. Keep
-those in a separate private directory or secret manager. The root ignore
-policy is intentionally fail-closed for `Secrets/`, local state, and generated
-runtimes.
+## Install
 
-## Quick start
+Requirements:
 
-1. Install Node.js 24 or newer. Runtime packages support Node 24+, while the
-   reproducible maintainer release gate is intentionally pinned to Node major
-   24.
-2. Install and configure DeepSeek Harness using its upstream documentation when
-   using DeepSeek jobs. For Grok Build, install the official CLI and
-   authenticate it separately (`grok login` or device auth); the MCP server
-   never automates installation/login or accepts xAI credentials as tool
-   arguments.
-3. Clone this repository and register
-   `plugins/plumbob-harness-control` as a local Codex plugin.
-4. Set the provider credential and runtime workspace in the MCP server
-   environment. A template is in
-   [`config/configuration.example.json`](config/configuration.example.json).
-5. Run the MCP Inspector preflight for the exact target before dispatching a
-   job.
+- Node.js 24 or newer. The release gate is intentionally pinned to Node 24.
+- Git and the `worktree-bootstrap` CLI/skill for managed local workspaces.
+- Linux with a working `systemd --user` manager, `systemd-run` 244 or
+  newer, and a unified cgroup v2 hierarchy for local providers.
+- Authenticated Grok Build and Cursor Local CLIs.
+- A Cursor Cloud API key in its normal owner-only configuration file.
+- The DSH/Muse model credential in its normal owner-only configuration file.
 
-Example environment (replace placeholders locally; never commit the values):
-
-```bash
-export MODEL_API_KEY='provided-by-your-secret-manager'
-export XAI_API_KEY='optional-xai-key-for-grok-cli'
-export DSH_HOME='/absolute/path/to/dsh-profile-home'
-export CODEX_CO_ENGINEER_RUNTIME_WORKSPACE='/absolute/path/to/default/git-workspace'
-export CODEX_CO_ENGINEER_ALLOWED_ROOTS='/absolute/path/to/checkouts'
-export CODEX_CO_ENGINEER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-co-engineer"
-```
-
-`CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` is used only when an explicit target
-contract selects `mode: "default"`. It is not prompt-derived target authority.
-A job must carry one strict target contract with an absolute cwd,
-expected Git root and HEAD, allowed paths, role, and caller-supplied expected
-fingerprint. Prompt-level `cd` is never authoritative, and an invalid
-explicit target never falls back to a default workspace.
-
-For Grok Build, the server invokes the configured `grok` executable directly
-(`CODEX_CO_ENGINEER_GROK_COMMAND` may select an administrator-approved binary)
-with typed model, session, reasoning, sandbox, permission, tool, and rules
-options. Headless prompts use `-p` (the official `--single` alias). It defaults to
-`--no-auto-update` and `streaming-json`; raw argv,
-shell strings, environment maps, prompt-file/prompt-JSON input,
-restore/worktree/ref controls, debug files, leader sockets, login/update
-commands, agent bundles, raw output schemas, and system-prompt overrides are
-not exposed. Bounded typed `json_schema` input is supported for structured JSON
-output; ACP (`grok agent stdio`) is documented but intentionally deferred until
-it can preserve the same target and lifecycle guarantees.
-
-Configured Grok, DSH, and Cursor credentials are standing authorization for
-task-scoped provider work; the control planes do not add a per-job data-egress
-prompt. Repository writes, destructive Git operations, deployments, and PR
-creation retain their normal task authority and safety controls.
-
-## Co-Engineer tools
-
-The plugin exposes seven stable MCP tools:
-
-- `preflight` attests the target, configuration digest, protocol, and tool set.
-- `status` reports DeepSeek, Grok, credential-presence, UI, and recent-job state.
-- `capacity` reads compact Codex/Grok capacity and exact DSH job-token evidence.
-- `runtime` starts or stops the optional plugin-owned loopback DeepSeek UI.
-- `run` dispatches exactly `deepseek_agent` or `grok_build`.
-- `jobs` lists, inspects, waits for, or cursor-pages managed jobs.
-- `cancel` cancels one exact plugin-owned job.
-
-DSH/Muse dollar spend, account quota remaining, and reset time remain
-`unknown`: the installed harness does not prove them. Experimental ACPX session
-transport and the Bubblewrap-based Grok outer runtime are packaged only as
-gated conformance components. They are not wired to a public MCP `sessions`
-tool or to direct `grok_build` dispatch in this release.
-
-Every dispatch requires the versioned target contract, caller-supplied target
-fingerprint, stable request ID, and bounded timeout. See the
-[plugin README](plugins/plumbob-harness-control/README.md#mcp-tool-calls) for
-the complete call shapes and examples.
-
-## Reliability contract
-
-Before execution, the MCP Inspector receipt must include:
-
-- target fingerprint
-- resolved workspace and cwd
-- configuration digest
-- transport and protocol version
-- server identity
-- available tools
-
-Long-running jobs expose exactly one lifecycle:
-
-`accepted → started → working → completed | failed | cancelled | timeout`
-
-Progress notifications are bounded heartbeats approximately every 15 seconds.
-An absolute deadline cannot be extended by progress. Client retries reuse a
-stable request ID and fingerprint, preventing duplicate dispatch when a
-transport is uncertain. Timeout, cancellation, protocol, tool, process-startup,
-and client failures remain distinct.
-
-See:
-
-- [`plugins/plumbob-harness-control/README.md`](plugins/plumbob-harness-control/README.md)
-- [`plugins/cursor-cloud-control/README.md`](plugins/cursor-cloud-control/README.md)
-- [`docs/target-contract.md`](docs/target-contract.md)
-- [`docs/preflight-inspector.md`](docs/preflight-inspector.md)
-- [`docs/configuration.md`](docs/configuration.md)
-- [`docs/data-handling.md`](docs/data-handling.md)
-- [`SECURITY.md`](SECURITY.md)
-
-## Development
+Install the plugin through Codex, then run its one-time setup from the
+installed plugin package directory—the directory containing `package.json`
+and `bin/setup.mjs`. In this source checkout that directory is:
 
 ```bash
 cd plugins/plumbob-harness-control
-npm test
-cd ../..
-cd plugins/cursor-cloud-control
-npm test
-cd ../..
-node scripts/validate-release.mjs
+npm run setup
+npm run setup:check
 ```
 
-Tests use local fixtures and temporary Git repositories. CI must not send
-repository contents or prompts to an external model provider.
+For a Codex-managed installation, use the package path reported by Codex or
+its plugin manager instead of assuming it is relative to the current project.
 
-Cursor Cloud Control uses only the official Cursor Cloud Agents API v1 through
-typed MCP tools. Credentials stay in the MCP process environment or an
-owner-only file; creation defaults to plan mode, a new branch, and no PR.
+Setup installs the pinned ACPX, Cursor SDK, and cohesive DSH rc.7
+composition, creates owner-only DSH configuration/session directories, and
+does not perform provider login. Authenticate providers once through their
+normal flows; their sessions persist across Codex tasks:
+
+```bash
+grok login
+cursor-agent login
+bin/set-model-api-key
+```
+
+`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
+and `worktree-bootstrap` dependency. It does not install or authenticate Grok
+or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or prove
+that the Linux systemd/cgroup process boundary is usable. Call the `status`
+tool after setup to check provider readiness; the release gate and live host
+acceptance must validate the process boundary before starting local agents.
+
+Cursor Cloud uses `CURSOR_API_KEY`,
+`CURSOR_API_KEY_FILE`, or the existing owner-only
+`~/.config/cursor-cloud-control/api-key`. The DSH key defaults to the
+owner-only `~/.config/codex-co-engineer/model-api-key`. Never put credentials
+in MCP arguments or prompts.
+
+## Delegation model
+
+Local Grok and Cursor tasks use ACP. DSH uses the official rc.7 ACP
+composition through ACPX. Cursor Cloud uses the official Cursor SDK. A local
+CLI fallback is allowed only when ACP fails before prompt dispatch; an
+accepted prompt is never replayed through another transport. ACPX does not
+provide an authoritative prompt-sent acknowledgement, so a DSH task is marked
+`dispatch_uncertain` as soon as ACPX spawns and is never replayed through CLI.
+
+Every local worker is launched as a manager-owned transient `systemd --user`
+service with `KillMode=control-group` solely so cancellation reaches detached
+descendants and the worker survives the launching client. This is a
+lifecycle/cleanup boundary, not a sandbox: providers inherit the normal
+environment, network, filesystem, credentials, and shell capabilities. Local
+dispatch fails closed when the Linux systemd/cgroup prerequisite is not
+available. Cursor Cloud runs in the provider's remote environment.
+
+Cursor Local and DSH's official fallback CLIs take the prompt positionally,
+so it may be visible to other processes running as the same Unix user for the
+duration of that fallback. Grok fallback uses an owner-only prompt file.
+
+### Local workspace modes
+
+Local providers accept `workspace_mode`:
+
+- `managed` (default) creates and locks one
+  `worktree-bootstrap` worktree and branch per task. This is the normal mode
+  for parallel implementation and review.
+- `direct` runs against the supplied checkout. Use it only when you
+  explicitly accept direct mutation of that checkout.
+
+The invariant for managed tasks is:
+
+```text
+one task → one worktree → one branch → one writer
+```
+
+If `worktree-bootstrap` fails before returning an authoritative receipt and
+path, Co-Engineer does not guess at or delete an unknown worktree. Inspect the
+repository with `git worktree list` and the `worktree-bootstrap` lock tooling;
+clean only an exact task/lock that the tooling identifies.
+
+### Cursor Cloud requirements
+
+Cursor Cloud does not use a local worktree. The supplied repository must have
+an origin that Cursor can access, and `starting_ref` must be an exact,
+immutable commit SHA that has already been pushed to that origin. This avoids
+silently sending a different local branch state to the remote provider.
+
+An exact SHA that is reachable only from a feature branch can still be
+invisible to Cursor until that branch is provider-visible through an open
+pull request or the default branch. Create the draft PR (or make the commit
+reachable from the default branch) before final Cloud acceptance. If Cursor
+returns HTTP 400 for an otherwise-valid SHA, surface it as a provider
+visibility failure in the receipt and fix reachability before retrying; do not
+blindly replay the task.
+
+`create_pr` is a Cursor Cloud-only option and defaults to `false`. Local
+tasks reject it. A local implementation returns its branch and handoff for
+Codex to inspect; Codex may push and open a PR only after confirming that real
+commits exist. Codex controls the final merge.
+
+Example local review:
+
+```json
+{
+  "task_id": "review-auth-refactor",
+  "provider": "grok",
+  "repo": "/absolute/path/to/git-worktree",
+  "role": "review",
+  "workspace_mode": "managed",
+  "prompt": "Review the current branch and report concrete correctness risks.",
+  "timeout_ms": 3600000
+}
+```
+
+Example Cursor Cloud implementation:
+
+```json
+{
+  "task_id": "cloud-auth-refactor",
+  "provider": "cursor-cloud",
+  "repo": "/absolute/path/to/clean-checkout",
+  "role": "implement",
+  "starting_ref": "0123456789abcdef0123456789abcdef01234567",
+  "prompt": "Implement the requested change, run tests, and commit the result.",
+  "create_pr": true
+}
+```
+
+Providers are `grok`, `cursor-local`, `cursor-cloud`, and `dsh`. Roles
+are `review` and `implement`.
+
+## Handoff and cleanup
+
+Terminal managed tasks retain their worktree and branch for Codex inspection;
+they are not silently deleted. Poll `task`, then run the authoritative
+handoff from the recorded worktree:
+
+```bash
+worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
+```
+
+Inspect commits, diff, tests, and ownership evidence before pushing or opening
+a PR. After merge or deliberate discard:
+
+```bash
+worktree-bootstrap lock inspect TASK --repo /absolute/worktree
+worktree-bootstrap lock clean TASK --repo /absolute/worktree \
+  --policy dead-local --lock-id LOCK_ID
+git worktree remove /absolute/worktree
+```
+
+Clean only the exact corresponding branch and terminal task-state directory
+after its receipt is no longer needed. Direct tasks have no managed worktree;
+review their caller checkout explicitly. Cursor Cloud agents are archived
+after terminal completion where supported, while their remote branch/PR
+remains for Codex review.
+
+## Data and credentials
+
+Selecting a provider authorizes the task prompt and repository content to be
+sent to that provider. Private repositories are supported when the configured
+provider is authorized to review them. Provider children inherit the user's
+normal authenticated environment because they are trusted peer coding agents.
+
+Task prompts, events, logs, runtime identities, local paths, branch names, and
+opaque provider IDs are stored under the owner-only state directory, normally
+`$XDG_STATE_HOME/codex-co-engineer` or
+`~/.local/state/codex-co-engineer`. Task directories are `0700`; files are
+`0600`. Prompts and session data are retained for inspection until the
+operator removes the exact terminal task state. See
+[data handling](docs/data-handling.md).
+
+## Development and release
+
+```bash
+npm --prefix plugins/plumbob-harness-control test
+node scripts/validate-release.mjs
+node scripts/inspector-preflight.mjs
+```
+
+The authoritative release gate runs against one exact local candidate using
+Node 24. GitHub Actions is a credential-free mirror; live Grok, Cursor,
+Cursor Cloud, and DSH acceptance is recorded separately because CI must not
+send repository content to model providers.
+
+The older `cursor-cloud-control` package remains in this repository as a
+compatibility plugin for existing installations. New installations need only
+Codex-Co-Engineer 3.x.
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [LICENSE](LICENSE).

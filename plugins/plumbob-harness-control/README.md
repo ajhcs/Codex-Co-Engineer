@@ -1,312 +1,219 @@
 # Codex-Co-Engineer
 
-Codex-Co-Engineer is the Codex-first MCP control plane for the standalone
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the
-official [Grok Build CLI](https://docs.x.ai/build/cli/headless-scripting). It
-submits bounded background work, reports a durable lifecycle, and lets Codex
-inspect or cancel plugin-owned jobs without opening a shell. Version 2 removes
-all Prime Intellect adapters and runtime dependencies; the only worker kinds
-are `deepseek_agent` and `grok_build`.
+Codex-Co-Engineer is a small stdio MCP supervisor that lets Codex delegate
+real review and implementation work to trusted, authenticated peer coding
+agents:
 
-The public product name is **Codex-Co-Engineer**. The stable plugin and MCP
-identifier remains `plumbob-harness-control` so existing Codex configurations
-and automation continue to resolve the same server.
+- Grok Build on the local host
+- Cursor Local
+- Cursor Cloud
+- DeepSeek Harness (DSH) with Muse
 
-## What it provides
+Codex remains the chief engineer, reviewer, and merge authority. Providers
+retain their normal shell, coding, and dependency-installation capabilities.
 
-The MCP server exposes seven compact tools:
+## Tools
 
-- `preflight`: resolve and attest one strict target/configuration
-- `status`: provider-free control-plane, adapter, credential-presence, and recent-job state
-- `capacity`: explicit read-only Codex, Grok, and DSH capacity/usage snapshot
-- `runtime`: start or stop the optional loopback DeepSeek UI
-- `run`: accept a target-bound `deepseek_agent` or `grok_build` job
-- `jobs`: list, inspect, wait for, or cursor-page a managed job
-- `cancel`: request cancellation of one plugin-owned job
+The MCP server exposes five tools:
 
-The control plane stores only bounded metadata and redacted logs in an
-owner-only state directory. It does not accept arbitrary shell commands,
-ports, provider URLs, or environment maps as tool arguments.
+- `status` — supervisor health, provider readiness, and recent task state
+- `delegate` — start a review or implementation task
+- `task` — inspect one task receipt and runtime identity
+- `tasks` — list recent task receipts
+- `cancel` — stop one owned local process group or Cursor Cloud run
 
-Provider CLIs run inside the control plane's managed process-group lifecycle.
-They may use their documented in-session background-job and subagent features,
-but must not daemonize or reparent work outside that lifecycle. Such detached
-processes are outside the supported worker contract and cannot be reliably
-cancelled or included in the final target snapshot.
+`delegate` requires a stable `task_id`, a provider, an absolute Git
+repository root, and a prompt. Providers are `grok`, `cursor-local`,
+`cursor-cloud`, and `dsh`; roles are `review` and `implement`.
 
-Grok internal subagents are supported and enabled unless a request explicitly
-disables delegation. DSH's installed profile advertises its internal subagent
-and fork tools. Receipts distinguish supported, requested, and effective
-delegation; `effective` remains `unknown` unless provider output proves that a
-child actually ran. These are harness-internal workers, not extra public MCP
-tools and not Codex-native subagents.
+## Execution model
 
-## Install
+Grok and Cursor Local use ACP as their primary transport. DSH uses the
+official rc.7 ACP composition through ACPX. Cursor Cloud uses the official
+Cursor SDK. A local CLI fallback is allowed only when ACP fails before prompt
+dispatch. Once a prompt is dispatched, Co-Engineer never replays it through
+another transport. ACPX does not provide an authoritative prompt-sent
+acknowledgement, so DSH receipts use `dispatch_uncertain` after ACPX spawns and
+never fall back to CLI from that point.
 
-1. Install Node.js 24 or newer. Runtime packages support Node 24+, while the
-   reproducible maintainer release gate is intentionally pinned to Node major
-   24.
-2. Install and authenticate the official Grok Build CLI separately when using
-   `grok_build`, following [xAI's headless CLI instructions](https://docs.x.ai/build/cli/headless-scripting).
-   Use `grok login` (or `grok login --device-auth` on a remote host), or
-   provide `XAI_API_KEY` through the MCP server process environment.
-   Codex-Co-Engineer never installs the CLI, opens a browser, or accepts
-   credentials as tool arguments.
-3. Install and configure DeepSeek Harness separately when using DeepSeek jobs.
-4. Clone this repository and register
-   `plugins/plumbob-harness-control` as a local Codex plugin.
-5. Set the runtime environment described below before Codex starts the MCP
-   server. If the task sandbox makes the normal home directory read-only,
-   provide the host-provisioned `CODEX_TASK_STATE_ROOT` (Co-Engineer uses its
-   `codex-co-engineer` child directory), or an explicit
-   `CODEX_CO_ENGINEER_STATE_DIR`. Status reports the exact readiness reason and
-   dispatch fails before a DSH worker is submitted when no durable root is
-   usable.
+Cursor Local and DSH's official fallback CLIs take the prompt positionally,
+so it may be visible to other processes running as the same Unix user during
+that fallback. Grok fallback uses an owner-only prompt file.
 
-The plugin has no runtime npm dependencies. DeepSeek Harness and Grok Build are
-installed and authenticated independently. The public repository deliberately
-does not include generated Harness profiles, session logs, or credentials.
+Each local worker runs in a manager-owned transient `systemd --user` service
+with `KillMode=control-group` so cancellation reaches detached descendants and
+the worker survives the launching client. This
+is only a lifecycle/cleanup boundary, not a provider sandbox: the normal
+environment, credentials, network, filesystem, and shell capabilities are
+inherited unchanged. Local dispatch fails closed when Linux systemd or unified
+cgroup v2 is unavailable. Cursor Cloud uses the provider's remote runtime.
+
+### Local workspace modes
+
+Local tasks accept `workspace_mode`:
+
+- `managed` (default) creates and locks one `worktree-bootstrap` worktree
+  and branch per task.
+- `direct` runs against the supplied checkout and explicitly permits direct
+  mutation of it.
+
+Managed tasks follow:
+
+```text
+one task -> one worktree -> one branch -> one writer
+```
+
+If bootstrap fails before returning an authoritative receipt and path, the
+supervisor cannot safely identify or delete an unknown worktree. Inspect with
+`git worktree list` and `worktree-bootstrap` tooling, then clean only an exact
+identified task/lock.
+
+Reviews and implementations use the same provider capabilities; managed
+reviews inspect an isolated worktree instead of the caller's checkout.
+
+### Cursor Cloud and PRs
+
+Cursor Cloud uses a provider-managed branch, not a local worktree. The
+supplied repository must have a provider-accessible origin, and
+`starting_ref` must be an exact immutable commit SHA already pushed to that
+origin. A local branch name or unpushed work is not a valid cloud starting
+point.
+
+An exact SHA reachable only from a feature branch can remain invisible to
+Cursor until the branch is provider-visible through an open pull request or
+the default branch. Create the draft PR (or make the commit reachable from
+the default branch) before final Cloud acceptance. If the provider returns
+HTTP 400 for an otherwise-valid SHA, surface it as a visibility failure in
+the receipt and fix reachability before retrying; do not blindly replay the
+task.
+
+`create_pr` is Cursor Cloud-only and defaults to `false`. Local tasks reject
+it. Local implementations return their branch and handoff for Codex to
+inspect; Codex may push and open a PR only after verifying real commits.
+
+## Install and authentication
+
+Requirements:
+
+- Node.js 24 or newer (the release gate is pinned to Node 24)
+- Git and `worktree-bootstrap`
+- Linux with a working `systemd --user` manager, `systemd-run` 244 or
+  newer, and unified cgroup v2 for local providers
+- the official Grok Build CLI
+- `cursor-agent`
+- a Cursor Cloud API key
+- a Muse/Meta model API key for DSH
+
+From the installed plugin package directory—the directory containing
+`package.json` and `bin/setup.mjs`:
+
+```bash
+npm run setup
+npm run setup:check
+npm test
+```
+
+In a source checkout, that directory is
+`plugins/plumbob-harness-control`. For a Codex-managed installation, use the
+package path reported by Codex or its plugin manager instead of assuming a
+project-relative path.
+
+Setup installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and the cohesive
+official DSH `0.1.0-rc.7` composition. It writes a key-free DSH ACP
+configuration and owner-only session directory; it does not perform login.
+`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
+and `worktree-bootstrap` dependencies. It does not install or authenticate
+Grok or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or
+validate the Linux systemd/cgroup process boundary. Call the `status` tool
+after setup to check provider readiness; release and live host acceptance
+perform the process-boundary check before local dispatch.
+
+Authenticate providers normally so sessions persist across Codex tasks:
+
+```bash
+grok login
+cursor-agent login
+bin/set-model-api-key
+```
+
+DSH uses `MODEL_API_KEY`,
+`CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or the default owner-only
+`~/.config/codex-co-engineer/model-api-key`. Cursor Cloud uses
+`CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the existing owner-only
+`~/.config/cursor-cloud-control/api-key`. Credentials are never MCP
+arguments or task receipts.
 
 ## Configuration
 
-The MCP server receives configuration through its process environment. A
-portable example is in [`config/configuration.example.json`](../../config/configuration.example.json).
-
 | Variable | Purpose |
 | --- | --- |
-| `MODEL_API_KEY` | Provider credential, supplied by the environment or a secret manager. |
-| `XAI_API_KEY` | Optional xAI API key for the official Grok CLI; OAuth/session state remains under the normal user home. Never pass it as an MCP argument. |
-| `DSH_HOME` | Optional absolute DeepSeek Harness profile/state home. When omitted, Co-Engineer uses its managed `dsh-home` beneath the configured state directory and never falls back to the protected per-user DSH home. |
-| `CODEX_CO_ENGINEER_DSH_HOME` | Preferred explicit absolute DeepSeek Harness profile/state home. Relative paths fail closed. |
-| `CODEX_CO_ENGINEER_RUNTIME_WORKSPACE` | Default Git workspace selected only by an explicit `target_context.mode: "default"`; it is not prompt-derived authority. |
-| `CODEX_CO_ENGINEER_ALLOWED_ROOTS` | Optional path-delimited administrator allowlist for local Git roots. |
-| `CODEX_CO_ENGINEER_STATE_DIR` | Preferred owner-only state, SQLite ledger, cancellation markers, redacted logs, and the default managed DSH profile/state root. Must be absolute; an empty or relative value fails closed. |
-| `PLUMBOB_HARNESS_STATE_DIR` | Legacy explicit alias for `CODEX_CO_ENGINEER_STATE_DIR`; it is used only when the preferred variable is absent. |
-| `CODEX_TASK_STATE_ROOT` | Host-provisioned shared durable root. When component-specific settings are absent, Co-Engineer uses `${CODEX_TASK_STATE_ROOT}/codex-co-engineer`; an empty or relative value fails closed instead of falling back. |
-| `XDG_STATE_HOME` | Absolute fallback state root; Co-Engineer uses `${XDG_STATE_HOME}/codex-co-engineer` when no explicit or host-shared root is configured. A present empty or relative value fails closed instead of falling through to HOME. |
-| `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Optional protected file containing only the provider key; keep it outside the clone. |
-| `CODEX_CO_ENGINEER_DSH_COMMAND` | Optional DeepSeek Harness executable override; defaults to `dsh`; passed to `spawn` without a shell. |
-| `CODEX_CO_ENGINEER_GROK_COMMAND` | Optional direct Grok executable override; defaults to `grok`; passed to `spawn` without a shell. |
+| `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only task-state root. |
+| `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Owner-only DSH/Muse key file. |
+| `CODEX_CO_ENGINEER_DSH_ACP_CONFIG` | Absolute DSH ACP YAML path. |
+| `CURSOR_API_KEY_FILE` | Owner-only Cursor Cloud key file. |
+| `CODEX_CO_ENGINEER_GROK_COMMAND` | Grok executable override. |
+| `CODEX_CO_ENGINEER_CURSOR_COMMAND` | Cursor Local executable override. |
+| `CODEX_CO_ENGINEER_DSH_COMMAND` | DSH CLI fallback executable override. |
+| `CODEX_CO_ENGINEER_DSH_ACP_COMMAND` | DSH ACP server override. |
+| `CODEX_CO_ENGINEER_ACPX_COMMAND` | ACPX executable override. |
 
-Legacy `PLUMBOB_HARNESS_*` names remain compatibility aliases.
+The default state directory is
+`${XDG_STATE_HOME}/codex-co-engineer` or
+`~/.local/state/codex-co-engineer`. Task directories are `0700`; files are
+`0600`. Prompts, events, logs, and ACP/DSH session data remain owner-only
+until the operator removes the exact terminal task state.
 
-Every state path component is identity-revalidated without following symbolic
-links. Non-sticky group/world-writable ancestors are rejected (a sticky shared
-ancestor such as `/tmp` remains valid), and the final state and jobs directories
-must be owned by the process user with mode `0700`. The daemon log, lock, Unix
-socket, SQLite ledger, and any SQLite WAL/SHM sidecars are restricted to mode
-`0600`, one link, and the same owner. Node's synchronous SQLite API is path-only,
-so Co-Engineer pre-creates or validates the ledger with `O_EXCL|O_NOFOLLOW` and
-revalidates it before and after opening. The identity-bound `0700` directory is
-therefore the explicit same-uid trust boundary for the unavoidable path-open
-interval; pre-existing symlinks and other unsafe objects are rejected.
+## Handoff and cleanup
 
-## MCP tool calls
+Terminal managed tasks retain their worktree and branch for inspection. Poll
+`task`, then run:
 
-The seven MCP tools are intentionally narrow; removing Prime narrows only the
-accepted worker kinds and backend-specific fields.
+```bash
+worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
+worktree-bootstrap lock inspect TASK --repo /absolute/worktree
+worktree-bootstrap lock clean TASK --repo /absolute/worktree \
+  --policy dead-local --lock-id LOCK_ID
+git worktree remove /absolute/worktree
+```
 
-- `preflight` is read-only. Supply `schema_version`, `target_context`, and the
-  caller-computed `expected_target_fingerprint`. Set `kind` to `preflight`,
-  `deepseek_agent`, or `grok_build`. A Grok preflight may include the same typed
-  Grok options accepted by `run`.
-- `status` accepts optional `recent_limit` (`0`–`15`) and `diagnostics`. Recent
-  jobs and `jobs` action `list` return bounded summaries only; use `jobs`
-  action `get` for one job's effective configuration and lifecycle history.
-  The normal path is provider-free. `diagnostics: true` is the existing
-  explicit, bounded read-only `grok models` authentication probe; it is not a
-  capacity query and is never started automatically.
-- `capacity` is the one explicit provider-read surface. It is read-only and
-  accepts `providers` (`codex`, `grok`, or `dsh`), `refresh`, bounded
-  `max_age_seconds`, `include_usage`, `grok_session_id`, and `dsh_job_id`.
-  Codex reads official App Server rate-limit/credit data (and optional
-  account usage); Grok reads official ACP billing data (and optional exact
-  session usage). DSH/Muse account remaining capacity, reset time, and dollar
-  spend are unsupported and never inferred. DSH token usage is returned only
-  for an exact job with a validated trusted receipt.
-- Capacity snapshots are compact and cached independently per provider and
-  selector (60 seconds by default). `refresh: true` bypasses the cache;
-  failed refreshes retain the last known snapshot as `stale` with an error,
-  rather than fabricating zeros. Provider credentials come from the existing
-  configured sessions/environment; capacity never accepts credentials or
-  requests a per-call egress/authorization prompt.
-- `runtime` accepts `action: "start"` with the versioned target contract and a
-  bounded timeout, or `action: "stop"` to stop only the plugin-owned DeepSeek
-  UI job.
-- `run` requires `schema_version`, `kind`, `request_id`, `prompt`,
-  `target_context`, and `expected_target_fingerprint`. `kind` is exactly
-  `deepseek_agent` or `grok_build`; unknown and removed kinds fail closed.
-- `jobs` accepts `action: "list"`, `"get"`, `"wait"`, or `"logs"`. Waits are
-  bounded to 55 seconds per call and log reads use byte cursors.
-- `cancel` requires one exact `job_id` and signals only a process whose
-  ownership the plugin can prove.
+Use the exact lock ID; never delete a lock by hand. Remove only the matching
+branch and terminal task-state directory after the receipt is no longer
+needed. Direct-mode tasks have no managed worktree. Cursor Cloud agents are
+archived after terminal completion where supported; their remote branch or PR
+remains for Codex review.
 
-Minimal DeepSeek dispatch after a successful preflight:
+## Example
 
 ```json
 {
-  "schema_version": "codex-co-engineer.config.v1",
-  "kind": "deepseek_agent",
-  "request_id": "review-example-001",
-  "prompt": "Review the requested files and report findings.",
-  "target_context": {
-    "schema_version": "codex-co-engineer.target.v1",
-    "mode": "explicit",
-    "working_directory": "/absolute/path/to/checkout",
-    "expected_git_root": "/absolute/path/to/checkout",
-    "expected_head": "0123456789abcdef0123456789abcdef01234567",
-    "allowed_paths": ["src", "tests"],
-    "role": "review"
-  },
-  "expected_target_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  "task_id": "review-auth-1",
+  "provider": "grok",
+  "role": "review",
+  "repo": "/absolute/path/to/repository",
+  "workspace_mode": "managed",
+  "prompt": "Review authentication changes and report actionable findings."
 }
 ```
 
-For Grok, change `kind` to `grok_build` and optionally add typed fields such as
-`model`, `reasoning_effort`, `max_turns`, `sandbox_profile`, `allowed_tools`,
-or the structured-output controls described below. Credentials, executable
-paths, raw arguments, shell commands, environment maps, and provider URLs are
-never accepted in a tool call.
-
-Prefer a native per-user secret store. If a file is necessary, place it under
-the platform's user configuration directory, restrict it to the current user,
-and never put it under this repository or a Windows-mounted shared directory.
-
-## Target contract
-
-Every operation that dispatches work must resolve exactly one target before a
-worker starts. The target contract contains:
-
-- absolute `working_directory` and `expected_git_root`
-- expected Git `HEAD`
-- relative `allowed_paths`
-- `role`: `review`, `verify`, or `implement`
-- the caller's expected target fingerprint
-
-The connector canonicalizes the resolved target and configuration, computes
-digests, and fails closed on a mismatch. An explicit malformed target is an
-error; it never falls back to a default workspace. A prompt containing `cd`
-is descriptive text, not target authority. See
-[`docs/target-contract.md`](../../docs/target-contract.md) and
-[`examples/target-context.json`](../../examples/target-context.json).
-
-Review and verify roles are read-only. Implement roles are limited to their
-allowlist and must produce a recoverable patch only after scope verification.
-Never reuse a checkout marked tainted after timeout or cancellation until it
-has been inspected independently.
-
-## Preflight and lifecycle
-
-Run the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
-against the exact server command before dispatch. The preflight receipt must
-include the target fingerprint, resolved workspace and cwd, configuration
-digest, transport, protocol version, server identity, and available tools.
-The required shape and acceptance checks are documented in
-[`docs/preflight-inspector.md`](../../docs/preflight-inspector.md).
-
-Long-running jobs expose one lifecycle:
-
-`accepted → started → working → completed | failed | cancelled | timeout`
-
-Progress is bounded by an absolute deadline. The runner emits a heartbeat at
-approximately 15-second intervals (or sooner when state changes), including
-the phase, elapsed time, deadline, and last activity timestamp. Progress never
-extends the deadline. Client retries must reuse the same `request_id` and
-configuration fingerprint so uncertain transport cannot duplicate dispatch.
+For an implementation, use `role: "implement"`. A local managed task creates
+and locks its worktree before the provider starts.
 
 ## Data handling
 
-Prompts, repository excerpts, tool results, and attachments sent to a
-configured external model provider leave the local machine. Do not submit
-credentials, private keys, protected health information, production-only
-material, or unredacted customer data. Logs and job records must contain
-digests, bounded summaries, and redacted diagnostics—not full prompts,
-credentials, or payloads. Read [`docs/data-handling.md`](../../docs/data-handling.md)
-before enabling an external provider.
-
-## Grok Build controls
-
-`grok_build` invokes `grok --no-auto-update -p <prompt> --cwd <target>
---output-format streaming-json` directly by default; the official `--single`
-alias is equivalent to `-p`. Typed fields cover model,
-output format, UUID session selection, resume/continue/fork, reasoning effort,
-max turns, built-in sandbox profile, permission mode, rules, tool allow/deny lists,
-repeatable permission rules, automatic approval, bounded JSON Schema structured
-output, verbatim prompts, partial message streaming, and safe feature switches.
-Prompt text is one argv value; raw arguments, shell strings, executable paths,
-environment maps, provider URLs, prompt files, and system-prompt replacement
-are not exposed.
-
-`json_schema` accepts a JSON Schema object or boolean, is capped at 16 KiB after
-serialization, and forces `output_format: "json"`. `include_partial_messages`
-is accepted only with `streaming-messages-json`; `verbatim` is a boolean prompt
-transport control.
-
-Permission mode is role-dependent in the advertised MCP schema as well as at
-runtime. Review and verify accept omitted `permission_mode`, plus the legacy
-`default`/`plan` aliases and explicit `auto`, then normalize the effective
-receipt and argv to Grok's noninteractive `auto` mode inside the hard
-`read-only` sandbox. In that mode blocked tool calls fail back to the model;
-the sandbox still blocks repository writes. Automatic approval, `no_plan`, and
-write-capable allow rules are rejected. Headless implement runs omit the field
-or use Grok's noninteractive `auto` permission mode inside the bounded
-`workspace` sandbox because interactive approval modes can cancel edits when no
-approval channel exists.
-An implement run that exits without changing an allowed path is reported as a
-contract/integrity failure, not a generic provider process failure. The
-postflight Git scope verifier remains authoritative for `allowed_paths`.
-
-Sandbox enforcement remains owned by the official Grok CLI ([built-in sandbox
-profiles](https://docs.x.ai/build/features/sandbox)). The connector accepts
-only Grok's built-in `off`, `workspace`, `devbox`, `read-only`, and
-`strict` profiles, records the normalized profile in the effective
-configuration, and passes it as the exact `--sandbox <profile>` argument. The
-status summary reports `managed_by: "grok_cli"` and
-`enforcement: "cli_managed"`; it does not guess at host-specific Landlock or
-Seatbelt capabilities and does not attempt to emulate them. The connector
-still verifies the configured executable with `grok --version` and records
-actual process-start failures from the managed spawn.
-
-The official CLI also provides ACP through `grok agent stdio`. The connector
-uses ACP only for the `capacity` tool's read-only billing and exact session
-usage calls. Coding dispatch stays on the documented direct headless prompt
-interface; it is not routed through ACP and does not invent an ACP JSON-RPC
-proxy. Prompt-file/prompt-JSON input, system-prompt overrides, debug files,
-leader sockets, restore/worktree/ref controls, login/update commands,
-interactive UI commands, and agent/agents bundle selection are intentionally
-outside this release: each would bypass the target-bound prompt contract,
-lifecycle ownership, or credential boundary.
-Direct review and verify dispatch also rejects catch-all permission grants and
-project-local Grok, Cursor/Claude compatibility, or MCP configuration before
-provider startup; callers must use only explicit read-only tool rules and the
-connector-owned configuration. Grok account-capacity probes run from the fixed
-POSIX root rather than inheriting a repository working directory.
-The connector keeps a fixed bounded streaming parser, so unbounded/raw output
-schemas and provider-specific output contracts are not accepted.
-
-The packaged pinned ACPX runtime, bounded ACP proxy/ledger/schema helpers, and
-Grok Bubblewrap outer-runtime modules are conformance work only. They remain
-unwired: this release exposes no public session tool, direct `grok_build`
-continues to use the CLI-managed sandbox described above, and real
-host/systemd acceptance is still pending. The experimental outer boundary does
-not accept `XAI_API_KEY`; its credential design is an attested owner-only Grok
-authentication file. Do not treat the presence of these packaged modules as
-runtime readiness.
+Prompts and selected repository content may leave the machine for the chosen
+provider. Private repositories are supported when that provider is authorized
+to review them. Do not include credentials in prompts or repository files.
+Task receipts contain bounded output, provider/session identifiers, branch and
+PR information, lifecycle state, and runtime identity; they do not contain
+credentials or the full prompt.
 
 ## Development
 
 ```bash
-cd plugins/plumbob-harness-control
 npm test
+node ../../scripts/inspector-preflight.mjs
+npm pack . --dry-run --ignore-scripts --offline --json
 ```
 
-From the repository root, the release inventory check is:
-
-```bash
-node scripts/validate-release.mjs
-```
-
-Do not run provider-backed jobs in CI. Use fixture runners and local temporary
-Git repositories for target, lifecycle, timeout, cancellation, and redaction
-tests. See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) and
-[`SECURITY.md`](../../SECURITY.md).
+Live provider checks are opt-in host acceptance tests and do not run in
+GitHub CI. See the repository release documentation for the exact-tree gate.
