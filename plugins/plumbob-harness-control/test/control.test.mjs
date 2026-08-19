@@ -203,6 +203,11 @@ test('status and jobs list expose bounded job summaries while jobs get keeps det
     configuration_digest: 'sha256:' + 'c'.repeat(64),
   };
   const database = openStore(path.join(state, 'control.sqlite3'));
+  await writeFile(path.join(state, 'job.log'), [
+    JSON.stringify({ type: 'reasoning', text: 'private chain of thought must not be returned' }),
+    JSON.stringify({ type: 'text', text: 'final actionable finding' }),
+    JSON.stringify({ type: 'result', result: { status: 'completed' } }),
+  ].join('\n') + '\n');
   insertJob(database, {
     id: 'grok-build-compact-1234',
     kind: 'grok_build',
@@ -273,6 +278,8 @@ test('status and jobs list expose bounded job summaries while jobs get keeps det
   const detailed = await dispatchControl('jobs', { action: 'get', job_id: 'grok-build-compact-1234', tail_lines: 0 });
   assert.equal(detailed.job.effective_configuration.prompt, effectiveConfiguration.prompt);
   assert.equal(detailed.job.target_context.prompt_should_not_escape, targetContext.prompt_should_not_escape);
+  assert.equal(detailed.final_response.text, 'final actionable finding');
+  assert.equal(detailed.final_response.source, 'grok_streaming_json');
   assert.ok(Array.isArray(detailed.job.lifecycle));
 });
 
@@ -343,6 +350,143 @@ test('agent locks apply only to overlapping execution scopes', async () => {
   ), false);
 });
 
+test('active workspace locking does not depend on the bounded recent-job list', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-active-lock-query-test-'));
+  const state = path.join(directory, 'state');
+  const target = path.join(directory, 'target');
+  await mkdir(target);
+  assert.equal(spawnSync('git', ['init', '-q', target]).status, 0);
+  await writeFile(path.join(target, 'note.txt'), 'initial\n');
+  assert.equal(spawnSync('git', ['-C', target, 'add', 'note.txt']).status, 0);
+  assert.equal(spawnSync('git', [
+    '-C', target,
+    '-c', 'user.name=Co-Engineer Test',
+    '-c', 'user.email=co-engineer-test@example.invalid',
+    'commit', '-qm', 'initial',
+  ]).status, 0);
+  const previousState = process.env.CODEX_CO_ENGINEER_STATE_DIR;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = state;
+  context.after(async () => {
+    if (previousState === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previousState;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const { __testing, ToolError } = await import(`../mcp/control.mjs?active-lock-query=${Date.now()}`);
+  await mkdir(state, { mode: 0o700 });
+  const database = openStore(path.join(state, 'control.sqlite3'));
+  const newest = Date.now();
+  for (let index = 0; index < 120; index += 1) {
+    const createdAt = new Date(newest - index * 1000).toISOString();
+    insertJob(database, {
+      id: `completed-recent-${index}`,
+      kind: 'deepseek_agent',
+      status: 'succeeded',
+      lifecycle_state: 'completed',
+      terminal_state: 'completed',
+      summary: 'recent terminal fixture',
+      created_at: createdAt,
+      updated_at: createdAt,
+      finished_at: createdAt,
+      log_file: path.join(state, `completed-${index}.log`),
+      cancel_file: path.join(state, `completed-${index}.cancel`),
+    });
+  }
+  const activeCreatedAt = new Date(newest - 121000).toISOString();
+  insertJob(database, {
+    id: 'active-old-agent',
+    kind: 'deepseek_agent',
+    status: 'running',
+    lifecycle_state: 'working',
+    summary: 'old active fixture',
+    created_at: activeCreatedAt,
+    updated_at: activeCreatedAt,
+    child_pid: process.pid,
+    log_file: path.join(state, 'active.log'),
+    cancel_file: path.join(state, 'active.cancel'),
+    target_context: JSON.stringify({
+      working_directory: target,
+      expected_git_root: target,
+      git_common_directory: path.join(target, '.git'),
+      role: 'implement',
+    }),
+    effective_configuration: JSON.stringify({ working_directory: target }),
+  });
+  database.close();
+
+  await assert.rejects(
+    __testing.startAgentJob({
+      working_directory: target,
+      expected_git_root: target,
+      git_common_directory: path.join(target, '.git'),
+    }, () => 'must-not-start'),
+    (error) => error instanceof ToolError
+      && error.code === 'workspace_busy'
+      && /active-old-agent/.test(error.message),
+  );
+  const active = await __testing.listActiveJobs();
+  assert.deepEqual(active.map((job) => job.id), ['active-old-agent']);
+});
+
+test('cancellation persists before child ownership is proven and never signals a foreign PID', async (context) => {
+  const state = await mkdtemp(path.join(os.tmpdir(), 'plumbob-cancel-intent-test-'));
+  const previousState = process.env.CODEX_CO_ENGINEER_STATE_DIR;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = state;
+  context.after(async () => {
+    if (previousState === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previousState;
+    await rm(state, { recursive: true, force: true });
+  });
+
+  const { dispatchControl } = await import(`../mcp/control.mjs?cancel-intent=${Date.now()}`);
+  const database = openStore(path.join(state, 'control.sqlite3'));
+  const foreignCancelFile = path.join(state, 'foreign.cancel');
+  insertJob(database, {
+    id: 'foreign-running-job',
+    kind: 'grok_build',
+    status: 'running',
+    lifecycle_state: 'working',
+    summary: 'foreign PID fixture',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    child_pid: process.pid,
+    log_file: path.join(state, 'foreign.log'),
+    cancel_file: foreignCancelFile,
+  });
+  const acceptedCancelFile = path.join(state, 'accepted.cancel');
+  insertJob(database, {
+    id: 'accepted-no-child-job',
+    kind: 'deepseek_agent',
+    status: 'queued',
+    lifecycle_state: 'accepted',
+    summary: 'accepted cancellation fixture',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    log_file: path.join(state, 'accepted.log'),
+    cancel_file: acceptedCancelFile,
+  });
+  database.close();
+
+  const foreign = await dispatchControl('cancel', { job_id: 'foreign-running-job' });
+  assert.equal(foreign.ok, true);
+  assert.equal(foreign.job.termination_reason, 'cancel_requested');
+  assert.equal(foreign.job.signal_sent, null);
+  assert.equal(foreign.job.status, 'working');
+  assert.match(await readFile(foreignCancelFile, 'utf8'), /T/);
+
+  const accepted = await dispatchControl('cancel', { job_id: 'accepted-no-child-job' });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.job.terminal_state, 'cancelled');
+  assert.match(await readFile(acceptedCancelFile, 'utf8'), /T/);
+});
+
+test('DSH web permission follows the target role', async () => {
+  const { __testing } = await import(`../mcp/control.mjs?dsh-web-permission=${Date.now()}`);
+  assert.equal(__testing.dshWebPermissionMode('review'), 'read-only');
+  assert.equal(__testing.dshWebPermissionMode('verify'), 'read-only');
+  assert.equal(__testing.dshWebPermissionMode('implement'), 'workspace-write');
+});
+
 test('omitted, null, and unknown target fields fail without default fallback', async () => {
   const { __testing, dispatchControl, ToolError } = await import(`../mcp/control.mjs?strict-target=${Date.now()}`);
   await assert.rejects(
@@ -383,6 +527,70 @@ test('capacity dispatch validates bounded provider selectors before any provider
       && error.code === 'invalid_options'
       && /max_age_seconds/.test(error.message),
   );
+});
+
+test('production Grok capacity uses the administrator-selected executable', async (context) => {
+  const previousCommand = process.env.CODEX_CO_ENGINEER_GROK_COMMAND;
+  // This path must not be silently replaced by the literal `grok` fallback.
+  process.env.CODEX_CO_ENGINEER_GROK_COMMAND = '/definitely/missing/codex-test-grok';
+  context.after(() => {
+    if (previousCommand === undefined) delete process.env.CODEX_CO_ENGINEER_GROK_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_GROK_COMMAND = previousCommand;
+  });
+  const { dispatchControl } = await import(`../mcp/control.mjs?grok-capacity-command=${Date.now()}`);
+  const result = await dispatchControl('capacity', {
+    providers: ['grok'],
+    refresh: true,
+    max_age_seconds: 0,
+  });
+  assert.equal(result.providers[0].status, 'unavailable');
+  assert.deepEqual(result.providers[0].error, { code: 'capacity_query_failed' });
+});
+
+test('production Grok capacity sends bounded RPC to the selected executable from safe cwd', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-grok-capacity-selected-test-'));
+  const state = path.join(directory, 'state');
+  const invocation = path.join(directory, 'invocation.jsonl');
+  const fakeGrok = path.join(directory, 'selected-grok');
+  const fakeProgram = [
+    '#!/usr/bin/env node',
+    "const { appendFileSync } = require('node:fs');",
+    `appendFileSync(${JSON.stringify(invocation)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }) + '\\n');`,
+    "let buffer = '';",
+    'function respond(request) {',
+    "  const result = request.method === 'initialize' ? { protocolVersion: 1, authMethods: [] } : { config: { creditUsagePercent: 17 } };",
+    "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');",
+    '}',
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', (chunk) => { buffer += chunk; let newline; while ((newline = buffer.indexOf('\\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (line.trim()) respond(JSON.parse(line)); } });",
+    'process.stdin.resume();',
+    'const keepAlive = setInterval(() => {}, 1000);',
+    "process.stdin.on('end', () => clearInterval(keepAlive));",
+  ].join('\n');
+  await writeFile(fakeGrok, fakeProgram, { mode: 0o700 });
+  const previous = {
+    command: process.env.CODEX_CO_ENGINEER_GROK_COMMAND,
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+  };
+  process.env.CODEX_CO_ENGINEER_GROK_COMMAND = fakeGrok;
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = state;
+  context.after(async () => {
+    if (previous.command === undefined) delete process.env.CODEX_CO_ENGINEER_GROK_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_GROK_COMMAND = previous.command;
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    await rm(directory, { recursive: true, force: true });
+  });
+  const { dispatchControl } = await import(`../mcp/control.mjs?grok-capacity-selected=${Date.now()}`);
+  const result = await dispatchControl('capacity', {
+    providers: ['grok'],
+    refresh: true,
+    max_age_seconds: 0,
+  });
+  assert.equal(result.providers[0].status, 'available');
+  assert.equal(result.providers[0].capacity.used_percent, 17);
+  const calls = (await readFile(invocation, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+  assert.deepEqual(calls, [{ argv: ['agent', 'stdio'], cwd: '/' }]);
 });
 
 test('preflight rejects a caller fingerprint mismatch before dispatch', async (context) => {
@@ -444,6 +652,205 @@ test('preflight rejects a caller fingerprint mismatch before dispatch', async (c
     (error) => error instanceof ToolError
       && error.code === 'grok_read_only_target_unverifiable'
       && /built-in read-only profile permits provider writes/.test(error.message),
+  );
+});
+
+test('staging enforces one absolute deadline across Git and checkout scans', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-stage-deadline-test-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const { __testing, ToolError } = await import(`../mcp/control.mjs?stage-deadline=${Date.now()}`);
+  await assert.rejects(
+    __testing.runStageGit(
+      ['-c', 'alias.codex-deadline-wait=!sleep 5', 'codex-deadline-wait'],
+      'bounded staging deadline test',
+      Date.now() + 100,
+    ),
+    (error) => error instanceof ToolError && error.code === 'target_stage_timeout',
+  );
+  await assert.rejects(
+    __testing.assertStageSize(directory, Date.now() - 1),
+    (error) => error instanceof ToolError && error.code === 'target_stage_timeout',
+  );
+});
+
+test('local annotated tags resolve and bind their peeled commit', async (context) => {
+  const repository = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-annotated-tag-test-'));
+  context.after(() => rm(repository, { recursive: true, force: true }));
+  assert.equal(spawnSync('git', ['init', '-q', repository]).status, 0);
+  await writeFile(path.join(repository, 'note.txt'), 'annotated\n');
+  assert.equal(spawnSync('git', ['-C', repository, 'add', 'note.txt']).status, 0);
+  assert.equal(spawnSync('git', [
+    '-C', repository,
+    '-c', 'user.name=Codex-Co-Engineer Test',
+    '-c', 'user.email=codex-co-engineer@example.invalid',
+    'commit', '-qm', 'annotated',
+  ]).status, 0);
+  const head = spawnSync('git', ['-C', repository, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(spawnSync('git', [
+    '-C', repository,
+    '-c', 'user.name=Codex-Co-Engineer Test',
+    '-c', 'user.email=codex-co-engineer@example.invalid',
+    'tag', '-a', 'annotated-release', '-m', 'annotated release',
+  ]).status, 0);
+  const { __testing } = await import(`../mcp/control.mjs?annotated-ref=${Date.now()}`);
+  const resolved = await __testing.resolveLocalRef(
+    repository,
+    'refs/tags/annotated-release',
+    head,
+    Date.now() + 5000,
+  );
+  assert.deepEqual(resolved, { ref: 'refs/tags/annotated-release', commit: head });
+  const remoteResolved = await __testing.resolveGithubRef(
+    repository,
+    'refs/tags/annotated-release',
+    Date.now() + 5000,
+  );
+  assert.deepEqual(remoteResolved, { ref: 'refs/tags/annotated-release', commit: head });
+});
+
+test('control-plane binding computes the fingerprint and stages a clean local source outside its original path', async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-co-engineer-staging-test-'));
+  // Keep the source outside /tmp so the provider-writable-root policy can
+  // prove that only the staged copy is exposed when state itself is temporary.
+  const source = path.join(process.cwd(), `.codex-co-engineer-staging-source-${path.basename(directory)}`);
+  // Use an owner-controlled, non-provider-writable host location. The staged
+  // workflow intentionally rejects state beneath broad writable roots such as
+  // /tmp and /mnt/d, and the fixture must remain portable across CI users.
+  const state = path.join(
+    os.homedir(),
+    '.local',
+    'state',
+    `codex-co-engineer-staging-state-${path.basename(directory)}`,
+  );
+  await mkdir(source);
+  assert.equal(spawnSync('git', ['init', '-q', source]).status, 0);
+  await writeFile(path.join(source, 'note.txt'), 'initial\n');
+  assert.equal(spawnSync('git', ['-C', source, 'add', 'note.txt']).status, 0);
+  assert.equal(spawnSync('git', [
+    '-C', source,
+    '-c', 'user.name=Codex-Co-Engineer Test',
+    '-c', 'user.email=codex-co-engineer@example.invalid',
+    'commit', '-qm', 'initial',
+  ]).status, 0);
+  const previous = {
+    state: process.env.CODEX_CO_ENGINEER_STATE_DIR,
+    roots: process.env.CODEX_CO_ENGINEER_ALLOWED_ROOTS,
+  };
+  process.env.CODEX_CO_ENGINEER_STATE_DIR = state;
+  delete process.env.CODEX_CO_ENGINEER_ALLOWED_ROOTS;
+  context.after(async () => {
+    if (previous.state === undefined) delete process.env.CODEX_CO_ENGINEER_STATE_DIR;
+    else process.env.CODEX_CO_ENGINEER_STATE_DIR = previous.state;
+    if (previous.roots === undefined) delete process.env.CODEX_CO_ENGINEER_ALLOWED_ROOTS;
+    else process.env.CODEX_CO_ENGINEER_ALLOWED_ROOTS = previous.roots;
+    await rm(source, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  });
+
+  const { __testing, dispatchControl, ToolError } = await import(`../mcp/control.mjs?staging=${Date.now()}`);
+  const staged = await dispatchControl('preflight', {
+    schema_version: 'codex-co-engineer.config.v1',
+    kind: 'grok_build',
+    target_binding: 'control_plane',
+    target_context: {
+      schema_version: 'codex-co-engineer.target.v1',
+      mode: 'staged',
+      source: { type: 'local', path: source },
+      role: 'review',
+    },
+  });
+  assert.equal(staged.target_binding, 'control_plane');
+  assert.equal(staged.expected_target_fingerprint, staged.target_fingerprint);
+  assert.notEqual(staged.resolved_workspace, source);
+  assert.match(staged.resolved_workspace, /\/targets\/lease-[0-9a-f]{64}\/checkout$/);
+  assert.equal(staged.configuration.target_context.target_origin, 'control_plane_staged');
+  assert.equal(await stat(staged.resolved_workspace).then((value) => value.isDirectory()), true);
+  const leasePath = path.join(path.dirname(staged.resolved_workspace), 'lease.json');
+  const lease = JSON.parse(await readFile(leasePath, 'utf8'));
+  assert.equal(lease.schema_version, 'codex-co-engineer.target-lease.v1');
+  assert.equal(lease.resolved_head, staged.configuration.target_context.expected_head);
+
+  const stagedAgain = await dispatchControl('preflight', {
+    schema_version: 'codex-co-engineer.config.v1',
+    kind: 'grok_build',
+    target_binding: 'control_plane',
+    target_context: {
+      schema_version: 'codex-co-engineer.target.v1',
+      mode: 'staged',
+      source: { type: 'local', path: source },
+      role: 'review',
+    },
+  });
+  assert.equal(stagedAgain.resolved_workspace, staged.resolved_workspace);
+  assert.equal(stagedAgain.target_fingerprint, staged.target_fingerprint);
+
+  // Expired inactive leases are reclaimed before the next staging request;
+  // the deterministic descriptor still gives the caller the same checkout.
+  await writeFile(leasePath, JSON.stringify({
+    ...lease,
+    last_used_at: new Date(Date.now() - (2 * 24 * 60 * 60 * 1000)).toISOString(),
+  }));
+  const stagedAfterExpiry = await dispatchControl('preflight', {
+    schema_version: 'codex-co-engineer.config.v1',
+    kind: 'grok_build',
+    target_binding: 'control_plane',
+    target_context: {
+      schema_version: 'codex-co-engineer.target.v1',
+      mode: 'staged',
+      source: { type: 'local', path: source },
+      role: 'review',
+    },
+  });
+  assert.equal(stagedAfterExpiry.resolved_workspace, staged.resolved_workspace);
+
+  const explicit = await dispatchControl('preflight', {
+    schema_version: 'codex-co-engineer.config.v1',
+    target_binding: 'control_plane',
+    target_context: {
+      schema_version: 'codex-co-engineer.target.v1',
+      mode: 'explicit',
+      working_directory: source,
+      expected_git_root: source,
+      expected_head: spawnSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(),
+      allowed_paths: ['.'],
+      role: 'review',
+    },
+  });
+  assert.equal(explicit.target_binding, 'control_plane');
+  assert.equal(explicit.target_fingerprint, explicit.expected_target_fingerprint);
+  const sourceHead = spawnSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const reviewIdentity = await __testing.prepareTarget({
+    schema_version: 'codex-co-engineer.target.v1',
+    mode: 'explicit',
+    working_directory: source,
+    expected_git_root: source,
+    expected_head: sourceHead,
+    allowed_paths: ['.'],
+    role: 'review',
+  });
+  const verifyIdentity = await __testing.prepareTarget({
+    schema_version: 'codex-co-engineer.target.v1',
+    mode: 'explicit',
+    working_directory: source,
+    expected_git_root: source,
+    expected_head: sourceHead,
+    allowed_paths: ['note.txt'],
+    role: 'verify',
+  });
+  assert.notEqual(reviewIdentity.targetFingerprint, verifyIdentity.targetFingerprint);
+  await assert.rejects(
+    dispatchControl('preflight', {
+      schema_version: 'codex-co-engineer.config.v1',
+      target_binding: 'control_plane',
+      target_context: {
+        schema_version: 'codex-co-engineer.target.v1',
+        mode: 'staged',
+        source: { type: 'github', repository: 'https://github.com/example/repo?token=bad' },
+        role: 'review',
+      },
+    }),
+    (error) => error instanceof ToolError && error.code === 'invalid_target_source',
   );
 });
 

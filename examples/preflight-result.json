@@ -1,15 +1,18 @@
 {
-  "status": "passed",
-  "target_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "resolved_workspace": "/absolute/path/to/dsh-runtime-workspace",
+  "ok": true,
+  "schema_version": "codex-co-engineer.config.v1",
+  "target_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "expected_target_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "target_binding": "control_plane",
+  "target_match": true,
+  "resolved_workspace": "/absolute/path/to/local/checkouts/example",
   "resolved_cwd": "/absolute/path/to/local/checkouts/example",
-  "configuration_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "configuration_digest": "0000000000000000000000000000000000000000000000000000000000000000",
   "transport": "stdio",
   "protocol_version": "2025-11-25",
   "server_identity": {
     "name": "plumbob-harness-control",
-    "display_name": "Codex-Co-Engineer",
-    "version": "1.0.0"
+    "version": "2.2.0"
   },
-  "available_tools": ["status", "runtime", "run", "jobs", "cancel"]
+  "available_tools": ["preflight", "status", "capacity", "runtime", "run", "jobs", "cancel"]
 }

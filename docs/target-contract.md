@@ -12,9 +12,19 @@ administrator-allowlist violations before credentials, deduplication, or
 process startup.
 
 The target fingerprint is SHA-256 over canonical JSON containing the resolved
-workspace, cwd, Git common directory, exact HEAD, and filesystem device/inode
-identity. The caller computes or records this value independently and sends it
-as `expected_target_fingerprint`. A mismatch is fatal.
+workspace, cwd, Git common directory, exact HEAD, normalized `allowed_paths`,
+the authoritative `role`, and filesystem device/inode identity. Normal callers
+should set `target_binding: "control_plane"` and receive the exact binding from
+the control plane. Advanced callers may compute or record this value
+independently, omit `target_binding`, and send it as
+`expected_target_fingerprint`. A mismatch is fatal.
+
+For a staged private GitHub source, Git credentials must already be available
+noninteractively to the MCP server process through an owner-approved helper or
+secret-manager/askpass integration. Staging sets `GIT_TERMINAL_PROMPT=0`, so
+interactive credentials cannot be entered during clone or ref resolution.
+Repository URLs remain credential-free; credentials never belong in the
+target contract or tool arguments.
 
 Prompts are task content only. A prompt-level `cd`, path, or claimed HEAD never
 changes target authority.

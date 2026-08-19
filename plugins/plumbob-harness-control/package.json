@@ -1,6 +1,6 @@
 {
   "name": "plumbob-harness-control",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "private": false,
   "description": "Codex-Co-Engineer: a bounded MCP control plane for DeepSeek Harness and Grok Build jobs.",
   "license": "MIT",
@@ -11,6 +11,7 @@
   "files": [
     ".codex-plugin",
     ".mcp.json",
+    "LICENSE",
     "README.md",
     "assets",
     "bin",

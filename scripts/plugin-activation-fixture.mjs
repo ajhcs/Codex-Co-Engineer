@@ -29,8 +29,14 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const PLUGIN = 'fixture-plugin';
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const RELEASE_MANIFESTS = Object.freeze([
+  'plugins/plumbob-harness-control/.codex-plugin/plugin.json',
+  'plugins/cursor-cloud-control/.codex-plugin/plugin.json',
+]);
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const METADATA_FILE = '.codex-version.json';
 const NEXT_MARKER = '.next-';
@@ -63,6 +69,20 @@ async function exists(file) {
 
 async function readJson(file) {
   return JSON.parse(await readFile(file, 'utf8'));
+}
+
+async function currentReleaseVersions() {
+  const versions = {};
+  for (const relative of RELEASE_MANIFESTS) {
+    const manifest = await readJson(path.join(REPOSITORY_ROOT, relative));
+    assert.equal(typeof manifest.name, 'string', `${relative} must declare a plugin name`);
+    assert.match(manifest.name, VERSION_PATTERN, `${relative} declares an unsafe plugin name`);
+    assert.equal(typeof manifest.version, 'string', `${relative} must declare a plugin version`);
+    assert.match(manifest.version, VERSION_PATTERN, `${relative} declares an unsafe plugin version`);
+    assert.equal(versions[manifest.name], undefined, `duplicate release plugin ${manifest.name}`);
+    versions[manifest.name] = manifest.version;
+  }
+  return versions;
 }
 
 function digestFiles(files) {
@@ -385,6 +405,19 @@ async function runFixture() {
   const store = new ActivationFixture(tempRoot);
   await store.init();
   try {
+    const releaseVersions = await currentReleaseVersions();
+    for (const [plugin, version] of Object.entries(releaseVersions)) {
+      await store.stage(plugin, version, {
+        'release/VERSION': `${plugin}@${version}\n`,
+      });
+      await store.activate(plugin, version);
+      assert.equal(await store.activeVersion(plugin), version);
+      await store.lease(`release-${plugin}`, plugin, version);
+      assert.equal((await readJson(store.leaseFile(`release-${plugin}`))).version, version);
+      await store.releaseLease(`release-${plugin}`);
+      assert.deepEqual((await store.gc(plugin)).retained, [version]);
+    }
+
     const v1 = await store.stage(PLUGIN, '1.0.0', { 'skill/SKILL.md': 'version one\n' });
     const v2 = await store.stage(PLUGIN, '2.0.0', { 'skill/SKILL.md': 'version two\n' });
     const v3 = await store.stage(PLUGIN, '3.0.0', { 'skill/SKILL.md': 'version three\n' });

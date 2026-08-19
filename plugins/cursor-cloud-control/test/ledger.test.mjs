@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -45,6 +46,23 @@ function deferred() {
   let resolve;
   const promise = new Promise((fulfill) => { resolve = fulfill; });
   return { promise, resolve };
+}
+
+function runLedgerChild(stateDir, requestId) {
+  const source = `import { SubmissionLedger, requestDigest } from ${JSON.stringify(new URL('../mcp/ledger.mjs', import.meta.url).href)};
+const ledger = new SubmissionLedger({ stateDir: ${JSON.stringify(stateDir)}, lockTimeoutMs: 2000, lockRetryMs: 1, lockStaleMs: 25 });
+const digest = requestDigest('child', ${JSON.stringify(requestId)});
+try { await ledger.begin({ requestId: ${JSON.stringify(requestId)}, kind: 'child', digest }); process.stdout.write('ok'); }
+catch (error) { process.stdout.write(JSON.stringify({ code: error.code, message: error.message })); process.exitCode = 1; }`;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--no-warnings', '--input-type=module', '-e', source], { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, stdout, stderr }));
+  });
 }
 
 test('configured state is created owner-only and readiness does not create a ledger record', async (context) => {
@@ -110,6 +128,23 @@ test('definitive failures leave a retryable reservation instead of a pending rec
   assert.ok(retry.record.owner?.token);
 });
 
+test('provider-ID reservations still block a failed-request retry when another request is uncertain', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-provider-id-conflict-');
+  const stateDir = path.join(root, 'state');
+  const ledger = new SubmissionLedger({ stateDir });
+  const providerAgentId = 'bc-00000000-0000-0000-0000-000000000001';
+
+  await ledger.begin({ requestId: 'failed-request-1', kind: 'agents.create', digest, agentId: providerAgentId, providerAgentId });
+  await ledger.fail('failed-request-1', { failureCode: 'bad_request' });
+  await ledger.begin({ requestId: 'uncertain-request-2', kind: 'agents.create', digest: otherDigest, agentId: providerAgentId, providerAgentId });
+  await ledger.uncertain('uncertain-request-2', { agentId: providerAgentId });
+
+  await assertLedgerError(
+    () => ledger.begin({ requestId: 'failed-request-1', kind: 'agents.create', digest, agentId: providerAgentId, providerAgentId }),
+    'uncertain_submission',
+  );
+});
+
 test('finalization fails closed when the durable reservation disappears', async (context) => {
   const root = await stateFixture(context, 'cursor-ledger-missing-final-record-');
   const stateDir = path.join(root, 'state');
@@ -153,6 +188,57 @@ test('stale pending reservations become uncertain and persist reconciliation met
     () => restarted.begin({ requestId: 'stale-pending', kind: 'agents.create', digest }),
     'uncertain_submission',
   );
+});
+
+test('record cap evicts terminal history only and preserves all active reservations across restart', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-active-cap-');
+  const stateDir = path.join(root, 'state');
+  const ledger = new SubmissionLedger({ stateDir });
+  await ledger.init();
+  const current = new Date().toISOString();
+  const records = [
+    validRecord({ requestId: 'active-pending-first', updatedAt: current, status: 'pending' }),
+    ...Array.from({ length: 510 }, (_, index) => validRecord({ requestId: `terminal-${index.toString().padStart(3, '0')}`, status: 'completed' })),
+    validRecord({ requestId: 'active-uncertain-last', status: 'uncertain', agentId: 'agent-active', providerAgentId: 'agent-active' }),
+  ];
+  await writeFile(path.join(stateDir, 'submissions.json'), JSON.stringify({ version: 1, records }), { mode: 0o600 });
+
+  const restarted = new SubmissionLedger({ stateDir });
+  assert.equal((await restarted.lookup('active-pending-first')).status, 'pending');
+  assert.equal((await restarted.lookup('active-uncertain-last')).status, 'uncertain');
+  assert.equal((await restarted.lookup('terminal-000')), null);
+  assert.equal((await restarted.lookup('terminal-509')).status, 'completed');
+
+  await restarted.begin({ requestId: 'cap-trigger-write', kind: 'agents.create', digest });
+  const persisted = JSON.parse(await readFile(path.join(stateDir, 'submissions.json'), 'utf8')).records;
+  assert.ok(persisted.some((record) => record.requestId === 'active-pending-first'));
+  assert.ok(persisted.some((record) => record.requestId === 'active-uncertain-last'));
+  assert.ok(persisted.filter((record) => !['pending', 'uncertain'].includes(record.status)).length <= 500);
+});
+
+test('retry clears prior reconciliation metadata before starting a new attempt', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-retry-metadata-');
+  const stateDir = path.join(root, 'state');
+  const ledger = new SubmissionLedger({ stateDir });
+  const providerAgentId = 'agent-retry-metadata';
+  await ledger.begin({ requestId: 'retry-metadata-1', kind: 'agents.create', digest, agentId: providerAgentId, providerAgentId });
+  await ledger.uncertain('retry-metadata-1', {
+    agentId: providerAgentId,
+    providerAgentId,
+    reconciliationReason: 'old-observation',
+    reconciliationRequired: true,
+    reconciledAt: '2026-08-17T00:01:00.000Z',
+    staleAt: '2026-08-17T00:01:00.000Z',
+    recoveryReason: 'stale_pending',
+    failureCode: 'old_failure',
+    providerCode: 'old_provider_code',
+  });
+  await ledger.reconcile('retry-metadata-1', { agentId: providerAgentId });
+  const retry = await ledger.begin({ requestId: 'retry-metadata-1', kind: 'agents.create', digest, agentId: providerAgentId, providerAgentId });
+  assert.equal(retry.record.status, 'pending');
+  for (const field of ['reconciliationReason', 'reconciliationRequired', 'reconciledAt', 'staleAt', 'recoveryReason', 'failureCode', 'providerCode']) {
+    assert.equal(Object.hasOwn(retry.record, field), false, field);
+  }
 });
 
 test('a read queued during begin persistence cannot clear the in-flight record', async (context) => {
@@ -265,6 +351,71 @@ test('a live lock fails closed after the bounded wait instead of overwriting sta
     'ledger_lock_timeout',
   );
   await assert.rejects(readFile(path.join(stateDir, 'submissions.json'), 'utf8'), { code: 'ENOENT' });
+});
+
+test('a stale ownerless lock is reclaimed only after its age and directory identity remain stable', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-ownerless-stale-');
+  const stateDir = path.join(root, 'state');
+  await new SubmissionLedger({ stateDir }).init();
+  const lockDir = path.join(stateDir, 'submissions.lock');
+  await mkdir(lockDir, { mode: 0o700 });
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockDir, old, old);
+
+  const ledger = new SubmissionLedger({ stateDir, lockTimeoutMs: 100, lockRetryMs: 5, lockStaleMs: 1_000 });
+  const result = await ledger.begin({ requestId: 'ownerless-stale', kind: 'agents.create', digest });
+  assert.equal(result.duplicate, false);
+  assert.equal((await ledger.lookup('ownerless-stale')).status, 'pending');
+  await ledger.fail('ownerless-stale', { failureCode: 'test-cleanup' });
+  await assert.rejects(lstat(lockDir), { code: 'ENOENT' });
+});
+
+test('a stale malformed lock owner marker is reclaimable without weakening fresh-lock protection', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-malformed-lock-');
+  const stateDir = path.join(root, 'state');
+  await new SubmissionLedger({ stateDir }).init();
+  const lockDir = path.join(stateDir, 'submissions.lock');
+  await mkdir(lockDir, { mode: 0o700 });
+  await writeFile(path.join(lockDir, 'owner.json'), '{not-json', { mode: 0o600 });
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockDir, old, old);
+
+  const ledger = new SubmissionLedger({ stateDir, lockTimeoutMs: 100, lockRetryMs: 5, lockStaleMs: 1_000 });
+  const result = await ledger.begin({ requestId: 'malformed-stale', kind: 'agents.create', digest });
+  assert.equal(result.duplicate, false);
+  await ledger.fail('malformed-stale', { failureCode: 'test-cleanup' });
+  await assert.rejects(lstat(lockDir), { code: 'ENOENT' });
+
+  const freshLockDir = path.join(stateDir, 'submissions.lock');
+  await mkdir(freshLockDir, { mode: 0o700 });
+  await writeFile(path.join(freshLockDir, 'owner.json'), '{still-writing', { mode: 0o600 });
+  const blocked = new SubmissionLedger({ stateDir, lockTimeoutMs: 40, lockRetryMs: 5, lockStaleMs: 60_000 });
+  await assertLedgerError(
+    () => blocked.begin({ requestId: 'fresh-malformed', kind: 'agents.create', digest }),
+    'ledger_lock_timeout',
+  );
+  assert.equal((await lstat(freshLockDir)).isDirectory(), true);
+});
+
+test('independent processes contend on a stale lock without deleting the replacement owner marker', async (context) => {
+  const root = await stateFixture(context, 'cursor-ledger-independent-lock-race-');
+  const stateDir = path.join(root, 'state');
+  await new SubmissionLedger({ stateDir }).init();
+  const lockDir = path.join(stateDir, 'submissions.lock');
+  await mkdir(lockDir, { mode: 0o700 });
+  await writeFile(path.join(lockDir, 'owner.json'), JSON.stringify({ token: 'dead-owner', pid: 999_999, createdAt: Date.now() }), { mode: 0o600 });
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockDir, old, old);
+
+  const [first, second] = await Promise.all([
+    runLedgerChild(stateDir, 'independent-child-1'),
+    runLedgerChild(stateDir, 'independent-child-2'),
+  ]);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(second.code, 0, second.stderr);
+  const records = JSON.parse(await readFile(path.join(stateDir, 'submissions.json'), 'utf8')).records;
+  assert.deepEqual(records.map((record) => record.requestId).sort(), ['independent-child-1', 'independent-child-2']);
+  await assert.rejects(lstat(lockDir), { code: 'ENOENT' });
 });
 
 test('state-directory resolution honors explicit and shared configuration before XDG/HOME', async (context) => {

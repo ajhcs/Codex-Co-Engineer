@@ -94,6 +94,7 @@ const MAX_TOKEN = 128;
 const MAX_RULE = 240;
 const MAX_RULES = 32;
 const MAX_JSON_SCHEMA_BYTES = 16_384;
+export const GROK_FINAL_RESPONSE_MAX_CHARS = 12_000;
 const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+=-]{0,127}$/;
 const SAFE_AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_RULE = /^[^\u0000-\u001f\u007f]{1,240}$/;
@@ -637,4 +638,116 @@ export function grokBuildFailure(text) {
   // still proves the model recovered from a blocked tool call; leave the
   // process exit code to classify genuinely incomplete provider sessions.
   return sawText ? null : blockedToolFailure;
+}
+
+function responseText(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value.map((part) => responseText(part)).filter(Boolean).join('');
+  }
+  if (value && typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.data === 'string') return value.data;
+    if (typeof value.content === 'string') return value.content;
+    if (Array.isArray(value.content)) return responseText(value.content);
+    if (typeof value.output === 'string') return value.output;
+    if (value.message) return responseText(value.message);
+  }
+  return null;
+}
+
+/**
+ * Extract only the bounded final assistant response from Grok JSONL output.
+ * Reasoning/analysis/tool events are deliberately ignored. The control plane
+ * uses this for jobs-get convenience; the full provider log remains a
+ * separate cursor-paged diagnostic surface.
+ */
+export function grokBuildFinalResponse(text, maximum = GROK_FINAL_RESPONSE_MAX_CHARS) {
+  const source = String(text ?? '');
+  const chunks = [];
+  let terminalResult = null;
+  let sawStructuredEvent = false;
+  let terminalSuccess = false;
+  for (const line of source.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let event;
+    try { event = JSON.parse(trimmed); } catch { continue; }
+    const type = String(event?.type ?? '').toLowerCase();
+    if (type) sawStructuredEvent = true;
+    const role = String(event?.role ?? event?.message?.role ?? '').toLowerCase();
+    if (type === 'result') {
+      const status = String(event?.status ?? event?.state ?? event?.stopReason
+        ?? event?.stop_reason ?? '').toLowerCase();
+      const failed = Boolean(event?.error ?? event?.failure ?? event?.exception)
+        || ['error', 'failed', 'failure', 'exception', 'fatal', 'cancelled', 'canceled']
+          .includes(status);
+      if (!failed) terminalSuccess = true;
+      const candidate = responseText(event.result ?? event.text ?? event.data ?? event.message);
+      if (candidate) terminalResult = candidate;
+      continue;
+    }
+    if (type === 'end') {
+      const stopReason = String(event?.stopReason ?? event?.stop_reason ?? event?.status
+        ?? event?.state ?? '').toLowerCase();
+      terminalSuccess = !['error', 'failed', 'failure', 'exception', 'fatal', 'blocked',
+        'cancelled', 'canceled'].includes(stopReason);
+      continue;
+    }
+    if (type === 'text') {
+      if (event.reasoning === true || event.thinking === true || event.channel === 'reasoning') continue;
+      const candidate = responseText(event.data ?? event.text);
+      if (candidate) chunks.push(candidate);
+      continue;
+    }
+    if ((type === 'message' || type === 'assistant')
+      && (!role || role === 'assistant' || role === 'model')) {
+      if (event.reasoning === true || event.thinking === true || event.channel === 'reasoning') continue;
+      const candidate = responseText(event.content ?? event.text ?? event.data ?? event.message);
+      if (candidate) chunks.push(candidate);
+    }
+  }
+  // Streaming records are only a final response after a successful terminal
+  // event. In particular, a reasoning record has a `text` field but is not an
+  // assistant response, and an interrupted stream must not be presented as a
+  // completed report.
+  if (sawStructuredEvent && !terminalSuccess) return null;
+  // The official `--output-format json` mode emits one raw JSON document
+  // instead of JSONL event envelopes. Accept only a bounded final response
+  // field from that document; reasoning/tool payloads remain excluded.
+  if (!sawStructuredEvent && !terminalResult && chunks.length === 0) {
+    try {
+      const document = JSON.parse(source.trim());
+      if (document && typeof document === 'object' && !Array.isArray(document)) {
+        const status = String(document.status ?? document.state ?? document.stopReason
+          ?? document.stop_reason ?? '').toLowerCase();
+        const failed = Boolean(document.error ?? document.failure ?? document.exception)
+          || ['error', 'failed', 'failure', 'exception', 'fatal', 'blocked', 'cancelled', 'canceled']
+            .includes(status);
+        const hasExplicitResult = Object.hasOwn(document, 'result')
+          || Object.hasOwn(document, 'response')
+          || Object.hasOwn(document, 'final_response')
+          || Object.hasOwn(document, 'output');
+        if (!failed && hasExplicitResult) {
+          terminalResult = responseText(
+            document.result
+              ?? document.response
+              ?? document.final_response
+              ?? document.output,
+          );
+        }
+      }
+    } catch {
+      // Streaming output is parsed line-by-line above; malformed raw JSON is
+      // intentionally treated as having no final response.
+    }
+  }
+  const value = (terminalResult ?? chunks.join('')).trim();
+  if (!value) return null;
+  const bounded = value.length <= maximum ? value : `${value.slice(0, maximum - 1)}…`;
+  return {
+    text: bounded,
+    truncated: bounded.length < value.length,
+    characters: value.length,
+  };
 }

@@ -7,19 +7,27 @@ description: Use Codex-Co-Engineer to control and monitor target-bound DeepSeek 
 
 Use the plugin tools instead of shell commands for dispatch, monitoring, and
 cancellation. The stable MCP server identifier is `plumbob-harness-control`.
+This skill ships with Co-Engineer `2.2.0`; the identifier is kept stable across
+releases for existing Codex configurations.
 
-1. Run `status` when adapter or control-plane state is unknown.
+1. Run the Co-Engineer MCP `status` tool when adapter or control-plane state is unknown.
 2. Complete the MCP Inspector preflight before dispatching work.
 3. Validate one strict target contract for every dispatch.
-4. Call `run` with a stable `request_id` and the caller's expected fingerprint.
+4. For normal use, call the Co-Engineer MCP `run` tool with a stable
+   `request_id` and `target_binding: "control_plane"`; the connector computes
+   and binds the exact target identity.
+   Advanced callers may omit `target_binding` and provide their own
+   `expected_target_fingerprint` assertion.
    Select `kind: "grok_build"` for the official Grok CLI; use only the typed
    Grok fields in its schema, including bounded `json_schema` only with JSON
    output and `include_partial_messages` only with Messages-format streaming.
    The server passes OAuth/session state through Grok's normal user environment
    and does not accept xAI credentials.
-5. Use `jobs` with `until: "terminal"` to monitor a long-running job.
-6. Use `cancel` only after the user explicitly requests cancellation.
-7. Use the explicit read-only `capacity` tool when provider capacity or usage
+5. Use the Co-Engineer MCP `jobs` tool with `until: "terminal"` to monitor a
+   long-running job.
+6. Use the Co-Engineer MCP `cancel` tool only after the user explicitly
+   requests cancellation.
+7. Use the explicit read-only Co-Engineer MCP `capacity` tool when provider capacity or usage
    affects routing. Select `codex`, `grok`, and/or `dsh`; use `include_usage`
    for optional Codex usage, `grok_session_id` for exact Grok session usage,
    and `dsh_job_id` for an exact DSH receipt.
@@ -81,8 +89,9 @@ private material.
 
 ## Capacity and provider boundaries
 
-`status` remains a compact provider-free health check on its normal path.
-`capacity` is the sole explicit provider-read surface. It uses the official
+The Co-Engineer MCP `status` tool remains a compact provider-free health check
+on its normal path. The Co-Engineer MCP `capacity` tool is the sole explicit
+provider-read surface. It uses the official
 Codex App Server rate-limit/credit endpoints and Grok ACP billing/session
 usage methods. Results are compact and cached independently per provider and
 selector; the default 60-second cache can be bypassed with `refresh: true`.
@@ -100,7 +109,7 @@ accepts credentials or asks for a per-call egress/authorization prompt.
 
 Grok Build coding dispatch uses its documented direct headless prompt
 interface. The ACP `grok agent stdio` interface is used only for the
-read-only `capacity` billing and session-usage calls; it is not a coding
+read-only Co-Engineer MCP `capacity` billing and session-usage calls; it is not a coding
 dispatch transport. Grok and DSH may use their own internal subagent tools.
 Record delegation as supported/requested/effective and keep `effective:
 unknown` unless runtime evidence proves it; do not present those
@@ -110,7 +119,8 @@ peer workers.
 
 Do not call or advertise a public ACP session surface. The packaged ACPX,
 bounded-proxy, and Grok outer-runtime modules are gated experimental
-conformance components and are not wired into `run`. Direct Grok dispatch still
+conformance components and are not wired into the Co-Engineer MCP `run` tool.
+Direct Grok dispatch still
 uses the official CLI-managed sandbox. The outer experiment supports an
 attested auth file, not `XAI_API_KEY`, and still requires real host/systemd
 acceptance.

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -21,6 +22,18 @@ import {
 import { modelApiKeyBindingDigest } from '../mcp/secrets.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+async function daemonProcessMatches(record) {
+  try {
+    const statText = await readFile(`/proc/${record.pid}/stat`, 'utf8');
+    const closingParenthesis = statText.lastIndexOf(')');
+    if (closingParenthesis < 0) return false;
+    const fields = statText.slice(closingParenthesis + 2).trim().split(/\s+/u);
+    return fields[0] !== 'Z' && fields[19] === record.start_time;
+  } catch {
+    return false;
+  }
+}
 
 function socketRpc(socketFile, message) {
   return new Promise((resolve, reject) => {
@@ -46,6 +59,19 @@ function socketRpc(socketFile, message) {
       }
     });
   });
+}
+
+async function waitForSocket(socketFile, timeoutMilliseconds = 3000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    try {
+      if ((await lstat(socketFile)).isSocket()) return;
+    } catch {
+      // The daemon may still be creating its state directory and socket.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for daemon socket: ${socketFile}`);
 }
 
 async function verifiedShutdown(socketFile, prepared) {
@@ -391,6 +417,59 @@ test('server and daemon use the same XDG_STATE_HOME path when no explicit root i
   assert.equal(stillLive.result?.ok, true);
 
   await verifiedShutdown(socketFile, prepared);
+});
+
+test('daemon treats a malformed idle timeout as the safe default instead of draining immediately', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-daemon-idle-config-'));
+  const state = path.join(root, 'state');
+  const socketFile = path.join(state, 'control.sock');
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => ![
+    'CODEX_CO_ENGINEER_STATE_DIR',
+    'PLUMBOB_HARNESS_STATE_DIR',
+    'CODEX_TASK_STATE_ROOT',
+    'XDG_STATE_HOME',
+    'CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS',
+    'PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS',
+    'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
+    'PLUMBOB_HARNESS_MODEL_API_KEY_FILE',
+  ].includes(name)));
+  const daemon = spawn(process.execPath, [path.join(ROOT, 'mcp', 'daemon.mjs')], {
+    cwd: ROOT,
+    env: {
+      ...inherited,
+      MODEL_API_KEY: '',
+      CODEX_CO_ENGINEER_STATE_DIR: state,
+      CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS: 'not-a-duration',
+      CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: path.join(root, 'missing-model-key'),
+    },
+    stdio: 'ignore',
+  });
+
+  try {
+    await waitForSocket(socketFile);
+    const daemonRecord = JSON.parse(await readFile(path.join(state, 'daemon.pid'), 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(await daemonProcessMatches(daemonRecord), true);
+  } finally {
+    if (daemon.exitCode === null) {
+      try {
+        const prepared = await prepareStateDirectory(state);
+        if ((await lstat(socketFile)).isSocket()) await verifiedShutdown(socketFile, prepared);
+      } catch {
+        daemon.kill('SIGTERM');
+      }
+    }
+    if (daemon.exitCode === null) {
+      await Promise.race([
+        once(daemon, 'exit'),
+        new Promise((resolve) => setTimeout(() => {
+          daemon.kill('SIGKILL');
+          resolve();
+        }, 2000)),
+      ]);
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('server refuses a symlinked SQLite ledger without touching its target', async (context) => {

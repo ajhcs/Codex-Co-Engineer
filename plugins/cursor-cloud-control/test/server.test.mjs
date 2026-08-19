@@ -10,6 +10,8 @@ import { CursorCloudService, TOOLS, handleToolCall, projectIdentity, runStdio } 
 
 const agentId = 'bc-00000000-0000-0000-0000-000000000001';
 const runId = 'run-00000000-0000-0000-0000-000000000001';
+const otherAgentId = 'bc-00000000-0000-0000-0000-000000000002';
+const otherRunId = 'run-00000000-0000-0000-0000-000000000002';
 
 class FakeClient {
   constructor() {
@@ -21,6 +23,8 @@ class FakeClient {
     this.failCreateAgent = null;
     this.afterCreateAgent = null;
     this.failFollowup = false;
+    this.notFoundAgent = false;
+    this.notFoundRuns = false;
     this.failRepositories = null;
     this.modelCatalog = {
       items: [{
@@ -55,7 +59,8 @@ class FakeClient {
       this.resolveCreateAgentStarted();
       await new Promise((resolve) => { this.releaseCreateAgent = resolve; });
     }
-    const response = { agent: { id: body.agentId, name: 'unit-secret-value', status: 'ACTIVE' }, run: { id: runId, agentId: body.agentId, status: 'CREATING' } };
+    const assignedAgentId = body.agentId ?? agentId;
+    const response = { agent: { id: assignedAgentId, name: 'unit-secret-value', status: 'ACTIVE' }, run: { id: runId, agentId: assignedAgentId, status: 'CREATING' } };
     if (this.afterCreateAgent) await this.afterCreateAgent();
     return response;
   }
@@ -76,8 +81,16 @@ class FakeClient {
   async models(options) { this.calls.push(['models', options]); return this.modelCatalog; }
 
   async listAgents(query) { this.calls.push(['listAgents', query]); return { items: [{ id: agentId }], nextCursor: 'next' }; }
-  async getAgent(id) { this.calls.push(['getAgent', id]); return { id, latestRunId: runId }; }
-  async listRuns(id, query) { this.calls.push(['listRuns', id, query]); return { items: [{ id: runId, agentId: id, status: 'FINISHED' }] }; }
+  async getAgent(id) {
+    this.calls.push(['getAgent', id]);
+    if (this.notFoundAgent) throw new CursorApiError('not_found', 'Cursor API returned HTTP 404.', { status: 404 });
+    return { id, latestRunId: runId };
+  }
+  async listRuns(id, query) {
+    this.calls.push(['listRuns', id, query]);
+    if (this.notFoundRuns) throw new CursorApiError('not_found', 'Cursor API returned HTTP 404.', { status: 404 });
+    return { items: [{ id: runId, agentId: id, status: 'FINISHED' }] };
+  }
   async getRun(id, run) { this.calls.push(['getRun', id, run]); return { id: run, agentId: id, status: 'FINISHED', result: 'done' }; }
   async cancelRun(id, run) { this.calls.push(['cancelRun', id, run]); return { id: run }; }
   async usage(id, run) { this.calls.push(['usage', id, run]); return { totalUsage: { totalTokens: 1 }, runs: [{ id: run ?? runId }] }; }
@@ -99,7 +112,7 @@ class ConcurrentSecretClient extends FakeClient {
     if (secret === 'resolved-secret-a') {
       this.resolveFirstCreateStarted();
       await new Promise((resolve) => { this.releaseFirstCreate = resolve; });
-      return { agent: { id: body.agentId, detail: secret }, run: { id: runId, agentId: body.agentId, status: 'CREATING' } };
+      return { agent: { id: agentId, detail: secret }, run: { id: runId, agentId, status: 'CREATING' } };
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
     throw new CursorApiError('bad_request', `provider rejected ${secret}`);
@@ -412,6 +425,103 @@ test('create maps official fields, safe defaults, redacted receipts, and dedupli
   assert.equal(prCall[1].skipReviewerRequest, true);
 });
 
+test('a successful create response without a provider agent ID remains uncertain and is never retried', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.createAgent = async (body) => {
+    client.calls.push(['createAgent', body]);
+    return { run: { id: runId, status: 'CREATING' } };
+  };
+  const args = { action: 'create', requestId: 'create-empty-success-1', prompt: { text: 'response body is incomplete' } };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+  const second = await handleToolCall('agents', args, service);
+  assert.equal(second.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('an explicit create ID does not turn an ID-less 2xx response into a completed receipt', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.createAgent = async (body) => {
+    client.calls.push(['createAgent', body]);
+    return { run: { id: runId, status: 'CREATING' } };
+  };
+  const args = {
+    action: 'create', requestId: 'create-explicit-id-empty-success-1', agentId,
+    prompt: { text: 'provider response omits its ID' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.status, 'uncertain');
+  assert.equal(record.providerAgentId, agentId);
+  assert.equal(record.agentId, null);
+  const second = await handleToolCall('agents', args, service);
+  assert.equal(second.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('provider-assigned create reconciliation never attributes a pre-existing fingerprint match', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.createAgent = async (body) => {
+    client.calls.push(['createAgent', body]);
+    return {};
+  };
+  client.listAgents = async (query) => {
+    client.calls.push(['listAgents', query]);
+    return { items: [{ id: agentId, name: 'recoverable-agent', prompt: 'recover this exact task', model: { id: 'provider-model' } }] };
+  };
+  const args = {
+    action: 'create', requestId: 'create-fingerprint-recovery-1', name: 'recoverable-agent',
+    model: { id: 'provider-model' }, prompt: { text: 'recover this exact task' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  const reconciled = await handleToolCall('agents', { action: 'reconcile', requestId: args.requestId }, service);
+  assert.equal(reconciled.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('explicit create ID mismatch remains uncertain and never finalizes the returned agent', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.createAgent = async (body) => {
+    client.calls.push(['createAgent', body]);
+    return { agent: { id: 'bc-00000000-0000-0000-0000-000000000002' }, run: { id: runId, status: 'CREATING' } };
+  };
+  const args = {
+    action: 'create', requestId: 'create-provider-id-mismatch-1', agentId,
+    prompt: { text: 'provider must honor exact requested ID' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.status, 'uncertain');
+  assert.equal(record.providerAgentId, agentId);
+  assert.equal(record.providerReturnedAgentId, 'bc-00000000-0000-0000-0000-000000000002');
+  const second = await handleToolCall('agents', args, service);
+  assert.equal(second.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('create does not finalize a run returned for a different agent', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.createAgent = async (body) => {
+    client.calls.push(['createAgent', body]);
+    return { agent: { id: agentId }, run: { id: runId, agentId: otherAgentId, status: 'CREATING' } };
+  };
+  const args = {
+    action: 'create', requestId: 'create-provider-run-mismatch-1', agentId,
+    prompt: { text: 'do not bind a cross-agent run' },
+  };
+  const result = await handleToolCall('agents', args, service);
+  assert.equal(result.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.status, 'uncertain');
+  assert.equal(record.providerReturnedRunAgentId, otherAgentId);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
 test('create receipts separate requested model while leaving effective model unknown', async (context) => {
   const { client, service } = await serviceFixture(context);
   const requested = { id: 'provider-requested', params: [{ id: 'reasoning', value: 'deep' }] };
@@ -612,7 +722,7 @@ test('concurrent MCP secret resolution cannot cross-contaminate delayed success 
   assert.equal(second.structuredContent.error.message, 'provider rejected [REDACTED]');
 });
 
-test('concurrent identical generated-ID creates share one submission and preserve duplicate receipt', async (context) => {
+test('concurrent identical provider-assigned creates share one submission and preserve duplicate receipt', async (context) => {
   const { client, service } = await serviceFixture(context);
   client.blockCreateAgent = true;
   const args = { action: 'create', requestId: 'concurrent-create-1', prompt: { text: 'same caller intent' } };
@@ -626,9 +736,10 @@ test('concurrent identical generated-ID creates share one submission and preserv
 
   client.releaseCreateAgent();
   const first = await firstPromise;
+  assert.equal(Object.hasOwn(client.calls[0][1], 'agentId'), false, 'generated reservation IDs must not be sent to Cursor');
   assert.equal(first.structuredContent.ok, true);
   assert.equal(first.structuredContent.receipt.duplicate, false);
-  assert.match(first.structuredContent.receipt.agentId, /^bc-/);
+  assert.equal(first.structuredContent.receipt.agentId, agentId);
 
   const duplicate = await handleToolCall('agents', args, service);
   assert.equal(duplicate.structuredContent.ok, true);
@@ -636,6 +747,32 @@ test('concurrent identical generated-ID creates share one submission and preserv
   assert.equal(duplicate.structuredContent.receipt.agentId, first.structuredContent.receipt.agentId);
   assert.equal(duplicate.structuredContent.receipt.requestDigest, first.structuredContent.receipt.requestDigest);
   assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('provider-assigned creates omit local IDs and keep different request IDs independent', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = { action: 'create', requestId: 'reconcile-assigned-1', prompt: { text: 'provider assigns the ID' } };
+
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.providerAgentId, null);
+  assert.equal(Object.hasOwn(client.calls[0][1], 'agentId'), false);
+
+  client.failCreateAgent = null;
+  const newRequest = await handleToolCall('agents', {
+    action: 'create', requestId: 'reconcile-assigned-2', envVars: {}, prompt: { text: 'do not duplicate' },
+  }, service);
+  assert.equal(newRequest.structuredContent.ok, true);
+  const missingTarget = await handleToolCall('agents', { action: 'reconcile', requestId: args.requestId }, service);
+  assert.equal(missingTarget.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'getAgent').length, 0);
+  const attemptedBinding = await handleToolCall('agents', {
+    action: 'reconcile', requestId: args.requestId, agentId,
+  }, service);
+  assert.equal(attemptedBinding.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'getAgent').length, 0);
 });
 
 test('definitive create failure leaves a retryable reservation', async (context) => {
@@ -651,6 +788,64 @@ test('definitive create failure leaves a retryable reservation', async (context)
   assert.equal(retry.structuredContent.ok, true);
   assert.equal(retry.structuredContent.receipt.duplicate, false);
   assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 2);
+});
+
+test('known Cursor agent-id conflicts are definitive and preserve the provider code', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const originalCreate = client.createAgent.bind(client);
+  client.createAgent = async (body) => {
+    client.calls.push(['createAgent', body]);
+    if (client.calls.filter((call) => call[0] === 'createAgent').length === 1) {
+      throw new CursorApiError('conflict', 'Cursor rejected the requested agent ID.', {
+        status: 409,
+        providerCode: 'agent_id_conflict',
+      });
+    }
+    return originalCreate(body);
+  };
+  const args = {
+    action: 'create', requestId: 'agent-id-conflict-1', agentId,
+    prompt: { text: 'retry after definitive conflict' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'conflict');
+  const failed = await service.ledger.lookup(args.requestId);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.providerCode, 'agent_id_conflict');
+  const retry = await handleToolCall('agents', args, service);
+  assert.equal(retry.structuredContent.ok, true);
+  assert.equal(retry.structuredContent.receipt.duplicate, false);
+});
+
+test('HTTP 429 rate limits are definitive and preserve the provider code', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const originalCreate = client.createAgent.bind(client);
+  let attempts = 0;
+  client.createAgent = async (body) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new CursorApiError('rate_limited', 'Cursor rate limit reached.', {
+        status: 429,
+        retryable: true,
+        providerCode: 'rate_limit_exceeded',
+      });
+    }
+    return originalCreate(body);
+  };
+  const args = {
+    action: 'create', requestId: 'rate-limit-definitive-1', agentId,
+    prompt: { text: 'retry after definitive rate limit' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'rate_limited');
+  const failed = await service.ledger.lookup(args.requestId);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.providerCode, 'rate_limit_exceeded');
+
+  const retry = await handleToolCall('agents', args, service);
+  assert.equal(retry.structuredContent.ok, true);
+  assert.equal(retry.structuredContent.receipt.duplicate, false);
+  assert.equal(attempts, 2);
 });
 
 test('retryable upstream mutation failures remain uncertain and are never resubmitted', async (context) => {
@@ -670,6 +865,166 @@ test('retryable upstream mutation failures remain uncertain and are never resubm
   assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
 });
 
+test('explicit provider-404 reconciliation releases an uncertain create reservation without duplicating it', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = {
+    action: 'create', requestId: 'reconcile-create-1', agentId,
+    prompt: { text: 'submit once, then reconcile' },
+  };
+
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+
+  const sameRequest = await handleToolCall('agents', args, service);
+  assert.equal(sameRequest.structuredContent.error.code, 'uncertain_submission');
+
+  const newRequestSameAgent = await handleToolCall('agents', {
+    ...args, requestId: 'reconcile-create-2',
+  }, service);
+  assert.equal(newRequestSameAgent.structuredContent.error.code, 'uncertain_submission');
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+
+  client.notFoundAgent = true;
+  client.notFoundRuns = true;
+  const reconciled = await handleToolCall('agents', {
+    action: 'reconcile', requestId: args.requestId,
+  }, service);
+  assert.equal(reconciled.structuredContent.ok, true);
+  assert.deepEqual(reconciled.structuredContent.provider, {
+    agent: 'not_found', runs: 'not_found', reservation: 'released',
+  });
+  assert.equal(reconciled.structuredContent.status, 'failed');
+  assert.equal(reconciled.structuredContent.agentId, agentId);
+  assert.equal((await service.ledger.lookup(args.requestId)).reconciliationReason, 'provider_not_found');
+  assert.deepEqual(client.calls.slice(-4), [
+    ['getAgent', agentId], ['listRuns', agentId, {}],
+    ['getAgent', agentId], ['listRuns', agentId, {}],
+  ]);
+
+  client.failCreateAgent = null;
+  client.notFoundAgent = false;
+  client.notFoundRuns = false;
+  const retry = await handleToolCall('agents', args, service);
+  assert.equal(retry.structuredContent.ok, true);
+  assert.equal(retry.structuredContent.receipt.duplicate, false);
+  const newRequestAfterReconcile = await handleToolCall('agents', {
+    ...args, requestId: 'reconcile-create-2',
+  }, service);
+  assert.equal(newRequestAfterReconcile.structuredContent.ok, true);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 3);
+});
+
+test('one provider 404 is not enough to release an uncertain create reservation', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = {
+    action: 'create', requestId: 'reconcile-create-3', agentId,
+    prompt: { text: 'confirm both provider paths' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+
+  client.notFoundAgent = true;
+  const incomplete = await handleToolCall('agents', {
+    action: 'reconcile', requestId: args.requestId,
+  }, service);
+  assert.equal(incomplete.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+  assert.deepEqual(client.calls.slice(-4), [
+    ['getAgent', agentId], ['listRuns', agentId, {}],
+    ['getAgent', agentId], ['listRuns', agentId, {}],
+  ]);
+});
+
+test('reconciliation of a provider-visible agent finalizes completed without resubmitting', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = {
+    action: 'create', requestId: 'reconcile-create-4', agentId,
+    prompt: { text: 'agent may already exist' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  client.failCreateAgent = null;
+
+  const reconciled = await handleToolCall('agents', {
+    action: 'reconcile', requestId: args.requestId,
+  }, service);
+  assert.equal(reconciled.structuredContent.ok, true);
+  assert.equal(reconciled.structuredContent.provider.agent, 'found');
+  assert.equal(reconciled.structuredContent.status, 'completed');
+  assert.equal(reconciled.structuredContent.runId, runId);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+  const duplicate = await handleToolCall('agents', args, service);
+  assert.equal(duplicate.structuredContent.ok, true);
+  assert.equal(duplicate.structuredContent.receipt.duplicate, true);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('agent reconciliation rejects a mismatched provider object without releasing', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = {
+    action: 'create', requestId: 'reconcile-agent-identity-mismatch-1', agentId,
+    prompt: { text: 'reconcile one exact agent' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  client.getAgent = async (requestedAgentId) => {
+    client.calls.push(['getAgent', requestedAgentId]);
+    return { id: otherAgentId, latestRunId: runId };
+  };
+  const mismatch = await handleToolCall('agents', { action: 'reconcile', requestId: args.requestId }, service);
+  assert.equal(mismatch.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.status, 'uncertain');
+  assert.equal(mismatch.structuredContent.error.details.providerReturnedAgentId, otherAgentId);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('reconciliation retries a transient pair of 404s before releasing or completing', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failCreateAgent = 'upstream_failure';
+  const args = {
+    action: 'create', requestId: 'reconcile-create-5', agentId,
+    prompt: { text: 'wait through eventual consistency' },
+  };
+  const first = await handleToolCall('agents', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+
+  let lookups = 0;
+  client.getAgent = async (id) => {
+    client.calls.push(['getAgent', id]);
+    lookups += 1;
+    if (lookups === 1) throw new CursorApiError('not_found', 'Cursor API returned HTTP 404.', { status: 404 });
+    return { id, latestRunId: runId };
+  };
+  const reconciled = await handleToolCall('agents', { action: 'reconcile', requestId: args.requestId }, service);
+  assert.equal(reconciled.structuredContent.ok, true);
+  assert.equal(reconciled.structuredContent.provider.agent, 'found');
+  assert.equal(lookups, 2);
+  assert.deepEqual(client.calls.slice(-3), [
+    ['getAgent', agentId], ['listRuns', agentId, {}], ['getAgent', agentId],
+  ]);
+  assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
+});
+
+test('agent reconciliation rejects follow-up reservations instead of binding a caller target', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failFollowup = true;
+  const followup = await handleToolCall('runs', {
+    action: 'followup', requestId: 'reconcile-followup-1', agentId, prompt: { text: 'continue once' },
+  }, service);
+  assert.equal(followup.structuredContent.error.code, 'uncertain_submission');
+  const result = await handleToolCall('agents', {
+    action: 'reconcile', requestId: 'reconcile-followup-1', agentId,
+  }, service);
+  assert.equal(result.structuredContent.error.code, 'reconciliation_not_supported');
+  assert.equal(client.calls.filter((call) => call[0] === 'getAgent').length, 0);
+});
+
 test('a missing reservation after provider success fails uncertain and prevents resubmission', async (context) => {
   const { client, service } = await serviceFixture(context);
   const args = { action: 'create', requestId: 'missing-final-record-1', prompt: { text: 'create once' } };
@@ -687,7 +1042,7 @@ test('a missing reservation after provider success fails uncertain and prevents 
   assert.equal(client.calls.filter((call) => call[0] === 'createAgent').length, 1);
 });
 
-test('changed create intent conflicts even when the first request generated its agent ID', async (context) => {
+test('changed create intent conflicts after a provider-assigned create', async (context) => {
   const { client, service } = await serviceFixture(context);
   const first = await handleToolCall('agents', {
     action: 'create', requestId: 'changed-create-1', prompt: { text: 'original intent' },
@@ -714,6 +1069,177 @@ test('uncertain follow-up is ledgered and cannot be silently duplicated', async 
   assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 1);
 });
 
+test('follow-up success without a provider run ID remains uncertain for every incomplete response shape', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const responses = [{}, { run: {} }, { run: { status: 'CREATING' } }];
+  const agentTargets = [agentId, 'bc-00000000-0000-0000-0000-000000000002', 'bc-00000000-0000-0000-0000-000000000003'];
+  let responseIndex = 0;
+  client.createRun = async (agent, body) => {
+    client.calls.push(['createRun', agent, body]);
+    return responses[responseIndex++];
+  };
+
+  for (let index = 0; index < responses.length; index += 1) {
+    const requestId = `followup-empty-response-${index + 1}`;
+    const result = await handleToolCall('runs', {
+      action: 'followup', requestId, agentId: agentTargets[index], prompt: { text: `missing run ${index}` },
+    }, service);
+    assert.equal(result.structuredContent.error.code, 'uncertain_submission');
+    assert.equal((await service.ledger.lookup(requestId)).status, 'uncertain');
+  }
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, responses.length);
+});
+
+test('uncertain follow-up can be reconciled by an observed run or explicitly released without resubmission', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failFollowup = true;
+  const args = { action: 'followup', requestId: 'followup-reconcile-1', agentId, prompt: { text: 'continue once' } };
+  const first = await handleToolCall('runs', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  const reconciled = await handleToolCall('runs', { action: 'reconcile', requestId: args.requestId, agentId, runId }, service);
+  assert.equal(reconciled.structuredContent.ok, true);
+  assert.equal(reconciled.structuredContent.provider.state, 'found');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'completed');
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 1);
+
+  client.failFollowup = true;
+  const releaseArgs = { action: 'followup', requestId: 'followup-release-1', agentId, prompt: { text: 'release me' } };
+  await handleToolCall('runs', releaseArgs, service);
+  const released = await handleToolCall('runs', {
+    action: 'reconcile', requestId: releaseArgs.requestId, release: true, confirmation: `release:${releaseArgs.requestId}`,
+  }, service);
+  assert.equal(released.structuredContent.ok, true);
+  assert.equal(released.structuredContent.provider.reservation, 'released');
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 2);
+});
+
+test('follow-up does not finalize a provider run returned for a different agent', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.createRun = async (requestedAgentId, body) => {
+    client.calls.push(['createRun', requestedAgentId, body]);
+    return { run: { id: runId, agentId: otherAgentId, status: 'CREATING' } };
+  };
+  const args = { action: 'followup', requestId: 'followup-provider-identity-mismatch-1', agentId, prompt: { text: 'exact agent only' } };
+  const result = await handleToolCall('runs', args, service);
+  assert.equal(result.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 1);
+});
+
+test('follow-up reconciliation rejects a mismatched run object without releasing', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failFollowup = true;
+  const args = { action: 'followup', requestId: 'followup-reconcile-identity-mismatch-1', agentId, prompt: { text: 'reconcile one exact run' } };
+  const first = await handleToolCall('runs', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  client.getRun = async (requestedAgentId, requestedRunId) => {
+    client.calls.push(['getRun', requestedAgentId, requestedRunId]);
+    return { id: requestedRunId, agentId: otherAgentId, status: 'FINISHED' };
+  };
+  const mismatch = await handleToolCall('runs', { action: 'reconcile', requestId: args.requestId, agentId, runId }, service);
+  assert.equal(mismatch.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.status, 'uncertain');
+  assert.equal(mismatch.structuredContent.error.details.providerReturnedRunAgentId, otherAgentId);
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 1);
+});
+
+test('follow-up reconciliation requires repeated exact 404s before releasing', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failFollowup = true;
+  const args = { action: 'followup', requestId: 'followup-reconcile-404-confirmation-1', agentId, prompt: { text: 'confirm one exact run absence' } };
+  const first = await handleToolCall('runs', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+
+  let lookups = 0;
+  client.getRun = async (requestedAgentId, requestedRunId) => {
+    client.calls.push(['getRun', requestedAgentId, requestedRunId]);
+    lookups += 1;
+    throw new CursorApiError('not_found', 'missing run', { status: 404 });
+  };
+  const oneMiss = await handleToolCall('runs', {
+    action: 'reconcile', requestId: args.requestId, agentId, runId,
+  }, service);
+  assert.equal(oneMiss.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+  assert.equal((await service.ledger.lookup(args.requestId)).providerNotFoundConfirmations, 1);
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 1);
+
+  const confirmed = await handleToolCall('runs', {
+    action: 'reconcile', requestId: args.requestId, agentId, runId,
+  }, service);
+  assert.equal(confirmed.structuredContent.ok, true);
+  assert.equal(confirmed.structuredContent.provider.reservation, 'released');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'failed');
+  assert.equal(lookups, 2);
+  assert.equal(client.calls.filter((call) => call[0] === 'createRun').length, 1);
+});
+
+test('uncertain cancellation requires a terminal cancelled provider run and safely releases on exact 404', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const cancelRequest = { action: 'cancel', requestId: 'cancel-reconcile-status-1', agentId, runId };
+  client.cancelRun = async (id, run) => {
+    client.calls.push(['cancelRun', id, run]);
+    throw new CursorApiError('network_error', 'response lost', { ambiguous: true });
+  };
+  const first = await handleToolCall('runs', cancelRequest, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+
+  client.getRun = async (id, run) => {
+    client.calls.push(['getRun', id, run]);
+    return { id: run, agentId: otherAgentId, status: 'CANCELED' };
+  };
+  const mismatched = await handleToolCall('runs', { action: 'reconcile', requestId: cancelRequest.requestId, agentId, runId }, service);
+  assert.equal(mismatched.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(cancelRequest.requestId)).status, 'uncertain');
+
+  client.getRun = async (id, run) => {
+    client.calls.push(['getRun', id, run]);
+    return { id: run, agentId: id, status: 'RUNNING' };
+  };
+  const stillRunning = await handleToolCall('runs', { action: 'reconcile', requestId: cancelRequest.requestId, agentId, runId }, service);
+  assert.equal(stillRunning.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(cancelRequest.requestId)).status, 'uncertain');
+
+  client.getRun = async (id, run) => {
+    client.calls.push(['getRun', id, run]);
+    return { id: run, agentId: id, status: 'CANCELED' };
+  };
+  const canceled = await handleToolCall('runs', { action: 'reconcile', requestId: cancelRequest.requestId, agentId, runId }, service);
+  assert.equal(canceled.structuredContent.ok, true);
+  assert.equal(canceled.structuredContent.provider.reservation, 'completed');
+  assert.equal((await service.ledger.lookup(cancelRequest.requestId)).status, 'completed');
+  assert.equal(client.calls.filter((call) => call[0] === 'cancelRun').length, 1);
+
+  const missingRequest = { action: 'cancel', requestId: 'cancel-reconcile-404-1', agentId, runId: 'run-00000000-0000-0000-0000-000000000002' };
+  const secondCancel = await handleToolCall('runs', missingRequest, service);
+  assert.equal(secondCancel.structuredContent.error.code, 'uncertain_submission');
+  client.getRun = async (id, run) => {
+    client.calls.push(['getRun', id, run]);
+    throw new CursorApiError('not_found', 'missing run', { status: 404 });
+  };
+  const oneMiss = await handleToolCall('runs', { action: 'reconcile', requestId: missingRequest.requestId, agentId, runId: missingRequest.runId }, service);
+  assert.equal(oneMiss.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(missingRequest.requestId)).status, 'uncertain');
+  const released = await handleToolCall('runs', { action: 'reconcile', requestId: missingRequest.requestId, agentId, runId: missingRequest.runId }, service);
+  assert.equal(released.structuredContent.ok, true);
+  assert.equal(released.structuredContent.provider.reservation, 'released');
+  assert.equal((await service.ledger.lookup(missingRequest.requestId)).providerAgentId, agentId);
+});
+
+test('cancel does not finalize a mismatched provider acknowledgement', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.cancelRun = async (requestedAgentId, requestedRunId) => {
+    client.calls.push(['cancelRun', requestedAgentId, requestedRunId]);
+    return { id: otherRunId, agentId: otherAgentId };
+  };
+  const args = { action: 'cancel', requestId: 'cancel-provider-identity-mismatch-1', agentId, runId };
+  const result = await handleToolCall('runs', args, service);
+  assert.equal(result.structuredContent.error.code, 'uncertain_submission');
+  assert.equal((await service.ledger.lookup(args.requestId)).status, 'uncertain');
+  assert.equal(client.calls.filter((call) => call[0] === 'cancelRun').length, 1);
+});
+
 test('list, usage, cancellation, and deletion use exact typed endpoint operations', async (context) => {
   const { client, service } = await serviceFixture(context);
   const listed = await handleToolCall('agents', { action: 'list', limit: 1, includeArchived: false }, service);
@@ -725,6 +1251,42 @@ test('list, usage, cancellation, and deletion use exact typed endpoint operation
   const deleted = await handleToolCall('lifecycle', { action: 'delete', agentId, confirmation: `delete:${agentId}` }, service);
   assert.equal(deleted.structuredContent.irreversible, true);
   assert.ok(client.calls.some((call) => call[0] === 'usage' && call[2] === undefined));
+});
+
+test('runs.wait forwards each remaining deadline to provider reads', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const timeouts = [];
+  let reads = 0;
+  client.getRun = async (id, run, options) => {
+    client.calls.push(['getRun', id, run, options]);
+    timeouts.push(options?.timeoutMs);
+    reads += 1;
+    return reads > 1 ? { id: run, status: 'FINISHED' } : { id: run, status: 'CREATING' };
+  };
+  const result = await handleToolCall('runs', { action: 'wait', agentId, runId, timeoutMs: 600, pollMs: 250 }, service);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.timedOut, false);
+  assert.equal(timeouts.length, 2);
+  assert.ok(timeouts[0] <= 600 && timeouts[0] > 0);
+  assert.ok(timeouts[1] <= timeouts[0] && timeouts[1] > 0);
+});
+
+test('runs.wait converts provider request timeouts into bounded timedOut receipts with the latest run', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  let reads = 0;
+  client.getRun = async (id, run, options) => {
+    client.calls.push(['getRun', id, run, options]);
+    reads += 1;
+    if (reads === 1) return { id: run, status: 'CREATING', progress: 'partial' };
+    throw new CursorApiError('request_timeout', 'provider read exceeded its remaining bound', {
+      details: { partial: { id: run, status: 'CREATING', progress: 'latest' } },
+    });
+  };
+  const result = await handleToolCall('runs', { action: 'wait', agentId, runId, timeoutMs: 600, pollMs: 250 }, service);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.timedOut, true);
+  assert.deepEqual(result.structuredContent.run, { id: runId, status: 'CREATING', progress: 'latest' });
+  assert.equal(reads, 2);
 });
 
 test('expired streams reconcile the exact run without resubmitting', async (context) => {

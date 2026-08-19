@@ -1,8 +1,8 @@
 {
   "name": "cursor-cloud-control",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
-  "description": "Cursor Cloud Control plus a distinct typed, fail-closed Cursor Local CLI status surface.",
+  "description": "Cursor Cloud Control plus an explicitly activated host-trusted local Cursor CLI control surface with separate state and receipts.",
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"
@@ -11,10 +11,10 @@
   "files": [
     ".codex-plugin",
     ".mcp.json",
+    "LICENSE",
     "README.md",
     "mcp",
     "skills",
-    "test",
     "package.json"
   ],
   "scripts": {

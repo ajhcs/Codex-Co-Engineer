@@ -38,12 +38,24 @@ const STATE_HANDLE = await prepareStateDirectory(STATE_DIR);
 await revalidateStateDirectory(STATE_HANDLE);
 const STATE_DIGEST = stateDirectoryDigest(STATE_HANDLE);
 const CREDENTIAL_BINDING_DIGEST = await modelApiKeyBindingDigest();
-const IDLE_SECONDS = Number.parseInt(
-  process.env.CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS
-    ?? process.env.PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS
-    ?? '900',
-  10,
-);
+const DEFAULT_IDLE_SECONDS = 900;
+const MAX_IDLE_SECONDS = Math.floor(0x7fffffff / 1000);
+
+function parseIdleSeconds(environment = process.env) {
+  const configured = Object.hasOwn(environment, 'CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS')
+    ? environment.CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS
+    : environment.PLUMBOB_HARNESS_DAEMON_IDLE_SECONDS;
+  if (configured === undefined) return DEFAULT_IDLE_SECONDS;
+  if (typeof configured !== 'string' || !/^[1-9]\d*$/u.test(configured.trim())) {
+    return DEFAULT_IDLE_SECONDS;
+  }
+  const seconds = Number(configured.trim());
+  return Number.isSafeInteger(seconds) && seconds <= MAX_IDLE_SECONDS
+    ? seconds
+    : DEFAULT_IDLE_SECONDS;
+}
+
+const IDLE_SECONDS = parseIdleSeconds();
 let clients = 0;
 let lastActivity = Date.now();
 let mutationTail = Promise.resolve();

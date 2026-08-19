@@ -209,6 +209,8 @@ async function makeTargetContract({ root, working, common }, {
     resolved_cwd: working,
     git_common_directory: common,
     git_head: expectedHead,
+    allowed_paths: allowedPaths,
+    role,
     workspace_identity: workspaceIdentity,
     cwd_identity: cwdIdentity,
   });
@@ -836,9 +838,17 @@ test('strict real boundary pins provenance, exposes only the minroot closure, co
       (error) => error instanceof GrokOuterSandboxError && error.code === 'invalid_prepared_state',
     );
 
+    const roleMismatchTarget = await makeTargetContract({
+      root: tree.root,
+      working: tree.working,
+      common: tree.common,
+    }, {
+      expectedHead: tree.target.expected_head,
+      role: 'verify',
+    });
     const roleMismatchPrepared = await prepareGrokOuterSandbox({
       ...(await makeRealOptions(tree, bwrap, 'role-mismatch', 10_000, tree.providerPath, busybox)),
-      target: { ...tree.target, role: 'verify' },
+      target: roleMismatchTarget,
     });
     assert.notEqual(roleMismatchPrepared.target.target_contract_digest,
       prepared.target.target_contract_digest, 'role did not change the canonical target contract digest');

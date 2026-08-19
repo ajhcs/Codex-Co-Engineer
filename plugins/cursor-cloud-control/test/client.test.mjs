@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -31,6 +31,33 @@ test('discovers the default owner-only key file without returning its contents',
   assert.equal(await loadApiKey(env), 'unit-secret-value');
   await chmod(file, 0o644);
   await assert.rejects(loadApiKey(env), (error) => error.code === 'credential_file_permissions');
+});
+
+test('credential reads reject a pathname replacement after the descriptor-bound read', async (context) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cursor-cloud-credential-swap-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const env = { HOME: home };
+  const file = defaultApiKeyFile(env);
+  const displaced = `${file}.displaced`;
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(file, 'unit-secret-value\n', { mode: 0o600 });
+  const probe = await open(file, 'r');
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const originalReadFile = prototype.readFile;
+  let swapped = false;
+  prototype.readFile = async function (...arguments_) {
+    const contents = await originalReadFile.apply(this, arguments_);
+    if (!swapped) {
+      swapped = true;
+      await rename(file, displaced);
+      await writeFile(file, 'attacker-value\n', { mode: 0o600 });
+    }
+    return contents;
+  };
+  context.after(() => { prototype.readFile = originalReadFile; });
+  await assert.rejects(loadApiKey(env), (error) => error.code === 'credential_file_permissions');
+  assert.equal(swapped, true);
 });
 
 test('rejects non-TLS production origin overrides', () => {

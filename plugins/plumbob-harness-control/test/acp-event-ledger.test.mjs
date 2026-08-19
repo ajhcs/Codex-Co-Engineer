@@ -205,7 +205,7 @@ test('rejects every free-form provider field including secrets, paths, raw JSON,
     { type: 'tool', status: 'running', tool_args: { dangerous: true } },
     { type: 'control', status: 'running', jsonrpc: '2.0' },
     event(1, { text: 'read /private/repository/secret.txt' }),
-    event(1, { text: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' }),
+    event(1, { text: 'not-a-real-credential-canary' }),
     event(1, { raw_json: '{"jsonrpc":"2.0","params":{"secret":true}}' }),
     event(1, { provider_id: 'grok-local-acp' }),
   ];

@@ -4,6 +4,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   access,
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
   open,
   readFile,
   rename,
@@ -19,6 +25,7 @@ import {
   findStoredRequest,
   getStoredJob,
   insertJob,
+  listActiveStoredJobs,
   listLifecycleEvents,
   listStoredJobs,
   openStore,
@@ -36,6 +43,7 @@ import {
 } from './preflight.mjs';
 import {
   buildGrokArgs,
+  grokBuildFinalResponse,
   grokCapabilityProfile,
   grokVersionProbe,
   normalizeGrokConfiguration,
@@ -52,11 +60,15 @@ import {
   resolveDshHome,
 } from './dsh.mjs';
 import { CapacityError, createCapacityReader } from './capacity.mjs';
+import { readGrokCapacity } from './grok-capacity.mjs';
 import { createDshReceiptReader } from './dsh-receipt.mjs';
 import {
+  createExclusiveStateFile,
   inspectStateFile,
+  openStateFileRead,
   prepareStateFile,
   prepareStateDirectory,
+  removeStateFile,
   resolveStateDirectory,
   revalidateStateDirectory,
   sameStateIdentity,
@@ -96,6 +108,8 @@ function grokEnvironment() {
 const RUNNER = path.join(PLUGIN_ROOT, 'mcp', 'runner.mjs');
 const WEB_HOST = '127.0.0.1';
 const WEB_PORT = 3180;
+const DSH_WEB_LOCK_FILE = 'dsh-web-runtime.lock';
+const DSH_WEB_LOCK_SCHEMA = 'codex-co-engineer.dsh-web-lock.v1';
 const FINAL_STATES = new Set([
   'completed',
   'succeeded',
@@ -119,10 +133,11 @@ const WAIT_LIMITS = Object.freeze({
 const LOG_PAGE_MAX_BYTES = WAIT_LIMITS.log_page_bytes.maximum;
 const COMPACT_JOB_TEXT_MAX_LENGTH = 160;
 const TARGET_ROLES = new Set(['review', 'implement', 'verify']);
-const TARGET_MODES = new Set(['default', 'explicit']);
+const TARGET_MODES = new Set(['default', 'explicit', 'staged']);
 const TARGET_CONTEXT_KEYS = new Set([
   'schema_version',
   'mode',
+  'source',
   'working_directory',
   'expected_git_root',
   'expected_head',
@@ -130,11 +145,24 @@ const TARGET_CONTEXT_KEYS = new Set([
   'role',
 ]);
 
+const TARGET_SOURCE_TYPES = new Set(['local', 'github']);
+const TARGET_SOURCE_KEYS = new Set(['type', 'path', 'repository', 'ref']);
+const TARGET_STAGE_ROOT_NAME = 'targets';
+const TARGET_STAGE_LEASE_TTL_MS = 24 * 60 * 60 * 1000;
+const TARGET_STAGE_MAX_LEASES = 8;
+const TARGET_STAGE_LOCK_STALE_MS = 2 * 60 * 1000;
+const TARGET_STAGE_ACQUIRE_TIMEOUT_MS = 60 * 1000;
+const TARGET_STAGE_RECONCILE_LIMIT = 256;
+const TARGET_STAGE_GIT_TIMEOUT_MS = 15 * 1000;
+const TARGET_STAGE_DEADLINE_MS = 45 * 1000;
+const TARGET_STAGE_MAX_BYTES = 256 * 1024 * 1024;
+const TARGET_STAGE_MAX_ENTRIES = 100_000;
+
 // Grok's built-in `read-only` profile explicitly permits writes to these
 // locations.  The runner can detect a changed checkout after the fact, but
-// that is not a prevention boundary.  Refuse review/verify targets rooted in
-// a provider-writable directory until the connector can provision and verify
-// a target-specific custom profile (whose startup failure is fail-closed).
+// that is not a prevention boundary. Refuse review/verify targets rooted in a
+// provider-writable directory unless the connector created an owner-only,
+// isolated staged checkout beneath its identity-bound state directory.
 const GROK_READ_ONLY_WRITABLE_ROOTS = Object.freeze([...new Set([
   '/tmp',
   '/var/tmp',
@@ -161,6 +189,7 @@ let databaseStateIdentity;
 let databaseJobsIdentity;
 let databaseFileIdentity;
 let statePreparationTail = Promise.resolve();
+let controlProcessStartTime;
 
 const SQLITE_STATE_CHILDREN = Object.freeze([
   'control.sqlite3-wal',
@@ -249,6 +278,165 @@ function ensureState() {
   return result;
 }
 
+function processStartTimeFromStat(statText) {
+  const closingParenthesis = statText.lastIndexOf(')');
+  if (closingParenthesis < 0) return null;
+  return statText.slice(closingParenthesis + 2).trim().split(/\s+/u)[19] ?? null;
+}
+
+async function currentControlProcessStartTime() {
+  if (controlProcessStartTime !== undefined) return controlProcessStartTime;
+  try {
+    controlProcessStartTime = processStartTimeFromStat(
+      await readFile(`/proc/${process.pid}/stat`, 'utf8'),
+    );
+  } catch {
+    controlProcessStartTime = null;
+  }
+  return controlProcessStartTime;
+}
+
+async function processIdentityAlive(record) {
+  if (!Number.isInteger(record?.pid) || record.pid < 2) return false;
+  try {
+    process.kill(record.pid, 0);
+    if (typeof record.start_time !== 'string' || !record.start_time) return true;
+    const observed = processStartTimeFromStat(
+      await readFile(`/proc/${record.pid}/stat`, 'utf8'),
+    );
+    return observed !== null && observed === record.start_time;
+  } catch {
+    return false;
+  }
+}
+
+function runtimeLockError(message) {
+  return new ToolError('runtime_lock_unverifiable', message);
+}
+
+async function readWebRuntimeLock() {
+  await ensureState();
+  const name = DSH_WEB_LOCK_FILE;
+  const identity = await inspectStateFile(stateHandle, name, { required: false });
+  if (!identity) return null;
+  let record;
+  try {
+    const opened = await openStateFileRead(stateHandle, name, { expectedIdentity: identity });
+    try {
+      record = JSON.parse(await opened.file.readFile('utf8'));
+    } finally {
+      await opened.file.close();
+    }
+    await inspectStateFile(stateHandle, name, { expectedIdentity: identity });
+  } catch {
+    throw runtimeLockError('The DSH web runtime lock could not be identity-verified; refusing to start another listener.');
+  }
+  if (record?.schema_version !== DSH_WEB_LOCK_SCHEMA
+    || !['starting', 'active'].includes(record.state)
+    || !Number.isInteger(record.pid)
+    || record.pid < 2
+    || typeof record.start_time !== 'string'
+    || !record.start_time
+    || (record.state === 'active'
+      && (typeof record.job_id !== 'string' || !/^[a-z0-9-]{8,96}$/u.test(record.job_id)))) {
+    throw runtimeLockError('The DSH web runtime lock has an invalid ownership record; refusing replacement.');
+  }
+  return { identity, record };
+}
+
+async function releaseWebRuntimeLock(lock) {
+  if (!lock) return;
+  await lock.file?.close().catch(() => {});
+  try {
+    await removeStateFile(
+      stateHandle,
+      DSH_WEB_LOCK_FILE,
+      { expectedIdentity: lock.identity },
+    );
+  } catch (error) {
+    // A different owner may have reclaimed the exact lock after this holder
+    // lost its path. Never remove or overwrite that replacement.
+    if (error?.code !== 'state_identity_changed' && error?.code !== 'state_child_missing') throw error;
+  }
+}
+
+async function writeWebRuntimeLock(lock, record) {
+  const payload = `${JSON.stringify(record)}\n`;
+  await lock.file.truncate(0);
+  await lock.file.write(payload, 0, 'utf8');
+  await lock.file.sync();
+  await inspectStateFile(stateHandle, DSH_WEB_LOCK_FILE, { expectedIdentity: lock.identity });
+  lock.record = record;
+}
+
+async function acquireWebRuntimeLock() {
+  await ensureState();
+  const owner = {
+    schema_version: DSH_WEB_LOCK_SCHEMA,
+    state: 'starting',
+    pid: process.pid,
+    start_time: await currentControlProcessStartTime(),
+    created_at: new Date().toISOString(),
+  };
+  if (!owner.start_time) throw runtimeLockError('The DSH web runtime owner process could not be identity-verified.');
+
+  while (true) {
+    const existing = await readWebRuntimeLock();
+    if (existing) {
+      const active = await activeWebJob();
+      const ownerAlive = await processIdentityAlive(existing.record);
+      if (active) {
+        throw new ToolError(
+          'workspace_busy',
+          `A managed DSH web runtime is already active: ${active.id}`,
+        );
+      }
+      if (existing.record.state === 'starting' && ownerAlive) {
+        throw new ToolError(
+          'workspace_busy',
+          'Another Co-Engineer process is starting the DSH web runtime; retry after startup completes.',
+        );
+      }
+      // An active lock with no active job is a completed or failed startup.
+      // Reclaim only this exact inode; a concurrent replacement is left
+      // untouched and the next loop observes its owner.
+      await removeStateFile(
+        stateHandle,
+        DSH_WEB_LOCK_FILE,
+        { expectedIdentity: existing.identity },
+      );
+      continue;
+    }
+
+    const created = await createExclusiveStateFile(stateHandle, DSH_WEB_LOCK_FILE);
+    if (!created.created) continue;
+    try {
+      await created.file.write(`${JSON.stringify(owner)}\n`, 0, 'utf8');
+      await created.file.sync();
+      await inspectStateFile(stateHandle, DSH_WEB_LOCK_FILE, { expectedIdentity: created.identity });
+      return { file: created.file, identity: created.identity, record: owner };
+    } catch (error) {
+      await created.file.close().catch(() => {});
+      await removeStateFile(
+        stateHandle,
+        DSH_WEB_LOCK_FILE,
+        { expectedIdentity: created.identity },
+      ).catch(() => {});
+      throw error;
+    }
+  }
+}
+
+async function promoteWebRuntimeLock(lock, jobId) {
+  if (!lock) return;
+  await writeWebRuntimeLock(lock, {
+    ...lock.record,
+    state: 'active',
+    job_id: jobId,
+    activated_at: new Date().toISOString(),
+  });
+}
+
 let database;
 
 async function exists(file) {
@@ -297,7 +485,7 @@ function publicJobKind(kind) {
 
 function isAgentJobKind(kind) {
   return kind === 'deepseek_agent' || kind === 'dsh_agent'
-    || kind === 'grok_build';
+    || kind === 'grok_build' || kind === 'dsh_web';
 }
 
 function jobExecutionScope(job) {
@@ -344,13 +532,25 @@ function executionScopesOverlap(left, right) {
     isPathWithin(leftPath, rightPath) || isPathWithin(rightPath, leftPath)));
 }
 
-async function startAgentJob(scope, starter) {
+async function listActiveJobs() {
+  await ensureState();
+  const jobs = [];
+  for (const job of listActiveStoredJobs(database)) {
+    const reconciled = await reconcile(job);
+    if (ACTIVE_STATES.has(reconciled.lifecycle_state ?? reconciled.status)) jobs.push(reconciled);
+  }
+  return jobs;
+}
+
+async function startAgentJob(scope, starter, { ignoreJobIds = [] } = {}) {
+  const ignored = new Set(ignoreJobIds);
   let release;
   const previous = agentSubmissionTail;
   agentSubmissionTail = new Promise((resolve) => { release = resolve; });
   await previous;
   try {
-    const active = (await listJobs(100)).find((job) => isAgentJobKind(job.kind)
+    const active = (await listActiveJobs()).find((job) => isAgentJobKind(job.kind)
+      && !ignored.has(job.id)
       && ACTIVE_STATES.has(job.status)
       && executionScopesOverlap(jobExecutionScope(job), scope));
     if (active) {
@@ -445,6 +645,889 @@ async function targetGitMetadata(cwd) {
   };
 }
 
+function sourceRef(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.length < 1 || value.length > 240
+    || value.includes('\0') || /\s/.test(value) || value.startsWith('-')) {
+    throw new ToolError(
+      'invalid_target_source',
+      'target_context.source.ref must be a non-empty Git ref without whitespace, NUL bytes, or a leading dash.',
+    );
+  }
+  return value;
+}
+
+function githubRepository(value) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 240 || value.includes('\0')) {
+    throw new ToolError(
+      'invalid_target_source',
+      'target_context.source.repository must be a GitHub HTTPS URL.',
+    );
+  }
+  let parsed;
+  try { parsed = new URL(value); } catch {
+    throw new ToolError('invalid_target_source', 'target_context.source.repository must be a GitHub HTTPS URL.');
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== 'https:'
+    || !['github.com', 'www.github.com'].includes(hostname)
+    || parsed.username || parsed.password || parsed.search || parsed.hash
+    || !/^\/[^/]+\/[^/]+(?:\.git)?\/?$/.test(parsed.pathname)) {
+    throw new ToolError(
+      'invalid_target_source',
+      'target_context.source.repository must be an https://github.com/OWNER/REPOSITORY URL without credentials, query, or fragment data.',
+    );
+  }
+  return `https://github.com/${parsed.pathname.slice(1).replace(/\/$/, '')}`;
+}
+
+function stageGitEnvironment() {
+  return {
+    ...process.env,
+    // Staging must never wait for an interactive credential prompt. Existing
+    // user/session credentials may still be used by Git's configured helper.
+    GIT_TERMINAL_PROMPT: '0',
+  };
+}
+
+function stageDeadlineError() {
+  return new ToolError('target_stage_timeout', 'Target staging exceeded its bounded preparation deadline.');
+}
+
+function assertStageDeadlineAt(deadlineAt) {
+  if (!Number.isFinite(deadlineAt)) return TARGET_STAGE_GIT_TIMEOUT_MS;
+  if (Date.now() >= deadlineAt) throw stageDeadlineError();
+  return Math.max(1, Math.ceil(deadlineAt - Date.now()));
+}
+
+function stageProcessGroupExists(pid) {
+  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function signalStageProcessGroup(pid, signal) {
+  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    return error?.code === 'ESRCH';
+  }
+}
+
+function waitStageChild(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, Math.max(1, timeoutMs));
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once('close', done);
+    child.once('exit', done);
+  });
+}
+
+async function terminateStageProcess(child) {
+  if (!child) return;
+  if (process.platform !== 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
+    signalStageProcessGroup(child.pid, 'SIGTERM');
+    if (await waitStageChild(child, 250) && !stageProcessGroupExists(child.pid)) return;
+    signalStageProcessGroup(child.pid, 'SIGKILL');
+    await waitStageChild(child, 250);
+    return;
+  }
+  try { child.kill?.('SIGTERM'); } catch { /* bounded fallback */ }
+  if (await waitStageChild(child, 250)) return;
+  try { child.kill?.('SIGKILL'); } catch { /* bounded fallback */ }
+  await waitStageChild(child, 250);
+}
+
+async function runStageGit(args, label, deadlineAt) {
+  const timeoutMs = Math.min(TARGET_STAGE_GIT_TIMEOUT_MS, assertStageDeadlineAt(deadlineAt));
+  return new Promise((resolve, reject) => {
+    let child;
+    let settled = false;
+    let timedOut = false;
+    let outputBytes = 0;
+    const stdout = [];
+    const stderr = [];
+    const finish = (error, value = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const failAndTerminate = async (error) => {
+      if (settled) return;
+      await terminateStageProcess(child);
+      finish(error);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void failAndTerminate(stageDeadlineError());
+    }, timeoutMs);
+    try {
+      child = spawn('git', args, {
+        env: stageGitEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish(new ToolError('target_stage_failed', `${label} could not be started: ${error?.message ?? 'spawn failed'}`));
+      return;
+    }
+    const collect = (target, chunk) => {
+      if (settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      outputBytes += buffer.length;
+      if (outputBytes > 1024 * 1024) {
+        void failAndTerminate(new ToolError('target_stage_failed', `${label} exceeded the bounded output limit.`));
+        return;
+      }
+      target.push(buffer);
+    };
+    child.stdout?.on('data', (chunk) => collect(stdout, chunk));
+    child.stderr?.on('data', (chunk) => collect(stderr, chunk));
+    child.once('error', (error) => {
+      void failAndTerminate(new ToolError('target_stage_failed', `${label} failed: ${error?.message ?? 'process error'}`));
+    });
+    child.once('close', (status, signal) => {
+      if (settled) return;
+      if (timedOut || Date.now() >= deadlineAt) {
+        void failAndTerminate(stageDeadlineError());
+        return;
+      }
+      const stdoutText = Buffer.concat(stdout).toString('utf8');
+      const stderrText = Buffer.concat(stderr).toString('utf8');
+      if (status !== 0) {
+        const detail = concise(stderrText || stdoutText || `git exited with ${signal ?? status}`, 360);
+        finish(new ToolError('target_stage_failed', `${label} failed${detail ? `: ${detail}` : '.'}`));
+        return;
+      }
+      finish(null, stdoutText.trim());
+    });
+  });
+}
+
+async function optionalStageGit(args, deadlineAt) {
+  try {
+    return { ok: true, output: await runStageGit(args, 'Git ref query', deadlineAt), error: '' };
+  } catch (error) {
+    if (error?.code === 'target_stage_timeout') throw error;
+    return { ok: false, output: '', error: error?.message ?? 'git failed' };
+  }
+}
+
+async function assertStageSize(directory, deadlineAt) {
+  const pending = [directory];
+  let entries = 0;
+  let bytes = 0;
+  while (pending.length > 0) {
+    assertStageDeadlineAt(deadlineAt);
+    const current = pending.pop();
+    const children = await readdir(current, { withFileTypes: true });
+    for (const child of children) {
+      assertStageDeadlineAt(deadlineAt);
+      entries += 1;
+      if (entries > TARGET_STAGE_MAX_ENTRIES) {
+        throw new ToolError('target_stage_too_large', 'The staged checkout exceeds the bounded entry limit.');
+      }
+      const childPath = path.join(current, child.name);
+      const metadata = await lstat(childPath);
+      assertStageDeadlineAt(deadlineAt);
+      if (metadata.isSymbolicLink()) {
+        throw new ToolError('target_stage_failed', `The staged checkout contains a symbolic link: ${childPath}`);
+      }
+      if (metadata.isDirectory()) pending.push(childPath);
+      else bytes += metadata.size;
+      if (bytes > TARGET_STAGE_MAX_BYTES) {
+        throw new ToolError('target_stage_too_large', 'The staged checkout exceeds the bounded byte limit.');
+      }
+    }
+  }
+}
+
+async function sourceGitRoot(sourcePath, deadlineAt) {
+  const metadata = await stageTargetGitMetadata(sourcePath, deadlineAt);
+  const status = await runStageGit([
+    '-C', metadata.root,
+    'status', '--porcelain=v1', '--untracked-files=all', '--ignored=no',
+  ], 'local source status', deadlineAt);
+  if (status) {
+    throw new ToolError(
+      'target_source_dirty',
+      'The local source checkout has uncommitted or untracked files; commit the review state or use a clean GitHub ref before staging.',
+    );
+  }
+  const roots = configuredTargetRoots();
+  if (roots && !roots.some((root) => isPathWithin(root, metadata.root))) {
+    throw new ToolError('target_outside_allowlist', 'The local source Git root is outside the administrator-configured target roots.');
+  }
+  return metadata;
+}
+
+function fullCommit(value, label) {
+  const commit = String(value ?? '').trim().split(/\s+/, 1)[0];
+  if (!/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new ToolError('target_stage_failed', `${label} did not resolve to a full Git commit.`);
+  }
+  return commit.toLowerCase();
+}
+
+async function stageGitCommonDirectory(gitRoot, deadlineAt) {
+  const result = await optionalStageGit([
+    '-C', gitRoot,
+    'rev-parse', '--git-common-dir',
+  ], deadlineAt);
+  if (!result.ok || !result.output) return gitRoot;
+  const candidate = path.resolve(gitRoot, result.output);
+  return realpath(candidate).catch(() => gitRoot);
+}
+
+async function stageTargetGitMetadata(cwd, deadlineAt) {
+  const rootCandidate = await runStageGit(
+    ['-C', cwd, 'rev-parse', '--show-toplevel'],
+    'working_directory inspection',
+    deadlineAt,
+  );
+  const resolvedRoot = await realpath(rootCandidate).catch(() => {
+    throw new ToolError('invalid_target_context', 'The Git root does not resolve to an existing directory.');
+  });
+  const head = await runStageGit(
+    ['-C', cwd, 'rev-parse', 'HEAD'],
+    'working_directory inspection',
+    deadlineAt,
+  );
+  if (!/^[0-9a-f]{40}$/i.test(head)) {
+    throw new ToolError('invalid_target_context', 'Git HEAD is not a full 40-character revision.');
+  }
+  return {
+    root: resolvedRoot,
+    head: head.toLowerCase(),
+    common: await stageGitCommonDirectory(resolvedRoot, deadlineAt),
+  };
+}
+
+async function refCandidates(root, ref, deadlineAt) {
+  if (!ref) return [];
+  if (/^[0-9a-f]{40}$/i.test(ref)) {
+    const verified = await optionalStageGit(['-C', root, 'cat-file', '-e', `${ref}^{commit}`], deadlineAt);
+    if (!verified.ok) throw new ToolError('target_stage_ref_not_found', `Local source ref ${ref} was not found.`);
+    return [{ ref, commit: ref.toLowerCase(), direct: true }];
+  }
+  const normalized = ref.startsWith('refs/') ? ref : null;
+  const names = normalized
+    ? [normalized]
+    : [`refs/heads/${ref}`, `refs/tags/${ref}`, `refs/remotes/origin/${ref}`];
+  const result = await optionalStageGit([
+    '-C', root,
+    'for-each-ref',
+    '--format=%(refname) %(objectname)',
+    ...names.map((name) => name),
+  ], deadlineAt);
+  if (!result.ok) {
+    throw new ToolError('target_stage_ref_not_found', `Local source ref ${ref} could not be resolved.`);
+  }
+  const output = result.output;
+  return output.split(/\r?\n/)
+    .map((line) => {
+      const [refName, objectName] = line.trim().split(/\s+/, 2);
+      return refName && objectName ? { ref: refName, object: objectName } : null;
+    })
+    .filter(Boolean);
+}
+
+async function resolveLocalRef(root, ref, fallbackHead, deadlineAt) {
+  if (!ref) return { commit: fallbackHead, ref: null };
+  const candidates = await refCandidates(root, ref, deadlineAt);
+  if (candidates.length === 0) {
+    throw new ToolError('target_stage_ref_not_found', `Local source ref ${ref} was not found.`);
+  }
+  const resolved = [];
+  for (const candidate of candidates) {
+    resolved.push({
+      ...candidate,
+      commit: candidate.direct
+        ? candidate.commit
+        : fullCommit(await runStageGit([
+          '-C', root,
+          'rev-parse', '--verify', `${candidate.ref}^{commit}`,
+        ], 'local source ref resolution', deadlineAt), 'local source ref'),
+    });
+  }
+  const distinctCommits = new Set(resolved.map((candidate) => candidate.commit));
+  if (resolved.length !== 1 || distinctCommits.size !== 1) {
+    throw new ToolError(
+      'target_stage_ref_ambiguous',
+      `Local source ref ${ref} is ambiguous; use an exact refs/heads/* or refs/tags/* name.`,
+    );
+  }
+  return { commit: resolved[0].commit, ref: resolved[0].ref };
+}
+
+function parseRemoteRefs(output) {
+  return output.split(/\r?\n/).map((line) => {
+    const [object, ref] = line.trim().split(/\s+/, 2);
+    return object && ref && /^[0-9a-f]{40}$/i.test(object) ? { object: object.toLowerCase(), ref } : null;
+  }).filter(Boolean);
+}
+
+async function resolveGithubRef(repository, ref, deadlineAt) {
+  if (ref && /^[0-9a-f]{40}$/i.test(ref)) {
+    return { commit: ref.toLowerCase(), ref: ref.toLowerCase() };
+  }
+  const names = ref?.startsWith('refs/')
+    ? [ref]
+    : ref
+      ? [`refs/heads/${ref}`, `refs/tags/${ref}`]
+      : ['HEAD'];
+  const matches = [];
+  for (const name of names) {
+    const query = name.startsWith('refs/tags/')
+      ? [name, `${name}^{}`]
+      : [name];
+    const remoteResult = await optionalStageGit(['ls-remote', repository, ...query], deadlineAt);
+    if (!remoteResult.ok) {
+      throw new ToolError('target_stage_failed', 'GitHub source ref resolution failed.');
+    }
+    const remote = parseRemoteRefs(remoteResult.output);
+    const exact = remote.filter((candidate) => candidate.ref === name);
+    const peeled = remote.filter((candidate) => candidate.ref === `${name}^{}`);
+    if (exact.length > 1 || peeled.length > 1) {
+      throw new ToolError(
+        'target_stage_ref_ambiguous',
+        `GitHub source ref ${ref ?? 'HEAD'} returned multiple exact or peeled objects.`,
+      );
+    }
+    if (exact.length !== 1) continue;
+    // Annotated tags must bind to the peeled commit advertised by the
+    // remote. Lightweight tags and branches have no ^{} row and retain the
+    // exact object they advertise.
+    matches.push({ ref: name, commit: peeled[0]?.object ?? exact[0].object });
+  }
+  if (matches.length === 0) throw new ToolError('target_stage_ref_not_found', `GitHub source ref ${ref ?? 'HEAD'} was not found.`);
+  const distinctCommits = new Set(matches.map((candidate) => candidate.commit));
+  if (matches.length !== 1 || distinctCommits.size !== 1) {
+    throw new ToolError(
+      'target_stage_ref_ambiguous',
+      `GitHub source ref ${ref} is ambiguous; use an exact refs/heads/* or refs/tags/* name.`,
+    );
+  }
+  return matches[0];
+}
+
+function leaseDescriptor(source, repository, ref, resolvedHead) {
+  return {
+    type: source.type,
+    repository,
+    ref: ref ?? 'HEAD',
+    resolved_head: resolvedHead,
+  };
+}
+
+function sameFsIdentity(left, right) {
+  return Boolean(left && right)
+    && String(left.dev ?? left.device) === String(right.dev ?? right.device)
+    && String(left.ino ?? left.inode) === String(right.ino ?? right.inode);
+}
+
+async function leaseDirectoryIdentity(directory, label = 'target staging lease') {
+  const metadata = await lstat(directory).catch(() => null);
+  if (!metadata || !metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new ToolError('target_stage_failed', `${label} is not a private directory: ${directory}`);
+  }
+  return { dev: String(metadata.dev), ino: String(metadata.ino) };
+}
+
+async function readLeaseChild(leaseDirectory, name, expectedDirectoryIdentity) {
+  const leaseHandle = await prepareStateDirectory(leaseDirectory);
+  if (!sameFsIdentity(leaseHandle.components.at(-1), expectedDirectoryIdentity)) {
+    throw new ToolError('target_stage_identity_changed', `Target staging lease changed while reading ${name}.`);
+  }
+  const identity = await inspectStateFile(leaseHandle, name, { required: false });
+  if (!identity) return null;
+  const opened = await openStateFileRead(leaseHandle, name, { expectedIdentity: identity });
+  try {
+    return { value: JSON.parse(await opened.file.readFile('utf8')), identity };
+  } catch {
+    return null;
+  } finally {
+    await opened.file.close();
+  }
+}
+
+async function writeLease(leaseFile, value, { expectedDirectoryIdentity = null } = {}) {
+  const leaseDirectory = path.dirname(leaseFile);
+  const before = await leaseDirectoryIdentity(leaseDirectory);
+  if (expectedDirectoryIdentity && !sameFsIdentity(before, expectedDirectoryIdentity)) {
+    throw new ToolError('target_stage_identity_changed', 'Target staging lease changed before metadata publication.');
+  }
+  const temporary = `${leaseFile}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+    const beforeRename = await leaseDirectoryIdentity(leaseDirectory);
+    if (!sameFsIdentity(before, beforeRename)
+      || (expectedDirectoryIdentity && !sameFsIdentity(beforeRename, expectedDirectoryIdentity))) {
+      throw new ToolError('target_stage_identity_changed', 'Target staging lease changed before metadata publication.');
+    }
+    await rename(temporary, leaseFile);
+    const after = await leaseDirectoryIdentity(leaseDirectory);
+    if (!sameFsIdentity(before, after)
+      || (expectedDirectoryIdentity && !sameFsIdentity(after, expectedDirectoryIdentity))) {
+      throw new ToolError('target_stage_identity_changed', 'Target staging lease changed during metadata publication.');
+    }
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+async function writeLeaseOwner(leaseDirectory, expectedDirectoryIdentity) {
+  const leaseHandle = await prepareStateDirectory(leaseDirectory);
+  if (!sameFsIdentity(leaseHandle.components.at(-1), expectedDirectoryIdentity)) {
+    throw new ToolError('target_stage_identity_changed', 'Target staging lease changed before ownership publication.');
+  }
+  const owner = await createExclusiveStateFile(leaseHandle, 'owner.json');
+  if (!owner.created) {
+    await owner.file?.close().catch(() => {});
+    throw new ToolError('target_stage_busy', 'Another control-plane operation owns this target staging lease.');
+  }
+  const record = {
+    schema_version: 'codex-co-engineer.target-lease-owner.v1',
+    pid: process.pid,
+    start_time: await currentControlProcessStartTime(),
+    created_at: new Date().toISOString(),
+  };
+  if (!record.start_time) {
+    await owner.file.close().catch(() => {});
+    await removeStateFile(leaseHandle, 'owner.json', { expectedIdentity: owner.identity }).catch(() => {});
+    throw new ToolError('target_stage_failed', 'Target staging owner process could not be identity-verified.');
+  }
+  try {
+    await owner.file.write(`${JSON.stringify(record)}\n`, 0, 'utf8');
+    await owner.file.sync();
+    await inspectStateFile(leaseHandle, 'owner.json', { expectedIdentity: owner.identity });
+  } finally {
+    await owner.file.close();
+  }
+  return { record, identity: owner.identity };
+}
+
+async function removeLeaseChild(leaseDirectory, name, expectedDirectoryIdentity) {
+  const leaseHandle = await prepareStateDirectory(leaseDirectory);
+  if (!sameFsIdentity(leaseHandle.components.at(-1), expectedDirectoryIdentity)) return false;
+  const identity = await inspectStateFile(leaseHandle, name, { required: false });
+  if (!identity) return false;
+  await removeStateFile(leaseHandle, name, { expectedIdentity: identity });
+  return true;
+}
+
+async function removeLeaseDirectory(stageRoot, directory, expectedIdentity) {
+  await revalidateStateDirectory(stageRoot);
+  const observed = await lstat(directory).catch(() => null);
+  if (!observed || !observed.isDirectory() || observed.isSymbolicLink()
+    || !sameFsIdentity(observed, expectedIdentity)) return false;
+  // Revalidate both the parent and the exact lease inode immediately before
+  // removal. A slow clone can outlive a stale-lock check; if another owner
+  // replaced this path, its inode is left untouched.
+  await revalidateStateDirectory(stageRoot);
+  const confirmed = await lstat(directory).catch(() => null);
+  if (!confirmed || !sameFsIdentity(confirmed, expectedIdentity)) return false;
+  await rm(directory, { recursive: true, force: true });
+  const remaining = await lstat(directory).catch(() => null);
+  if (remaining && sameFsIdentity(remaining, expectedIdentity)) return false;
+  return true;
+}
+
+async function targetLeaseOwner(leaseDirectory, expectedDirectoryIdentity) {
+  const owner = await readLeaseChild(leaseDirectory, 'owner.json', expectedDirectoryIdentity).catch(() => null);
+  if (!owner?.value) return { record: null, alive: false };
+  const record = owner.value;
+  const valid = record.schema_version === 'codex-co-engineer.target-lease-owner.v1'
+    && Number.isInteger(record.pid)
+    && record.pid >= 2
+    && typeof record.start_time === 'string'
+    && record.start_time.length > 0;
+  return { record: valid ? record : null, alive: valid && await processIdentityAlive(record) };
+}
+
+async function activeStageCheckouts(deadlineAt) {
+  if (!database) return new Map();
+  const active = new Map();
+  // Pruning must not trust a dead runner's stale active row. Reconcile a
+  // bounded number of oldest rows before deciding which staged checkout is
+  // protected by a live job.
+  for (const stored of listActiveStoredJobs(database, TARGET_STAGE_RECONCILE_LIMIT)) {
+    assertStageDeadlineAt(deadlineAt);
+    const job = await reconcile(stored);
+    assertStageDeadlineAt(deadlineAt);
+    if (!ACTIVE_STATES.has(job.lifecycle_state ?? job.status)) continue;
+    const target = storedJson(job.target_context);
+    if (target?.target_origin === 'control_plane_staged' && target.working_directory) {
+      active.set(path.resolve(target.working_directory), target.workspace_identity ?? null);
+    }
+  }
+  return active;
+}
+
+async function pruneTargetLeases(stageRoot, deadlineAt) {
+  assertStageDeadlineAt(deadlineAt);
+  await revalidateStateDirectory(stageRoot);
+  const active = await activeStageCheckouts(deadlineAt);
+  const entries = await readdir(stageRoot.directory, { withFileTypes: true }).catch(() => []);
+  const leases = [];
+  for (const entry of entries) {
+    assertStageDeadlineAt(deadlineAt);
+    if (!entry.isDirectory() || !entry.name.startsWith('lease-')) continue;
+    const directory = path.join(stageRoot.directory, entry.name);
+    const checkout = path.join(directory, 'checkout');
+    const observed = await lstat(directory).catch(() => null);
+    if (!observed || observed.isSymbolicLink() || !observed.isDirectory()) continue;
+    const directoryIdentity = { dev: String(observed.dev), ino: String(observed.ino) };
+    const leaseChild = await readLeaseChild(directory, 'lease.json', directoryIdentity).catch(() => null);
+    const lease = leaseChild?.value ?? null;
+    const owner = await targetLeaseOwner(directory, directoryIdentity);
+    const expectedActiveIdentity = active.get(path.resolve(checkout));
+    const checkoutObserved = await lstat(checkout).catch(() => null);
+    const checkoutIdentity = checkoutObserved && !checkoutObserved.isSymbolicLink()
+      ? { dev: String(checkoutObserved.dev), ino: String(checkoutObserved.ino) }
+      : null;
+    const lastUsed = Date.parse(lease?.last_used_at ?? '') || observed?.mtimeMs || 0;
+    const activeIdentityMatches = expectedActiveIdentity
+      && checkoutIdentity
+      && sameFsIdentity(expectedActiveIdentity, checkoutIdentity);
+    leases.push({
+      directory,
+      checkout,
+      directoryIdentity,
+      lastUsed,
+      active: Boolean(activeIdentityMatches),
+      ownerAlive: owner.alive,
+      valid: Boolean(lease),
+    });
+  }
+  const now = Date.now();
+  const expired = leases
+    .filter((lease) => !lease.active && !lease.ownerAlive && (lease.valid
+      ? now - lease.lastUsed > TARGET_STAGE_LEASE_TTL_MS
+      : now - lease.lastUsed > TARGET_STAGE_LOCK_STALE_MS))
+    .sort((left, right) => left.lastUsed - right.lastUsed);
+  for (const lease of expired) await removeLeaseDirectory(
+    stageRoot,
+    lease.directory,
+    lease.directoryIdentity,
+  ).catch(() => {});
+  assertStageDeadlineAt(deadlineAt);
+  const survivors = leases.filter((lease) => !expired.includes(lease));
+  const overQuota = survivors
+    // A recent entry without lease.json is an in-progress clone. Never evict
+    // that lock merely because the quota is full; stale locks are reclaimed
+    // by the TTL branch above.
+    .filter((lease) => !lease.active && !lease.ownerAlive && lease.valid)
+    .sort((left, right) => left.lastUsed - right.lastUsed)
+    .slice(0, Math.max(0, survivors.length - TARGET_STAGE_MAX_LEASES));
+  for (const lease of overQuota) await removeLeaseDirectory(
+    stageRoot,
+    lease.directory,
+    lease.directoryIdentity,
+  ).catch(() => {});
+  assertStageDeadlineAt(deadlineAt);
+  await revalidateStateDirectory(stageRoot);
+}
+
+async function stagedCheckoutClean(checkout, deadlineAt) {
+  try {
+    const result = await runStageGit([
+    '-C', checkout,
+    'status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching',
+    ], 'staged checkout status', deadlineAt);
+    return !result;
+  } catch (error) {
+    if (error?.code === 'target_stage_timeout') throw error;
+    return false;
+  }
+}
+
+async function existingStageLease(
+  leaseDirectory,
+  leaseFile,
+  checkout,
+  descriptorDigest,
+  resolvedHead,
+  sourceType,
+  deadlineAt,
+) {
+  const directoryMetadata = await lstat(leaseDirectory).catch(() => null);
+  if (!directoryMetadata?.isDirectory() || directoryMetadata.isSymbolicLink()) return null;
+  const leaseIdentity = { dev: String(directoryMetadata.dev), ino: String(directoryMetadata.ino) };
+  const owner = await targetLeaseOwner(leaseDirectory, leaseIdentity);
+  if (owner.record && owner.alive) return null;
+  const leaseChild = await readLeaseChild(leaseDirectory, 'lease.json', leaseIdentity).catch(() => null);
+  const lease = leaseChild?.value ?? null;
+  if (!lease || lease.descriptor_digest !== descriptorDigest || lease.resolved_head !== resolvedHead
+    || lease.source_type !== sourceType || lease.tainted === true) return null;
+  if (await exists(path.join(leaseDirectory, 'tainted'))) return null;
+  const metadata = await stageTargetGitMetadata(checkout, deadlineAt).catch((error) => {
+    if (error?.code === 'target_stage_timeout') throw error;
+    return null;
+  });
+  if (!metadata || metadata.root !== path.resolve(checkout) || metadata.head !== resolvedHead) return null;
+  if (!await stagedCheckoutClean(checkout, deadlineAt)) return null;
+  const checkoutIdentity = await directoryIdentity(checkout, 'staged checkout').catch(() => null);
+  if (!checkoutIdentity || (lease.checkout_identity && !sameFsIdentity(lease.checkout_identity, checkoutIdentity))) return null;
+  const refreshed = { ...lease, last_used_at: new Date().toISOString() };
+  await writeLease(leaseFile, refreshed, { expectedDirectoryIdentity: leaseIdentity });
+  return {
+    directory: path.resolve(checkout),
+    head: resolvedHead,
+    common: metadata.common,
+    source_type: sourceType,
+    lease_directory: path.resolve(leaseDirectory),
+    lease_identity: leaseIdentity,
+    taint_file: path.join(leaseDirectory, 'tainted'),
+  };
+}
+
+async function stageTargetSource(source) {
+  const stageDeadlineAt = Date.now() + TARGET_STAGE_DEADLINE_MS;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new ToolError('invalid_target_source', 'target_context.source must identify a local checkout or GitHub repository.');
+  }
+  for (const key of Object.keys(source)) {
+    if (!TARGET_SOURCE_KEYS.has(key)) {
+      throw new ToolError('invalid_target_source', `target_context.source.${key} is not supported.`);
+    }
+  }
+  if (!TARGET_SOURCE_TYPES.has(source.type)) {
+    throw new ToolError('invalid_target_source', 'target_context.source.type must be local or github.');
+  }
+  const ref = sourceRef(source.ref);
+  let repository;
+  let sourceMetadata = null;
+  if (source.type === 'local') {
+    if (Object.hasOwn(source, 'repository')) {
+      throw new ToolError('invalid_target_source', 'Local sources must use path, not repository.');
+    }
+    if (typeof source.path !== 'string' || !path.isAbsolute(source.path) || source.path.includes('\0')) {
+      throw new ToolError('invalid_target_source', 'target_context.source.path must be an absolute local Git path.');
+    }
+    sourceMetadata = await sourceGitRoot(await realpath(source.path).catch(() => {
+      throw new ToolError('invalid_target_source', 'target_context.source.path does not resolve to a local Git checkout.');
+    }), stageDeadlineAt);
+    const writableSourceRoot = GROK_READ_ONLY_WRITABLE_ROOTS.find((root) => isPathWithin(root, sourceMetadata.root));
+    if (writableSourceRoot) {
+      throw new ToolError(
+        'target_source_unverifiable',
+        `The local source Git root is beneath ${writableSourceRoot}, where the built-in provider profile permits writes; move the source to a non-temporary root or use a GitHub source for staged review.`,
+      );
+    }
+    repository = sourceMetadata.root;
+  } else {
+    if (Object.hasOwn(source, 'path')) {
+      throw new ToolError('invalid_target_source', 'GitHub sources must use repository, not path.');
+    }
+    repository = githubRepository(source.repository);
+  }
+
+  assertStageDeadlineAt(stageDeadlineAt);
+  await ensureState();
+  assertStageDeadlineAt(stageDeadlineAt);
+  const stateWritableRoot = GROK_READ_ONLY_WRITABLE_ROOTS.find((root) => STATE_DIR && isPathWithin(root, STATE_DIR));
+  if (stateWritableRoot) {
+    throw new ToolError(
+      'target_stage_state_unverifiable',
+      `Staged targets cannot use a state directory beneath ${stateWritableRoot}; the provider's built-in read-only profile permits writes there. Configure a non-temporary Co-Engineer state directory.`,
+    );
+  }
+  const stageRoot = await prepareStateDirectory(path.join(STATE_DIR, TARGET_STAGE_ROOT_NAME));
+  await revalidateStateDirectory(stageRoot);
+  assertStageDeadlineAt(stageDeadlineAt);
+  await pruneTargetLeases(stageRoot, stageDeadlineAt);
+  assertStageDeadlineAt(stageDeadlineAt);
+  const resolved = source.type === 'local'
+    ? await resolveLocalRef(sourceMetadata.root, ref, sourceMetadata.head, stageDeadlineAt)
+    : await resolveGithubRef(repository, ref, stageDeadlineAt);
+  assertStageDeadlineAt(stageDeadlineAt);
+  const resolvedHead = resolved.commit;
+  const resolvedRef = resolved.ref;
+  const descriptor = leaseDescriptor(source, repository, ref, resolvedHead);
+  const descriptorDigest = sha256Digest(descriptor);
+  const leaseDirectory = path.join(stageRoot.directory, `lease-${descriptorDigest}`);
+  const leaseFile = path.join(leaseDirectory, 'lease.json');
+  const checkout = path.join(leaseDirectory, 'checkout');
+  const acquireStarted = Date.now();
+  let acquired = false;
+  let leaseIdentity = null;
+
+  // A deterministic lease makes preflight and the subsequent run observe the
+  // same checkout. A second caller waits for an in-progress clone, then
+  // reuses it; a dead owner is reclaimed only after a bounded stale period.
+  while (!acquired) {
+    try {
+      await mkdir(leaseDirectory, { mode: 0o700 });
+      leaseIdentity = await leaseDirectoryIdentity(leaseDirectory);
+      const owner = await writeLeaseOwner(leaseDirectory, leaseIdentity);
+      if (!owner.record.start_time) throw new ToolError('target_stage_failed', 'Target staging owner is not verifiable.');
+      acquired = true;
+      break;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') {
+        if (leaseIdentity) {
+          await removeLeaseDirectory(stageRoot, leaseDirectory, leaseIdentity).catch(() => {});
+          leaseIdentity = null;
+        }
+        if (error?.code === 'state_symlink' || error?.code === 'state_not_directory') {
+          throw new ToolError('target_stage_failed', `Target staging lease is not a private directory: ${leaseDirectory}`);
+        }
+        throw error;
+      }
+      const reusable = await existingStageLease(
+        leaseDirectory,
+        leaseFile,
+        checkout,
+        descriptorDigest,
+        resolvedHead,
+        source.type,
+        stageDeadlineAt,
+      );
+      if (reusable) {
+        await revalidateStateDirectory(stageRoot);
+        assertStageDeadlineAt(stageDeadlineAt);
+        return reusable;
+      }
+      const observed = await lstat(leaseDirectory).catch(() => null);
+      if (!observed?.isDirectory() || observed.isSymbolicLink()) {
+        throw new ToolError('target_stage_failed', `Target staging lease is not a private directory: ${leaseDirectory}`);
+      }
+      const observedIdentity = { dev: String(observed.dev), ino: String(observed.ino) };
+      const owner = await targetLeaseOwner(leaseDirectory, observedIdentity);
+      const existingLease = await readLeaseChild(leaseDirectory, 'lease.json', observedIdentity).catch(() => null);
+      if (existingLease?.value && !owner.alive) {
+        // A completed lease that no longer points at a clean, untainted
+        // checkout is disposable. Reclaim it by inode before cloning a fresh
+        // copy; never recursively remove a replacement at the same path.
+        await removeLeaseDirectory(stageRoot, leaseDirectory, observedIdentity);
+        continue;
+      }
+      // A clone may block the event loop for longer than the stale-lock TTL.
+      // Reclaim only when the recorded owner is absent/dead, and fence the
+      // recursive cleanup to the exact directory inode observed above.
+      if (!owner.alive && Date.now() - observed.mtimeMs > TARGET_STAGE_LOCK_STALE_MS) {
+        await removeLeaseDirectory(stageRoot, leaseDirectory, observedIdentity);
+        continue;
+      }
+      if (Date.now() - acquireStarted >= TARGET_STAGE_ACQUIRE_TIMEOUT_MS) {
+        throw new ToolError('target_stage_busy', 'Another control-plane operation is staging this target; retry after it completes.');
+      }
+      assertStageDeadlineAt(stageDeadlineAt);
+      await sleep(200);
+    }
+  }
+
+  let temporaryCheckout;
+  let temporaryCheckoutIdentity = null;
+  try {
+    assertStageDeadlineAt(stageDeadlineAt);
+    await revalidateStateDirectory(stageRoot);
+    if (!leaseIdentity || !sameFsIdentity(
+      await leaseDirectoryIdentity(leaseDirectory),
+      leaseIdentity,
+    )) throw new ToolError('target_stage_identity_changed', 'Target staging lease changed before cloning.');
+    temporaryCheckout = await mkdtemp(path.join(leaseDirectory, 'checkout-tmp-'));
+    await chmod(temporaryCheckout, 0o700);
+    temporaryCheckoutIdentity = await leaseDirectoryIdentity(temporaryCheckout, 'temporary target checkout');
+    const cloneArgs = ['clone', '--no-checkout', '--no-tags'];
+    if (source.type === 'local') cloneArgs.push('--no-local');
+    cloneArgs.push(repository, temporaryCheckout);
+    await runStageGit(cloneArgs, 'target source clone', stageDeadlineAt);
+    assertStageDeadlineAt(stageDeadlineAt);
+    await assertStageSize(temporaryCheckout, stageDeadlineAt);
+    if (resolvedRef) {
+      await runStageGit(['-C', temporaryCheckout, 'fetch', '--no-tags', 'origin', resolvedRef], 'target source ref fetch', stageDeadlineAt);
+      assertStageDeadlineAt(stageDeadlineAt);
+      await runStageGit(['-C', temporaryCheckout, 'checkout', '--detach', 'FETCH_HEAD'], 'target source ref checkout', stageDeadlineAt);
+    } else {
+      await runStageGit(['-C', temporaryCheckout, 'checkout', '--detach', resolvedHead], 'target source checkout', stageDeadlineAt);
+    }
+    assertStageDeadlineAt(stageDeadlineAt);
+    // A staged review never needs its origin and must not expose a private
+    // source URL or a credential-bearing remote to the provider.
+    await runStageGit(['-C', temporaryCheckout, 'remote', 'remove', 'origin'], 'target source remote cleanup', stageDeadlineAt);
+    assertStageDeadlineAt(stageDeadlineAt);
+    await assertStageSize(temporaryCheckout, stageDeadlineAt);
+    const stagedMetadata = await stageTargetGitMetadata(temporaryCheckout, stageDeadlineAt);
+    if (stagedMetadata.head !== resolvedHead) {
+      throw new ToolError('target_stage_failed', `The staged checkout resolved ${stagedMetadata.head}, expected ${resolvedHead}.`);
+    }
+    await revalidateStateDirectory(stageRoot);
+    const leaseBeforePublish = await leaseDirectoryIdentity(leaseDirectory);
+    if (!sameFsIdentity(leaseBeforePublish, leaseIdentity)) {
+      throw new ToolError('target_stage_identity_changed', 'Target staging lease was replaced during cloning.');
+    }
+    const existingCheckout = await lstat(checkout).catch(() => null);
+    if (existingCheckout) {
+      throw new ToolError('target_stage_identity_changed', 'Target staging checkout was replaced during cloning.');
+    }
+    await rename(temporaryCheckout, checkout);
+    temporaryCheckout = null;
+    temporaryCheckoutIdentity = null;
+    const checkoutIdentity = await directoryIdentity(checkout, 'staged checkout');
+    // Git reports an absolute common-directory path. Recompute it after the
+    // atomic publish so the first caller and later lease reusers bind the same
+    // final checkout identity rather than the temporary pre-rename pathname.
+    const publishedMetadata = await stageTargetGitMetadata(checkout, stageDeadlineAt);
+    if (publishedMetadata.head !== resolvedHead) {
+      throw new ToolError('target_stage_failed', `The published checkout resolved ${publishedMetadata.head}, expected ${resolvedHead}.`);
+    }
+    const now = new Date().toISOString();
+    await writeLease(leaseFile, {
+      schema_version: 'codex-co-engineer.target-lease.v1',
+      descriptor_digest: descriptorDigest,
+      source_type: source.type,
+      resolved_head: resolvedHead,
+      created_at: now,
+      last_used_at: now,
+      checkout_identity: checkoutIdentity,
+    }, { expectedDirectoryIdentity: leaseIdentity });
+    await removeLeaseChild(leaseDirectory, 'owner.json', leaseIdentity).catch(() => {});
+    await revalidateStateDirectory(stageRoot);
+    return {
+      directory: path.resolve(checkout),
+      head: resolvedHead,
+      common: publishedMetadata.common,
+      source_type: source.type,
+      lease_directory: path.resolve(leaseDirectory),
+      lease_identity: leaseIdentity,
+      taint_file: path.join(leaseDirectory, 'tainted'),
+    };
+  } catch (error) {
+    if (temporaryCheckout && temporaryCheckoutIdentity) {
+      const currentTemporary = await lstat(temporaryCheckout).catch(() => null);
+      if (currentTemporary && sameFsIdentity(currentTemporary, temporaryCheckoutIdentity)) {
+        await rm(temporaryCheckout, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+    if (acquired && leaseIdentity) {
+      await removeLeaseDirectory(stageRoot, leaseDirectory, leaseIdentity).catch(() => {});
+    }
+    throw error;
+  }
+}
+
 async function directoryIdentity(directory, label) {
   const info = await stat(directory).catch(() => {
     throw new ToolError('invalid_target_context', `${label} does not resolve to an existing directory.`);
@@ -471,7 +1554,37 @@ async function prepareTarget(rawTarget) {
     throw new ToolError('invalid_target_context', `target_context.schema_version must be ${TARGET_SCHEMA_VERSION}.`);
   }
   if (!TARGET_MODES.has(rawTarget.mode)) {
-    throw new ToolError('invalid_target_context', 'target_context.mode must be default or explicit.');
+    throw new ToolError('invalid_target_context', 'target_context.mode must be default, explicit, or staged.');
+  }
+
+  let staged = null;
+  if (rawTarget.mode === 'staged') {
+    const stagedKeys = new Set(['schema_version', 'mode', 'source', 'allowed_paths', 'role']);
+    for (const key of Object.keys(rawTarget)) {
+      if (!stagedKeys.has(key)) {
+        throw new ToolError('invalid_target_context', `target_context.${key} is not supported when mode=staged.`);
+      }
+    }
+    if (rawTarget.role === 'implement') {
+      throw new ToolError(
+        'invalid_target_context',
+        'Staged targets are read-only review or verify checkouts; implement runs require an explicit workspace target.',
+      );
+    }
+    staged = await stageTargetSource(rawTarget.source);
+    rawTarget = {
+      schema_version: TARGET_SCHEMA_VERSION,
+      mode: 'explicit',
+      working_directory: staged.directory,
+      expected_git_root: staged.directory,
+      expected_head: staged.head,
+      allowed_paths: rawTarget.allowed_paths,
+      role: rawTarget.role,
+    };
+  }
+
+  if (Object.hasOwn(rawTarget, 'source')) {
+    throw new ToolError('invalid_target_context', 'target_context.source is only valid when mode=staged.');
   }
 
   const isDefault = rawTarget.mode === 'default';
@@ -527,7 +1640,13 @@ async function prepareTarget(rawTarget) {
     || (resolvedGitRoot && resolvedGitRoot !== path.resolve(expectedGitRoot))) {
     throw new ToolError('invalid_target_context', 'target paths may not contain symlinks.');
   }
-  const metadata = await targetGitMetadata(resolvedWorkingDirectory);
+  const metadata = staged
+    ? {
+      root: resolvedGitRoot,
+      head: rawTarget.expected_head.toLowerCase(),
+      common: staged.common,
+    }
+    : await targetGitMetadata(resolvedWorkingDirectory);
   if (resolvedGitRoot && metadata.root !== resolvedGitRoot) {
     throw new ToolError('invalid_target_context', `working_directory is not inside expected_git_root (${metadata.root}).`);
   }
@@ -539,10 +1658,10 @@ async function prepareTarget(rawTarget) {
     throw new ToolError('target_head_mismatch', `Expected HEAD ${rawTarget.expected_head}, found ${metadata.head}.`);
   }
   const targetRoots = configuredTargetRoots();
-  if (targetRoots && !targetRoots.some((root) => isPathWithin(root, resolvedWorkingDirectory))) {
+  if (!staged && targetRoots && !targetRoots.some((root) => isPathWithin(root, resolvedWorkingDirectory))) {
     throw new ToolError('target_outside_allowlist', 'working_directory is outside the administrator-configured target roots.');
   }
-  if (targetRoots && !targetRoots.some((root) => isPathWithin(root, exactRoot))) {
+  if (!staged && targetRoots && !targetRoots.some((root) => isPathWithin(root, exactRoot))) {
     throw new ToolError('target_outside_allowlist', 'expected_git_root is outside the administrator-configured target roots.');
   }
   const normalizedAllowedPaths = allowedPaths.map(normalizeAllowedPath);
@@ -554,6 +1673,8 @@ async function prepareTarget(rawTarget) {
     resolved_cwd: resolvedWorkingDirectory,
     git_common_directory: metadata.common,
     git_head: metadata.head,
+    allowed_paths: normalizedAllowedPaths,
+    role,
     workspace_identity: workspaceIdentity,
     cwd_identity: cwdIdentity,
   });
@@ -574,6 +1695,12 @@ async function prepareTarget(rawTarget) {
       target_fingerprint: targetFingerprint,
       workspace_identity: workspaceIdentity,
       cwd_identity: cwdIdentity,
+      ...(staged ? { target_origin: 'control_plane_staged' } : {}),
+      ...(staged ? {
+        stage_lease_directory: staged.lease_directory,
+        stage_lease_identity: staged.lease_identity,
+        stage_taint_file: staged.taint_file,
+      } : {}),
       isolation: role === 'implement'
         ? 'explicit-scoped-workspace'
         : 'read-only-process-contract',
@@ -806,6 +1933,34 @@ async function tailLog(file, lineCount) {
   }
 }
 
+async function logSuffix(file, maximumBytes = 1_048_576) {
+  if (!(await exists(file))) return '';
+  const info = await stat(file);
+  const bytes = Math.min(info.size, maximumBytes);
+  const handle = await open(file, 'r');
+  try {
+    const buffer = Buffer.alloc(bytes);
+    if (bytes > 0) await handle.read(buffer, 0, bytes, info.size - bytes);
+    return redactLog(buffer.toString('utf8').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ''));
+  } finally {
+    await handle.close();
+  }
+}
+
+async function terminalGrokResponse(job) {
+  const lifecycle = job?.lifecycle_state ?? job?.status;
+  if (job?.kind !== 'grok_build' || !['completed', 'succeeded'].includes(lifecycle)) return null;
+  const parsed = grokBuildFinalResponse(await logSuffix(job.log_file));
+  if (!parsed) return null;
+  const configuration = storedJson(job.effective_configuration);
+  const outputFormat = configuration?.grok_configuration?.output_format
+    ?? configuration?.output_format;
+  return {
+    ...parsed,
+    source: outputFormat === 'json' ? 'grok_json' : 'grok_streaming_json',
+  };
+}
+
 function parseCursor(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
   const text = String(value);
@@ -1020,7 +2175,13 @@ function getProductionCapacityReader() {
       return reader(jobId);
     };
   }
-  productionCapacityReader = createCapacityReader({ readDshReceipt: dshReceiptReader });
+  productionCapacityReader = createCapacityReader({
+    // The command is administrator-selected at MCP process startup.  Pass it
+    // explicitly so Grok capacity uses the same executable as status and run;
+    // the capacity helper otherwise defaults to the literal `grok` command.
+    readGrok: (options) => readGrokCapacity({ ...options, command: GROK }),
+    readDshReceipt: dshReceiptReader,
+  });
   return productionCapacityReader;
 }
 
@@ -1124,38 +2285,47 @@ async function startJob({
 async function cancelJob(job) {
   job = await reconcile(job);
   if (FINAL_STATES.has(job.status)) return job;
-  if (!(await isOwned(job))) {
-    throw new ToolError('ownership_check_failed', 'Refusing to signal a process not proven to be plugin-owned.');
-  }
-
+  // Cancellation is a durable intent, not a process signal.  A job can be
+  // accepted/started before the runner has recorded a child PID, and a stale
+  // or replaced PID must not make the request disappear.  Persist the intent
+  // first; ownership proof below gates only the best-effort signal.
   await writeFile(job.cancel_file, `${new Date().toISOString()}\n`, { mode: 0o600 });
   updateJob(database, job.id, {
     status: 'cancelling',
     updated_at: new Date().toISOString(),
-    signal_sent: 'SIGTERM',
     termination_reason: 'cancel_requested',
     error: 'Cancellation requested; waiting for the managed process to exit.',
   });
 
-  try { process.kill(-job.child_pid, 'SIGTERM'); } catch {}
+  if (!(await isOwned(job))) return getJob(job.id);
+
+  let termSignalSent = false;
+  try {
+    process.kill(-job.child_pid, 'SIGTERM');
+    termSignalSent = true;
+    updateJob(database, job.id, { signal_sent: 'SIGTERM' });
+  } catch {}
   await sleep(1200);
-  if (await isOwned(job)) {
-    try { process.kill(-job.child_pid, 'SIGKILL'); } catch {}
-    updateJob(database, job.id, { signal_sent: 'SIGKILL', forced_kill: 1 });
+  if (termSignalSent && await isOwned(job)) {
+    try {
+      process.kill(-job.child_pid, 'SIGKILL');
+      updateJob(database, job.id, { signal_sent: 'SIGKILL', forced_kill: 1 });
+    } catch {}
   }
   await sleep(150);
   return getJob(job.id);
 }
 
 async function activeWebJob() {
-  const jobs = await listJobs(50);
+  const jobs = await listActiveJobs();
   return jobs.find((job) => job.kind === 'dsh_web' && ACTIVE_STATES.has(job.status)) ?? null;
 }
 
 async function statusTool(args) {
   const recentLimit = clampInteger(args.recent_limit, 5, 0, 15, 'recent_limit');
   const jobs = await listJobs(Math.max(recentLimit, 15));
-  const web = jobs.find((job) => job.kind === 'dsh_web' && ACTIVE_STATES.has(job.status));
+  const activeJobs = await listActiveJobs();
+  const web = activeJobs.find((job) => job.kind === 'dsh_web' && ACTIVE_STATES.has(job.status));
   const listening = await portOpen();
   const detectedVersions = versions();
   const grokStatus = grokVersionProbe(GROK, PLUGIN_ROOT, grokEnvironment());
@@ -1251,7 +2421,7 @@ async function statusTool(args) {
     },
     versions: detectedVersions,
     jobs: {
-      active: jobs.filter((job) => ACTIVE_STATES.has(job.status)).length,
+      active: activeJobs.length,
       recent: jobs.slice(0, recentLimit).map(compactJob),
     },
   };
@@ -1341,6 +2511,12 @@ function grokAuthDoctor() {
   };
 }
 
+function dshWebPermissionMode(role) {
+  if (role === 'implement') return 'workspace-write';
+  if (role === 'review' || role === 'verify') return 'read-only';
+  throw new ToolError('invalid_target_context', 'dsh_web requires a review, verify, or implement target role.');
+}
+
 async function runtimeTool(args) {
   if (args.action === 'start') {
     if (args.schema_version !== CONFIG_SCHEMA_VERSION) {
@@ -1354,44 +2530,86 @@ async function runtimeTool(args) {
     const managed = await activeWebJob();
     const listening = await portOpen();
     if (managed && listening) return { ok: true, already_running: true, job: publicJob(managed) };
-    if (listening) {
-      throw new ToolError('port_occupied', `Port ${WEB_PORT} is occupied by an unmanaged process.`);
-    }
-    requireDeepSeekReady();
-    const runtimeDshConfiguration = normalizeDshForTool(undefined);
-    const job = await startJob({
-      kind: 'dsh_web',
-      summary: 'DeepSeek Harness web UI',
-      command: DSH,
-      args: [
-        '--profile', 'web',
-        ...(DSH_PATCH_FILE ? ['--patch', DSH_PATCH_FILE] : []),
-        '--host', WEB_HOST,
-        '--port', String(WEB_PORT),
-      ],
-      env: {
-        ...dshWorkerEnvironment(runtimeDshConfiguration),
-        DSH_PERMISSION_MODE: 'workspace-write',
-      },
-      url: `http://${WEB_HOST}:${WEB_PORT}`,
-      timeoutSeconds,
-      cwd,
-      targetContext: target,
-      effectiveConfiguration: (() => {
-        const configuration = {
-          schema_version: CONFIG_SCHEMA_VERSION,
+    return startAgentJob({
+      working_directory: cwd,
+      expected_git_root: target.expected_git_root,
+      git_common_directory: target.git_common_directory,
+    }, async () => {
+      // Re-check the global UI/port state after acquiring the same execution
+      // lock used by headless agent jobs.  A concurrent runtime start either
+      // reuses its managed listener or fails closed; it never races a second
+      // DSH web process into the same workspace/port.
+      const currentManaged = await activeWebJob();
+      const currentListening = await portOpen();
+      if (currentManaged && currentListening) {
+        return { ok: true, already_running: true, job: publicJob(currentManaged) };
+      }
+      if (currentManaged) {
+        throw new ToolError('workspace_busy', `A managed DSH web runtime is already active: ${currentManaged.id}`);
+      }
+      if (currentListening) {
+        throw new ToolError('port_occupied', `Port ${WEB_PORT} is occupied by an unmanaged process.`);
+      }
+      requireDeepSeekReady();
+      const runtimeDshConfiguration = normalizeDshForTool(undefined);
+      const permissionMode = dshWebPermissionMode(target.role);
+      let runtimeLock;
+      let runtimeLockPromoted = false;
+      try {
+        // The fixed web port is a process-wide resource. The SQLite job query
+        // and in-memory submission tail are useful diagnostics, but only this
+        // owner-only O_EXCL lock closes the cross-process start race.
+        runtimeLock = await acquireWebRuntimeLock();
+        const job = await startJob({
           kind: 'dsh_web',
-          timeout_seconds: timeoutSeconds,
-          working_directory: cwd,
-          target_fingerprint: targetFingerprint,
-          target_context: target,
-        };
-        configuration.configuration_digest = sha256Digest(configuration);
-        return configuration;
-      })(),
-    });
-    for (let attempt = 0; attempt < 20 && !(await portOpen()); attempt += 1) await sleep(100);
-    return { ok: true, job: publicJob(await getJob(job.id)), listening: await portOpen() };
+          summary: 'DeepSeek Harness web UI',
+          command: DSH,
+          args: [
+            '--profile', 'web',
+            ...(DSH_PATCH_FILE ? ['--patch', DSH_PATCH_FILE] : []),
+            '--host', WEB_HOST,
+            '--port', String(WEB_PORT),
+          ],
+          env: {
+            ...dshWorkerEnvironment(runtimeDshConfiguration),
+            DSH_PERMISSION_MODE: permissionMode,
+          },
+          url: `http://${WEB_HOST}:${WEB_PORT}`,
+          timeoutSeconds,
+          cwd,
+          targetContext: target,
+          effectiveConfiguration: (() => {
+            const configuration = {
+              schema_version: CONFIG_SCHEMA_VERSION,
+              kind: 'dsh_web',
+              timeout_seconds: timeoutSeconds,
+              working_directory: cwd,
+              target_fingerprint: targetFingerprint,
+              target_context: target,
+              role: target.role,
+              permission_mode: permissionMode,
+            };
+            configuration.configuration_digest = sha256Digest(configuration);
+            return configuration;
+          })(),
+        });
+        await promoteWebRuntimeLock(runtimeLock, job.id);
+        runtimeLockPromoted = true;
+        for (let attempt = 0; attempt < 20 && !(await portOpen()); attempt += 1) await sleep(100);
+        const currentJob = await getJob(job.id);
+        // A provider that exits during startup must not leave an owner-only
+        // lock behind. Keep the lock for a still-running slow startup so a
+        // concurrent caller cannot launch a second listener.
+        if (!await portOpen() && FINAL_STATES.has(currentJob.status)) {
+          await releaseWebRuntimeLock(runtimeLock);
+          runtimeLock = null;
+          runtimeLockPromoted = false;
+        }
+        return { ok: true, job: publicJob(currentJob), listening: await portOpen() };
+      } finally {
+        if (runtimeLock && !runtimeLockPromoted) await releaseWebRuntimeLock(runtimeLock).catch(() => {});
+      }
+    }, { ignoreJobIds: managed ? [managed.id] : [] });
   }
   if (args.action === 'stop') {
     const managed = await activeWebJob();
@@ -1439,6 +2657,24 @@ function assertTargetFingerprint(expected, actual) {
       'The resolved target fingerprint does not match the caller-supplied expected fingerprint; refusing dispatch.',
     );
   }
+}
+
+function bindTarget(args, targetFingerprint) {
+  const binding = args.target_binding ?? 'caller';
+  if (binding !== 'caller' && binding !== 'control_plane') {
+    throw new ToolError('invalid_target_binding', 'target_binding must be control_plane when supplied.');
+  }
+  if (binding === 'control_plane') {
+    // Supplying an assertion alongside the explicit control-plane binding is
+    // allowed and still checked; omitting it is the convenience path.
+    if (Object.hasOwn(args, 'expected_target_fingerprint')) {
+      assertTargetFingerprint(expectedTargetFingerprint(args.expected_target_fingerprint), targetFingerprint);
+    }
+    return { expected: targetFingerprint, source: 'control_plane' };
+  }
+  const expected = expectedTargetFingerprint(args.expected_target_fingerprint);
+  assertTargetFingerprint(expected, targetFingerprint);
+  return { expected, source: 'caller' };
 }
 
 async function findRequest(id, fingerprint) {
@@ -1491,6 +2727,7 @@ function agentConfiguration({
   timeoutSeconds,
   cwd,
   target,
+  targetBinding = 'caller',
   dshConfiguration = null,
   grokConfiguration = null,
 }) {
@@ -1507,8 +2744,11 @@ function agentConfiguration({
     },
     working_directory: cwd,
     target_fingerprint: target?.target_fingerprint ?? null,
+    target_binding: targetBinding,
     targeting_mode: target
-      ? target.mode === 'default'
+      ? target.target_origin === 'control_plane_staged'
+        ? 'control-plane-staged'
+        : target.mode === 'default'
         ? 'explicit-default-workspace'
         : (configuredTargetRoots() ? 'administrator-allowlisted' : 'explicit-target-any-git-root')
       : 'default-workspace',
@@ -1590,6 +2830,7 @@ function preflightAllowedFields(args) {
     'timeout_seconds',
     'target_context',
     'expected_target_fingerprint',
+    'target_binding',
     ...DSH_CONFIGURATION_FIELDS,
     ...GROK_CONFIGURATION_FIELDS,
   ]);
@@ -1608,15 +2849,14 @@ async function preflightTool(args) {
   if (!Object.hasOwn(args, 'target_context')) {
     throw new ToolError('missing_target_context', 'preflight requires a versioned target_context; use mode=default to select the configured workspace.');
   }
-  const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
   const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
-  assertTargetFingerprint(expectedFingerprint, targetFingerprint);
+  const binding = bindTarget(args, targetFingerprint);
 
   let kind = args.kind ?? 'preflight';
   if (kind !== 'preflight' && !['deepseek_agent', 'grok_build'].includes(kind)) {
     throw new ToolError('invalid_kind', 'preflight.kind must be deepseek_agent or grok_build.');
   }
-  const commonFields = new Set(['schema_version', 'kind', 'request_id', 'prompt', 'timeout_seconds', 'target_context', 'expected_target_fingerprint']);
+  const commonFields = new Set(['schema_version', 'kind', 'request_id', 'prompt', 'timeout_seconds', 'target_context', 'expected_target_fingerprint', 'target_binding']);
   const kindFields = kind === 'grok_build'
     ? GROK_CONFIGURATION_FIELDS
     : kind === 'deepseek_agent'
@@ -1645,6 +2885,7 @@ async function preflightTool(args) {
       : { timeout_seconds: clampInteger(args.timeout_seconds, 3600, 60, 21600, 'timeout_seconds') }),
     working_directory: cwd,
     target_fingerprint: targetFingerprint,
+    target_binding: binding.source,
     target_context: target,
   };
   let grokCapabilities = null;
@@ -1664,7 +2905,8 @@ async function preflightTool(args) {
     ok: true,
     schema_version: CONFIG_SCHEMA_VERSION,
     target_fingerprint: targetFingerprint,
-    expected_target_fingerprint: expectedFingerprint,
+    expected_target_fingerprint: binding.expected,
+    target_binding: binding.source,
     target_match: true,
     resolved_workspace: target.resolved_workspace,
     resolved_cwd: target.resolved_cwd,
@@ -1701,6 +2943,7 @@ async function runTool(args) {
       'timeout_seconds',
       'target_context',
       'expected_target_fingerprint',
+      'target_binding',
       ...GROK_CONFIGURATION_FIELDS,
     ]);
     rejectUnsupportedRunFields(args, allowed, args.kind);
@@ -1711,9 +2954,8 @@ async function runTool(args) {
     if (!Object.hasOwn(args, 'target_context')) {
       throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
     }
-    const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
-    assertTargetFingerprint(expectedFingerprint, targetFingerprint);
+    const binding = bindTarget(args, targetFingerprint);
     const grokConfiguration = normalizeGrokForTool(args, target.role);
     assertGrokReadOnlyTarget(target);
     const grokCapabilities = grokCapabilityProfile(grokInput(args), target.role);
@@ -1724,6 +2966,7 @@ async function runTool(args) {
       timeoutSeconds,
       cwd,
       target,
+      targetBinding: binding.source,
       grokConfiguration,
     });
     const fingerprint = requestFingerprint({
@@ -1792,6 +3035,7 @@ async function runTool(args) {
       'timeout_seconds',
       'target_context',
       'expected_target_fingerprint',
+      'target_binding',
       'dsh_options',
     ]);
     rejectUnsupportedRunFields(args, allowed, args.kind);
@@ -1802,9 +3046,8 @@ async function runTool(args) {
     if (!Object.hasOwn(args, 'target_context')) {
       throw new ToolError('missing_target_context', 'run requires an explicit versioned target_context; use mode=default to select the configured workspace.');
     }
-    const expectedFingerprint = expectedTargetFingerprint(args.expected_target_fingerprint);
     const { cwd, target, targetFingerprint } = await prepareTarget(args.target_context);
-    assertTargetFingerprint(expectedFingerprint, targetFingerprint);
+    const binding = bindTarget(args, targetFingerprint);
     const dshConfiguration = normalizeDshForTool(args.dsh_options);
     const deepseekCapabilities = dshConfiguration
       ? dshCapabilityProfile(dshConfiguration)
@@ -1816,6 +3059,7 @@ async function runTool(args) {
       timeoutSeconds,
       cwd,
       target,
+      targetBinding: binding.source,
       dshConfiguration,
     });
     const fingerprint = requestFingerprint({
@@ -1981,6 +3225,8 @@ async function jobsTool(args) {
     log_delta: logDelta,
   };
   if (args.action === 'get') {
+    const finalResponse = await terminalGrokResponse(job);
+    if (finalResponse) response.final_response = finalResponse;
     const usage = await terminalDshUsage(job);
     if (usage) response.dsh_usage = usage;
   }
@@ -2058,11 +3304,21 @@ export async function dispatchControl(name, args = {}) {
 
 export const __testing = Object.freeze({
   configuredTargetRoots,
+  dshWebPermissionMode,
   executionScopesOverlap,
   deepseekReadiness,
   getProductionCapacityReader,
+  listActiveJobs,
+  readWebRuntimeLock,
+  acquireWebRuntimeLock,
+  releaseWebRuntimeLock,
+  runStageGit,
+  assertStageSize,
+  resolveGithubRef,
+  resolveLocalRef,
   prepareTarget,
   assertGrokReadOnlyTarget,
+  startAgentJob,
   startJobEnvironment,
 });
 

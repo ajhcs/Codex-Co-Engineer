@@ -28,6 +28,37 @@ test('create requires a stable request ID, usage permits an omitted run ID, and 
   assert.throws(() => validateToolInput('status', { action: 'identity', fullIdentity: true }), /not supported/);
 });
 
+test('agent reconciliation requires only a stable request ID and accepts an optional opaque provider ID', () => {
+  assert.deepEqual(validateToolInput('agents', {
+    action: 'reconcile', requestId: 'reconcile-validation-1',
+  }), {
+    action: 'reconcile', requestId: 'reconcile-validation-1',
+  });
+  assert.equal(validateToolInput('agents', {
+    action: 'reconcile', requestId: 'reconcile-validation-2', agentId,
+  }).agentId, agentId);
+  assert.throws(() => validateToolInput('agents', {
+    action: 'reconcile', requestId: 'reconcile-validation-3', prompt: { text: 'not accepted' },
+  }), /not supported/);
+});
+
+test('run and lifecycle reconciliation expose typed release confirmations and cancellation request IDs', () => {
+  assert.deepEqual(validateToolInput('runs', { action: 'cancel', requestId: 'cancel-validation-1', agentId, runId }), {
+    action: 'cancel', requestId: 'cancel-validation-1', agentId, runId,
+  });
+  assert.deepEqual(validateToolInput('runs', {
+    action: 'reconcile', requestId: 'run-reconcile-validation-1', release: true, confirmation: 'release:run-reconcile-validation-1',
+  }), {
+    action: 'reconcile', requestId: 'run-reconcile-validation-1', release: true, confirmation: 'release:run-reconcile-validation-1',
+  });
+  assert.deepEqual(validateToolInput('lifecycle', {
+    action: 'reconcile', requestId: 'life-reconcile-validation-1', agentId,
+  }), { action: 'reconcile', requestId: 'life-reconcile-validation-1', agentId });
+  assert.throws(() => validateToolInput('lifecycle', {
+    action: 'reconcile', requestId: 'life-reconcile-validation-2', release: true,
+  }), /confirmation is required/);
+});
+
 test('write-mode repository dispatch requires an immutable start commit', () => {
   assert.throws(() => validateToolInput('agents', {
     action: 'create', requestId: 'create-agent-1', mode: 'agent', prompt: { text: 'implement' },

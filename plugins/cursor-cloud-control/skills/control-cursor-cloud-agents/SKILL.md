@@ -9,6 +9,8 @@ Use the `cursor-cloud-control` MCP server for Cursor Cloud Agents API v1. Do
 not ask the user for an API key in chat and do not place a key in a tool
 argument. The MCP process reads `CURSOR_API_KEY` or an owner-only
 `CURSOR_API_KEY_FILE`.
+This skill ships with Cursor Cloud Control `0.4.0`; its cloud server identity
+is versioned independently from the local `cursor-local-control` wire identity.
 If neither is set, it discovers `$XDG_CONFIG_HOME/cursor-cloud-control/api-key`
 or `$HOME/.config/cursor-cloud-control/api-key` when that file is owner-only.
 
@@ -55,12 +57,35 @@ repository starting refs, model resolution, and remote workspace head/branch
 as unverified unless Cursor returns a documented attestation. The legacy
 `effectiveConfiguration` field is marked `provenance: "caller-derived"` and
 `deprecated: true`; it is not provider evidence. Never infer that a timeout
-means no agent was created. A receipt with `uncertain_submission` requires
-`agents.get` and `runs.list` reconciliation before any new request ID is used.
+means no agent was created. When `agentId` is omitted, the plugin does not
+send its local reservation ID to Cursor. `agents` `action=reconcile` performs
+a bounded listing as a diagnostic only. A hash-only fingerprint, even when it
+matches one provider agent exactly, has no reservation-time provenance and may
+identify a pre-existing agent, so the reservation remains uncertain. Never
+guess an ID, finalize a listing match, or resubmit. An explicit
+`release:<requestId>` confirmation is available when the caller has
+accepted that provider state cannot be proven. When a caller-supplied
+`agentId` is present, reconciliation repeats `agents.get` and `runs.list`
+with a bounded backoff and releases the reservation only after both paths
+consistently return provider HTTP 404. Never bind an arbitrary ID to a
+reservation that has no stored provider target. Different request IDs remain
+independent unless they reuse the same explicit provider agent ID.
+
+HTTP 409 conflicts and HTTP 429 rate limits are definitive provider failures,
+not transport uncertainty; retry only after the returned provider error has
+been handled.
 
 Use `runs` with `action=followup` only for a known agent ID. Follow-ups are
 non-idempotent and are never automatically retried. A stable request ID is
-required so transport failures remain reconcilable.
+required so transport failures remain reconcilable; use `runs`
+`action=reconcile` with the exact observed provider run ID, or explicitly
+release with `release:<requestId>`. A successful follow-up response without an
+opaque provider run ID remains uncertain. Cancellation reconciliation completes
+only for the exact run when its provider status is terminal `CANCELLED` or
+`CANCELED`; otherwise it remains uncertain. `runs.wait` returns a bounded
+`timedOut` receipt for provider `request_timeout` while retaining the latest
+confirmed run. Cancellation also has a durable receipt; reconcile or release
+an uncertain cancellation before issuing another request.
 
 Remote MCP servers may use the typed `authEnv` and `headerEnv` wrappers. These
 fields contain only environment variable names, not credential values. The
@@ -74,8 +99,9 @@ Use `runs` `action=stream` with bounded `timeoutMs`, `maxEvents`, and
 `maxBytes`. Keep the returned `lastEventId`; pass it as `lastEventId` to resume
 after a disconnect. Unknown events are preserved as bounded event names/data.
 For a 410 stream expiry or bounded timeout, use `runs` `action=get` or
-`action=wait`. Use `runs` `action=cancel` with the exact agent and run IDs;
-Cursor cancellation is terminal.
+`action=wait`. Use `runs` `action=cancel` with the exact agent and run IDs. The
+cancellation request is durably keyed and returns a receipt; Cursor
+cancellation is terminal.
 
 ## Artifacts and lifecycle
 
@@ -86,7 +112,10 @@ and never executes or renders the file.
 
 Use `lifecycle` `archive` for reversible removal and `unarchive` to resume an
 archived agent. Permanent `delete` requires confirmation exactly equal to
-`delete:<agent-id>` and must be treated as irreversible.
+`delete:<agent-id>` and must be treated as irreversible. Lifecycle calls are
+durably keyed; use `lifecycle` `action=reconcile` for uncertain state or the
+explicit `release:<requestId>` confirmation when provider state cannot be
+proven. No reconciliation or release path resubmits the mutation.
 
 Refer to the plugin README and the current Cursor endpoint reference for API
 details and beta-compatibility caveats. Bearer authentication is the plugin

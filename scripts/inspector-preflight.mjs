@@ -80,6 +80,7 @@ try {
   const fingerprint = targetIdentityDigest({
     mode: 'explicit', resolved_workspace: workspace, resolved_cwd: workspace,
     git_common_directory: common, git_head: head,
+    allowed_paths: ['.'], role: 'review',
     workspace_identity: { device: String(identity.dev), inode: String(identity.ino) },
     cwd_identity: { device: String(identity.dev), inode: String(identity.ino) },
   });
@@ -159,16 +160,25 @@ try {
   assert.ok(structured.available_tools.includes('capacity'));
 
   const grokImplementTarget = { ...args.target_context, role: 'implement' };
+  const grokImplementFingerprint = targetIdentityDigest({
+    mode: 'explicit', resolved_workspace: workspace, resolved_cwd: workspace,
+    git_common_directory: common, git_head: head,
+    allowed_paths: ['.'], role: 'implement',
+    workspace_identity: { device: String(identity.dev), inode: String(identity.ino) },
+    cwd_identity: { device: String(identity.dev), inode: String(identity.ino) },
+  });
   const grokImplementOmitted = structuredResult(inspect('tools/call', 'preflight', {
     ...args,
     kind: 'grok_build',
     target_context: grokImplementTarget,
+    expected_target_fingerprint: grokImplementFingerprint,
   }));
   assert.notEqual(grokImplementOmitted.code, 'invalid_argument');
   const grokImplementAuto = structuredResult(inspect('tools/call', 'preflight', {
     ...args,
     kind: 'grok_build',
     target_context: grokImplementTarget,
+    expected_target_fingerprint: grokImplementFingerprint,
     permission_mode: 'auto',
     agent: 'project-review',
     delegation: { enabled: false },

@@ -402,6 +402,12 @@ function validateRecord(record) {
     && /^[0-9a-f]{64}$/i.test(record.digest)
     && ['pending', 'completed', 'failed', 'uncertain'].includes(record.status)
     && (record.agentId === null || typeof record.agentId === 'string')
+    && (record.providerAgentId === undefined || record.providerAgentId === null
+      || typeof record.providerAgentId === 'string' && record.providerAgentId.length > 0 && record.providerAgentId.length <= 256)
+    && (record.providerNotFoundConfirmations === undefined
+      || Number.isInteger(record.providerNotFoundConfirmations)
+      && record.providerNotFoundConfirmations >= 0
+      && record.providerNotFoundConfirmations <= 2)
     && typeof record.createdAt === 'string'
     && typeof record.updatedAt === 'string'
     && (record.owner === undefined || (record.owner && typeof record.owner === 'object'
@@ -418,6 +424,80 @@ function activeOwnerKey(stateDir, requestId) {
 function timestampMilliseconds(timestamp) {
   const milliseconds = Date.parse(timestamp);
   return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+function activeReservation(record) {
+  return record?.status === 'pending' || record?.status === 'uncertain';
+}
+
+const RECONCILIATION_FIELDS = Object.freeze([
+  'reconciliationReason',
+  'reconciliationRequired',
+  'reconciledAt',
+  'releasedAt',
+  'staleAt',
+  'recoveryReason',
+  'failureCode',
+  'providerCode',
+  'providerNotFoundConfirmations',
+]);
+
+const ATTEMPT_FIELDS = Object.freeze(['runId', 'providerRunId']);
+
+function clearAttemptMetadata(record, { clearAttempt = false } = {}) {
+  const output = { ...record };
+  for (const field of RECONCILIATION_FIELDS) delete output[field];
+  if (clearAttempt) for (const field of ATTEMPT_FIELDS) delete output[field];
+  return output;
+}
+
+function capRecords(records) {
+  const terminal = records.filter((record) => !activeReservation(record));
+  const keptTerminal = terminal.slice(-MAX_RECORDS);
+  const terminalSet = new Set(keptTerminal);
+  // Preserve the original order so restart/replay semantics remain stable,
+  // while guaranteeing that no pending or uncertain reservation is evicted by
+  // terminal history growth.
+  return records.filter((record) => activeReservation(record) || terminalSet.has(record));
+}
+
+function recordProviderAgentId(record) {
+  // Records written before the providerAgentId field was introduced used the
+  // local agentId as the provider target. Preserve that legacy reconciliation
+  // behavior while making new generated IDs explicitly non-provider IDs.
+  // Lifecycle/cancellation reservations historically stored an explicit null
+  // providerAgentId even though their exact agent target lived in agentId.
+  // A non-null providerAgentId always wins; otherwise the exact stored agent
+  // target is the safe fallback. Provider-assigned creates have both fields
+  // null and therefore still cannot be guessed during reconciliation.
+  return record?.providerAgentId ?? record?.agentId ?? null;
+}
+
+function findProviderReservation(records, requestId, providerId) {
+  if (providerId === null) return null;
+  return [...records.values()].find((record) => (
+    record.requestId !== requestId
+    && activeReservation(record)
+    // New lifecycle/cancellation records intentionally carry an explicit
+    // null providerAgentId: their target is exact for reconciliation, but
+    // they are not create/follow-up provider-ID reservations that should
+    // block an unrelated operation on the same agent. Legacy records without
+    // the field retain their historical agentId reservation behavior.
+    && (Object.hasOwn(record, 'providerAgentId') ? record.providerAgentId : record.agentId ?? null) !== null
+    && (Object.hasOwn(record, 'providerAgentId') ? record.providerAgentId : record.agentId ?? null) === providerId
+  )) ?? null;
+}
+
+function throwProviderReservationConflict(record) {
+  if (!record) return;
+  if (record.status === 'uncertain') {
+    throw new CursorApiError(
+      'uncertain_submission',
+      'A prior submission for this provider agent ID has an uncertain transport outcome; reconcile it before retrying.',
+      { ambiguous: true },
+    );
+  }
+  throw new CursorApiError('submission_in_progress', 'A submission for this provider agent ID is already in progress.');
 }
 
 async function probeWritable(directory, snapshot) {
@@ -458,27 +538,140 @@ function processIsAlive(pid) {
   }
 }
 
-async function readLockOwner(lockPath) {
+function sameFileIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
+async function readLockOwnerSnapshot(lockPath) {
   const ownerPath = path.join(lockPath, 'owner.json');
   let metadata;
   try {
     metadata = await lstat(ownerPath);
   } catch (error) {
-    if (error?.code === 'ENOENT') return null;
+    if (error?.code === 'ENOENT') return { owner: null, present: false, identity: null, contents: null };
     throw unavailable(error, ownerPath);
   }
   assertOwnerOnly(metadata, 'Submission ledger lock owner');
+  const identity = fileIdentity(metadata);
   let owner;
+  let contents;
   try {
-    owner = JSON.parse(await readFile(ownerPath, 'utf8'));
+    contents = await readFile(ownerPath, 'utf8');
   } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    return null;
+    if (error?.code === 'ENOENT') {
+      throw new CursorApiError('ledger_permissions', 'Submission ledger lock owner changed during stale-lock inspection.');
+    }
+    throw unavailable(error, ownerPath);
   }
-  return validLockOwner(owner) ? owner : null;
+  let confirmed;
+  try {
+    confirmed = await lstat(ownerPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new CursorApiError('ledger_permissions', 'Submission ledger lock owner changed during stale-lock inspection.');
+    }
+    throw unavailable(error, ownerPath);
+  }
+  assertOwnerOnly(confirmed, 'Submission ledger lock owner');
+  assertFileIdentity(confirmed, identity, 'Submission ledger lock owner');
+  try {
+    owner = JSON.parse(contents);
+  } catch {
+    owner = null;
+  }
+  return { owner: validLockOwner(owner) ? owner : null, present: true, identity, contents };
 }
 
-async function removeStaleLock(lockPath, staleMs) {
+async function readLockOwner(lockPath) {
+  return (await readLockOwnerSnapshot(lockPath)).owner;
+}
+
+function lockIsStale(metadata, staleMs, clock) {
+  const observedAt = clock();
+  return Number.isFinite(observedAt)
+    && Number.isFinite(metadata.mtimeMs)
+    && observedAt >= metadata.mtimeMs
+    && observedAt - metadata.mtimeMs >= staleMs;
+}
+
+async function confirmStaleLockIdentity(lockPath, initial, ownerSnapshot, staleMs, clock) {
+  let confirmed;
+  try {
+    confirmed = await lstat(lockPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw unavailable(error, lockPath);
+  }
+  assertOwnerOnly(confirmed, 'Submission ledger lock', { directory: true });
+  // The lock must remain the same old directory from the first observation
+  // through the owner read. A replacement lock (or a fresh mtime) is left for
+  // its owner; never remove a path merely because it has the same name.
+  if (!sameFileIdentity(initial, confirmed)
+    || confirmed.mtimeMs !== initial.mtimeMs
+    || !lockIsStale(confirmed, staleMs, clock)) return null;
+
+  const ownerPath = path.join(lockPath, 'owner.json');
+  if (ownerSnapshot.present) {
+    let currentOwner;
+    try {
+      currentOwner = await lstat(ownerPath);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw unavailable(error, ownerPath);
+    }
+    assertOwnerOnly(currentOwner, 'Submission ledger lock owner');
+    if (!sameFileIdentity(ownerSnapshot.identity, currentOwner)) return null;
+    // A stable inode is not enough if a writer replaced the contents in place;
+    // compare the bounded owner marker before deciding to unlink it.
+    let contents;
+    try {
+      contents = await readFile(ownerPath, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw unavailable(error, ownerPath);
+    }
+    if (contents !== ownerSnapshot.contents) return null;
+  } else {
+    try {
+      await lstat(ownerPath);
+      return null;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw unavailable(error, ownerPath);
+    }
+  }
+  return confirmed;
+}
+
+async function claimStaleLock(lockPath) {
+  const claimPath = path.join(lockPath, '.reclaiming');
+  const claim = { pid: process.pid, token: randomUUID(), claimedAt: Date.now() };
+  try {
+    await writeFile(claimPath, JSON.stringify(claim), { flag: 'wx', mode: 0o600 });
+    const metadata = await lstat(claimPath);
+    assertOwnerOnly(metadata, 'Submission ledger stale-lock claim');
+    return { path: claimPath, identity: fileIdentity(metadata), contents: JSON.stringify(claim) };
+  } catch (error) {
+    if (error?.code === 'EEXIST') return null;
+    throw unavailable(error, claimPath);
+  }
+}
+
+async function releaseStaleLockClaim(claim) {
+  if (!claim) return;
+  try {
+    const metadata = await lstat(claim.path);
+    assertOwnerOnly(metadata, 'Submission ledger stale-lock claim');
+    if (!sameFileIdentity(metadata, claim.identity)) return;
+    await unlink(claim.path);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      // Cleanup is best effort. The caller's stale-lock decision remains
+      // fail-closed if another process replaced the claim marker.
+    }
+  }
+}
+
+async function removeStaleLock(lockPath, staleMs, clock = Date.now) {
   let metadata;
   try {
     metadata = await lstat(lockPath);
@@ -487,23 +680,55 @@ async function removeStaleLock(lockPath, staleMs) {
     throw unavailable(error, lockPath);
   }
   assertOwnerOnly(metadata, 'Submission ledger lock', { directory: true });
-  if (Date.now() - metadata.mtimeMs < staleMs) return false;
+  if (!lockIsStale(metadata, staleMs, clock)) return false;
 
-  const owner = await readLockOwner(lockPath);
-  // An unknown owner is deliberately never removed. A process can crash between
-  // mkdir(lock) and writing owner.json, so a malformed or absent marker must
-  // eventually time out rather than being guessed to be stale.
-  if (!owner || processIsAlive(owner.pid)) return false;
+  const ownerSnapshot = await readLockOwnerSnapshot(lockPath);
+  const owner = ownerSnapshot.owner;
+  // A valid live owner always wins. An absent or malformed marker is
+  // reclaimable only after the age and identity checks below prove this is the
+  // same old lock directory and marker we inspected.
+  if (owner && processIsAlive(owner.pid)) return false;
+  const confirmed = await confirmStaleLockIdentity(lockPath, metadata, ownerSnapshot, staleMs, clock);
+  if (!confirmed) return false;
 
+  // Claim the old directory before touching owner.json. A contender cannot
+  // create a replacement lock while this directory still exists, and a
+  // second reclaimer cannot race us through the fixed claim marker. The
+  // claim is removed only immediately before rmdir(lockPath); if a new owner
+  // wins that mkdir race, rmdir returns ENOTEMPTY and its marker is untouched.
+  const claim = await claimStaleLock(lockPath);
+  if (!claim) return false;
+  let removedOwner = false;
   const ownerPath = path.join(lockPath, 'owner.json');
   try {
-    await unlink(ownerPath);
+    const claimedLock = await lstat(lockPath);
+    assertOwnerOnly(claimedLock, 'Submission ledger lock', { directory: true });
+    if (!sameFileIdentity(metadata, claimedLock)) return false;
+    if (ownerSnapshot.present) {
+      const currentOwner = await lstat(ownerPath);
+      assertOwnerOnly(currentOwner, 'Submission ledger lock owner');
+      if (!sameFileIdentity(ownerSnapshot.identity, currentOwner)) return false;
+      const currentContents = await readFile(ownerPath, 'utf8');
+      if (currentContents !== ownerSnapshot.contents) return false;
+      await unlink(ownerPath);
+      removedOwner = true;
+    }
+    await releaseStaleLockClaim(claim);
+    const beforeRemove = await lstat(lockPath);
+    assertOwnerOnly(beforeRemove, 'Submission ledger lock', { directory: true });
+    if (!sameFileIdentity(metadata, beforeRemove)) return false;
     await rmdir(lockPath);
     return true;
   } catch (error) {
-    if (error?.code === 'ENOENT') return true;
+    if (error?.code === 'ENOENT') return removedOwner;
     if (error?.code === 'ENOTEMPTY') return false;
     throw unavailable(error, lockPath);
+  } finally {
+    // If the lock was not removed, retain neither our claim nor a partially
+    // removed marker. Both cleanup operations are identity checked.
+    if (!removedOwner || await lstat(lockPath).then(() => true).catch(() => false)) {
+      await releaseStaleLockClaim(claim);
+    }
   }
 }
 
@@ -511,6 +736,7 @@ async function acquireFileLock(directory, snapshot, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
   retryMs = DEFAULT_LOCK_RETRY_MS,
   staleMs = DEFAULT_LOCK_STALE_MS,
+  clock = Date.now,
 } = {}) {
   const lockPath = path.join(directory, 'submissions.lock');
   const ownerPath = path.join(lockPath, 'owner.json');
@@ -557,7 +783,7 @@ async function acquireFileLock(directory, snapshot, {
         await rmdir(lockPath).catch(() => {});
       }
       if (error?.code !== 'EEXIST') throw unavailable(error, lockPath);
-      await removeStaleLock(lockPath, staleMs);
+      await removeStaleLock(lockPath, staleMs, clock);
     }
 
     const remaining = deadline - Date.now();
@@ -634,7 +860,7 @@ export class SubmissionLedger {
     if (record.status !== 'pending' || this.ownerFor(record.requestId) || !this.isPendingStale(record)) return record;
     const recoveredAt = new Date(this.clock()).toISOString();
     return {
-      ...record,
+      ...clearAttemptMetadata(record, { clearAttempt: true }),
       status: 'uncertain',
       updatedAt: recoveredAt,
       staleAt: recoveredAt,
@@ -659,7 +885,12 @@ export class SubmissionLedger {
       if (parsed?.version !== LEDGER_VERSION || !Array.isArray(parsed.records) || parsed.records.some((record) => !validateRecord(record))) {
         throw new CursorApiError('ledger_corrupt', 'Submission ledger has an unsupported or invalid record format.');
       }
-      for (const record of parsed.records.slice(-MAX_RECORDS)) {
+      const cappedRecords = capRecords(parsed.records);
+      // Persist terminal-history trimming during restart as well as on the
+      // next mutation. Active pending/uncertain reservations are retained by
+      // capRecords, so this write can only remove old terminal history.
+      if (cappedRecords.length !== parsed.records.length) recovered = true;
+      for (const record of cappedRecords) {
         const normalized = this.recoverPending(record);
         if (normalized !== record) recovered = true;
         records.set(record.requestId, normalized);
@@ -683,7 +914,7 @@ export class SubmissionLedger {
 
   async persistUnlocked() {
     const snapshot = await inspectOrCreateDirectory(this.stateDir);
-    const records = [...this.records.values()].slice(-MAX_RECORDS);
+    const records = capRecords([...this.records.values()]);
     await writeLedgerFile(this.file, JSON.stringify({ version: LEDGER_VERSION, records }), snapshot);
   }
 
@@ -700,6 +931,7 @@ export class SubmissionLedger {
         timeoutMs: this.lockTimeoutMs,
         retryMs: this.lockRetryMs,
         staleMs: this.lockStaleMs,
+        clock: this.clock,
       });
       try {
         // A ledger instance may have read an older snapshot while another MCP
@@ -738,7 +970,16 @@ export class SubmissionLedger {
     return this.withFileLock(async () => this.records.get(requestId) ?? null);
   }
 
-  async begin({ requestId, kind, digest, agentId = null }) {
+  async begin({
+    requestId,
+    kind,
+    digest,
+    agentId = null,
+    providerAgentId = agentId,
+    runId = undefined,
+    reconciliationFingerprint = null,
+    reconciliationHints = null,
+  }) {
     return this.withMutation(async () => {
       const existing = this.records.get(requestId);
       if (existing) {
@@ -758,12 +999,17 @@ export class SubmissionLedger {
           throw new CursorApiError('submission_in_progress', 'A submission with this request ID is already in progress.');
         }
         if (existing.status === 'failed') {
+          throwProviderReservationConflict(findProviderReservation(this.records, requestId, providerAgentId));
           const timestamp = new Date(this.clock()).toISOString();
           const owner = { pid: process.pid, token: randomUUID(), startedAt: timestamp };
           const record = {
-            ...existing,
+            ...clearAttemptMetadata(existing, { clearAttempt: true }),
             status: 'pending',
             agentId: agentId ?? existing.agentId ?? null,
+            providerAgentId: providerAgentId ?? existing.providerAgentId ?? null,
+            ...(runId !== undefined ? { runId: runId ?? null } : {}),
+            ...(reconciliationFingerprint ? { reconciliationFingerprint } : {}),
+            ...(reconciliationHints ? { reconciliationHints } : {}),
             owner,
             updatedAt: timestamp,
           };
@@ -774,9 +1020,30 @@ export class SubmissionLedger {
         }
         return { duplicate: true, record: existing };
       }
+
+      // An explicit provider ID is also an idempotency boundary. If a prior
+      // request with that ID has an uncertain transport outcome, accepting a
+      // different request ID could create a duplicate agent after the first
+      // request eventually becomes visible at Cursor. Keep the reservation
+      // live until the caller explicitly reconciles it.
+      throwProviderReservationConflict(findProviderReservation(this.records, requestId, providerAgentId));
+
       const timestamp = new Date(this.clock()).toISOString();
       const owner = { pid: process.pid, token: randomUUID(), startedAt: timestamp };
-      const record = { requestId, kind, digest, status: 'pending', agentId, owner, createdAt: timestamp, updatedAt: timestamp };
+      const record = {
+        requestId,
+        kind,
+        digest,
+        status: 'pending',
+        agentId,
+        providerAgentId: providerAgentId ?? null,
+        ...(runId !== undefined ? { runId: runId ?? null } : {}),
+        ...(reconciliationFingerprint ? { reconciliationFingerprint } : {}),
+        ...(reconciliationHints ? { reconciliationHints } : {}),
+        owner,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
       this.records.set(requestId, record);
       this.setOwner(requestId, owner);
       await this.persistUnlocked();
@@ -791,7 +1058,7 @@ export class SubmissionLedger {
         throw new CursorApiError('ledger_record_missing', 'The durable submission record disappeared before completion could be recorded.');
       }
       const record = {
-        ...current,
+        ...clearAttemptMetadata(current),
         ...fields,
         status: 'completed',
         updatedAt: new Date(this.clock()).toISOString(),
@@ -807,6 +1074,7 @@ export class SubmissionLedger {
         // age into uncertain and be reconciled after a restart.
         this.clearOwner(requestId, current.owner);
       }
+      return { duplicate: false, record };
     });
   }
 
@@ -816,7 +1084,13 @@ export class SubmissionLedger {
       if (!current) {
         throw new CursorApiError('ledger_record_missing', 'The durable submission record disappeared before failure could be recorded.');
       }
-      const record = { ...current, ...fields, status: 'failed', updatedAt: new Date(this.clock()).toISOString() };
+      const record = {
+        ...clearAttemptMetadata(current),
+        ...fields,
+        status: 'failed',
+        reconciliationRequired: false,
+        updatedAt: new Date(this.clock()).toISOString(),
+      };
       if (record.agentId === undefined) record.agentId = null;
       this.records.set(requestId, record);
       try {
@@ -841,8 +1115,15 @@ export class SubmissionLedger {
           digest: fields.digest,
           status: 'uncertain',
           agentId: fields.agentId ?? null,
+          ...(fields.providerAgentId !== undefined ? { providerAgentId: fields.providerAgentId } : {}),
           ...(fields.runId ? { runId: fields.runId } : {}),
+          ...(Number.isInteger(fields.providerNotFoundConfirmations)
+            ? { providerNotFoundConfirmations: fields.providerNotFoundConfirmations }
+            : {}),
+          ...(fields.reconciliationFingerprint ? { reconciliationFingerprint: fields.reconciliationFingerprint } : {}),
+          ...(fields.reconciliationHints ? { reconciliationHints: fields.reconciliationHints } : {}),
           recoveryReason: 'missing_final_record',
+          reconciliationRequired: true,
           createdAt: timestamp,
           updatedAt: timestamp,
         };
@@ -853,7 +1134,13 @@ export class SubmissionLedger {
       if ((fields.kind && fields.kind !== current.kind) || (fields.digest && fields.digest !== current.digest)) {
         throw new CursorApiError('request_id_conflict', 'The request ID was already used for a different operation.');
       }
-      const record = { ...current, ...fields, status: 'uncertain', updatedAt: new Date(this.clock()).toISOString() };
+      const record = {
+        ...clearAttemptMetadata(current),
+        ...fields,
+        status: 'uncertain',
+        reconciliationRequired: true,
+        updatedAt: new Date(this.clock()).toISOString(),
+      };
       if (record.agentId === undefined) record.agentId = null;
       this.records.set(requestId, record);
       try {
@@ -861,6 +1148,98 @@ export class SubmissionLedger {
       } finally {
         this.clearOwner(requestId, current.owner);
       }
+    });
+  }
+
+  /**
+   * Finalize an uncertain reservation after the provider has been checked
+   * through an explicit, bounded reconciliation path. This is deliberately
+   * narrower than fail(): callers cannot attach arbitrary fields or release a
+   * live reservation by accident. The resulting failed record is retryable,
+   * while its reconciliation metadata prevents a second reconciliation from
+   * being mistaken for a fresh provider observation.
+   */
+  async reconcile(requestId, { agentId } = {}) {
+    return this.withMutation(async () => {
+      const current = this.records.get(requestId);
+      if (!current) {
+        throw new CursorApiError('ledger_record_missing', 'The durable submission record disappeared before reconciliation could be recorded.');
+      }
+      if (current.status === 'failed' && current.reconciliationReason === 'provider_not_found') {
+        return { duplicate: true, record: current };
+      }
+      if (current.status === 'completed') return { duplicate: true, record: current };
+      if (current.status !== 'uncertain') {
+        if (current.status === 'pending') {
+          throw new CursorApiError('submission_in_progress', 'The submission is still in progress; reconcile it only after transport uncertainty is recorded.');
+        }
+        throw new CursorApiError('reconciliation_not_required', 'The submission does not require provider-absence reconciliation.');
+      }
+      const currentProviderAgentId = recordProviderAgentId(current);
+      if (currentProviderAgentId === null) {
+        throw new CursorApiError('reconciliation_target_missing', 'The uncertain reservation has no stored provider agent ID to reconcile.');
+      }
+      if (agentId !== undefined && currentProviderAgentId !== null && currentProviderAgentId !== agentId) {
+        throw new CursorApiError('reconciliation_target_mismatch', 'The provider agent ID does not match the uncertain reservation.');
+      }
+
+      const timestamp = new Date(this.clock()).toISOString();
+      const record = {
+        ...current,
+        agentId: agentId ?? current.agentId ?? null,
+        providerAgentId: agentId ?? currentProviderAgentId,
+        status: 'failed',
+        failureCode: 'provider_not_found',
+        reconciliationReason: 'provider_not_found',
+        reconciliationRequired: false,
+        reconciledAt: timestamp,
+        updatedAt: timestamp,
+      };
+      this.records.set(requestId, record);
+      try {
+        await this.persistUnlocked();
+      } finally {
+        this.clearOwner(requestId, current.owner);
+      }
+      return { duplicate: false, record };
+    });
+  }
+
+  /**
+   * Explicitly release an uncertain reservation after the caller has accepted
+   * that provider state could not be proven. This never contacts Cursor and
+   * never resubmits the original mutation; the durable receipt remains in the
+   * terminal failed history with an explicit operator-release reason.
+   */
+  async release(requestId, { reason = 'operator_release' } = {}) {
+    return this.withMutation(async () => {
+      const current = this.records.get(requestId);
+      if (!current) {
+        throw new CursorApiError('ledger_record_missing', 'The durable submission record disappeared before release could be recorded.');
+      }
+      if (current.status === 'failed' && current.reconciliationReason === reason) return { duplicate: true, record: current };
+      if (current.status === 'completed') return { duplicate: true, record: current };
+      if (current.status !== 'uncertain') {
+        if (current.status === 'pending') throw new CursorApiError('submission_in_progress', 'The submission is still in progress; release it only after uncertainty is recorded.');
+        throw new CursorApiError('reconciliation_not_required', 'The submission does not require uncertainty release.');
+      }
+      const timestamp = new Date(this.clock()).toISOString();
+      const record = {
+        ...clearAttemptMetadata(current),
+        status: 'failed',
+        failureCode: 'uncertain_released',
+        reconciliationReason: reason,
+        reconciliationRequired: false,
+        releasedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      this.records.set(requestId, record);
+      try {
+        await this.persistUnlocked();
+      } finally {
+        this.clearOwner(requestId, current.owner);
+      }
+      return { duplicate: false, record };
     });
   }
 }

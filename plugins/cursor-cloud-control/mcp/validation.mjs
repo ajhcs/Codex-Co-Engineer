@@ -648,9 +648,10 @@ export const TOOL_SCHEMAS = Object.freeze({
   agents: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['list', 'get', 'create'] },
+      action: { type: 'string', enum: ['list', 'get', 'create', 'reconcile'] },
       requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source },
       agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source },
+      release: { type: 'boolean' }, confirmation: { type: 'string', minLength: 1, maxLength: 256 },
       prompt: PROMPT_SCHEMA, model: MODEL_SCHEMA, name: { type: 'string', maxLength: 100 },
       env: ENV_SCHEMA, repos: REPOS_SCHEMA,
       workOnCurrentBranch: { type: 'boolean' }, autoCreatePR: { type: 'boolean' }, skipReviewerRequest: { type: 'boolean' },
@@ -663,13 +664,14 @@ export const TOOL_SCHEMAS = Object.freeze({
       { properties: { action: { const: 'list' }, limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: { type: 'string', minLength: 1, maxLength: 512 }, prUrl: { type: 'string', format: 'uri' }, includeArchived: { type: 'boolean' } }, required: ['action'], additionalProperties: false },
       { properties: { action: { const: 'get' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source } }, required: ['action', 'agentId'], additionalProperties: false },
       { properties: { action: { const: 'create' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, prompt: PROMPT_SCHEMA, model: MODEL_SCHEMA, name: { type: 'string', maxLength: 100 }, env: ENV_SCHEMA, repos: REPOS_SCHEMA, workOnCurrentBranch: { type: 'boolean' }, autoCreatePR: { type: 'boolean' }, skipReviewerRequest: { type: 'boolean' }, envVars: ENV_VARS_SCHEMA, mcpServers: MCP_SERVERS_SCHEMA, customSubagents: SUBAGENTS_SCHEMA, mode: { type: 'string', enum: ['agent', 'plan'] }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source } }, required: ['action', 'requestId', 'prompt'], additionalProperties: false },
+      { properties: { action: { const: 'reconcile' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, release: { type: 'boolean' }, confirmation: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['action', 'requestId'], additionalProperties: false },
     ],
     additionalProperties: false,
   },
   runs: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['list', 'get', 'followup', 'wait', 'stream', 'cancel'] },
+      action: { type: 'string', enum: ['list', 'get', 'followup', 'wait', 'stream', 'cancel', 'reconcile'] },
       requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source },
       runId: { type: 'string', pattern: RUN_ID_PATTERN.source }, prompt: PROMPT_SCHEMA,
       mcpServers: MCP_SERVERS_SCHEMA, mode: { type: 'string', enum: ['agent', 'plan'] },
@@ -684,7 +686,8 @@ export const TOOL_SCHEMAS = Object.freeze({
       { properties: { action: { const: 'followup' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, prompt: PROMPT_SCHEMA, mcpServers: MCP_SERVERS_SCHEMA, mode: { type: 'string', enum: ['agent', 'plan'] } }, required: ['action', 'requestId', 'agentId', 'prompt'], additionalProperties: false },
       { properties: { action: { const: 'wait' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, runId: { type: 'string', pattern: RUN_ID_PATTERN.source }, timeoutMs: { type: 'integer', minimum: 250, maximum: 60000 }, pollMs: { type: 'integer', minimum: 250, maximum: 10000 } }, required: ['action', 'agentId', 'runId'], additionalProperties: false },
       { properties: { action: { const: 'stream' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, runId: { type: 'string', pattern: RUN_ID_PATTERN.source }, lastEventId: { type: 'string', minLength: 1, maxLength: 512 }, timeoutMs: { type: 'integer', minimum: 250, maximum: 60000 }, maxEvents: { type: 'integer', minimum: 1, maximum: 500 }, maxBytes: { type: 'integer', minimum: 1024, maximum: 2_000_000 } }, required: ['action', 'agentId', 'runId'], additionalProperties: false },
-      { properties: { action: { const: 'cancel' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, runId: { type: 'string', pattern: RUN_ID_PATTERN.source } }, required: ['action', 'agentId', 'runId'], additionalProperties: false },
+      { properties: { action: { const: 'cancel' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, runId: { type: 'string', pattern: RUN_ID_PATTERN.source } }, required: ['action', 'agentId', 'runId'], additionalProperties: false },
+      { properties: { action: { const: 'reconcile' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, runId: { type: 'string', pattern: RUN_ID_PATTERN.source }, release: { type: 'boolean' }, confirmation: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['action', 'requestId'], additionalProperties: false },
     ],
     additionalProperties: false,
   },
@@ -710,13 +713,15 @@ export const TOOL_SCHEMAS = Object.freeze({
   lifecycle: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['archive', 'unarchive', 'delete'] }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source },
+      action: { type: 'string', enum: ['archive', 'unarchive', 'delete', 'reconcile'] }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source },
+      requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, release: { type: 'boolean' },
       confirmation: { type: 'string', minLength: 1, maxLength: 256 },
     },
     oneOf: [
-      { properties: { action: { const: 'archive' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source } }, required: ['action', 'agentId'], additionalProperties: false },
-      { properties: { action: { const: 'unarchive' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source } }, required: ['action', 'agentId'], additionalProperties: false },
-      { properties: { action: { const: 'delete' }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, confirmation: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['action', 'agentId', 'confirmation'], additionalProperties: false },
+      { properties: { action: { const: 'archive' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source } }, required: ['action', 'agentId'], additionalProperties: false },
+      { properties: { action: { const: 'unarchive' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source } }, required: ['action', 'agentId'], additionalProperties: false },
+      { properties: { action: { const: 'delete' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, confirmation: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['action', 'agentId', 'confirmation'], additionalProperties: false },
+      { properties: { action: { const: 'reconcile' }, requestId: { type: 'string', pattern: REQUEST_ID_PATTERN.source }, agentId: { type: 'string', pattern: AGENT_ID_PATTERN.source }, release: { type: 'boolean' }, confirmation: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['action', 'requestId'], additionalProperties: false },
     ],
     additionalProperties: false,
   },
@@ -742,21 +747,36 @@ export function validateToolInput(toolName, raw) {
   }
   if (toolName === 'agents') {
     required(value, ['action']);
-    validateAction(value, ['list', 'get', 'create']);
+    validateAction(value, ['list', 'get', 'create', 'reconcile']);
     if (value.action === 'list') { pageFields(value, { includeArchived: true }); return value; }
     if (value.action === 'get') { unknown(value, ['action', 'agentId'], 'arguments'); id(value.agentId, 'arguments.agentId'); return value; }
+    if (value.action === 'reconcile') {
+      unknown(value, ['action', 'requestId', 'agentId', 'release', 'confirmation'], 'arguments');
+      required(value, ['requestId']);
+      requestId(value.requestId);
+      if (value.agentId !== undefined) id(value.agentId, 'arguments.agentId');
+      boolean(value.release, 'arguments.release', true);
+      string(value.confirmation, 'arguments.confirmation', { min: 1, max: 256, optional: true });
+      if (value.release === true && value.confirmation === undefined) fail('arguments.confirmation is required when release is true.');
+      return value;
+    }
     return validateCreate(value);
   }
   if (toolName === 'runs') {
     required(value, ['action']);
-    validateAction(value, ['list', 'get', 'followup', 'wait', 'stream', 'cancel']);
+    validateAction(value, ['list', 'get', 'followup', 'wait', 'stream', 'cancel', 'reconcile']);
     if (value.action === 'list') {
       unknown(value, ['action', 'agentId', 'limit', 'cursor'], 'arguments');
       id(value.agentId, 'arguments.agentId'); pageFields({ limit: value.limit, cursor: value.cursor }); return value;
     }
-    if (value.action === 'get' || value.action === 'cancel') {
+    if (value.action === 'get') {
       unknown(value, ['action', 'agentId', 'runId'], 'arguments');
       id(value.agentId, 'arguments.agentId'); id(value.runId, 'arguments.runId', 'run'); return value;
+    }
+    if (value.action === 'cancel') {
+      unknown(value, ['action', 'requestId', 'agentId', 'runId'], 'arguments');
+      id(value.agentId, 'arguments.agentId'); id(value.runId, 'arguments.runId', 'run'); requestId(value.requestId);
+      return value;
     }
     if (value.action === 'followup') return validateFollowup(value);
     if (value.action === 'wait') {
@@ -764,6 +784,16 @@ export function validateToolInput(toolName, raw) {
       id(value.agentId, 'arguments.agentId'); id(value.runId, 'arguments.runId', 'run');
       integer(value.timeoutMs, 'arguments.timeoutMs', { min: 250, max: 60000, optional: true });
       integer(value.pollMs, 'arguments.pollMs', { min: 250, max: 10000, optional: true }); return value;
+    }
+    if (value.action === 'reconcile') {
+      unknown(value, ['action', 'requestId', 'agentId', 'runId', 'release', 'confirmation'], 'arguments');
+      required(value, ['requestId']);
+      requestId(value.requestId); if (value.agentId !== undefined) id(value.agentId, 'arguments.agentId', 'agent');
+      if (value.runId !== undefined) id(value.runId, 'arguments.runId', 'run');
+      boolean(value.release, 'arguments.release', true);
+      string(value.confirmation, 'arguments.confirmation', { min: 1, max: 256, optional: true });
+      if (value.release === true && value.confirmation === undefined) fail('arguments.confirmation is required when release is true.');
+      return value;
     }
     unknown(value, ['action', 'agentId', 'runId', 'lastEventId', 'timeoutMs', 'maxEvents', 'maxBytes'], 'arguments');
     id(value.agentId, 'arguments.agentId'); id(value.runId, 'arguments.runId', 'run');
@@ -791,16 +821,31 @@ export function validateToolInput(toolName, raw) {
     return value;
   }
   if (toolName === 'lifecycle') {
-    required(value, ['action', 'agentId']);
-    validateAction(value, ['archive', 'unarchive', 'delete']);
+    required(value, ['action']);
+    validateAction(value, ['archive', 'unarchive', 'delete', 'reconcile']);
+    if (value.action === 'reconcile') {
+      unknown(value, ['action', 'requestId', 'agentId', 'release', 'confirmation'], 'arguments');
+      required(value, ['requestId']);
+      requestId(value.requestId);
+      if (value.agentId !== undefined) id(value.agentId, 'arguments.agentId');
+      boolean(value.release, 'arguments.release', true);
+      string(value.confirmation, 'arguments.confirmation', { min: 1, max: 256, optional: true });
+      if (value.release === true && value.confirmation === undefined) fail('arguments.confirmation is required when release is true.');
+      return value;
+    }
+    required(value, ['agentId']);
     id(value.agentId, 'arguments.agentId');
     if (value.action === 'delete') {
-      unknown(value, ['action', 'agentId', 'confirmation'], 'arguments');
+      unknown(value, ['action', 'requestId', 'agentId', 'confirmation'], 'arguments');
+      requestId(value.requestId);
       string(value.confirmation, 'arguments.confirmation', { min: 1, max: 256 });
       if (value.confirmation !== `delete:${value.agentId}`) {
         throw new InputError('confirmation_required', `Deletion requires confirmation exactly equal to delete:${value.agentId}.`);
       }
-    } else unknown(value, ['action', 'agentId'], 'arguments');
+    } else {
+      unknown(value, ['action', 'requestId', 'agentId'], 'arguments');
+      requestId(value.requestId);
+    }
     return value;
   }
   throw new InputError('unknown_tool', `Unknown tool ${toolName}.`);

@@ -1,17 +1,105 @@
 import { createHash } from 'node:crypto';
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
-const configRoot = process.env.XDG_CONFIG_HOME
-  ?? path.join(process.env.HOME ?? '', '.config');
+const NOFOLLOW = constants.O_NOFOLLOW;
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+const DISABLED_MODEL_API_KEY_FILE = '/dev/null';
+const NON_OWNER_MODEL_API_KEY_MODE = 0o077;
 
-export const MODEL_API_KEY_FILE = process.env.CODEX_CO_ENGINEER_MODEL_API_KEY_FILE
-  ?? process.env.PLUMBOB_HARNESS_MODEL_API_KEY_FILE
-  ?? path.join(configRoot, 'codex-co-engineer', 'model-api-key');
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function absolutePath(value) {
+  const normalized = nonEmptyString(value);
+  return normalized && path.isAbsolute(normalized) ? path.resolve(normalized) : null;
+}
+
+function configuredModelApiKeyFile(environment = process.env) {
+  // Explicit configuration is authoritative, including an invalid value. Do
+  // not silently fall through to a different profile when a caller supplied
+  // an empty or relative credential path.
+  for (const name of ['CODEX_CO_ENGINEER_MODEL_API_KEY_FILE', 'PLUMBOB_HARNESS_MODEL_API_KEY_FILE']) {
+    if (Object.prototype.hasOwnProperty.call(environment, name)) {
+      return absolutePath(environment[name]) ?? DISABLED_MODEL_API_KEY_FILE;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(environment, 'XDG_CONFIG_HOME')) {
+    const configRoot = absolutePath(environment.XDG_CONFIG_HOME);
+    return configRoot
+      ? path.join(configRoot, 'codex-co-engineer', 'model-api-key')
+      : DISABLED_MODEL_API_KEY_FILE;
+  }
+
+  const home = absolutePath(environment.HOME);
+  return home
+    ? path.join(home, '.config', 'codex-co-engineer', 'model-api-key')
+    : DISABLED_MODEL_API_KEY_FILE;
+}
+
+export const MODEL_API_KEY_FILE = configuredModelApiKeyFile();
 
 const inheritedModelApiKey = process.env.MODEL_API_KEY?.trim() || '';
 
 const MODEL_API_KEY_BINDING_SCHEMA = 'codex-co-engineer.model-api-key-binding.v1';
+
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function assertProtectedModelApiKeyMetadata(metadata) {
+  const uid = currentUid();
+  if (uid === null || !metadata.isFile() || metadata.isSymbolicLink()
+    || metadata.uid !== uid
+    || (metadata.mode & NON_OWNER_MODEL_API_KEY_MODE) !== 0
+    || metadata.nlink !== 1) {
+    throw new Error('model API key file is not an owner-only, singly-linked regular file');
+  }
+}
+
+async function assertNoSymlinkAncestors(file) {
+  const parsed = path.parse(file);
+  let component = parsed.root;
+  const ancestors = file.slice(parsed.root.length).split(path.sep).filter(Boolean).slice(0, -1);
+  for (const name of ancestors) {
+    component = path.join(component, name);
+    const metadata = await lstat(component);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error('model API key path contains an unsafe ancestor');
+    }
+  }
+}
+
+async function readProtectedModelApiKey(file) {
+  if (!NOFOLLOW || typeof file !== 'string' || !path.isAbsolute(file)) {
+    throw new Error('model API key file cannot be securely opened');
+  }
+
+  let handle;
+  try {
+    // O_NOFOLLOW prevents a final-component symlink from redirecting a
+    // credential read. The descriptor is then checked and used for the read,
+    // avoiding a path-based stat/read race.
+    await assertNoSymlinkAncestors(file);
+    // The lstat preflight avoids opening a FIFO in blocking read mode. The
+    // descriptor check below remains authoritative if the path is replaced
+    // between this preflight and open().
+    assertProtectedModelApiKeyMetadata(await lstat(file));
+    handle = await open(file, constants.O_RDONLY | NOFOLLOW | NONBLOCK);
+    const metadata = await handle.stat();
+    assertProtectedModelApiKeyMetadata(metadata);
+    const key = (await handle.readFile('utf8')).trim();
+    if (!key || /[\u0000-\u001f\u007f\s]/.test(key)) throw new Error('invalid key file');
+    return key;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
 
 function metadataIdentity(metadata) {
   return {
@@ -73,15 +161,14 @@ export async function modelApiKeyBindingDigest(file = MODEL_API_KEY_FILE) {
     .digest('hex');
 }
 
-export async function loadModelApiKey() {
+export async function loadModelApiKey(file = MODEL_API_KEY_FILE) {
   if (inheritedModelApiKey) {
     process.env.MODEL_API_KEY = inheritedModelApiKey;
     return { available: true, source: 'environment' };
   }
 
   try {
-    const key = (await readFile(MODEL_API_KEY_FILE, 'utf8')).trim();
-    if (!key || /[\u0000-\u001f\u007f\s]/.test(key)) throw new Error('invalid key file');
+    const key = await readProtectedModelApiKey(file);
     process.env.MODEL_API_KEY = key;
     return { available: true, source: 'protected_file' };
   } catch {

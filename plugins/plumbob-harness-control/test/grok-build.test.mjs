@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   buildGrokArgs,
+  grokBuildFinalResponse,
   grokCapabilityProfile,
   grokBuildFailure,
   grokVersionProbe,
@@ -381,6 +382,24 @@ test('Grok streaming parser classifies the final session outcome after blocked t
     '{"type":"end","stopReason":"error","message":"session failed"}',
   ].join('\n');
   assert.equal(grokBuildFailure(terminalFailure), 'session failed');
+});
+
+test('Grok streaming parser exposes only a bounded final assistant response', () => {
+  const response = grokBuildFinalResponse([
+    '{"type":"reasoning","text":"private chain of thought"}',
+    '{"type":"tool_call","toolName":"Read","status":"completed"}',
+    '{"type":"text","data":"Review "}',
+    '{"type":"message","message":{"role":"assistant","content":"complete."}}',
+    '{"type":"end","stopReason":"end_turn"}',
+  ].join('\n'));
+  assert.deepEqual(response, {
+    text: 'Review complete.',
+    truncated: false,
+    characters: 16,
+  });
+  assert.equal(grokBuildFinalResponse('{"type":"reasoning","text":"not a report"}'), null);
+  const bounded = grokBuildFinalResponse('{"type":"result","result":"abcdefghijkl"}', 5);
+  assert.deepEqual(bounded, { text: 'abcd…', truncated: true, characters: 12 });
 });
 
 test('Grok streaming parser fails closed on sandbox fallback warnings', () => {

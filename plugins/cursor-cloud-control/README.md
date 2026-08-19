@@ -7,17 +7,18 @@ create durable agents; submit follow-up runs; observe
 bounded polling or SSE; cancel runs; read usage; handle artifacts; and archive,
 unarchive, or permanently delete agents.
 
+This README documents Cursor Cloud Control `0.4.0`. Its separately exposed
+`cursor-local-control` MCP server uses wire identity `0.2.0`.
+
 The same package contains a separate `cursor-local-control` MCP server
 for the locally installed Cursor Agent CLI. Its foundation has exactly three
-typed contracts—`status`, `run`, and `runs`—but the process-facing catalog
-currently exposes only read-only `status` (with `local`, `auth`, and
-`permissions` actions) pending host acceptance. It is deliberately not a
-wrapper for the Cloud API. Local credentials, permission configuration, process lifecycle,
+typed contracts—`status`, `run`, and `runs`—and the public/default catalog
+exposes only read-only `status` (with `local`, `auth`, and `permissions`
+actions). An administrator may explicitly opt into a clearly labeled
+host-trusted direct-CLI profile. It is deliberately not a wrapper for the
+Cloud API. Local credentials, permission configuration, process lifecycle,
 worktrees, logs, IDs, and owner-only receipts are separate from the Cloud
-surface and its `submissions.json` ledger. Local status/auth/permissions
-diagnostics are available in this release; provider execution remains
-deliberately fail-closed and unwired pending real Cursor plus Bubblewrap host
-acceptance inside a native boundary.
+surface and its `submissions.json` ledger.
 
 The implementation is intentionally a control plane, not a generic HTTP
 proxy. Every operation is mapped to a documented v1 endpoint and every tool
@@ -78,8 +79,9 @@ through the v1 run routes, so the plugin does not invent a second stream ID.
 
 ## Setup and key handling
 
-Register this directory as a local Codex plugin and configure the MCP process
-with one of these administrator-controlled credential sources:
+Register the repository root as a Codex marketplace (see the root
+[README](../../README.md)) and install `cursor-cloud-control`. Then configure
+the MCP process with one of these administrator-controlled credential sources:
 
 ```text
 CURSOR_API_KEY=<value supplied by a secret manager>
@@ -173,10 +175,10 @@ so the state problem can be diagnosed without submitting work.
 ### Cursor Local Control
 
 The second MCP server, `cursor-local-control`, is a separate local process
-adapter. Its foundation has exactly three typed contracts, while the shipped
-MCP catalog exposes only `status` until host acceptance proves the complete
-boundary. It never imports the Cloud API client, reads `submissions.json`,
-accepts Cloud IDs, or writes Cloud receipts.
+adapter. It never imports the Cloud API client, reads `submissions.json`,
+accepts Cloud IDs, or writes Cloud receipts. The default catalog is
+status-only; run/lifecycle tools appear only when the administrator enables
+host-trusted execution.
 
 Provision these administrator-only environment values before using local
 status:
@@ -185,50 +187,73 @@ status:
   `cursor-local-agent`. The generic `agent` alias is rejected so an existing
   Grok alias cannot be shadowed.
 - `CURSOR_LOCAL_CLI_SHA256`: administrator-pinned SHA-256 digest for the
-  executable. Status reports digest drift; an unpinned or changed binary is
-  never eligible for execution.
+  executable. Status reports digest drift. Host-trusted execution remains
+  administrator-authorized even when no digest pin is configured; a configured
+  pin that drifts still fails closed.
 - `CURSOR_LOCAL_CLI_SANDBOX_BIN`: absolute path to the administrator-selected
   native `bwrap` binary. Only `bwrap` is accepted.
 - `CURSOR_LOCAL_CLI_SANDBOX_SHA256`: administrator-pinned SHA-256 digest for
   that native sandbox. Status runs a harmless read-only-root preflight and
-  reports `sandbox.ready`; this preflight alone does not enable provider runs.
+  reports `sandbox.ready`; host-trusted execution does not invoke this
+  foundation and the preflight is not an execution attestation.
 - `CURSOR_LOCAL_CLI_API_KEY`: optional local-only API key environment value.
   The adapter maps it to the child process's `CURSOR_API_KEY`; it never takes
   the Cloud key file implicitly and never accepts a key as a tool argument.
-- `CURSOR_LOCAL_CLI_HOME`: owner-only (`0700`) directory reserved to isolate
-  CLI authentication and Cursor worktrees in a future accepted run surface.
-- `CURSOR_LOCAL_CLI_CONFIG_DIR`: required owner-only (`0700`) directory whose
-  `cli-config.json` is administrator-managed. The config must be schema v1,
-  non-unrestricted, and deny `Mcp(*:*)`; read-only runs additionally require
-  `Write(**)` and `Shell(*)` in `permissions.deny` for a future read-only
-  execution profile.
+- `CURSOR_LOCAL_CLI_HOME`: optional absolute directory for Cursor
+  authentication and worktrees. When absent, host-trusted execution uses the
+  MCP process `HOME`, matching the locally authenticated CLI.
+- `CURSOR_LOCAL_CLI_CONFIG_DIR`: optional absolute Cursor config directory.
+  The host-trusted profile inherits Cursor's normal CLI approval configuration;
+  the wrapper does not claim that it is a sandbox or silently widen it.
 - `CURSOR_LOCAL_CLI_WORKSPACE_ROOTS`: absolute, colon-separated workspace
   allowlist. Tool callers cannot broaden it.
+- `CURSOR_LOCAL_CLI_ENABLE_HOST_TRUSTED_RUNS`: set exactly to `1` by the
+  administrator to expose local `run` and `runs`. It is unset by default and
+  is never accepted as a tool argument.
 - `CURSOR_LOCAL_CONTROL_STATE_DIR`: owner-only (`0700`) local ledger root;
   absent this, the adapter uses an absolute `XDG_STATE_HOME` or `HOME` local
-  state path ending in `cursor-local-control`.
+  state path ending in `cursor-local-control`. The ledger retains every
+  requestId/request digest reservation (including terminal tombstones) up to
+  10,000 records and the 8 MiB file bound; it fails closed before spawning a
+  new process when either capacity is reached, rather than evicting a tombstone.
 
-The local `status` tool is available for binary, compact auth, permission, and
-sandbox inspection. The `run` and `runs` foundation schemas are retained for
-review and versioning, but this release intentionally advertises only
-`status` and keeps provider execution disabled. Direct calls to `run` or
-`runs` fail closed with `foundation_not_exposed`, and therefore never spawn or
-adopt Cursor. The shipped MCP manifest does not include an activation switch.
+The local `status` tool is always available for binary, compact auth,
+permission, and sandbox diagnostics. To expose execution, set
+`CURSOR_LOCAL_CLI_ENABLE_HOST_TRUSTED_RUNS=1`. Every `run` request must include
+`execution_profile: "host_trusted"`, an explicit `mode` (`read_only` or
+`implement`), and an absolute allowlisted workspace.
 
-The deferred invocation contract retains explicit `read_only` and
-`implement` modes for compatibility testing. A future host-acceptance release
-must prove the real Cursor binary, worktree creation, resource limits,
-permission enforcement, cancellation, and receipt behavior inside the native
-boundary before enabling either mode. Until then, do not describe local runs
-as operational or use this surface for provider execution.
+Host-trusted read-only execution invokes `cursor-agent --print --mode ask`;
+it never passes `--force` and requires explicit `Write(**)`, `Shell(*)`, and
+`Mcp(*:*)` deny rules in the administrator Cursor config. Explicit implement
+execution invokes Cursor with `--force` and an isolated Cursor worktree. Both
+use the direct selected binary,
+disable Cursor's provider sandbox, and do not invoke Bubblewrap. Receipts
+identify the boundary as `host_trusted`, the authority as
+`mcp_process_user`, the outer sandbox as `none`, and `workspaceChanged` as
+`null` because a direct host process has no outer filesystem observer.
 
-Host-acceptance blockers are explicit: the current Bubblewrap code is only a
-provider-free status preflight (its prototype root read-only bind is not a
-complete host confidentiality or network boundary); a real Cursor process
-must be exercised with resource limits and an audited filesystem/network
-policy. The future lifecycle test must also prove graceful termination,
-forced escalation, process-group ownership, and receipt recovery across MCP
-restarts. Digest pins alone are not an execution attestation.
+This is a normal local coding-agent authority surface, not a confidentiality,
+network, or filesystem sandbox. The process can use any authority available to
+the MCP OS user; the workspace allowlist and bounded timeout/event/log fields
+are control-plane limits only. Timeout and cancellation signal the owned
+process group with TERM and escalate to KILL after the grace interval.
+
+Host-trusted pathname, home, and Cursor-config authority is the same-user
+authority of the MCP process: owner-only checks and descriptor identity
+attestations reduce accidental swaps, but there is no separate filesystem or
+credential boundary. On restart, a child is signalled only when its durable
+PID start token freshly matches immediately before each TERM/KILL. If the
+leader has exited or the token cannot be matched, post-leader descendants are
+left untouched and the run is reported as `transport_lost` rather than risking
+a signal to a reused PID or unrelated process group.
+
+The retained Bubblewrap code remains a separately packaged foundation and is
+not the host-trusted boundary. A real host acceptance check is still required
+for each local installation, including Cursor project-state/trust setup and
+process cleanup. The adapter still does not expose `login`, `logout`,
+`update`, ACP, workers, arbitrary shell commands, or arbitrary MCP
+configuration.
 
 The CLI invocation is based on Cursor's documented [headless](https://cursor.com/docs/cli/headless),
 [parameter](https://cursor.com/docs/cli/reference/parameters),
@@ -255,6 +280,13 @@ Create defaults are deliberately conservative:
   network or timeout leaves acceptance uncertain, the ledger marks the
   submission `uncertain` and the same request ID cannot silently create a
   duplicate.
+- cancellation and agent lifecycle mutations also receive a durable request
+  receipt. If a request ID is omitted for those target-scoped operations, the
+  plugin derives a stable target/action key; callers should provide an explicit
+  request ID when they need an independently addressable receipt.
+- Cursor HTTP 409 conflicts and HTTP 429 rate limits are recorded as definitive
+  failed submissions (with a safe provider error code when available), not as
+  transport-uncertain mutations.
 - create receipts separate caller-requested configuration from provider
   verification. Repository starting refs, the effective model, and the remote
   workspace head/branch remain explicitly unverified unless Cursor returns a
@@ -290,7 +322,7 @@ potentially tens of seconds long. The plugin therefore makes one bounded
 be used directly. Repository-backed creation receives the same longer
 one-attempt transport bound.
 
-`agents` supports `list`, `get`, and `create`. A create call supplies a
+`agents` supports `list`, `get`, `create`, and explicit `reconcile`. A create call supplies a
 prompt and may select a model, environment, repositories, prompt images,
 session environment variables, inline MCP servers (including remote `authEnv`
 and `headerEnv` references), custom subagents, and `agent`/`plan` mode. The
@@ -302,7 +334,31 @@ does not attest them. For 0.2.x compatibility, `effectiveConfiguration` is
 still present with `provenance: "caller-derived"` and `deprecated: true`; it is
 only a legacy alias for the requested configuration.
 
-`runs` supports `list`, `get`, `followup`, `wait`, `stream`, and `cancel`.
+When `agentId` is omitted, the plugin does not send its local reservation ID
+to Cursor; Cursor may mint the provider ID. A transport-uncertain create in
+that mode may inspect a bounded provider listing using a hash-only fingerprint,
+but even a unique exact match is not reservation-time evidence: an identical
+agent may predate the request. The reservation therefore remains uncertain;
+the plugin never guesses an ID, finalizes a listing match, or resubmits. Use
+`{"action":"reconcile","requestId":"..."}` for the bounded diagnostic, or
+use the explicit typed release confirmation `release:<requestId>` only after
+accepting that provider state could not be proven. For a caller-supplied provider ID,
+reconciliation performs bounded, repeated `agents.get` and `runs.list` checks
+and releases the retryable local reservation only after both provider paths
+consistently return HTTP 404.
+
+`runs` supports `list`, `get`, `followup`, `wait`, `stream`, `cancel`, and
+`reconcile`. Follow-up and cancellation mutations return durable receipts;
+an otherwise successful follow-up response without an opaque provider run ID,
+or a cancellation response whose run is not terminal `CANCELLED`/`CANCELED`,
+remains uncertain. A caller-supplied create ID must also match the provider ID
+returned by Cursor; mismatches remain uncertain. `runs.wait` converts a
+provider `request_timeout` into a bounded `timedOut: true` receipt while
+retaining the latest confirmed run when available. Uncertain reservations can
+be reconciled with the exact provider run ID when one is known, or explicitly
+released with `release:<requestId>`. A provider run HTTP 404 is only treated as
+absence after bounded repeated exact 404 observations; one miss remains
+uncertain. No reconciliation path resubmits the mutation.
 `stream` parses fragmented SSE chunks, multiline data, comments, heartbeats,
 event IDs, unknown future event types, and the documented
 `status`/`assistant`/`thinking`/`tool_call`/`interaction_update`/`result`/
@@ -317,9 +373,14 @@ overwrite unless `overwrite=true` is explicit, write atomically with mode
 `0600`, and are never executed or rendered automatically.
 
 `usage` reads the documented per-agent token totals and per-run breakdown.
-`lifecycle` archives or unarchives an exact agent. Permanent deletion is
+`lifecycle` archives or unarchives an exact agent and supports
+`reconcile` for uncertain lifecycle receipts. Permanent deletion is
 irreversible and requires `confirmation` exactly equal to
-`delete:<agent-id>`; archive is the reversible alternative.
+`delete:<agent-id>`; archive is the reversible alternative. Every lifecycle
+mutation is durably keyed and never blindly retried. If provider state cannot
+be proven, use the typed lifecycle reconciliation or the explicit
+`release:<requestId>` confirmation; release records a terminal local receipt
+and does not claim that the provider mutation failed.
 
 ## Monitoring and cancellation
 

@@ -111,6 +111,8 @@ async function runTargetFixture(context, {
         resolved_cwd: cwd,
         git_common_directory: target.expectedCommon,
         git_head: target.expectedHead,
+        allowed_paths: allowedPaths,
+        role,
         workspace_identity: target.workspaceIdentity,
         cwd_identity: cwdIdentity,
       }),
@@ -313,13 +315,14 @@ test('detached runner fixes the deadline at acceptance before child startup', as
   assert.equal(typeof job.elapsed_seconds, 'number');
 });
 
-test('detached runner keeps an exit-code-0 cancellation unambiguously cancelled', async (context) => {
+test('detached runner records pre-spawn cancellation without launching the provider', async (context) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'plumbob-cancel-runner-test-'));
   context.after(async () => rm(directory, { recursive: true, force: true }));
 
   const databaseFile = path.join(directory, 'control.sqlite3');
   const logFile = path.join(directory, 'job.log');
   const cancelFile = path.join(directory, 'job.cancel');
+  const providerStartedFile = path.join(directory, 'provider-started.marker');
   const specFile = path.join(directory, 'job.spec.json');
   const createdAt = new Date().toISOString();
   const database = openStore(databaseFile);
@@ -340,16 +343,19 @@ test('detached runner keeps an exit-code-0 cancellation unambiguously cancelled'
     log_file: logFile,
     cancel_file: cancelFile,
     command: process.execPath,
-    args: ['-e', 'setTimeout(() => process.exit(0), 150)'],
+    args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(providerStartedFile)}, 'started\\n'); setTimeout(() => process.exit(0), 150)`],
     env: {},
     cwd: directory,
     timeout_seconds: 60,
   }));
 
+  // A durable cancellation marker present before runner startup must stop at
+  // the launch barrier. This is intentionally stronger than racing the
+  // marker against spawn: the provider must never be started for this job.
+  await writeFile(cancelFile, `${new Date().toISOString()}\n`);
   const runner = spawn(process.execPath, ['--no-warnings', path.join(ROOT, 'mcp', 'runner.mjs'), specFile], {
     stdio: 'ignore',
   });
-  await writeFile(cancelFile, `${new Date().toISOString()}\n`);
   const exitCode = await new Promise((resolve) => runner.once('exit', resolve));
 
   const completedStore = openStore(databaseFile);
@@ -357,9 +363,11 @@ test('detached runner keeps an exit-code-0 cancellation unambiguously cancelled'
   completedStore.close();
   assert.equal(exitCode, 0);
   assert.equal(job.status, 'cancelled');
-  assert.equal(job.exit_code, 0);
+  assert.equal(job.exit_code, null);
   assert.equal(job.termination_reason, 'cancelled_by_user');
-  assert.equal(job.signal_sent, 'SIGTERM');
+  assert.equal(job.signal_sent, null);
+  assert.equal(job.child_pid, null);
+  await assert.rejects(stat(providerStartedFile), { code: 'ENOENT' });
   assert.match(job.error, /Cancellation was requested/);
 });
 

@@ -1,4 +1,5 @@
-import { lstat, readFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import {
@@ -25,6 +26,69 @@ export const DEFAULT_MAX_ARTIFACT_REDIRECTS = 5;
 
 export function defaultApiKeyFile(env = process.env) {
   return path.resolve(path.join(env.XDG_CONFIG_HOME ?? path.join(env.HOME ?? '.', '.config'), 'cursor-cloud-control', 'api-key'));
+}
+
+function credentialFileIdentity(metadata) {
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+function credentialFileError(code, message) {
+  return new CursorApiError(code, message);
+}
+
+/**
+ * Read a credential through one O_NOFOLLOW file descriptor. The old
+ * lstat(path) -> readFile(path) sequence allowed a pathname replacement to
+ * redirect the second operation. Descriptor-bound reads plus an inode check
+ * before/after the read keep both the symlink and replacement cases fail
+ * closed.
+ */
+export async function readOwnerOnlyFile(fileName, {
+  emptyIsMissing = false,
+  permissionCode = 'credential_file_permissions',
+  errorCode = 'credential_file_error',
+} = {}) {
+  const noFollow = fsConstants.O_NOFOLLOW;
+  if (!Number.isInteger(noFollow) || noFollow === 0) {
+    throw credentialFileError(errorCode, 'Secure credential-file reads are unavailable on this host.');
+  }
+  let handle;
+  try {
+    handle = await open(fileName, fsConstants.O_RDONLY | noFollow);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    if (error?.code === 'ELOOP') throw credentialFileError(permissionCode, 'Credential file must not be a symbolic link.');
+    throw credentialFileError(errorCode, 'Unable to inspect credential file.');
+  }
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || (before.mode & 0o077) !== 0 || before.nlink !== 1) {
+      throw credentialFileError(permissionCode, 'Credential file must be a regular owner-only file with one hard link.');
+    }
+    const identity = credentialFileIdentity(before);
+    const contents = await handle.readFile({ encoding: 'utf8' });
+    const after = await handle.stat();
+    if (!after.isFile() || (after.mode & 0o077) !== 0 || after.nlink !== 1
+      || credentialFileIdentity(after).dev !== identity.dev
+      || credentialFileIdentity(after).ino !== identity.ino) {
+      throw credentialFileError(permissionCode, 'Credential file changed during the read.');
+    }
+    let pathMetadata;
+    try {
+      pathMetadata = await lstat(fileName);
+    } catch {
+      throw credentialFileError(permissionCode, 'Credential file changed during the read.');
+    }
+    if (pathMetadata.isSymbolicLink()
+      || credentialFileIdentity(pathMetadata).dev !== identity.dev
+      || credentialFileIdentity(pathMetadata).ino !== identity.ino) {
+      throw credentialFileError(permissionCode, 'Credential file changed during the read.');
+    }
+    const value = contents.trim();
+    return value || (emptyIsMissing ? null : '');
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -106,18 +170,7 @@ export async function loadApiKey(env = process.env, { pluginRoot } = {}) {
       throw new CursorApiError('invalid_configuration', 'CURSOR_API_KEY_FILE must point outside the plugin directory.');
     }
   }
-  let metadata;
-  try { metadata = await lstat(fileName); } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw new CursorApiError('credential_file_error', 'Unable to inspect CURSOR_API_KEY_FILE.');
-  }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new CursorApiError('credential_file_error', 'CURSOR_API_KEY_FILE is not a regular file.');
-  if ((metadata.mode & 0o077) !== 0) throw new CursorApiError('credential_file_permissions', 'CURSOR_API_KEY_FILE must be owner-only (mode 0600 or stricter).');
-  let content;
-  try { content = (await readFile(fileName, 'utf8')).trim(); } catch {
-    throw new CursorApiError('credential_file_error', 'Unable to read CURSOR_API_KEY_FILE.');
-  }
-  return content || null;
+  return readOwnerOnlyFile(fileName, { emptyIsMissing: true });
 }
 
 export function authHeaderFromKey(apiKey, scheme = 'bearer') {
@@ -515,8 +568,8 @@ export class CursorApiClient {
       retryRead: false,
     });
   }
-  listAgents(query) { return this.json('/v1/agents', { query }); }
-  getAgent(agentId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}`); }
+  listAgents(query, options = {}) { return this.json('/v1/agents', { ...options, query }); }
+  getAgent(agentId, options = {}) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}`, options); }
   createAgent(body) {
     const timeoutMs = Array.isArray(body?.repos) && body.repos.length > 0
       ? this.repositoryTimeoutMs
@@ -528,8 +581,8 @@ export class CursorApiClient {
       timeoutMs,
     });
   }
-  listRuns(agentId, query) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { query }); }
-  getRun(agentId, runId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}`); }
+  listRuns(agentId, query, options = {}) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { ...options, query }); }
+  getRun(agentId, runId, options = {}) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}`, options); }
   createRun(agentId, body) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs`, { method: 'POST', body, retryRead: false }); }
   cancelRun(agentId, runId) { return this.json(`/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', retryRead: false }); }
   streamRun(agentId, runId, options) {

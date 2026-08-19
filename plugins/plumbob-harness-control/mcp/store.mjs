@@ -1187,6 +1187,7 @@ export function openStore(file) {
     for (const [name, type] of Object.entries(COLUMN_TYPES)) {
       if (!columns.has(name)) database.exec(`ALTER TABLE jobs ADD COLUMN ${name} ${type}`);
     }
+    database.exec('CREATE INDEX IF NOT EXISTS jobs_lifecycle_state_idx ON jobs(lifecycle_state)');
     database.exec(`
     CREATE TABLE IF NOT EXISTS job_events (
       job_id TEXT NOT NULL,
@@ -1367,6 +1368,23 @@ export function getStoredJob(database, id) {
 
 export function listStoredJobs(database, limit) {
   return database.prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?').all(limit);
+}
+
+/**
+ * Return every non-terminal job without applying the bounded recent-jobs
+ * presentation limit.  Lifecycle state is authoritative for new rows while
+ * the legacy status fallback keeps older ledgers visible to the control plane.
+ */
+export function listActiveStoredJobs(database, limit = null) {
+  const query = `
+    SELECT * FROM jobs
+    WHERE lifecycle_state IN ('accepted', 'started', 'working')
+       OR (lifecycle_state IS NULL AND status IN ('queued', 'starting', 'running', 'cancelling'))
+    ORDER BY created_at DESC${limit === null ? '' : ' LIMIT ?'}
+  `;
+  return limit === null
+    ? database.prepare(query).all()
+    : database.prepare(query).all(limit);
 }
 
 export function findStoredRequest(database, requestId) {

@@ -927,7 +927,7 @@ function validateTargetInput(target) {
     'schema_version', 'mode', 'working_directory', 'expected_git_root', 'git_common_directory',
     'expected_head', 'allowed_paths', 'role', 'target_fingerprint',
     'resolved_workspace', 'resolved_cwd', 'observed_head', 'workspace_identity', 'cwd_identity',
-    'isolation',
+    'isolation', 'target_origin',
   ], 'target', [
     'working_directory', 'expected_git_root', 'git_common_directory',
     'expected_head', 'allowed_paths', 'role', 'target_fingerprint',
@@ -993,6 +993,8 @@ async function prepareTarget(target) {
     resolved_cwd: working,
     git_common_directory: common,
     git_head: observedHead,
+    allowed_paths: validated.allowedPaths,
+    role: validated.role,
     workspace_identity: workspaceIdentity,
     cwd_identity: cwdIdentity,
   });

@@ -2,9 +2,11 @@
 
 Provider credentials are accepted only from the server environment or a
 protected file outside the repository. They are never valid tool arguments.
-Once configured, those credentials are standing authorization for task-scoped
-provider calls; the control planes do not ask for per-job data-egress approval.
-Writes, destructive Git, deployments, and PR creation remain separately controlled.
+Once configured, those credentials or provider sessions are reused as standing
+authorization for task-scoped provider calls. Credentials and sessions can
+expire or be revoked and may require ordinary provider reauthentication; the
+control planes do not ask for per-job data-egress approval. Writes, destructive
+Git, deployments, and PR creation remain separately controlled.
 For `grok_build`, `MODEL_API_KEY` is not required or passed to the child;
 Grok's OAuth/session state remains under the user's normal home and an
 administrator may provide `XAI_API_KEY` through the daemon environment. The

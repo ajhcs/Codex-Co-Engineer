@@ -764,6 +764,29 @@ async function capturePatch(spec, allowedPaths) {
   return true;
 }
 
+async function markStagedTargetTainted(spec) {
+  const target = spec.target_context;
+  const taintFile = target?.stage_taint_file;
+  if (target?.target_origin !== 'control_plane_staged'
+    || typeof taintFile !== 'string'
+    || !path.isAbsolute(taintFile)
+    || typeof target.stage_lease_directory !== 'string') return;
+  const parent = path.dirname(taintFile);
+  const parentMetadata = await lstat(parent).catch(() => null);
+  const expected = target.stage_lease_identity;
+  if (!parentMetadata?.isDirectory() || parentMetadata.isSymbolicLink()
+    || !expected
+    || String(parentMetadata.dev) !== String(expected.dev ?? expected.device)
+    || String(parentMetadata.ino) !== String(expected.ino ?? expected.inode)) return;
+  try {
+    await writeFile(taintFile, `${new Date().toISOString()}\n`, { mode: 0o600, flag: 'wx' });
+  } catch (error) {
+    // Existing taint is already the fail-closed result. A replacement or
+    // provider-created path must never be overwritten by cleanup.
+    if (error?.code !== 'EEXIST') return;
+  }
+}
+
 async function main() {
   if (!specPath || !path.isAbsolute(specPath)) {
     process.exitCode = 2;
@@ -829,11 +852,27 @@ async function main() {
   let outputDrainFailed = false;
 
   const deadlineExpired = () => deadlineMs !== null && Date.now() >= deadlineMs;
+  const cancellationMarkerPresent = () => existsSync(spec.cancel_file);
   const finishTerminal = (outcome, patch, payload = null) => {
     const result = terminalizeJob(database, spec.id, outcome, patch, payload);
     terminalStateCommitted = Boolean(result.changed || result.job?.terminal_state);
     return result;
   };
+  const finishPreLaunchCancellation = (at = Date.now()) => finishTerminal('cancelled', {
+    finished_at: new Date(at).toISOString(),
+    elapsed_seconds: elapsedSeconds(acceptedAt, at),
+    termination_reason: 'cancelled_by_user',
+    failure_class: 'cancelled',
+    error: 'Cancellation was requested before the provider was launched.',
+    partial_output_available: 0,
+    log_bytes: 0,
+    workspace_tainted: null,
+    heartbeat: JSON.stringify({
+      phase: 'cancelled',
+      termination_reason: 'cancelled_by_user',
+      deadline_at: deadlineAt,
+    }),
+  }, { termination_reason: 'cancelled_by_user' });
   const updateHeartbeat = async (details = {}) => {
     const currentBytes = await fileSize(spec.log_file);
     const now = Date.now();
@@ -919,6 +958,15 @@ async function main() {
       timeoutTimer = setTimeout(onDeadline, Math.max(0, deadlineMs - Date.now()));
     }
 
+    // Cancellation is a durable intent and may arrive while the runner is
+    // still doing provider-free setup.  Check it before target inspection so
+    // a marker persisted before provider launch never causes a provider to be
+    // started just because the runner had not recorded a child PID yet.
+    if (cancellationMarkerPresent()) {
+      finishPreLaunchCancellation();
+      return;
+    }
+
     let preflight;
     try {
       preflight = await preflightTarget(spec);
@@ -953,6 +1001,16 @@ async function main() {
         log_bytes: 0,
         workspace_tainted: null,
       }, { reason: 'target_preflight_failed' });
+      return;
+    }
+
+    // This is the launch barrier.  Keep the check immediately adjacent to
+    // spawn: cancellation can be persisted after preflight completes but
+    // before the child exists.  A second post-spawn check below covers the
+    // unavoidable syscall interval and signals the new process group without
+    // waiting for a later heartbeat or exit event.
+    if (cancellationMarkerPresent()) {
+      finishPreLaunchCancellation();
       return;
     }
 
@@ -1005,6 +1063,15 @@ async function main() {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // If cancellation won the launch race, signal the provider as soon as a
+    // PID is available.  This intentionally happens before the lifecycle
+    // transition below so a cancellation persisted before child ownership is
+    // published cannot be stranded in the accepted/started state.
+    if (cancellationMarkerPresent()) {
+      signalSent = 'SIGTERM';
+      signalProcessGroup(child.pid, 'SIGTERM');
+    }
 
     outputCaptures = [
       captureSanitizedLines(child.stdout, logWriter, fragments),
@@ -1225,6 +1292,8 @@ async function main() {
       error = `${error ? `${error} ` : ''}The target checkout may contain partial changes; no patch artifact is trustworthy and it requires inspection before reuse.`;
     }
 
+    if (outcome !== 'completed') await markStagedTargetTainted(spec);
+
     await updateHeartbeat({ terminal_candidate: outcome });
     const finishedAt = Date.now();
     const terminalTime = outcome === 'timeout' && deadlineMs !== null
@@ -1268,6 +1337,7 @@ async function main() {
     const outcome = timedOut || deadlineExpired() ? 'timeout' : 'failed';
     const terminationReason = outcome === 'timeout' ? 'wall_clock_timeout' : 'runner_error';
     try {
+      if (outcome !== 'completed') await markStagedTargetTainted(spec);
       finishTerminal(outcome, {
         finished_at: outcome === 'timeout' && deadlineMs !== null
           ? new Date(deadlineMs).toISOString()

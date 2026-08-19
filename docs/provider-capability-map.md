@@ -207,25 +207,29 @@ Sources:
 
 The `cursor-local-control` MCP server is a separately packaged, typed adapter
 for the administrator-installed Cursor Agent CLI on Plumbob. Its foundation
-retains three contracts (`status`, `run`, and `runs`), but the shipped wire
-catalog exposes only `status` (with local/auth/permissions actions): provider
-dispatch and process lifecycle are intentionally unexposed and fail-closed
-pending real Cursor plus Bubblewrap host acceptance. Local IDs, state,
-credentials, permissions, worktrees, and receipts never share the Cursor
-Cloud ledger. The local wire identity is versioned independently at 0.1.0
-inside Cursor package 0.3.0.
+retains three contracts (`status`, `run`, and `runs`). The default wire catalog
+exposes only `status` (with local/auth/permissions actions); an administrator
+must set `CURSOR_LOCAL_CLI_ENABLE_HOST_TRUSTED_RUNS=1` before `run` and `runs`
+appear. Local IDs, state, credentials, permissions, worktrees, and receipts
+never share the Cursor Cloud ledger. The local wire identity is 0.2.0 inside
+Cursor package 0.4.0; the cloud and local identities remain separate even
+though they ship in one package.
 
-The deferred adapter contract requires an explicit absolute workspace in an
-administrator-owned allowlist, an owner-only CLI home and permission
-configuration, and a dedicated Cursor executable path. It specifies Ask mode
-for read-only work and an isolated worktree for implementation in a future
-accepted foundation, but neither provider run mode is operational in this
-release. Generic
-`agent` aliases, Cloud IDs, arbitrary shell commands, login/update commands,
-and arbitrary MCP configuration are rejected. Status may report a pinned,
-provider-free native sandbox preflight, but a digest or preflight alone is not
-an execution attestation; direct foundation calls return
-`foundation_not_exposed` in this release.
+The host-trusted adapter requires an explicit absolute workspace in an
+administrator-owned allowlist and a dedicated Cursor executable path. Every
+run requires `execution_profile: "host_trusted"`. Read-only work uses Cursor
+Ask mode, never `--force`, and requires explicit `Write(**)`, `Shell(*)`, and
+`Mcp(*:*)` deny rules; implementation uses explicit `implement` mode,
+`--force`, and an isolated Cursor worktree. Both modes invoke the direct
+`cursor-agent` binary with no Bubblewrap outer boundary and inherit the MCP
+process user's host authority. Receipts identify that authority and leave
+`workspaceChanged` unknown because the wrapper has no outer filesystem
+observer. Generic `agent` aliases, Cloud IDs, arbitrary shell commands,
+login/update commands, and arbitrary MCP configuration remain rejected.
+
+Status may report a pinned, provider-free native sandbox preflight, but the
+host-trusted run path never invokes it; a digest or preflight alone is not an
+execution attestation.
 
 Sources:
 

@@ -24,6 +24,7 @@ import {
   openStateFileRead,
   prepareStateDirectory,
   removeStateFile,
+  removeStateSocket,
   resolveStateDirectory,
   revalidateStateDirectory,
   stateDirectoryDigest,
@@ -509,6 +510,43 @@ async function requestDaemon(name, args) {
   return rawRequest(name, args);
 }
 
+const TARGET_SOURCE_SCHEMA = {
+  oneOf: [
+    {
+      type: 'object',
+      properties: {
+        type: { const: 'local' },
+        path: { type: 'string', pattern: '^/', description: 'Absolute local Git checkout path.' },
+        ref: {
+          type: 'string', minLength: 1, maxLength: 240,
+          pattern: '^[^\\s\\u0000-\\u001f\\u007f-][^\\s\\u0000-\\u001f\\u007f]{0,239}$',
+          description: 'Optional Git ref resolved and rebound to its observed exact commit.',
+        },
+      },
+      required: ['type', 'path'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        type: { const: 'github' },
+        repository: {
+          type: 'string',
+          pattern: '^https://(?:www\\.)?github\\.com/[^/]+/[^/?#]+(?:\\.git)?/?$',
+          description: 'GitHub HTTPS repository URL; credentials, query, and fragment data are rejected.',
+        },
+        ref: {
+          type: 'string', minLength: 1, maxLength: 240,
+          pattern: '^[^\\s\\u0000-\\u001f\\u007f-][^\\s\\u0000-\\u001f\\u007f]{0,239}$',
+          description: 'Optional Git ref resolved and rebound to its observed exact commit.',
+        },
+      },
+      required: ['type', 'repository'],
+      additionalProperties: false,
+    },
+  ],
+};
+
 const TARGET_CONTEXT_SCHEMA = {
   oneOf: [
     {
@@ -557,6 +595,36 @@ const TARGET_CONTEXT_SCHEMA = {
         'role',
       ],
       additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        schema_version: { const: TARGET_SCHEMA_VERSION },
+        mode: { const: 'staged' },
+        source: TARGET_SOURCE_SCHEMA,
+        allowed_paths: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 200,
+          items: { type: 'string' },
+        },
+        role: { type: 'string', enum: ['review', 'verify'] },
+      },
+      required: ['schema_version', 'mode', 'source'],
+      additionalProperties: false,
+    },
+  ],
+};
+
+// The default contract remains caller-asserted. A caller may explicitly opt
+// into control-plane binding when it wants the server to resolve the target,
+// compute its identity digest, and bind that exact result atomically.
+const TARGET_BINDING_POLICY = {
+  anyOf: [
+    { required: ['expected_target_fingerprint'] },
+    {
+      properties: { target_binding: { const: 'control_plane' } },
+      required: ['target_binding'],
     },
   ],
 };
@@ -807,10 +875,10 @@ const DSH_KIND_FIELD_POLICY = {
 const TOOLS = [
   {
     name: 'preflight',
-    description: 'Resolve and attest exactly one target/configuration before dispatch. The caller must supply expected_target_fingerprint; a mismatch is fatal.',
+    description: 'Resolve and attest exactly one target/configuration before dispatch. Caller assertions remain supported; explicitly set target_binding=control_plane when the connector should compute and bind the exact target identity.',
     inputSchema: {
       type: 'object',
-      allOf: [GROK_KIND_FIELD_POLICY, DSH_KIND_FIELD_POLICY],
+      allOf: [GROK_KIND_FIELD_POLICY, DSH_KIND_FIELD_POLICY, TARGET_BINDING_POLICY],
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
         kind: { type: 'string', enum: ['preflight', 'deepseek_agent', 'grok_build'], default: 'preflight' },
@@ -823,10 +891,15 @@ const TOOLS = [
           pattern: '^(sha256:)?[0-9a-fA-F]{64}$',
           description: 'Caller assertion for the resolved target fingerprint.',
         },
+        target_binding: {
+          type: 'string',
+          enum: ['control_plane'],
+          description: 'Explicitly delegate target fingerprint computation to the control plane; target paths, Git HEAD, identities, and runner postflight checks remain mandatory.',
+        },
         dsh_options: DSH_OPTIONS_SCHEMA,
         ...GROK_CONFIGURATION_PROPERTIES,
       },
-      required: ['schema_version', 'target_context', 'expected_target_fingerprint'],
+      required: ['schema_version', 'target_context'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -929,7 +1002,7 @@ const TOOLS = [
     description: 'Queue a kind-specific Co-Engineer text task and return effective_configuration plus a stable job ID. DeepSeek uses one compact managed-headless profile; Grok Build uses the official direct headless CLI with typed controls.',
     inputSchema: {
       type: 'object',
-      allOf: [GROK_KIND_FIELD_POLICY, DSH_KIND_FIELD_POLICY],
+      allOf: [GROK_KIND_FIELD_POLICY, DSH_KIND_FIELD_POLICY, TARGET_BINDING_POLICY],
       properties: {
         schema_version: { const: CONFIG_SCHEMA_VERSION },
         kind: { type: 'string', enum: ['deepseek_agent', 'grok_build'] },
@@ -945,10 +1018,15 @@ const TOOLS = [
           pattern: '^(sha256:)?[0-9a-fA-F]{64}$',
           description: 'Caller assertion for the resolved target fingerprint; mismatch is fatal.',
         },
+        target_binding: {
+          type: 'string',
+          enum: ['control_plane'],
+          description: 'Explicitly delegate target fingerprint computation to the control plane; target paths, Git HEAD, identities, and runner postflight checks remain mandatory.',
+        },
         dsh_options: DSH_OPTIONS_SCHEMA,
         ...GROK_CONFIGURATION_PROPERTIES,
       },
-      required: ['schema_version', 'kind', 'request_id', 'target_context', 'expected_target_fingerprint'],
+      required: ['schema_version', 'kind', 'request_id', 'target_context'],
       additionalProperties: false,
     },
     annotations: { openWorldHint: true },

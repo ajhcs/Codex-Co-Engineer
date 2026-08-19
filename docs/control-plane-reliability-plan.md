@@ -1,6 +1,8 @@
 # Control-plane reliability and full-feature utilization plan
 
-Status: implementation candidate under release validation
+Status: current release baseline (Co-Engineer 2.2.0; Cursor Control 0.4.0;
+Cursor Local wire identity 0.2.0).
+Host-specific acceptance items remain explicitly called out below.
 
 Scope: Codex-Co-Engineer, DeepSeek Harness (DSH), Grok Build, Cursor Cloud and
 Local Control, Codex-native delegation, and their lifecycle integrations.
@@ -25,11 +27,12 @@ can prove support, and Codex-native subagents should be used for independent
 local work. A provider that cannot report whether delegation was used must say
 `unknown`, not imply success.
 
-Configured Cursor, Grok, and DSH credentials are standing authorization to use
-those providers for task-scoped work. The control plane does not add per-job
-egress prompts or approval receipts. Repository writes, destructive Git
-operations, production changes, and PR creation retain their ordinary task
-authority and safety controls.
+Configured Cursor, Grok, and DSH credentials or provider sessions are reused as
+standing authorization for task-scoped work. Provider sessions can expire or be
+revoked and may require ordinary provider reauthentication; the control plane
+does not add per-job egress prompts or approval receipts. Repository writes,
+destructive Git operations, production changes, and PR creation retain their
+ordinary task authority and safety controls.
 
 The implementation should maximize useful provider capability per model-facing
 tool call. Prefer dynamic provider catalogs, installed profiles, compact presets,
@@ -43,10 +46,10 @@ already provides strict target contracts, separate Co-Engineer and Cursor MCP
 servers, package validation, Inspector preflights, and a repository release
 gate.
 
-The initial mixed tree contained Co-Engineer 2.0.3 and Cursor 0.1.1 work beside
-an unrelated untracked `inline-keys` plugin. This candidate targets
-Co-Engineer 2.1.2 and Cursor 0.3.0; its local Cursor wire identity is
-independently versioned 0.1.0; `inline-keys` remains outside the release.
+The current public baseline is Co-Engineer 2.2.0 and Cursor Control 0.4.0;
+the separately advertised Cursor Local wire identity is 0.2.0.
+Generated runtime, state, credential, and other host-local paths remain outside
+the public release artifacts.
 
 Observed baseline behavior:
 
@@ -55,12 +58,12 @@ Observed baseline behavior:
   sandbox contract (Landlock on Linux, Seatbelt on macOS); host-specific
   Bubblewrap probes are optional integration checks, not product readiness
   prerequisites.
-- Cursor identity returns the upstream identity object after secret redaction,
-  so personal name and email fields can still reach model context.
-- Co-Engineer diagnostics can report Grok ready while the top-level summary says
-  it is not ready.
-- Co-Engineer status returns full recent-job configurations and lifecycle
-  histories.
+- Cursor identity uses an explicit allowlist projection, so upstream personal
+  identity fields are not returned by default.
+- Co-Engineer promotes the diagnostic Grok authentication result into the
+  top-level readiness summary so those views cannot disagree.
+- Co-Engineer status returns compact recent-job summaries; exact job retrieval
+  remains available for bounded configuration and lifecycle detail.
 - Grok review and verify use noninteractive `auto` permission mode so blocked
   tool calls fail back to the model, while the CLI-managed `read-only` sandbox
   remains the hard write boundary.
@@ -81,13 +84,14 @@ Observed baseline behavior:
 | Durable broker configuration | Repository + host installer | Define contract, bootstrap, permissions, migration, and tests |
 | `agentctl` and worktree-bootstrap state defaults | Their component owners | Supply shared contract and linked acceptance tests |
 | Plugin cache retention and task leases | Codex app/plugin manager | Supply a reproducible fixture and app-visible acceptance test |
-| Provider account and repository access | Configured Cursor/Grok/DSH credentials | Treat as standing authorization and report ordinary provider errors |
+| Provider account and repository access | Configured Cursor/Grok/DSH credentials or sessions | Reuse as standing authorization; report ordinary expiry, revocation, or provider errors |
 
 ## Milestone 0: preserve and classify the candidate
 
-Move the existing dirty candidate to an isolated branch/worktree without
-rewriting it. Inventory every hunk and assign it to a release or discard decision.
-Keep `inline-keys` separate unless its release dependency is explicitly proven.
+Move any dirty candidate to an isolated branch/worktree without rewriting it.
+Inventory every hunk and assign it to a release or discard decision. Keep
+unrelated local plugins and generated files outside the public release unless
+their release dependency is explicitly proven.
 
 Acceptance:
 

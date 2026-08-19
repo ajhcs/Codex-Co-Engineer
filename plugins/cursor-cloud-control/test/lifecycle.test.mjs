@@ -9,6 +9,7 @@ import { CursorCloudService, handleToolCall } from '../mcp/server.mjs';
 
 const agentId = 'bc-00000000-0000-0000-0000-000000000001';
 const runId = 'run-00000000-0000-0000-0000-000000000001';
+const otherAgentId = 'bc-00000000-0000-0000-0000-000000000002';
 
 function jsonResponse(value = {}, { status = 200 } = {}) {
   return new Response(JSON.stringify(value), {
@@ -117,6 +118,8 @@ class LifecycleClient {
   }
 
   async cancelRun(id, run) { return this.mutate('cancelRun', id, run); }
+  async getAgent(id) { this.calls.push(['getAgent', id]); return { id, archived: true }; }
+  async getRun(id, run) { this.calls.push(['getRun', id, run]); return { id: run, agentId: id, status: 'CANCELLED' }; }
   async archive(id) { return this.mutate('archive', id); }
   async unarchive(id) { return this.mutate('unarchive', id); }
   async deleteAgent(id) { return this.mutate('deleteAgent', id); }
@@ -187,6 +190,84 @@ test('service dispatches archive, unarchive, cancel, and delete once with exact 
   ]);
 });
 
+test('lifecycle and cancellation request IDs deduplicate successful mutations durably', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const archived = await handleToolCall('lifecycle', { action: 'archive', requestId: 'lifecycle-dedupe-1', agentId }, service);
+  const duplicate = await handleToolCall('lifecycle', { action: 'archive', requestId: 'lifecycle-dedupe-1', agentId }, service);
+  assert.equal(archived.structuredContent.receipt.duplicate, false);
+  assert.equal(duplicate.structuredContent.receipt.duplicate, true);
+  assert.equal(client.calls.filter(([name]) => name === 'archive').length, 1);
+
+  const cancelled = await handleToolCall('runs', { action: 'cancel', requestId: 'cancel-dedupe-1', agentId, runId }, service);
+  const cancelDuplicate = await handleToolCall('runs', { action: 'cancel', requestId: 'cancel-dedupe-1', agentId, runId }, service);
+  assert.equal(cancelled.structuredContent.receipt.duplicate, false);
+  assert.equal(cancelDuplicate.structuredContent.receipt.duplicate, true);
+  assert.equal(client.calls.filter(([name]) => name === 'cancelRun').length, 1);
+});
+
+test('uncertain lifecycle mutations reconcile or explicitly release without resubmitting', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failMutation = true;
+  const args = { action: 'archive', requestId: 'lifecycle-reconcile-1', agentId };
+  const first = await handleToolCall('lifecycle', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  client.failMutation = false;
+  const reconciled = await handleToolCall('lifecycle', { action: 'reconcile', requestId: args.requestId, agentId }, service);
+  assert.equal(reconciled.structuredContent.ok, true);
+  assert.equal(reconciled.structuredContent.provider.reservation, 'completed');
+  assert.equal(client.calls.filter(([name]) => name === 'archive').length, 1);
+
+  client.failMutation = true;
+  const releaseArgs = { action: 'unarchive', requestId: 'lifecycle-release-1', agentId };
+  await handleToolCall('lifecycle', releaseArgs, service);
+  const released = await handleToolCall('lifecycle', {
+    action: 'reconcile', requestId: releaseArgs.requestId, release: true, confirmation: `release:${releaseArgs.requestId}`,
+  }, service);
+  assert.equal(released.structuredContent.ok, true);
+  assert.equal(released.structuredContent.provider.reservation, 'released');
+  assert.equal(client.calls.filter(([name]) => name === 'unarchive').length, 1);
+});
+
+test('lifecycle reconciliation rejects a mismatched provider agent without releasing', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failMutation = true;
+  const args = { action: 'archive', requestId: 'lifecycle-agent-identity-mismatch-1', agentId };
+  const first = await handleToolCall('lifecycle', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  client.failMutation = false;
+  client.getAgent = async (requestedAgentId) => {
+    client.calls.push(['getAgent', requestedAgentId]);
+    return { id: otherAgentId, archived: true };
+  };
+  const mismatch = await handleToolCall('lifecycle', { action: 'reconcile', requestId: args.requestId, agentId }, service);
+  assert.equal(mismatch.structuredContent.error.code, 'uncertain_submission');
+  const record = await service.ledger.lookup(args.requestId);
+  assert.equal(record.status, 'uncertain');
+  assert.equal(mismatch.structuredContent.error.details.providerReturnedAgentId, otherAgentId);
+  assert.equal(client.calls.filter(([name]) => name === 'archive').length, 1);
+});
+
+test('uncertain archive 404 reconciliation uses the exact stored provider target', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  client.failMutation = true;
+  const args = { action: 'archive', requestId: 'lifecycle-reconcile-404-1', agentId };
+  const first = await handleToolCall('lifecycle', args, service);
+  assert.equal(first.structuredContent.error.code, 'uncertain_submission');
+  const before = await service.ledger.lookup(args.requestId);
+  assert.equal(before.agentId, agentId);
+  assert.equal(before.providerAgentId, null);
+
+  client.failMutation = false;
+  client.getAgent = async (id) => {
+    client.calls.push(['getAgent', id]);
+    throw new CursorApiError('not_found', 'missing agent', { status: 404 });
+  };
+  const reconciled = await handleToolCall('lifecycle', { action: 'reconcile', requestId: args.requestId, agentId }, service);
+  assert.equal(reconciled.structuredContent.ok, true);
+  assert.equal(reconciled.structuredContent.provider.reservation, 'released');
+  assert.equal((await service.ledger.lookup(args.requestId)).providerAgentId, agentId);
+});
+
 test('lifecycle delete requires exact confirmation and never contacts Cursor on rejection', async (context) => {
   const { client, service } = await serviceFixture(context);
   for (const confirmation of [agentId, `delete:${agentId}:extra`, `delete:bc-00000000-0000-0000-0000-000000000002`]) {
@@ -218,6 +299,23 @@ test('service exposes usage and artifact list/download lifecycle without mutatio
   ]);
 });
 
+test('artifact list exposes provider and local page truncation while retaining the hard bound', async (context) => {
+  const { client, service } = await serviceFixture(context);
+  const sourceItems = Array.from({ length: 205 }, (_, index) => ({
+    path: `artifacts/output-${index}.txt`,
+    sizeBytes: index,
+  }));
+  client.artifacts = async () => ({ items: sourceItems, truncated: true });
+
+  const listed = await handleToolCall('artifacts', { action: 'list', agentId }, service);
+  assert.equal(listed.structuredContent.ok, true);
+  assert.equal(listed.structuredContent.artifacts.items.length, 200);
+  assert.equal(listed.structuredContent.artifacts.items.at(-1).path, 'artifacts/output-199.txt');
+  assert.equal(listed.structuredContent.artifacts.truncated, true);
+  assert.equal(listed.structuredContent.artifacts.pageTruncated, true);
+  assert.equal(Object.hasOwn(listed.structuredContent.artifacts, 'output-200'), false);
+});
+
 test('service does not auto-retry failed lifecycle mutations', async (context) => {
   const { client, service } = await serviceFixture(context);
   client.failMutation = true;
@@ -231,7 +329,7 @@ test('service does not auto-retry failed lifecycle mutations', async (context) =
   for (const [tool, arguments_, operation] of operations) {
     const result = await handleToolCall(tool, arguments_, service);
     assert.equal(result.isError, true);
-    assert.equal(result.structuredContent.error.code, 'upstream_failure');
+    assert.equal(result.structuredContent.error.code, 'uncertain_submission');
     assert.equal(client.calls.filter(([name]) => name === operation).length, 1, `${operation} was retried`);
   }
 });

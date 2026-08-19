@@ -13,16 +13,25 @@ import {
 } from '../plugins/cursor-cloud-control/mcp/local.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const EXPECTED_CO_ENGINEER_VERSION = '2.2.0';
+const EXPECTED_CURSOR_VERSION = '0.4.0';
+const EXPECTED_CURSOR_LOCAL_WIRE_VERSION = '0.2.0';
+const EXPECTED_MCP_PROTOCOL_VERSION = '2025-11-25';
+const EXPECTED_CO_ENGINEER_TOOLS = ['preflight', 'status', 'capacity', 'runtime', 'run', 'jobs', 'cancel'];
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/iu;
 const required = [
-  '.codex/release-gate.toml', '.github/workflows/ci.yml', '.gitignore',
+  '.agents/plugins/marketplace.json', '.codex/release-gate.toml',
+  '.github/workflows/ci.yml', '.gitignore',
   'CHANGELOG.md', 'CONTRIBUTING.md', 'LICENSE', 'README.md', 'SECURITY.md',
   'config/configuration.example.json', 'config/configuration.schema.json',
+  'examples/preflight-result.json', 'examples/target-context.json',
   'docs/acp-and-orchestrator-adoption.md', 'docs/configuration.md',
   'docs/control-plane-reliability-plan.md', 'docs/data-handling.md',
   'docs/preflight-inspector.md', 'docs/provider-capability-map.md',
   'docs/release.md', 'docs/target-contract.md',
   'plugins/plumbob-harness-control/.codex-plugin/plugin.json',
   'plugins/plumbob-harness-control/.mcp.json',
+  'plugins/plumbob-harness-control/LICENSE',
   'plugins/plumbob-harness-control/package.json',
   'plugins/plumbob-harness-control/README.md',
   'plugins/plumbob-harness-control/skills/control-plumbob-agents/SKILL.md',
@@ -51,6 +60,7 @@ const required = [
   'plugins/plumbob-harness-control/assets/dsh-headless-usage-runner.mjs',
   'plugins/plumbob-harness-control/test/acp-bounded-proxy.test.mjs',
   'plugins/plumbob-harness-control/test/acp-event-ledger.test.mjs',
+  'plugins/plumbob-harness-control/test/secrets.test.mjs',
   'plugins/plumbob-harness-control/test/acp-provider-registry.test.mjs',
   'plugins/plumbob-harness-control/test/acp-resource-boundary.test.mjs',
   'plugins/plumbob-harness-control/test/acp-session-schema.test.mjs',
@@ -72,6 +82,7 @@ const required = [
   'plugins/plumbob-harness-control/test/server.test.mjs',
   'plugins/cursor-cloud-control/.codex-plugin/plugin.json',
   'plugins/cursor-cloud-control/.mcp.json',
+  'plugins/cursor-cloud-control/LICENSE',
   'plugins/cursor-cloud-control/package.json',
   'plugins/cursor-cloud-control/README.md',
   'plugins/cursor-cloud-control/mcp/server.mjs',
@@ -133,25 +144,52 @@ const packageJson = await json('plugins/plumbob-harness-control/package.json');
 const cursorManifest = await json('plugins/cursor-cloud-control/.codex-plugin/plugin.json');
 const cursorPackage = await json('plugins/cursor-cloud-control/package.json');
 const cursorMcp = await json('plugins/cursor-cloud-control/.mcp.json');
+const marketplace = await json('.agents/plugins/marketplace.json');
 const vendorPackage = await json('tools/acpx-vendor/package.json');
 const lockBytes = await readFile(path.join(ROOT, 'tools/acpx-vendor/package-lock.json'));
 const lock = JSON.parse(lockBytes);
 const runtimeManifest = await json('plugins/plumbob-harness-control/assets/acpx-runtime.manifest.json');
 const configurationSchema = await json('config/configuration.schema.json');
 const configurationExample = await json('config/configuration.example.json');
+const examplePreflightResult = await json('examples/preflight-result.json');
+const exampleTargetContext = await json('examples/target-context.json');
 
-if (manifest.version !== '2.1.2' || packageJson.version !== '2.1.2'
-  || SERVER_IDENTITY.version !== '2.1.2'
+if (manifest.version !== EXPECTED_CO_ENGINEER_VERSION || packageJson.version !== EXPECTED_CO_ENGINEER_VERSION
+  || SERVER_IDENTITY.version !== EXPECTED_CO_ENGINEER_VERSION
   || manifest.version !== packageJson.version) {
-  fail('Co-Engineer manifest, package, and MCP server versions must remain pinned at 2.1.2.');
+  fail(`Co-Engineer manifest, package, and MCP server versions must remain pinned at ${EXPECTED_CO_ENGINEER_VERSION}.`);
 }
 if (manifest.interface.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
-if (cursorManifest.version !== '0.3.0' || cursorPackage.version !== '0.3.0'
-  || CURSOR_SERVER_IDENTITY.version !== '0.3.0'
-  || CURSOR_LOCAL_SERVER_IDENTITY.version !== '0.1.0'
+const marketplaceEntries = marketplace.plugins?.map((entry) => ({
+  name: entry.name,
+  source: entry.source,
+  policy: entry.policy,
+  category: entry.category,
+}));
+if (marketplace.name !== 'codex-co-engineer'
+  || marketplace.interface?.displayName !== 'Codex-Co-Engineer'
+  || JSON.stringify(marketplaceEntries) !== JSON.stringify([
+    {
+      name: 'plumbob-harness-control',
+      source: { source: 'local', path: './plugins/plumbob-harness-control' },
+      policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+      category: 'Developer Tools',
+    },
+    {
+      name: 'cursor-cloud-control',
+      source: { source: 'local', path: './plugins/cursor-cloud-control' },
+      policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+      category: 'Developer Tools',
+    },
+  ])) {
+  fail('Public marketplace must expose the two release plugin packages with local sources.');
+}
+if (cursorManifest.version !== EXPECTED_CURSOR_VERSION || cursorPackage.version !== EXPECTED_CURSOR_VERSION
+  || CURSOR_SERVER_IDENTITY.version !== EXPECTED_CURSOR_VERSION
+  || CURSOR_LOCAL_SERVER_IDENTITY.version !== EXPECTED_CURSOR_LOCAL_WIRE_VERSION
   || cursorManifest.version !== cursorPackage.version
   || cursorPackage.version !== CURSOR_SERVER_IDENTITY.version) {
-  fail('Cursor manifest, package, and cloud MCP server versions must remain pinned at 0.3.0; local wire identity must remain 0.1.0.');
+  fail(`Cursor manifest, package, and cloud MCP server versions must remain pinned at ${EXPECTED_CURSOR_VERSION}; local wire identity must remain ${EXPECTED_CURSOR_LOCAL_WIRE_VERSION}.`);
 }
 if (cursorManifest.interface.displayName !== 'Cursor Cloud Control') fail('Cursor public display name mismatch.');
 if (JSON.stringify(CURSOR_LOCAL_FOUNDATION_TOOLS.map((tool) => tool.name)) !== JSON.stringify(['status', 'run', 'runs'])
@@ -169,11 +207,12 @@ for (const variable of [
   'CURSOR_LOCAL_CLI_SANDBOX_BIN', 'CURSOR_LOCAL_CLI_SANDBOX_SHA256',
   'CURSOR_LOCAL_CLI_API_KEY', 'CURSOR_LOCAL_CLI_HOME',
   'CURSOR_LOCAL_CLI_CONFIG_DIR', 'CURSOR_LOCAL_CLI_WORKSPACE_ROOTS',
+  'CURSOR_LOCAL_CLI_ENABLE_HOST_TRUSTED_RUNS',
   'CURSOR_LOCAL_CONTROL_STATE_DIR', 'XDG_STATE_HOME', 'HOME',
 ]) {
   if (!localServer.env_vars?.includes(variable)) fail(`Cursor local MCP manifest is missing ${variable}.`);
 }
-if (localServer.env_vars?.includes('CURSOR_LOCAL_CLI_ENABLE_RUNS')) fail('Cursor local MCP manifest must not ship an execution activation switch.');
+if (localServer.env_vars?.includes('CURSOR_LOCAL_CLI_ENABLE_RUNS')) fail('Cursor local MCP manifest must not ship the legacy execution activation switch.');
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') {
   fail('Co-Engineer package test script must explicitly select test/*.test.mjs.');
 }
@@ -181,14 +220,63 @@ if (typeof cursorPackage.scripts?.test !== 'string' || !cursorPackage.scripts.te
   fail('Cursor package test script is missing.');
 }
 if (JSON.stringify(packageJson.files) !== JSON.stringify([
-  '.codex-plugin', '.mcp.json', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'package.json',
+  '.codex-plugin', '.mcp.json', 'LICENSE', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'package.json',
 ])) {
   fail('Co-Engineer package inventory roots changed.');
 }
 if (JSON.stringify(cursorPackage.files) !== JSON.stringify([
-  '.codex-plugin', '.mcp.json', 'README.md', 'mcp', 'skills', 'test', 'package.json',
+  '.codex-plugin', '.mcp.json', 'LICENSE', 'README.md', 'mcp', 'skills', 'package.json',
 ])) {
   fail('Cursor package inventory roots changed.');
+}
+const rootLicenseText = await text('LICENSE');
+for (const [name, packageManifest, licenseRelative] of [
+  ['Co-Engineer', packageJson, 'plugins/plumbob-harness-control/LICENSE'],
+  ['Cursor', cursorPackage, 'plugins/cursor-cloud-control/LICENSE'],
+]) {
+  if (packageManifest.license !== 'MIT' || !packageManifest.files.includes('LICENSE')
+    || await text(licenseRelative) !== rootLicenseText) {
+    fail(`${name} package must declare MIT and publish its package-local LICENSE text.`);
+  }
+}
+
+const exampleTargetKeys = [
+  'schema_version', 'mode', 'working_directory', 'expected_git_root',
+  'expected_head', 'allowed_paths', 'role',
+];
+if (JSON.stringify(Object.keys(exampleTargetContext).sort()) !== JSON.stringify([...exampleTargetKeys].sort())
+  || exampleTargetContext.schema_version !== 'codex-co-engineer.target.v1'
+  || exampleTargetContext.mode !== 'explicit'
+  || !/^\//u.test(exampleTargetContext.working_directory)
+  || !/^\//u.test(exampleTargetContext.expected_git_root)
+  || !/^[0-9a-f]{40}$/iu.test(exampleTargetContext.expected_head)
+  || !Array.isArray(exampleTargetContext.allowed_paths)
+  || exampleTargetContext.allowed_paths.length < 1
+  || !['review', 'verify', 'implement'].includes(exampleTargetContext.role)) {
+  fail('examples/target-context.json must be a runnable explicit target-context template.');
+}
+if (Object.hasOwn(exampleTargetContext, 'expected_fingerprint')
+  || Object.hasOwn(exampleTargetContext, 'expected_target_fingerprint')) {
+  fail('examples/target-context.json must not embed a fingerprint assertion; compute it with target-fingerprint.mjs and send it as expected_target_fingerprint.');
+}
+
+if (examplePreflightResult.ok !== true
+  || Object.hasOwn(examplePreflightResult, 'status')
+  || examplePreflightResult.schema_version !== 'codex-co-engineer.config.v1'
+  || !DIGEST_PATTERN.test(examplePreflightResult.target_fingerprint)
+  || examplePreflightResult.expected_target_fingerprint !== examplePreflightResult.target_fingerprint
+  || examplePreflightResult.target_binding !== 'control_plane'
+  || examplePreflightResult.target_match !== true
+  || !path.isAbsolute(examplePreflightResult.resolved_workspace)
+  || !path.isAbsolute(examplePreflightResult.resolved_cwd)
+  || examplePreflightResult.resolved_workspace !== exampleTargetContext.expected_git_root
+  || examplePreflightResult.resolved_cwd !== exampleTargetContext.working_directory
+  || !DIGEST_PATTERN.test(examplePreflightResult.configuration_digest)
+  || examplePreflightResult.transport !== 'stdio'
+  || examplePreflightResult.protocol_version !== EXPECTED_MCP_PROTOCOL_VERSION
+  || JSON.stringify(examplePreflightResult.server_identity) !== JSON.stringify(SERVER_IDENTITY)
+  || JSON.stringify(examplePreflightResult.available_tools) !== JSON.stringify(EXPECTED_CO_ENGINEER_TOOLS)) {
+  fail('examples/preflight-result.json must match the current successful Co-Engineer preflight receipt and target context.');
 }
 
 for (const section of ['transport', 'runtime', 'credentials', 'target', 'deadlines']) {
@@ -341,7 +429,8 @@ for (const plugin of ['plumbob-harness-control', 'cursor-cloud-control']) {
 // intentionally not a recursive repository walk: the release gate validates
 // the explicit candidate inventory above and must not absorb unrelated files.
 const scanned = [
-  '.codex/release-gate.toml', '.github/workflows/ci.yml', 'docs/release.md',
+  '.agents/plugins/marketplace.json', '.codex/release-gate.toml',
+  '.github/workflows/ci.yml', 'docs/release.md',
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs',
 ];
 const forbidden = [
@@ -358,4 +447,4 @@ for (const relative of scanned) {
   }
 }
 
-process.stdout.write(`release validation passed (${required.length} required files, Co-Engineer ${packageJson.version}, ACPX ${runtimeManifest.source.version})\n`);
+process.stdout.write(`release validation passed (${required.length} required files, Co-Engineer ${packageJson.version}, Cursor ${cursorPackage.version}, local wire ${CURSOR_LOCAL_SERVER_IDENTITY.version}, ACPX ${runtimeManifest.source.version})\n`);
