@@ -8,11 +8,15 @@ import { promisify } from 'node:util';
 
 import {
   appendTaskEvent,
+  clearTaskLaunchReservation,
+  createLaunchReservation,
   createTask,
+  launchReservationActive,
   listTasks,
   readRuntimeRecord,
   readTask,
   requireTaskId,
+  reserveTaskLaunch,
   stateRoot,
   taskPaths,
   updateTask,
@@ -38,6 +42,19 @@ const ACTIVE = new Set(['accepted', 'starting', 'running', 'cancelling', 'transp
 const PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
 const WORKSPACE_MODES = new Set(['managed', 'direct']);
 const WORKTREE_CREATE_MAX_BUFFER = 16 * 1024 * 1024;
+const PUBLIC_STARTUP_MESSAGES = Object.freeze({
+  credential_permissions: 'Provider credential configuration is invalid.',
+  dsh_acp_not_configured: 'DSH ACP configuration is invalid.',
+  invalid_credential_file: 'Provider credential configuration is invalid.',
+  invalid_state_dir: 'Co-Engineer state configuration is invalid.',
+  invalid_worktree: 'The provider worktree is invalid.',
+  worktree_create_failed: 'The managed worktree could not be prepared.',
+  worker_boundary_uncertain: 'The worker boundary could not be stopped; reconcile or cancel this task.',
+  cancelled: 'The task was cancelled before worker startup.',
+  provider_startup_failed: 'Provider startup could not be prepared.',
+  task_launch_busy: 'Another worker already owns this task launch.',
+  worker_start_failed: 'The worker failed to start.',
+});
 
 export class SupervisorError extends Error {
   constructor(code, message, options) {
@@ -49,6 +66,15 @@ export class SupervisorError extends Error {
 
 function fail(code, message) {
   throw new SupervisorError(code, message);
+}
+
+function publicStartupError(error, fallbackCode = 'worker_start_failed') {
+  const rawCode = typeof error?.code === 'string' ? error.code : fallbackCode;
+  const code = /^[A-Za-z0-9._-]{1,96}$/u.test(rawCode) ? rawCode : fallbackCode;
+  const message = PUBLIC_STARTUP_MESSAGES[code] ?? PUBLIC_STARTUP_MESSAGES[fallbackCode] ?? 'The worker failed to start.';
+  // Startup failures cross the MCP boundary. Keep the public error bounded and
+  // do not retain a provider path, stderr, or credential-bearing cause object.
+  return new SupervisorError(code, message);
 }
 
 function normalizedAbsolute(value, field) {
@@ -187,8 +213,18 @@ export async function cleanupManagedWorkspace({ workspace, taskId, execute = exe
       'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
     ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     const lock = parseJsonSuffix(stdout);
-    if (!lock || lock.state === 'unlocked') return { state: 'unlocked', cleaned: false };
-    const health = lock.health ?? lock;
+    if (!lock || typeof lock !== 'object' || Array.isArray(lock)) {
+      throw Object.assign(new Error('worktree-bootstrap lock inspect did not return a JSON receipt.'), {
+        code: 'worktree_cleanup_failed',
+      });
+    }
+    if (lock.state === 'unlocked') return { state: 'unlocked', cleaned: false };
+    const health = lock.health;
+    if (!health || typeof health !== 'object' || Array.isArray(health) || typeof health.state !== 'string') {
+      throw Object.assign(new Error('worktree-bootstrap lock inspect returned an invalid lock receipt.'), {
+        code: 'worktree_cleanup_failed',
+      });
+    }
     if (health.state !== 'abandoned' || typeof lock.lock_id !== 'string' || lock.lock_id.length === 0) {
       return { state: health.state ?? lock.state ?? 'unknown', cleaned: false };
     }
@@ -254,7 +290,16 @@ export async function launchWorker({
   env: sourceEnv = process.env,
   spawn = nodeSpawn,
   launchBoundary = launchProcessBoundary,
+  stopBoundary = stopProcessBoundary,
+  writeRuntime = writeRuntimeRecord,
 } = {}) {
+  const initial = (await readTask(root, taskId)).task;
+  if (initial.status !== 'accepted') {
+    fail('cancelled', `Task cannot launch from ${initial.status}.`);
+  }
+  const launchReservation = launchReservationActive(initial)
+    ? initial.launch_reservation
+    : await reserveTaskLaunch(root, taskId);
   const paths = await writeRequest(root, taskId);
   const log = await open(paths.log, 'a', 0o600);
   const worker = provider === 'cursor-cloud' ? CLOUD_WORKER : WORKER;
@@ -295,11 +340,11 @@ export async function launchWorker({
   child.unref();
   try {
     const current = (await readTask(root, taskId)).task;
-    if (!['accepted', 'transport_lost'].includes(current.status)) {
-      if (boundary?.handle) await stopProcessBoundary(boundary.handle);
-      fail('cancelled', `Task cannot launch from ${current.status}.`);
+    if (current.status !== 'accepted' || current.launch_reservation?.token !== launchReservation.token) {
+      if (boundary?.handle) await stopBoundary(boundary.handle);
+      fail('cancelled', `Task launch reservation is no longer valid (${current.status}).`);
     }
-    const runtime = await writeRuntimeRecord(root, taskId, {
+    const runtime = await writeRuntime(root, taskId, {
       pid: child.pid,
       process_group: boundary ? null : child.pid,
       process_start_ticks: processStartTicks(child.pid),
@@ -307,15 +352,41 @@ export async function launchWorker({
       ...(boundary ? { process_boundary: boundary.receipt } : {}),
     });
     await appendTaskEvent(root, taskId, { type: 'worker', state: 'spawned', pid: child.pid });
+    await clearTaskLaunchReservation(root, taskId, launchReservation.token).catch(() => {});
     return runtime;
   } catch (error) {
     if (boundary?.handle) {
-      await stopProcessBoundary(boundary.handle).catch(() => {});
+      try {
+        await stopBoundary(boundary.handle);
+      } catch (stopError) {
+        const recovery = {
+          task_id: taskId,
+          pid: child.pid,
+          process_group: null,
+          process_start_ticks: processStartTicks(child.pid),
+          command: writer ? 'worktree-bootstrap' : process.execPath,
+          process_boundary: boundary.receipt,
+          updated_at: new Date().toISOString(),
+        };
+        const uncertain = new SupervisorError(
+          'worker_boundary_uncertain',
+          'Worker launch failed and its owned process boundary could not be stopped; reconcile or cancel this task.',
+          { cause: stopError },
+        );
+        await updateTask(root, taskId, {
+          status: 'transport_lost',
+          error: { code: uncertain.code, message: uncertain.message },
+          runtime_recovery: recovery,
+        }).catch(() => {});
+        await clearTaskLaunchReservation(root, taskId, launchReservation.token).catch(() => {});
+        throw uncertain;
+      }
     } else {
       try { process.kill(-child.pid, 'SIGTERM'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
       await new Promise((resolve) => setTimeout(resolve, 250));
       try { process.kill(-child.pid, 'SIGKILL'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
     }
+    await clearTaskLaunchReservation(root, taskId, launchReservation.token).catch(() => {});
     throw error;
   }
 }
@@ -342,7 +413,12 @@ export async function submitTask(input, dependencies = {}) {
     if (error instanceof SupervisorError) throw error;
     if (error?.code !== 'ENOENT') throw error;
   }
-  const launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env);
+  let launchEnv;
+  try {
+    launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env);
+  } catch (error) {
+    throw publicStartupError(error, 'provider_startup_failed');
+  }
   const managed = input.provider !== 'cursor-cloud' && workspaceMode === 'managed';
   const writer = managed;
   let workspace = null;
@@ -370,6 +446,7 @@ export async function submitTask(input, dependencies = {}) {
           ? 'provider-managed'
           : managed ? 'managed-worktree' : 'direct',
         ...(agentArgv ? { agent_argv: agentArgv } : {}),
+        launch_reservation: createLaunchReservation(),
         starting_ref: input.starting_ref,
         timeout_ms: input.timeout_ms,
         create_pr: input.create_pr === true,
@@ -385,14 +462,20 @@ export async function submitTask(input, dependencies = {}) {
       provider: input.provider,
       env: launchEnv,
     });
+    await clearTaskLaunchReservation(root, id, task.launch_reservation?.token).catch(() => {});
     return { task: (await readTask(root, id)).task, runtime };
   } catch (error) {
     if (taskCreated) {
-      await updateTask(root, id, {
-        status: 'failed',
-        error: { code: error?.code ?? 'worker_start_failed', message: error?.message ?? 'Worker failed to start.' },
-        finished_at: new Date().toISOString(),
-      }).catch(() => {});
+      const current = (await readTask(root, id)).task;
+      if (!['transport_lost', 'cancelling'].includes(current.status)) {
+        const safe = publicStartupError(error);
+        await updateTask(root, id, {
+          status: 'failed',
+          error: { code: safe.code, message: safe.message },
+          finished_at: new Date().toISOString(),
+        }).catch(() => {});
+      }
+      await clearTaskLaunchReservation(root, id, current.launch_reservation?.token).catch(() => {});
       await recordManagedCleanup(root, (await readTask(root, id)).task, dependencies.execute);
     } else if (managed) {
       await cleanupManagedWorkspace({
@@ -401,7 +484,7 @@ export async function submitTask(input, dependencies = {}) {
         execute: dependencies.execute,
       });
     }
-    throw error;
+    throw taskCreated ? publicStartupError(error) : publicStartupError(error, 'provider_startup_failed');
   }
 }
 
@@ -435,6 +518,10 @@ async function runtimeActive(runtime) {
     }
   }
   return Boolean(currentProcessIdentity(runtime));
+}
+
+function taskRuntime(runtime, task) {
+  return runtime ?? task?.runtime_recovery ?? null;
 }
 
 async function stopRuntimeBoundary(runtime) {
@@ -511,6 +598,7 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
     const runtime = await readRuntimeRecord(root, taskId);
     await updateTask(root, taskId, { status: 'cancelling' });
+    await clearTaskLaunchReservation(root, taskId, task.launch_reservation?.token).catch(() => {});
     const terminal = await (dependencies.cancelCloud ?? cancelCursorCloudTask)({
       root,
       taskId,
@@ -523,10 +611,11 @@ export async function cancelTask(root, taskId, dependencies = {}) {
     }
     return terminal;
   }
-  const runtime = await readRuntimeRecord(root, taskId);
+  const runtime = taskRuntime(await readRuntimeRecord(root, taskId), task);
   const identity = currentProcessIdentity(runtime);
   const providerIdentity = currentProviderIdentity(task);
   await updateTask(root, taskId, { status: 'cancelling' });
+  await clearTaskLaunchReservation(root, taskId, task.launch_reservation?.token).catch(() => {});
   if (runtime?.process_boundary) {
     try {
       await (dependencies.stopBoundary ?? stopRuntimeBoundary)(runtime);
@@ -577,8 +666,8 @@ export async function cancelTask(root, taskId, dependencies = {}) {
 
 export async function taskStatus(root, taskId) {
   let task = (await readTask(root, taskId)).task;
-  const runtime = await readRuntimeRecord(root, taskId);
-  if (ACTIVE.has(task.status) && !(await runtimeActive(runtime))) {
+  const runtime = taskRuntime(await readRuntimeRecord(root, taskId), task);
+  if (ACTIVE.has(task.status) && !launchReservationActive(task) && !(await runtimeActive(runtime))) {
     if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
       task = await reconcileCursorCloudTask({ root, taskId });
     } else {
@@ -593,6 +682,7 @@ export async function taskStatus(root, taskId) {
       }
       task = await updateTask(root, taskId, {
         status: 'transport_lost',
+        launch_reservation: null,
         error: {
           code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
           message: boundaryStopped
@@ -611,14 +701,15 @@ export async function supervisorStatus(root = stateRoot()) {
   for (let index = 0; index < tasks.length; index += 1) {
     const task = tasks[index];
     if (!ACTIVE.has(task.status)) continue;
-    const runtime = await readRuntimeRecord(root, task.id);
-    if (await runtimeActive(runtime)) continue;
+    const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
+    if (launchReservationActive(task) || await runtimeActive(runtime)) continue;
     if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
       try {
         tasks[index] = await reconcileCursorCloudTask({ root, taskId: task.id });
       } catch (error) {
         tasks[index] = await updateTask(root, task.id, {
           status: 'transport_lost',
+          launch_reservation: null,
           error: { code: error?.code ?? 'cursor_reconcile_failed', message: 'Cursor Cloud state could not be reconciled.' },
         });
       }
@@ -634,6 +725,7 @@ export async function supervisorStatus(root = stateRoot()) {
       }
       tasks[index] = await updateTask(root, task.id, {
         status: 'transport_lost',
+        launch_reservation: null,
         error: {
           code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
           message: boundaryStopped

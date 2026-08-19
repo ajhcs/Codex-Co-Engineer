@@ -4,10 +4,32 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
+export const LAUNCH_RESERVATION_GRACE_MS = 15_000;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
 const UPDATE_LOCK_STALE_MS = 2_000;
 const LOCAL_UPDATE_TAILS = new Map();
+
+function validLaunchReservation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (typeof value.token !== 'string' || !/^[0-9a-f-]{36}$/iu.test(value.token)) return false;
+  return typeof value.expires_at === 'string' && Number.isFinite(Date.parse(value.expires_at));
+}
+
+export function createLaunchReservation({ now = Date.now(), graceMs = LAUNCH_RESERVATION_GRACE_MS } = {}) {
+  if (!Number.isFinite(now) || !Number.isFinite(graceMs) || graceMs < 1_000 || graceMs > 5 * 60_000) {
+    throw Object.assign(new Error('Launch reservation timing is invalid.'), { code: 'invalid_launch_reservation' });
+  }
+  return Object.freeze({
+    token: randomUUID(),
+    expires_at: new Date(now + graceMs).toISOString(),
+  });
+}
+
+export function launchReservationActive(task, now = Date.now()) {
+  const reservation = task?.launch_reservation;
+  return validLaunchReservation(reservation) && Date.parse(reservation.expires_at) > now;
+}
 
 export function requireTaskId(value) {
   if (typeof value !== 'string' || !TASK_ID.test(value)) {
@@ -191,6 +213,29 @@ export async function updateTask(root, taskId, changes) {
     releaseLocal();
     if (LOCAL_UPDATE_TAILS.get(paths.record) === localTail) LOCAL_UPDATE_TAILS.delete(paths.record);
   }
+}
+
+export async function reserveTaskLaunch(root, taskId, reservation = createLaunchReservation()) {
+  if (!validLaunchReservation(reservation)) {
+    throw Object.assign(new Error('Launch reservation is invalid.'), { code: 'invalid_launch_reservation' });
+  }
+  const task = await updateTask(root, taskId, (current) => {
+    if (current.status !== 'accepted') return current;
+    if (launchReservationActive(current) && current.launch_reservation.token !== reservation.token) return current;
+    return { launch_reservation: reservation };
+  });
+  if (task.launch_reservation?.token !== reservation.token) {
+    throw Object.assign(new Error('Another worker already owns the task launch reservation.'), { code: 'task_launch_busy' });
+  }
+  return reservation;
+}
+
+export async function clearTaskLaunchReservation(root, taskId, token) {
+  return updateTask(root, taskId, (current) => {
+    if (!current.launch_reservation) return current;
+    if (token !== undefined && current.launch_reservation.token !== token) return current;
+    return { launch_reservation: null };
+  });
 }
 
 async function updateTaskWithFileLock(root, paths, taskId, changes) {

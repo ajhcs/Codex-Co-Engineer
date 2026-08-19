@@ -32,7 +32,9 @@ Grok and Cursor Local use ACP as their primary transport. DSH uses the
 official rc.7 ACP composition through ACPX. Cursor Cloud uses the official
 Cursor SDK. A local CLI fallback is allowed only when ACP fails before prompt
 dispatch. Once a prompt is dispatched, Co-Engineer never replays it through
-another transport.
+another transport. ACPX does not provide an authoritative prompt-sent
+acknowledgement, so DSH receipts use `dispatch_uncertain` after ACPX spawns and
+never fall back to CLI from that point.
 
 Cursor Local and DSH's official fallback CLIs take the prompt positionally,
 so it may be visible to other processes running as the same Unix user during
@@ -59,6 +61,11 @@ Managed tasks follow:
 ```text
 one task -> one worktree -> one branch -> one writer
 ```
+
+If bootstrap fails before returning an authoritative receipt and path, the
+supervisor cannot safely identify or delete an unknown worktree. Inspect with
+`git worktree list` and `worktree-bootstrap` tooling, then clean only an exact
+identified task/lock.
 
 Reviews and implementations use the same provider capabilities; managed
 reviews inspect an isolated worktree instead of the caller's checkout.

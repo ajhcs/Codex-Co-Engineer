@@ -22,12 +22,14 @@ const required = [
   `${PLUGIN}/mcp/v3/server.mjs`, `${PLUGIN}/mcp/v3/supervisor.mjs`,
   `${PLUGIN}/mcp/v3/task-store.mjs`, `${PLUGIN}/mcp/v3/acp-worker.mjs`,
   `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`, `${PLUGIN}/mcp/v3/single-turn.flow.mjs`,
+  `${PLUGIN}/mcp/v3/process-boundary.mjs`,
   `${PLUGIN}/assets/acpx-runtime.mjs`, `${PLUGIN}/assets/acpx-runtime.manifest.json`,
   `${PLUGIN}/assets/acpx-third-party-notices.md`,
   `${PLUGIN}/vendor/dsh-acp-demo/LICENSE`, `${PLUGIN}/vendor/dsh-acp-demo/PROVENANCE.json`,
   `${PLUGIN}/vendor/dsh-acp-demo/package.json`,
   `${PLUGIN}/skills/control-plumbob-agents/SKILL.md`,
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/inspector-preflight.mjs',
+  'scripts/process-boundary-preflight.mjs',
   'tools/acpx-vendor/package.json', 'tools/acpx-vendor/package-lock.json',
 ];
 for (const relative of required) {
@@ -102,18 +104,46 @@ async function releaseFiles(directory = ROOT) {
   return values;
 }
 const tracked = await releaseFiles();
-const forbidden = [
-  ['clyons', 'ajhcs.org'].join('@'),
-  ['Cole', 'Lyons'].join(' '),
-  ['', 'home', ['plum', 'bob'].join('')].join('/'),
-  ['', 'mnt', 'd', ['Coding', 'Projects'].join(' ')].join('/'),
+const sha256Text = (value) => createHash('sha256').update(value.toLowerCase()).digest('hex');
+// Keep the historical identity deny-list without putting the identity back in
+// the public source. Candidate extraction below is deliberately generic.
+const forbiddenIdentityFingerprints = new Map([
+  [16, new Set(['6383cd2ce525e2de7f0abdfde3c91410b5e56071e67da7da4b0743269d097b89'])],
+  [10, new Set(['a8b328b65bbcc9fcc4b8158e67b1ba3db0a10dec275b18861ff396c911841998'])],
+]);
+const emailPattern = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
+const namePattern = /\b[A-Za-z][A-Za-z'-]*\s+[A-Za-z][A-Za-z'-]*\b/gu;
+const localPathPattern = /(?:^|[\s"'`=(])\/(?:home|mnt|Users)\/(?!test-user(?:\W|$))[A-Za-z0-9._-]+(?:[\/\s][A-Za-z0-9._-]+)*/iu;
+const credentialPatterns = [
+  /\b(?:sk|xai)-[A-Za-z0-9_-]{8,}\b/iu,
+  /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{8,}\b/iu,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/iu,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/iu,
+  /https?:\/\/[^\s/@]+:[^\s/@]+@/iu,
 ];
+
+function hasForbiddenIdentity(source) {
+  for (const pattern of [emailPattern, namePattern]) {
+    pattern.lastIndex = 0;
+    for (const match of source.matchAll(pattern)) {
+      const candidate = match[0];
+      if (pattern === emailPattern && /@(?:example\.(?:com|net|org|test)|invalid)$/iu.test(candidate)) continue;
+      if (forbiddenIdentityFingerprints.get(candidate.length)?.has(sha256Text(candidate))) return true;
+    }
+  }
+  return false;
+}
+
 for (const relative of tracked) {
   const value = await readFile(absolute(relative)).catch(() => null);
   if (!value || value.includes(0)) continue;
   const source = value.toString('utf8');
-  for (const pattern of forbidden) {
-    if (source.toLowerCase().includes(pattern.toLowerCase())) fail(`Personal/local data found in tracked file ${relative}.`);
+  if (hasForbiddenIdentity(source) || localPathPattern.test(source)) {
+    fail(`Personal/local data found in tracked file ${relative}.`);
+  }
+  const isFixture = /(?:^|\/)test(?:\/|$)/u.test(relative) || /\.test\.[^/]+$/u.test(relative);
+  if (!isFixture && credentialPatterns.some((pattern) => pattern.test(source))) {
+    fail(`Credential material found in tracked file ${relative}.`);
   }
 }
 

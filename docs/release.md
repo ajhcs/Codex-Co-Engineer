@@ -33,14 +33,18 @@ After the provider-free gate passes:
 4. Run one bounded opt-in acceptance task through Grok, Cursor Local, Cursor
    Cloud, and DSH.
 5. For local tasks, verify ACP first; if fallback occurs, prove it happened
-   before prompt dispatch. Verify terminal receipts, zero active tasks, clean
+   before prompt dispatch. DSH ACPX receipts may be `dispatch_uncertain` after
+   spawn because ACPX has no authoritative prompt-sent acknowledgement; those
+   tasks are never replayed. Verify terminal receipts, zero active tasks, clean
    direct-mode caller checkouts, and retained managed-worktree handoffs.
 6. For Cursor Cloud, use a clean checkout with a provider-accessible origin
    and an exact immutable `starting_ref` commit SHA that is already pushed.
    Verify the remote run, branch, and any PR are archived or accounted for.
 7. Inspect the packed payload and current commit metadata for credentials,
    personal paths, and machine-specific information. Live receipts remain
-   local and must not contain credentials or raw private repository content.
+   local and owner-only. They may contain bounded agent output/code context and
+   must be treated as private state; verify that prompts and credentials are
+   redacted.
 
 ## Handoff and cleanup
 

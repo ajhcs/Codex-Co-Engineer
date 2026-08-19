@@ -10,7 +10,9 @@ provider is not authorized to process.
 ## Workspace boundary
 
 Local tasks use ACP first and a same-provider CLI fallback only when ACP fails
-before prompt dispatch. Managed local tasks use one
+before prompt dispatch. DSH ACPX has no authoritative prompt-sent
+acknowledgement, so it becomes `dispatch_uncertain` after spawn and is never
+replayed through CLI. Managed local tasks use one
 `worktree-bootstrap` worktree and branch per task. Direct mode is an explicit
 opt-in and permits mutation of the caller's supplied checkout.
 
@@ -29,6 +31,11 @@ boundary, not a sandbox: the provider's environment, credentials, network,
 filesystem, and shell capabilities are inherited unchanged. Local dispatch
 fails closed when it cannot verify this boundary. `setup:check` validates
 CLI/worktree dependencies but does not replace the release/live cgroup check.
+
+If managed bootstrap fails before it emits an authoritative receipt/path,
+Co-Engineer cannot safely identify or delete an unknown worktree. Inspect
+`git worktree list` and the `worktree-bootstrap` lock tooling, and clean only
+an exact task/lock that is identified there.
 
 Cursor Cloud receives a remote repository reference and an exact pushed
 starting commit SHA. It does not see unpushed local commits. Its provider-

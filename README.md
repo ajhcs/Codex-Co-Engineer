@@ -65,7 +65,9 @@ in MCP arguments or prompts.
 Local Grok and Cursor tasks use ACP. DSH uses the official rc.7 ACP
 composition through ACPX. Cursor Cloud uses the official Cursor SDK. A local
 CLI fallback is allowed only when ACP fails before prompt dispatch; an
-accepted prompt is never replayed through another transport.
+accepted prompt is never replayed through another transport. ACPX does not
+provide an authoritative prompt-sent acknowledgement, so a DSH task is marked
+`dispatch_uncertain` as soon as ACPX spawns and is never replayed through CLI.
 
 Every local worker is launched inside a transient `systemd --user` scope with
 `KillMode=control-group` solely so cancellation reaches detached descendants.
@@ -93,6 +95,11 @@ The invariant for managed tasks is:
 ```text
 one task → one worktree → one branch → one writer
 ```
+
+If `worktree-bootstrap` fails before returning an authoritative receipt and
+path, Co-Engineer does not guess at or delete an unknown worktree. Inspect the
+repository with `git worktree list` and the `worktree-bootstrap` lock tooling;
+clean only an exact task/lock that the tooling identifies.
 
 ### Cursor Cloud requirements
 

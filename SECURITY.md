@@ -43,6 +43,10 @@ repository contents, or unredacted provider payloads.
 - Local tasks default to a managed `worktree-bootstrap` worktree. An explicit
   `workspace_mode: "direct"` request may run against the supplied checkout,
   so direct mode must be treated as full mutation of that checkout.
+- If managed bootstrap fails before an authoritative receipt/path exists,
+  Co-Engineer cannot safely identify or delete an unknown worktree. Inspect
+  `git worktree list` and the `worktree-bootstrap` lock tooling, then clean
+  only an exact identified task/lock.
 - Cursor Cloud is a remote provider. Its repository must have a provider-
   accessible origin and `starting_ref` must identify an exact, immutable
   commit SHA that is already pushed. Do not put credentials in an origin URL.

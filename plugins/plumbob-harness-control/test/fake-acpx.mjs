@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { stat, readFile } from 'node:fs/promises';
+import { mkdir, stat, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 
 const argv = process.argv.slice(2);
@@ -51,6 +52,45 @@ if (argv.some((entry) => entry === value.prompt)) {
   process.stderr.write('prompt must not be passed in ACPX argv\n');
   process.exit(6);
 }
+
+const fakeMode = process.env.FAKE_ACPX_MODE ?? 'success';
+const home = process.env.HOME;
+if (typeof home !== 'string' || !path.isAbsolute(home)) {
+  process.stderr.write('task-scoped HOME is required\n');
+  process.exit(7);
+}
+const homeMetadata = await stat(home);
+if (!homeMetadata.isDirectory() || (homeMetadata.mode & 0o077) !== 0) {
+  process.stderr.write('task-scoped HOME is not owner-only\n');
+  process.exit(8);
+}
+await mkdir(path.join(home, '.acpx', 'flows', 'runs', 'fake-run'), { recursive: true, mode: 0o700 });
+await mkdir(path.join(home, '.acpx', 'sessions'), { recursive: true, mode: 0o700 });
+await writeFile(path.join(home, '.acpx', 'flows', 'runs', 'fake-run', 'trace.ndjson'), 'private fake flow trace\n', { mode: 0o600 });
+await writeFile(path.join(home, '.acpx', 'sessions', 'session.json'), 'private fake session\n', { mode: 0o600 });
+if (process.env.FAKE_ACPX_ARTIFACT_MARKER) {
+  await writeFile(process.env.FAKE_ACPX_ARTIFACT_MARKER, 'created\n', { mode: 0o600 });
+}
+
+if (fakeMode === 'fail-after-spawn') {
+  process.stderr.write('fake ACPX failed after spawn\n');
+  process.exit(17);
+}
+
+if (fakeMode === 'timeout-tree') {
+  const descendant = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'], {
+    cwd,
+    detached: true,
+    stdio: 'ignore',
+  });
+  descendant.unref();
+  if (process.env.FAKE_ACPX_DESCENDANT_PID_FILE) {
+    await writeFile(process.env.FAKE_ACPX_DESCENDANT_PID_FILE, `${descendant.pid}\n`, { mode: 0o600 });
+  }
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+}
+
 process.stdout.write(`${JSON.stringify({
   action: 'flow_run_result',
   status: 'completed',

@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createWriterWorkspace, launchWorker, submitTask } from '../mcp/v3/supervisor.mjs';
-import { createTask, readRuntimeRecord, readTask } from '../mcp/v3/task-store.mjs';
+import { cancelTask, cleanupManagedWorkspace, createWriterWorkspace, launchWorker, submitTask, taskStatus } from '../mcp/v3/supervisor.mjs';
+import { createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 
 const SHA = 'a'.repeat(40);
 
@@ -40,6 +40,16 @@ test('invalid worktree receipt fails before dispatch', async () => {
     createWriterWorkspace({ taskId: 'bad', repo: '/repo', execute }),
     (error) => error.code === 'worktree_create_failed',
   );
+});
+
+test('managed cleanup fails closed when lock inspection is not parseable', async () => {
+  const result = await cleanupManagedWorkspace({
+    workspace: { task: 'bad-lock', worktree_path: '/worktrees/bad-lock' },
+    execute: async () => ({ stdout: 'worktree-bootstrap: warning\nnot-json\n' }),
+  });
+  assert.equal(result.state, 'cleanup_failed');
+  assert.equal(result.cleaned, false);
+  assert.equal(result.error.code, 'worktree_cleanup_failed');
 });
 
 test('direct local mode uses the caller worktree and does not invoke bootstrap', async () => {
@@ -137,12 +147,19 @@ test('managed launch failure marks the task failed and cleans an abandoned write
         env: {},
         execute,
         createWorkspace: async () => workspace,
-        launch: async () => { throw Object.assign(new Error('worker failed'), { code: 'worker_failed' }); },
+        launch: async () => { throw Object.assign(new Error('worker failed at /home/test-user/private?token=secret'), { code: 'worker_failed' }); },
       }),
-      (error) => error.code === 'worker_failed',
+      (error) => {
+        assert.equal(error.code, 'worker_failed');
+        assert.equal(error.message, 'The worker failed to start.');
+        assert.equal(error.cause, undefined);
+        return true;
+      },
     );
     const task = (await readTask(root, 'launch-fail')).task;
     assert.equal(task.status, 'failed');
+    assert.equal(task.error.code, 'worker_failed');
+    assert.doesNotMatch(task.error.message, /private|secret|plumbob/iu);
     assert.deepEqual(calls.at(-1), [
       'worktree-bootstrap',
       ['lock', 'clean', 'launch-fail', '--repo', '/worktrees/launch-fail', '--policy', 'dead-local', '--lock-id', 'dead-lock'],
@@ -192,6 +209,117 @@ test('local worker launch persists its verified cgroup boundary before provider 
     assert.equal(launched.command, process.execPath);
     assert.equal(launched.taskId, 'bounded-one');
     assert.equal(launched.cwd, repo);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('launch reservation keeps status from declaring a missing runtime during startup', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-launch-grace-'));
+  const repo = path.join(root, 'repo');
+  try {
+    await mkdir(repo);
+    const reservation = createLaunchReservation({ now: Date.now() });
+    await createTask({
+      root,
+      prompt: 'launch grace',
+      record: { id: 'launch-grace', status: 'accepted', provider: 'grok', cwd: repo, launch_reservation: reservation },
+    });
+    const during = await taskStatus(root, 'launch-grace');
+    assert.equal(during.task.status, 'accepted');
+    assert.equal(during.task.launch_reservation.token, reservation.token);
+
+    await updateTask(root, 'launch-grace', {
+      launch_reservation: { ...reservation, expires_at: new Date(Date.now() - 1).toISOString() },
+    });
+    const expired = await taskStatus(root, 'launch-grace');
+    assert.equal(expired.task.status, 'transport_lost');
+    assert.equal(expired.task.launch_reservation, null);
+    assert.equal(await readRuntimeRecord(root, 'launch-grace'), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a transport-lost task cannot start a fresh local worker', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-no-replay-'));
+  const repo = path.join(root, 'repo');
+  try {
+    await mkdir(repo);
+    await createTask({
+      root,
+      prompt: 'do not replay',
+      record: { id: 'no-replay', status: 'transport_lost', provider: 'grok', cwd: repo },
+    });
+    await assert.rejects(
+      launchWorker({
+        root,
+        taskId: 'no-replay',
+        cwd: repo,
+        writer: false,
+        provider: 'grok',
+        env: {},
+        launchBoundary: async () => { throw new Error('must not launch'); },
+      }),
+      (error) => error.code === 'cancelled',
+    );
+    assert.equal((await readTask(root, 'no-replay')).task.status, 'transport_lost');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('boundary rollback failure preserves a recoverable runtime and transport-lost state', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-boundary-recovery-'));
+  const repo = path.join(root, 'repo');
+  const receipt = {
+    version: 1,
+    boundary: 'systemd-user-scope-cgroup',
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.scope',
+    description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    invocation_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    control_group: '/user.slice/user-1000.slice/user@1000.service/app.slice/codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.scope',
+  };
+  try {
+    await mkdir(repo);
+    await createTask({
+      root,
+      prompt: 'persist boundary recovery',
+      record: { id: 'boundary-recovery', status: 'accepted', provider: 'grok', cwd: repo },
+    });
+    const child = new EventEmitter();
+    child.pid = process.pid;
+    child.unref = () => {};
+    let stopCalls = 0;
+    await assert.rejects(
+      launchWorker({
+        root,
+        taskId: 'boundary-recovery',
+        cwd: repo,
+        writer: false,
+        provider: 'grok',
+        env: {},
+        launchBoundary: async () => ({ child, handle: {}, receipt }),
+        writeRuntime: async () => { throw Object.assign(new Error('runtime store unavailable'), { code: 'runtime_store_failed' }); },
+        stopBoundary: async () => {
+          stopCalls += 1;
+          throw Object.assign(new Error('cgroup still populated'), { code: 'cgroup_not_empty' });
+        },
+      }),
+      (error) => error.code === 'worker_boundary_uncertain',
+    );
+    const task = (await readTask(root, 'boundary-recovery')).task;
+    assert.equal(stopCalls, 1);
+    assert.equal(task.status, 'transport_lost');
+    assert.equal(task.error.code, 'worker_boundary_uncertain');
+    assert.deepEqual(task.runtime_recovery.process_boundary, receipt);
+    assert.equal(task.runtime_recovery.process_group, null);
+    let recovered;
+    const cancelled = await cancelTask(root, 'boundary-recovery', {
+      stopBoundary: async (runtime) => { recovered = runtime; },
+    });
+    assert.deepEqual(recovered.process_boundary, receipt);
+    assert.equal(cancelled.status, 'cancelled');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -32,7 +32,9 @@
 
 - The seven-tool 2.x control plane, target fingerprints, capacity subsystem,
   daemon/runtime UI controls, direct-headless policy layer, and experimental
-  Bubblewrap/systemd/cgroup production paths.
+  Bubblewrap/attestation outer-sandbox paths. Local workers retain only a
+  lifecycle-only systemd user-scope cgroup boundary for descendant cleanup;
+  it is not a provider sandbox or an attested execution boundary.
 - Packaged legacy MCP modules, tests, and DSH headless overlays.
 
 ## [2.1.2] - 2026-08-18

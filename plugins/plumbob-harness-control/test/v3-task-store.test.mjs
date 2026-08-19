@@ -6,12 +6,16 @@ import test from 'node:test';
 
 import {
   appendTaskEvent,
+  clearTaskLaunchReservation,
+  createLaunchReservation,
   createTask,
+  launchReservationActive,
   listTasks,
   readPrompt,
   readRuntimeRecord,
   readTask,
   requireTaskId,
+  reserveTaskLaunch,
   taskPaths,
   updateTask,
   writeRuntimeRecord,
@@ -53,6 +57,23 @@ test('updates preserve identity and monotonically advance revision', async () =>
   assert.equal(complete.revision, 3);
   assert.equal(complete.id, 'run-1');
   assert.equal(complete.pid, 123);
+});
+
+test('launch reservations are owner-local, bounded, and cannot be stolen while active', async () => {
+  const root = await temporaryRoot();
+  await createTask({ root, prompt: 'reserve', record: { id: 'reserve-one', status: 'accepted' } });
+  const now = Date.now();
+  const first = await reserveTaskLaunch(root, 'reserve-one', createLaunchReservation({ now }));
+  const task = (await readTask(root, 'reserve-one')).task;
+  assert.equal(task.launch_reservation.token, first.token);
+  assert.equal(launchReservationActive(task, now + 1), true);
+  assert.equal(launchReservationActive(task, Date.parse(first.expires_at) + 1), false);
+  await assert.rejects(
+    reserveTaskLaunch(root, 'reserve-one', createLaunchReservation({ now: now + 1 })),
+    (error) => error.code === 'task_launch_busy',
+  );
+  await clearTaskLaunchReservation(root, 'reserve-one', first.token);
+  assert.equal((await readTask(root, 'reserve-one')).task.launch_reservation, null);
 });
 
 test('concurrent updates serialize and terminal cancellation wins', async () => {

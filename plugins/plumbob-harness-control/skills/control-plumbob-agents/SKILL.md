@@ -29,7 +29,9 @@ Use the five MCP tools for delegation and lifecycle control.
 
 Grok and Cursor Local use persistent ACP sessions. DSH uses the official rc.7
 ACP composition through ACPX. Cursor Cloud uses the official Cursor SDK. A
-local CLI fallback is allowed only when ACP fails before prompt dispatch.
+local CLI fallback is allowed only when ACP fails before prompt dispatch. ACPX
+does not provide an authoritative prompt-sent acknowledgement; after ACPX
+spawns, DSH receipts say `dispatch_uncertain` and never fall back to CLI.
 
 The systemd user scope used for local workers sets `KillMode=control-group`
 only so cancellation reaches detached descendants. It is not a sandbox and
@@ -46,6 +48,10 @@ Managed local tasks follow:
 ```text
 one task -> one worktree -> one branch -> one writer
 ```
+
+If bootstrap fails before an authoritative receipt/path exists, do not guess
+or delete a worktree. Inspect `git worktree list` and the
+`worktree-bootstrap` lock tooling, then clean only an exact identified task.
 
 Terminal managed tasks retain their worktree for inspection. Obtain the
 authoritative handoff before accepting or discarding work:
