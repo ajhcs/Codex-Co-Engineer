@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { appendFile, mkdtemp, open, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
 
 import {
   appendTaskEvent,
@@ -196,7 +199,7 @@ test('partial event lines are not consumed and invalid cursors fail closed', asy
   const midWrite = await readTaskEventProgress(root, 'partial-one', { cursor: ready.event_cursor });
   assert.equal(midWrite.new_event_count, 0);
   assert.equal(midWrite.event_cursor, ready.event_cursor);
-  await appendFile(paths.events, 'lete"}}}\n');
+  await appendFile(paths.events, 'lete"}}\n');
   const complete = await readTaskEventProgress(root, 'partial-one', { cursor: ready.event_cursor });
   assert.equal(complete.new_event_count, 1);
   assert.equal(complete.last_event.text, 'incomplete');

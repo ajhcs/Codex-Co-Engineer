@@ -552,7 +552,7 @@ export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } =
     client = sdk ?? await deadlineCall(deadlineAt, () => loadCursorSdk(), 'SDK loading');
     key = apiKey ?? await deadlineCall(deadlineAt, () => loadCursorApiKey(), 'credential loading');
     const [rawRepoUrl, head] = await Promise.all([
-      deadlineCall(deadlineAt, () => gitValue(task.cwd, ['remote', 'get-url', 'origin']), 'origin discovery'),
+      deadlineCall(deadlineAt, () => gitValue(task.cwd, ['config', '--local', '--get', 'remote.origin.url']), 'origin discovery'),
       deadlineCall(deadlineAt, () => gitValue(task.cwd, ['rev-parse', 'HEAD']), 'immutable head discovery'),
     ]);
     const repoUrl = providerRepoUrl(rawRepoUrl);

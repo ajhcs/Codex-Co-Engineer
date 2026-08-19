@@ -14,6 +14,9 @@
   arguments so Codex can wait for meaningful progress or a terminal state
   instead of hammering empty polls. Unsolicited stdio callbacks across
   assistant turns are not available.
+- Read the configured `remote.origin.url` for Cursor Cloud so host
+  `insteadOf` credential rewrites cannot leak into receipts or fail
+  dispatch.
 
 ### Changed
 
