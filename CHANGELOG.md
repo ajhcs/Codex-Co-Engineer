@@ -46,6 +46,11 @@
   events.
 - Cursor Cloud run-completion waits re-arm when an audited deadline extension
   is persisted.
+- Omitted `wait_until=terminal` waits re-read `deadline_at` and re-arm the
+  task-deadline timer when another client records an audited extension.
+  Explicit `wait_ms` remains a fixed caller-selected connection cap.
+- Public receipt sanitization keeps `prompt_dispatched` lifecycle evidence
+  while still omitting raw prompt content.
 
 ### Changed
 

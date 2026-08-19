@@ -32,7 +32,7 @@ const TOKEN_PATTERNS = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu,
   /\b(?:[A-Z][A-Z0-9]*_)*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|AUTH(?:ORIZATION)?|BEARER|CREDENTIALS?|PRIVATE[_-]?KEY)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;'"&]+)/giu,
 ];
-const SECRET_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|token|password|secret|cookie|credential|private[_-]?key|prompt)/iu;
+const SECRET_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|token|password|secret|cookie|credential|private[_-]?key|(?<![a-z0-9])prompt(?!_dispatched))/iu;
 const LIFECYCLE_STAGES = [
   'accepted',
   'starting',

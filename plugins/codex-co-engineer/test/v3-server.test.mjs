@@ -221,6 +221,7 @@ test('public MCP receipts redact secrets from result, errors, handoff, and event
         id: 'server-secrets',
         status: 'completed',
         provider: 'grok',
+        prompt_dispatched: true,
         result: `done with ${secrets[0]}`,
         error: { code: 'provider_failed', message: `boom ${secrets[1]}` },
         provider_error: { message: `provider ${secrets[2]}`, apiKey: secrets[2] },
@@ -258,6 +259,8 @@ test('public MCP receipts redact secrets from result, errors, handoff, and event
       }
       if (call.name === 'task') {
         assert.equal(response.result.structuredContent.task.result.includes('[REDACTED]'), true);
+        assert.equal(response.result.structuredContent.task.prompt_dispatched, true);
+        assert.equal(Object.hasOwn(response.result.structuredContent.task, 'prompt'), false);
       }
     }
   });

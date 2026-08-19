@@ -11,8 +11,23 @@ import {
   lastActivityMs,
   readTaskDiagnostics,
   redactDiagnosticText,
+  sanitizePublicReceipt,
 } from '../mcp/v3/diagnostics.mjs';
 import { appendTaskEvent, createTask, taskPaths } from '../mcp/v3/task-store.mjs';
+
+test('sanitizePublicReceipt omits raw prompt content and keeps prompt_dispatched', () => {
+  const sanitized = sanitizePublicReceipt({
+    prompt: 'raw secret prompt text',
+    prompt_dispatched: true,
+    result: 'done with sk-result-secret-1234567890',
+    last_successful_stage: 'prompt_dispatched',
+  });
+  assert.equal(Object.hasOwn(sanitized, 'prompt'), false);
+  assert.equal(sanitized.prompt_dispatched, true);
+  assert.equal(sanitized.last_successful_stage, 'prompt_dispatched');
+  assert.equal(sanitized.result.includes('[REDACTED]'), true);
+  assert.doesNotMatch(JSON.stringify(sanitized), /raw secret prompt text|sk-result-secret-1234567890/u);
+});
 
 test('normalized states map stored receipts onto the public contract', () => {
   assert.equal(publicState('completed'), 'succeeded');

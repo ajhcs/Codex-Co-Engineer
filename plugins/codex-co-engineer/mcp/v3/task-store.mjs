@@ -695,8 +695,9 @@ export async function waitForTaskProgress(root, taskId, {
   const waitUntil = parseWaitUntil(wait_until);
   const { task: initialTask, paths } = await readTask(root, taskId);
   const started = now();
-  const waitMs = wait_ms === undefined && waitUntil === 'terminal'
-    ? resolveTerminalWaitMs(initialTask, started)
+  const followLiveDeadline = waitUntil === 'terminal' && wait_ms === undefined;
+  const waitMs = followLiveDeadline
+    ? MAX_TASK_WAIT_MS
     : parseTaskWaitMs(wait_ms);
   const coalesceMs = Number.isInteger(coalesce_ms) && coalesce_ms >= 0 && coalesce_ms <= MAX_TASK_WAIT_MS
     ? coalesce_ms
@@ -706,7 +707,7 @@ export async function waitForTaskProgress(root, taskId, {
     ? fallback_ms
     : defaultFallback;
   const initialProgress = await readTaskEventProgress(root, taskId, { cursor });
-  const deadlineAt = parseDeadlineAt(initialTask.deadline_at);
+  let deadlineAt = parseDeadlineAt(initialTask.deadline_at);
   const silenceTimeoutMs = Number.isInteger(initialTask.silence_timeout_ms) ? initialTask.silence_timeout_ms : null;
   const snapshot = (task, progress, reason) => ({
     task,
@@ -785,6 +786,8 @@ export async function waitForTaskProgress(root, taskId, {
     let currentTask = (await readTask(root, taskId)).task;
     let currentProgress = await readTaskEventProgress(root, taskId, { cursor });
     if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
+    const initialLiveDeadline = parseDeadlineAt(currentTask.deadline_at);
+    if (initialLiveDeadline != null) deadlineAt = initialLiveDeadline;
     let wake = evaluate(currentTask, currentProgress, coalesceFrom);
     if (wake) return snapshot(currentTask, currentProgress, wake);
 
@@ -792,8 +795,12 @@ export async function waitForTaskProgress(root, taskId, {
       if (signal?.aborted) {
         return snapshot(currentTask, currentProgress, 'disconnected');
       }
-      const remaining = deadline - now();
-      if (remaining <= 0) break;
+      const connectionRemaining = deadline - now();
+      if (connectionRemaining <= 0) break;
+      const taskDeadlineRemaining = deadlineAt == null ? null : Math.max(0, deadlineAt - now());
+      const remaining = taskDeadlineRemaining == null
+        ? connectionRemaining
+        : Math.min(connectionRemaining, taskDeadlineRemaining);
       const silenceRemaining = silenceTimeoutMs == null
         ? null
         : Math.max(0, lastActivityFrom(currentTask, currentProgress, started) + silenceTimeoutMs - now());
@@ -815,9 +822,11 @@ export async function waitForTaskProgress(root, taskId, {
       currentTask = (await readTask(root, taskId)).task;
       currentProgress = await readTaskEventProgress(root, taskId, { cursor });
       if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
+      const parsedDeadline = parseDeadlineAt(currentTask.deadline_at);
+      if (parsedDeadline != null) deadlineAt = parsedDeadline;
       wake = evaluate(currentTask, currentProgress, coalesceFrom);
       if (wake) return snapshot(currentTask, currentProgress, wake);
-      if (reason === 'timeout') break;
+      if (reason === 'timeout' && now() >= deadline) break;
       if (reason === 'watch-error') {
         if (!rewatchAttempted) {
           rewatchAttempted = true;
@@ -832,6 +841,8 @@ export async function waitForTaskProgress(root, taskId, {
 
     const finalTask = (await readTask(root, taskId)).task;
     const finalProgress = await readTaskEventProgress(root, taskId, { cursor });
+    const finalDeadline = parseDeadlineAt(finalTask.deadline_at);
+    if (finalDeadline != null) deadlineAt = finalDeadline;
     const finalWake = evaluate(finalTask, finalProgress, coalesceFrom);
     if (finalWake) return snapshot(finalTask, finalProgress, finalWake);
     if (waitUntil === 'progress' && (receiptAdvanced(finalTask, initialTask) || progressAdvanced(finalProgress, initialProgress))) {

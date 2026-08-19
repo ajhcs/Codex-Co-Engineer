@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { inspectTask, taskStatus } from '../mcp/v3/supervisor.mjs';
+import { extendTaskDeadline, inspectTask, taskStatus } from '../mcp/v3/supervisor.mjs';
 import {
   appendTaskEvent,
   createTask,
@@ -133,7 +133,22 @@ test('needs_attention, silence, deadline, and disconnect wake without owning the
     });
     const deadline = await waitForTaskProgress(root, 'dead-one', { wait_until: 'terminal', wait_ms: 200 });
     assert.equal(deadline.progress.wait_reason, 'deadline');
+    assert.ok(deadline.progress.waited_ms < 160);
     assert.equal((await readTask(root, 'dead-one')).task.status, 'running');
+
+    await createTask({
+      root,
+      prompt: 'omitted deadline',
+      record: {
+        id: 'dead-omit',
+        status: 'running',
+        provider: 'grok',
+        deadline_at: new Date(Date.now() + 40).toISOString(),
+      },
+    });
+    const omittedDeadline = await waitForTaskProgress(root, 'dead-omit', { wait_until: 'terminal' });
+    assert.equal(omittedDeadline.progress.wait_reason, 'deadline');
+    assert.ok(omittedDeadline.progress.waited_ms < 160);
 
     await createTask({
       root,
@@ -269,6 +284,83 @@ test('watcher failure uses a low-frequency fallback instead of model-driven poll
     assert.equal(state.closed, state.opened);
     assert.ok(state.opened >= 2);
     assert.equal(delays.filter((value) => value > 0 && value <= 20).length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('in-flight omitted terminal wait crosses an extended deadline; explicit wait_ms stays capped', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-durable-extend-wait-'));
+  try {
+    const originalMs = 250;
+    const startedAt = Date.now();
+    await createTask({
+      root,
+      prompt: 'extend while an omitted terminal wait is pending',
+      record: {
+        id: 'term-extend',
+        status: 'running',
+        provider: 'grok',
+        expected_duration_ms: 1_000,
+        timeout_ms: originalMs,
+        deadline_at: new Date(startedAt + originalMs).toISOString(),
+        duration_margin: 1.2,
+        deadline_source: 'explicit',
+        deadline_extensions: [],
+      },
+    });
+    const pending = waitForTaskProgress(root, 'term-extend', { wait_until: 'terminal' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await extendTaskDeadline(root, 'term-extend', {
+      expected_duration_ms: 5_000,
+      reason: 'provider is still running the test suite',
+    });
+    const remainingOriginal = Math.max(0, originalMs - (Date.now() - startedAt));
+    await new Promise((resolve) => setTimeout(resolve, remainingOriginal + 40));
+    assert.equal((await readTask(root, 'term-extend')).task.status, 'running');
+    await updateTask(root, 'term-extend', {
+      status: 'completed',
+      finished_at: new Date().toISOString(),
+    });
+    const woke = await pending;
+    assert.equal(woke.progress.wait_reason, 'terminal');
+    assert.equal(woke.task.status, 'completed');
+    assert.equal(woke.task.deadline_source, 'extended');
+    assert.ok(Date.now() - startedAt > originalMs);
+    assert.ok(woke.progress.waited_ms > originalMs - 20);
+
+    const capMs = 70;
+    await createTask({
+      root,
+      prompt: 'explicit wait_ms must not grow with an extension',
+      record: {
+        id: 'term-cap',
+        status: 'running',
+        provider: 'grok',
+        expected_duration_ms: 1_000,
+        timeout_ms: 5_000,
+        deadline_at: new Date(Date.now() + 5_000).toISOString(),
+        duration_margin: 1.2,
+        deadline_source: 'explicit',
+        deadline_extensions: [],
+      },
+    });
+    const capStarted = Date.now();
+    const capped = waitForTaskProgress(root, 'term-cap', {
+      wait_until: 'terminal',
+      wait_ms: capMs,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await extendTaskDeadline(root, 'term-cap', {
+      expected_duration_ms: 8_000,
+      reason: 'extension must not enlarge an explicit wait_ms cap',
+    });
+    const timedOut = await capped;
+    assert.equal(timedOut.progress.wait_reason, 'timeout');
+    assert.equal(timedOut.task.status, 'running');
+    assert.ok(timedOut.progress.waited_ms >= capMs - 5);
+    assert.ok(timedOut.progress.waited_ms < 400);
+    assert.ok(Date.now() - capStarted < 400);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
