@@ -13,6 +13,7 @@ import {
   createTask,
   launchReservationActive,
   listTasks,
+  projectLiveLastEvent,
   readRuntimeRecord,
   readTask,
   requireTaskId,
@@ -20,6 +21,7 @@ import {
   stateRoot,
   taskPaths,
   updateTask,
+  waitForTaskProgress,
   writeRuntimeRecord,
 } from './task-store.mjs';
 import {
@@ -741,11 +743,27 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
 }
 
-export async function taskStatus(root, taskId) {
+export async function taskStatus(root, taskId, options = {}) {
   const { task: initialTask } = await readTask(root, taskId);
   const runtime = taskRuntime(await readRuntimeRecord(root, taskId), initialTask);
-  const task = await reconcileInactiveTask(root, initialTask, runtime);
-  return { task, runtime };
+  const reconciled = await reconcileInactiveTask(root, initialTask, runtime);
+  const waited = await waitForTaskProgress(root, taskId, {
+    cursor: options.cursor,
+    wait_ms: options.wait_ms,
+  });
+  const latestRuntime = taskRuntime(await readRuntimeRecord(root, taskId), waited.task);
+  const task = await projectLiveLastEvent(
+    root,
+    await reconcileInactiveTask(root, waited.task, latestRuntime),
+  );
+  return {
+    task,
+    runtime: latestRuntime,
+    progress: {
+      ...waited.progress,
+      last_event: task.last_event ?? waited.progress.last_event,
+    },
+  };
 }
 
 export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
@@ -772,6 +790,6 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
     providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
     local_boundary: boundary,
     readiness,
-    tasks: tasks.slice(0, 20),
+    tasks: await Promise.all(tasks.slice(0, 20).map((task) => projectLiveLastEvent(root, task))),
   };
 }

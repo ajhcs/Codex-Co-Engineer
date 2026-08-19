@@ -83,6 +83,9 @@ const toolNames = [...serverText.matchAll(/name: '([^']+)'/gu)].map((match) => m
 if (JSON.stringify(toolNames) !== JSON.stringify(['status', 'delegate', 'task', 'tasks', 'cancel'])) {
   fail('MCP tool catalog must contain exactly status, delegate, task, tasks, cancel.');
 }
+if (!serverText.includes('wait_ms') || !serverText.includes('event_cursor') || !serverText.includes("pattern: '^[0-9]{1,16}$'")) {
+  fail('task tool must advertise bounded wait_ms/cursor live progress.');
+}
 const mcpEntries = await readdir(absolute(`${PLUGIN}/mcp`));
 if (JSON.stringify(mcpEntries) !== JSON.stringify(['v3'])) fail('Legacy MCP modules remain packaged.');
 

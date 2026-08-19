@@ -5,10 +5,23 @@ import path from 'node:path';
 
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
 export const LAUNCH_RESERVATION_GRACE_MS = 15_000;
+export const MAX_TASK_WAIT_MS = 60_000;
+export const TASK_WAIT_POLL_MS = 50;
+export const EVENT_CURSOR_PATTERN = /^[0-9]{1,16}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
 const UPDATE_LOCK_STALE_MS = 2_000;
 const LOCAL_UPDATE_TAILS = new Map();
+const EVENT_TAIL_PEEK_BYTES = 16 * 1024;
+const MAX_PUBLIC_EVENT_TEXT = 4 * 1024;
+const MAX_PUBLIC_EVENT_KEYS = 24;
+const MAX_PUBLIC_EVENT_DEPTH = 4;
+const OMIT_PUBLIC_EVENT_KEYS = new Set([
+  'pid', 'ppid', 'process_group', 'provider_process_group', 'provider_process_start_ticks',
+  'argv', 'agent_argv', 'cli_argv', 'command', 'rawinput', 'rawoutput', 'content',
+  'availablecommands', 'home', 'env', 'stderr', 'stdout', 'prompt',
+]);
+const SENSITIVE_PUBLIC_EVENT_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|token|password|secret|cookie|credential|private[_-]?key)/iu;
 
 function validLaunchReservation(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -281,6 +294,216 @@ export async function appendTaskEvent(root, taskId, event) {
   };
   await appendFile(paths.events, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
   return entry;
+}
+
+function plainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function parseEventCursor(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !EVENT_CURSOR_PATTERN.test(value)) {
+    throw Object.assign(new Error('cursor must be a decimal event-log byte offset.'), { code: 'invalid_event_cursor' });
+  }
+  const offset = Number(value);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw Object.assign(new Error('cursor must be a decimal event-log byte offset.'), { code: 'invalid_event_cursor' });
+  }
+  return offset;
+}
+
+export function parseTaskWaitMs(value) {
+  if (value === undefined || value === null) return 0;
+  if (!Number.isInteger(value) || value < 0 || value > MAX_TASK_WAIT_MS) {
+    throw Object.assign(new Error(`wait_ms must be an integer from 0 to ${MAX_TASK_WAIT_MS}.`), { code: 'invalid_wait_ms' });
+  }
+  return value;
+}
+
+function sanitizePublicEvent(value, depth = 0) {
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return value.slice(0, MAX_PUBLIC_EVENT_TEXT);
+  if (typeof value !== 'object' || depth >= MAX_PUBLIC_EVENT_DEPTH) return undefined;
+  if (Array.isArray(value)) {
+    return value.slice(0, 16).map((entry) => sanitizePublicEvent(entry, depth + 1)).filter((entry) => entry !== undefined);
+  }
+  const sanitized = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const normalized = key.toLowerCase();
+    if (OMIT_PUBLIC_EVENT_KEYS.has(normalized) || SENSITIVE_PUBLIC_EVENT_KEY.test(key)) continue;
+    const next = sanitizePublicEvent(entry, depth + 1);
+    if (next === undefined) continue;
+    sanitized[key.slice(0, 64)] = next;
+    if (Object.keys(sanitized).length >= MAX_PUBLIC_EVENT_KEYS) break;
+  }
+  return sanitized;
+}
+
+export function publicProgressEvent(entry) {
+  if (!plainObject(entry)) return null;
+  const at = typeof entry.at === 'string' ? entry.at : undefined;
+  const body = entry.type === 'provider' && plainObject(entry.event) ? entry.event : entry;
+  const sanitized = sanitizePublicEvent(body);
+  if (!sanitized || typeof sanitized !== 'object' || Array.isArray(sanitized) || Object.keys(sanitized).length === 0) {
+    return at ? { type: 'status', at } : null;
+  }
+  if (at && sanitized.at === undefined) sanitized.at = at;
+  return sanitized;
+}
+
+async function assertEventCursorBoundary(handle, offset, size) {
+  if (offset > size) {
+    throw Object.assign(new Error('cursor is beyond the event log.'), { code: 'invalid_event_cursor' });
+  }
+  if (offset === 0) return;
+  const boundary = Buffer.alloc(1);
+  const { bytesRead } = await handle.read(boundary, 0, 1, offset - 1);
+  if (bytesRead !== 1 || boundary[0] !== 0x0a) {
+    throw Object.assign(new Error('cursor must land on an event-log line boundary.'), { code: 'invalid_event_cursor' });
+  }
+}
+
+function parseCompleteEventLines(buffer) {
+  const lastNewline = buffer.lastIndexOf(0x0a);
+  if (lastNewline === -1) {
+    return { completeBytes: 0, lastEvent: null, eventCount: 0 };
+  }
+  const complete = buffer.subarray(0, lastNewline + 1).toString('utf8');
+  let lastEvent = null;
+  let eventCount = 0;
+  for (const line of complete.split('\n')) {
+    if (!line) continue;
+    eventCount += 1;
+    try {
+      lastEvent = JSON.parse(line);
+    } catch {
+      // A corrupt complete line is skipped for projection but still consumed
+      // so waiters cannot get stuck on it.
+    }
+  }
+  return { completeBytes: lastNewline + 1, lastEvent, eventCount };
+}
+
+export async function readTaskEventProgress(root, taskId, { cursor } = {}) {
+  const { paths } = await readTask(root, taskId);
+  const requested = parseEventCursor(cursor);
+  const handle = await open(paths.events, 'r');
+  try {
+    const size = (await handle.stat()).size;
+    if (requested !== null) await assertEventCursorBoundary(handle, requested, size);
+    const start = requested !== null ? requested : Math.max(0, size - EVENT_TAIL_PEEK_BYTES);
+    const length = size - start;
+    if (length === 0) {
+      return {
+        event_cursor: String(start),
+        new_event_count: 0,
+        last_event: null,
+      };
+    }
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    let slice = buffer.subarray(0, bytesRead);
+    let skipped = 0;
+    if (requested === null && start > 0) {
+      const firstNewline = slice.indexOf(0x0a);
+      if (firstNewline === -1) {
+        return {
+          event_cursor: String(start),
+          new_event_count: 0,
+          last_event: null,
+        };
+      }
+      skipped = firstNewline + 1;
+      slice = slice.subarray(skipped);
+    }
+    const parsed = parseCompleteEventLines(slice);
+    return {
+      event_cursor: String(start + skipped + parsed.completeBytes),
+      new_event_count: requested === null ? 0 : parsed.eventCount,
+      last_event: publicProgressEvent(parsed.lastEvent),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+function progressAdvanced(current, baseline) {
+  return current.event_cursor !== baseline.event_cursor
+    || current.new_event_count > 0
+    || Boolean(current.last_event && !baseline.last_event);
+}
+
+export async function waitForTaskProgress(root, taskId, {
+  cursor,
+  wait_ms,
+  poll_ms = TASK_WAIT_POLL_MS,
+  signal,
+  now = Date.now,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+} = {}) {
+  const waitMs = parseTaskWaitMs(wait_ms);
+  const started = now();
+  const initialTask = (await readTask(root, taskId)).task;
+  const initialProgress = await readTaskEventProgress(root, taskId, { cursor });
+  const snapshot = (task, progress, reason) => ({
+    task,
+    progress: {
+      event_cursor: progress.event_cursor,
+      last_event: task.last_event ?? progress.last_event,
+      new_event_count: progress.new_event_count,
+      waited_ms: Math.max(0, now() - started),
+      wait_reason: reason,
+    },
+  });
+  const terminal = (task) => TERMINAL.has(task.status);
+  const requestedCursor = parseEventCursor(cursor);
+  if (waitMs === 0) {
+    return snapshot(initialTask, initialProgress, terminal(initialTask) ? 'terminal' : 'current');
+  }
+  if (terminal(initialTask)) {
+    return snapshot(initialTask, initialProgress, 'terminal');
+  }
+  if (requestedCursor !== null && initialProgress.new_event_count > 0) {
+    return snapshot(initialTask, initialProgress, 'progress');
+  }
+  if (requestedCursor === null && initialProgress.last_event) {
+    return snapshot(initialTask, initialProgress, 'current');
+  }
+  const pollMs = Number.isInteger(poll_ms) && poll_ms >= 1 && poll_ms <= 1_000 ? poll_ms : TASK_WAIT_POLL_MS;
+  while (now() < started + waitMs) {
+    if (signal?.aborted) break;
+    const remaining = started + waitMs - now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollMs, remaining));
+    const currentTask = (await readTask(root, taskId)).task;
+    const currentProgress = await readTaskEventProgress(root, taskId, { cursor });
+    if (terminal(currentTask)) return snapshot(currentTask, currentProgress, 'terminal');
+    if (progressAdvanced(currentProgress, initialProgress)
+      || currentTask.status !== initialTask.status
+      || currentTask.revision !== initialTask.revision) {
+      return snapshot(currentTask, currentProgress, 'progress');
+    }
+  }
+  const finalTask = (await readTask(root, taskId)).task;
+  const finalProgress = await readTaskEventProgress(root, taskId, { cursor });
+  if (terminal(finalTask)) return snapshot(finalTask, finalProgress, 'terminal');
+  if (progressAdvanced(finalProgress, initialProgress)
+    || finalTask.status !== initialTask.status
+    || finalTask.revision !== initialTask.revision) {
+    return snapshot(finalTask, finalProgress, 'progress');
+  }
+  return snapshot(finalTask, finalProgress, 'timeout');
+}
+
+export async function projectLiveLastEvent(root, task) {
+  if (task?.last_event) return task;
+  try {
+    const progress = await readTaskEventProgress(root, task.id);
+    return progress.last_event ? { ...task, last_event: progress.last_event } : task;
+  } catch {
+    return task;
+  }
 }
 
 export async function writeRuntimeRecord(root, taskId, record) {

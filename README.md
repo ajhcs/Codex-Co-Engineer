@@ -12,7 +12,9 @@ is not another sandbox or policy engine.
 
 The stable machine identifier is `codex-co-engineer`. The bundled skill is
 `control-codex-co-engineer-agents`. Version 3.0.2 exposes five tools:
-`status`, `delegate`, `task`, `tasks`, and `cancel`.
+`status`, `delegate`, `task`, `tasks`, and `cancel`. `task` can long-poll
+with optional `wait_ms` and `cursor`; it does not push unsolicited stdio
+callbacks across assistant turns.
 
 ## What Codex-Co-Engineer is for
 
@@ -21,7 +23,7 @@ Use Codex-Co-Engineer when you want Codex to:
 - run a review or implementation on Grok Build, Cursor Local, Cursor Cloud, or
   DeepSeek Harness (DSH) / Muse Spark
 - keep one writer per managed local worktree and branch
-- poll a durable receipt instead of a fire-and-forget shell job
+- wait on a durable receipt instead of a fire-and-forget shell job
 - cancel an owned local process group or Cursor Cloud run
 - inspect the result before Codex pushes, opens a PR, or merges
 
@@ -182,8 +184,8 @@ Cursor Cloud implementation:
 ## Handoff and cleanup
 
 Terminal managed tasks retain their worktree and branch for Codex inspection;
-they are not silently deleted. Poll `task`, then run the authoritative
-handoff from the recorded worktree:
+they are not silently deleted. Watch with `task` (optionally `wait_ms` +
+`cursor`), then run the authoritative handoff from the recorded worktree:
 
 ```bash
 worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown

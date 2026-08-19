@@ -4,6 +4,17 @@
 
 ## [3.0.2] - 2026-08-19
 
+### Fixed
+
+- Project a compact live `last_event` / `progress` snapshot from the
+  append-only event log so `task` and `status` no longer stay stale while
+  ACP workers are streaming. `task.json` is still not rewritten on every
+  text delta.
+- Extend `task` with optional bounded `wait_ms` and `cursor` long-poll
+  arguments so Codex can wait for meaningful progress or a terminal state
+  instead of hammering empty polls. Unsolicited stdio callbacks across
+  assistant turns are not available.
+
 ### Changed
 
 - Adopt `codex-co-engineer` as the package, plugin, MCP server, skill, and

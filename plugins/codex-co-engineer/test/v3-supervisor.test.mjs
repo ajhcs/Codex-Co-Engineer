@@ -14,7 +14,7 @@ import {
   supervisorStatus,
   taskStatus,
 } from '../mcp/v3/supervisor.mjs';
-import { createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
+import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 
 const SHA = 'a'.repeat(40);
 const readyBoundary = async () => ({
@@ -308,6 +308,72 @@ test('launch reservation keeps status from declaring a missing runtime during st
     assert.equal(expired.task.status, 'transport_lost');
     assert.equal(expired.task.launch_reservation, null);
     assert.equal(await readRuntimeRecord(root, 'launch-grace'), null);
+    assert.equal(expired.progress.wait_reason, 'current');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('task and status project live last_event from the event log', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-progress-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'keep this prompt private',
+      record: {
+        id: 'live-status',
+        status: 'running',
+        provider: 'grok',
+        agent_argv: ['grok', 'agent', '--always-approve', 'stdio'],
+      },
+    });
+    await appendTaskEvent(root, 'live-status', {
+      type: 'provider',
+      event: { type: 'text_delta', text: 'reviewing files', pid: 77 },
+    });
+    const value = await taskStatus(root, 'live-status');
+    assert.equal(value.task.last_event.text, 'reviewing files');
+    assert.equal(value.task.last_event.pid, undefined);
+    assert.equal(value.progress.last_event.text, 'reviewing files');
+    assert.equal(value.progress.wait_reason, 'current');
+    assert.equal((await readTask(root, 'live-status')).task.last_event, undefined);
+    const status = await supervisorStatus(root, {
+      probeBoundary: readyBoundary,
+      readProviderReadiness: async () => ({
+        grok: { installed: true, ready: true, transport: 'acp' },
+        'cursor-local': { installed: true, ready: true, transport: 'acp' },
+        dsh: { installed: true, ready: true, transport: 'acpx' },
+        'cursor-cloud': { installed: true, ready: true, transport: 'cursor-sdk' },
+      }),
+    });
+    assert.equal(status.tasks[0].last_event.text, 'reviewing files');
+    assert.doesNotMatch(JSON.stringify(value.progress), /keep this prompt private/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('task wait returns when a later event arrives or the task is cancelled', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-wait-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'wait for cancel',
+      record: { id: 'wait-cancel', status: 'running', provider: 'grok', cwd: root },
+    });
+    const baseline = await taskStatus(root, 'wait-cancel');
+    const pending = taskStatus(root, 'wait-cancel', {
+      cursor: baseline.progress.event_cursor,
+      wait_ms: 1_000,
+    });
+    setTimeout(() => {
+      cancelTask(root, 'wait-cancel', {
+        stopBoundary: async () => {},
+      }).catch(() => {});
+    }, 20);
+    const value = await pending;
+    assert.ok(['terminal', 'progress'].includes(value.progress.wait_reason));
+    assert.ok(['cancelling', 'cancelled', 'transport_lost'].includes(value.task.status));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

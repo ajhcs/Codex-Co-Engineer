@@ -22,13 +22,21 @@ The MCP server exposes five tools:
 | --- | --- |
 | `status` | Supervisor health, provider readiness, and recent task state |
 | `delegate` | Start a review or implementation task |
-| `task` | Inspect one task receipt and runtime identity |
+| `task` | Inspect one task receipt, compact live progress, and optional wait |
 | `tasks` | List recent task receipts |
 | `cancel` | Stop one owned local process group or Cursor Cloud run |
 
 `delegate` requires a stable `task_id`, a provider, an absolute Git
 repository root, and a prompt. Providers are `grok`, `cursor-local`,
 `cursor-cloud`, and `dsh`; roles are `review` and `implement`.
+
+`task` always returns a compact `progress` snapshot (`event_cursor`,
+`last_event`, `new_event_count`, `waited_ms`, `wait_reason`) derived from
+the append-only event log. Pass the previous `event_cursor` as `cursor`
+and a bounded `wait_ms` (0-60000) to block until meaningful progress or a
+terminal state. The five-tool API is unchanged; unsolicited stdio
+callbacks across assistant turns are not available. Do not expect
+`task.json` itself to rewrite `last_event` on every text delta.
 
 ## Provider matrix
 
@@ -172,8 +180,8 @@ until the operator removes the exact terminal task state.
 
 ## Handoff and cleanup
 
-Terminal managed tasks retain their worktree and branch for inspection. Poll
-`task`, then run:
+Terminal managed tasks retain their worktree and branch for inspection. Watch
+with `task` (optionally `wait_ms` + `cursor`), then run:
 
 ```bash
 worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
@@ -217,6 +225,21 @@ Cursor Cloud implementation:
   "create_pr": true
 }
 ```
+
+Watch a running task instead of empty-polling:
+
+```json
+{
+  "task_id": "review-auth-1",
+  "wait_ms": 25000,
+  "cursor": "184"
+}
+```
+
+Use the `event_cursor` from the previous `task` result. The call returns a
+compact progress snapshot when the event log or receipt advances, the task
+becomes terminal, or `wait_ms` elapses. Unsolicited stdio callbacks across
+assistant turns are not available.
 
 For an implementation, use `role: "implement"`. A local managed task creates
 and locks its worktree before the provider starts.

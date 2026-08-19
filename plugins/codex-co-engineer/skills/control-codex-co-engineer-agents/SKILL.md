@@ -28,8 +28,13 @@ Use the five MCP tools for delegation and lifecycle control.
    reachability before retrying.
 8. Set `create_pr` only for Cursor Cloud. Local tasks reject it; Codex
    decides whether local commits justify a PR after inspecting the handoff.
-9. Poll `task` until terminal. Never replay an active or prompt-dispatched
-   task.
+9. Watch with `task`. A bare `task_id` returns the current receipt plus a
+   compact `progress` snapshot (`event_cursor`, `last_event`, `wait_reason`).
+   To wait instead of hammering polls, pass the previous `event_cursor` as
+   `cursor` and a bounded `wait_ms` (0-60000). The call returns on
+   meaningful progress, terminal state, or timeout. Unsolicited stdio
+   callbacks across assistant turns are not available. Never replay an
+   active or prompt-dispatched task.
 10. Use `cancel` for explicit cancellation or verified orphan recovery.
 11. Inspect commits, handoff, and receipts before Codex merges anything.
 

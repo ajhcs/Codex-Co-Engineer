@@ -36,10 +36,23 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: 'Inspect one task receipt and its local worker identity.',
+    description: 'Inspect one task receipt, a compact live progress snapshot, and an event_cursor. Optional wait_ms long-polls until meaningful progress or a terminal state. Unsolicited stdio callbacks across assistant turns are not available.',
     inputSchema: {
       type: 'object',
-      properties: { task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' } },
+      properties: {
+        task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
+        wait_ms: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 60000,
+          description: 'Optional bounded long-poll. Returns immediately on meaningful progress, terminal state, or timeout. 0 is a non-blocking snapshot.',
+        },
+        cursor: {
+          type: 'string',
+          pattern: '^[0-9]{1,16}$',
+          description: 'Opaque event_cursor from a previous task result. Wait for events after this boundary instead of hammering empty polls.',
+        },
+      },
       required: ['task_id'],
       additionalProperties: false,
     },
@@ -98,8 +111,15 @@ async function callTool(name, args = {}) {
     return result({ task: publicTask(value.task), runtime: value.runtime });
   }
   if (name === 'task') {
-    const value = await taskStatus(root, args.task_id);
-    return result({ task: publicTask(value.task), runtime: value.runtime });
+    const value = await taskStatus(root, args.task_id, {
+      cursor: args.cursor,
+      wait_ms: args.wait_ms,
+    });
+    return result({
+      task: publicTask(value.task),
+      runtime: value.runtime,
+      progress: value.progress,
+    });
   }
   if (name === 'tasks') return result({ tasks: (await listTasks(root)).map(publicTask) });
   if (name === 'cancel') return result({ task: publicTask(await cancelTask(root, args.task_id)) });

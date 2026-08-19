@@ -33,6 +33,9 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
     'utf8',
   );
   assert.match(skill, /^name: control-codex-co-engineer-agents$/mu);
+  assert.match(skill, /wait_ms/u);
+  assert.match(skill, /event_cursor/u);
+  assert.match(skill, /Unsolicited stdio callbacks/u);
 
   const icon = await readFile(path.join(ROOT, 'assets', 'icon.svg'), 'utf8');
   assert.match(icon, /aria-label="Co-Engineer"/);

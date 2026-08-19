@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import test from 'node:test';
+import { appendFile, mkdtemp, open, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 
 import {
   appendTaskEvent,
@@ -11,13 +8,18 @@ import {
   createTask,
   launchReservationActive,
   listTasks,
+  parseEventCursor,
+  parseTaskWaitMs,
+  projectLiveLastEvent,
   readPrompt,
   readRuntimeRecord,
   readTask,
+  readTaskEventProgress,
   requireTaskId,
   reserveTaskLaunch,
   taskPaths,
   updateTask,
+  waitForTaskProgress,
   writeRuntimeRecord,
 } from '../mcp/v3/task-store.mjs';
 
@@ -130,6 +132,181 @@ test('events are JSONL and listTasks ignores invalid task directories', async ()
   assert.match(event.at, /^20/u);
   assert.deepEqual(new Set((await listTasks(root)).map((task) => task.id)), new Set(['one', 'two']));
   assert.equal((await readTask(root, 'one')).task.state, 'queued');
+});
+
+test('event cursors reject non-boundary offsets and wait_ms bounds', () => {
+  assert.equal(parseEventCursor(undefined), null);
+  assert.equal(parseEventCursor('12'), 12);
+  assert.throws(() => parseEventCursor('-1'), (error) => error.code === 'invalid_event_cursor');
+  assert.throws(() => parseEventCursor('1e2'), (error) => error.code === 'invalid_event_cursor');
+  assert.throws(() => parseEventCursor(4), (error) => error.code === 'invalid_event_cursor');
+  assert.equal(parseTaskWaitMs(undefined), 0);
+  assert.equal(parseTaskWaitMs(25_000), 25_000);
+  assert.throws(() => parseTaskWaitMs(60_001), (error) => error.code === 'invalid_wait_ms');
+  assert.throws(() => parseTaskWaitMs(1.5), (error) => error.code === 'invalid_wait_ms');
+});
+
+test('live progress tails events.jsonl without rewriting task.json', async () => {
+  const root = await temporaryRoot();
+  const { task, paths } = await createTask({
+    root,
+    prompt: 'hidden prompt must not leak',
+    record: { id: 'live-one', status: 'running', provider: 'grok' },
+  });
+  const first = await appendTaskEvent(root, 'live-one', {
+    type: 'provider',
+    event: { type: 'text_delta', text: 'chunk-one', pid: 4321, argv: ['grok', '--secret'] },
+  });
+  const snapshot = await readTaskEventProgress(root, 'live-one');
+  assert.equal((await readTask(root, 'live-one')).task.revision, task.revision);
+  assert.equal((await readTask(root, 'live-one')).task.last_event, undefined);
+  assert.equal(snapshot.last_event.type, 'text_delta');
+  assert.equal(snapshot.last_event.text, 'chunk-one');
+  assert.equal(snapshot.last_event.pid, undefined);
+  assert.equal(snapshot.last_event.argv, undefined);
+  assert.doesNotMatch(JSON.stringify(snapshot), /hidden prompt/u);
+  assert.match(snapshot.event_cursor, /^[0-9]+$/u);
+  assert.equal(snapshot.new_event_count, 0);
+
+  const delta = await readTaskEventProgress(root, 'live-one', { cursor: '0' });
+  assert.equal(delta.new_event_count, 1);
+  assert.equal(delta.last_event.text, 'chunk-one');
+  await appendTaskEvent(root, 'live-one', {
+    type: 'provider',
+    event: { type: 'text_delta', text: 'chunk-two', prompt: 'hidden prompt must not leak' },
+  });
+  const next = await readTaskEventProgress(root, 'live-one', { cursor: snapshot.event_cursor });
+  assert.equal(next.new_event_count, 1);
+  assert.equal(next.last_event.text, 'chunk-two');
+  assert.equal(next.last_event.prompt, undefined);
+  assert.equal(first.type, 'provider');
+  assert.equal((await readFile(paths.record, 'utf8')).includes('chunk-two'), false);
+});
+
+test('partial event lines are not consumed and invalid cursors fail closed', async () => {
+  const root = await temporaryRoot();
+  const { paths } = await createTask({
+    root,
+    prompt: 'partial',
+    record: { id: 'partial-one', status: 'running' },
+  });
+  await appendTaskEvent(root, 'partial-one', { type: 'transport', state: 'session_ready' });
+  const ready = await readTaskEventProgress(root, 'partial-one');
+  await appendFile(paths.events, '{"type":"provider","event":{"type":"text_delta","text":"incomp');
+  const midWrite = await readTaskEventProgress(root, 'partial-one', { cursor: ready.event_cursor });
+  assert.equal(midWrite.new_event_count, 0);
+  assert.equal(midWrite.event_cursor, ready.event_cursor);
+  await appendFile(paths.events, 'lete"}}}\n');
+  const complete = await readTaskEventProgress(root, 'partial-one', { cursor: ready.event_cursor });
+  assert.equal(complete.new_event_count, 1);
+  assert.equal(complete.last_event.text, 'incomplete');
+  await assert.rejects(
+    readTaskEventProgress(root, 'partial-one', { cursor: String(Number(complete.event_cursor) + 8) }),
+    (error) => error.code === 'invalid_event_cursor',
+  );
+  await assert.rejects(
+    readTaskEventProgress(root, 'partial-one', { cursor: '1' }),
+    (error) => error.code === 'invalid_event_cursor',
+  );
+});
+
+test('wait wakes on appended progress, terminal status, or timeout without leaking internals', async () => {
+  const root = await temporaryRoot();
+  await createTask({
+    root,
+    prompt: 'secret waiter prompt',
+    record: { id: 'wait-one', status: 'running', provider: 'grok', agent_argv: ['grok', 'agent'] },
+  });
+  const started = await waitForTaskProgress(root, 'wait-one', { wait_ms: 0 });
+  assert.equal(started.progress.wait_reason, 'current');
+  assert.equal(started.progress.last_event, null);
+
+  const pending = waitForTaskProgress(root, 'wait-one', {
+    cursor: started.progress.event_cursor,
+    wait_ms: 1_000,
+    poll_ms: 10,
+  });
+  setTimeout(() => {
+    appendTaskEvent(root, 'wait-one', {
+      type: 'provider',
+      event: { type: 'text_delta', text: 'live-progress', pid: 99, argv: ['leak'] },
+    }).catch(() => {});
+  }, 20);
+  const woke = await pending;
+  assert.equal(woke.progress.wait_reason, 'progress');
+  assert.equal(woke.progress.last_event.text, 'live-progress');
+  assert.equal(woke.progress.last_event.pid, undefined);
+  assert.equal(woke.task.last_event, undefined);
+  assert.doesNotMatch(JSON.stringify(woke.progress), /secret waiter prompt|"leak"/u);
+
+  const terminalWait = waitForTaskProgress(root, 'wait-one', {
+    cursor: woke.progress.event_cursor,
+    wait_ms: 1_000,
+    poll_ms: 10,
+  });
+  setTimeout(() => {
+    updateTask(root, 'wait-one', { status: 'cancelled', finished_at: new Date().toISOString() }).catch(() => {});
+  }, 20);
+  const cancelled = await terminalWait;
+  assert.equal(cancelled.progress.wait_reason, 'terminal');
+  assert.equal(cancelled.task.status, 'cancelled');
+
+  const already = await waitForTaskProgress(root, 'wait-one', { wait_ms: 1_000 });
+  assert.equal(already.progress.wait_reason, 'terminal');
+  assert.ok(already.progress.waited_ms < 200);
+
+  await createTask({
+    root,
+    prompt: 'still running',
+    record: { id: 'wait-timeout', status: 'running' },
+  });
+  const idle = await readTaskEventProgress(root, 'wait-timeout');
+  const timedOut = await waitForTaskProgress(root, 'wait-timeout', {
+    cursor: idle.event_cursor,
+    wait_ms: 40,
+    poll_ms: 10,
+  });
+  assert.equal(timedOut.progress.wait_reason, 'timeout');
+  assert.ok(timedOut.progress.waited_ms >= 40);
+});
+
+test('concurrent readers can wait while another process appends events', async () => {
+  const root = await temporaryRoot();
+  await createTask({
+    root,
+    prompt: 'race wait',
+    record: { id: 'wait-race', status: 'running' },
+  });
+  const baseline = await readTaskEventProgress(root, 'wait-race');
+  const waiters = Promise.all(Array.from({ length: 4 }, () => waitForTaskProgress(root, 'wait-race', {
+    cursor: baseline.event_cursor,
+    wait_ms: 1_000,
+    poll_ms: 10,
+  })));
+  const handle = await open(taskPaths(root, 'wait-race').events, 'a', 0o600);
+  try {
+    await handle.appendFile(`${JSON.stringify({ at: new Date().toISOString(), type: 'provider', event: { type: 'text_delta', text: 'shared' } })}\n`);
+  } finally {
+    await handle.close();
+  }
+  const values = await waiters;
+  for (const value of values) {
+    assert.equal(value.progress.wait_reason, 'progress');
+    assert.equal(value.progress.last_event.text, 'shared');
+  }
+});
+
+test('projectLiveLastEvent overlays event-log progress onto a stale receipt', async () => {
+  const root = await temporaryRoot();
+  await createTask({
+    root,
+    prompt: 'overlay',
+    record: { id: 'overlay-one', status: 'running' },
+  });
+  await appendTaskEvent(root, 'overlay-one', { type: 'provider', event: { type: 'text_delta', text: 'visible' } });
+  const projected = await projectLiveLastEvent(root, (await readTask(root, 'overlay-one')).task);
+  assert.equal(projected.last_event.text, 'visible');
+  assert.equal((await readTask(root, 'overlay-one')).task.last_event, undefined);
 });
 
 test('runtime identity is stored separately from the task receipt', async () => {
