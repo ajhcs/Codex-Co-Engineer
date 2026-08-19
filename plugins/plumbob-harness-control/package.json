@@ -16,6 +16,7 @@
     "bin",
     "mcp",
     "skills",
+    "vendor",
     "package.json"
   ],
   "scripts": {

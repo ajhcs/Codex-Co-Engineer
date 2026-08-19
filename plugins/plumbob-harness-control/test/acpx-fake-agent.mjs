@@ -216,6 +216,9 @@ async function handleRequest(message) {
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+// Keep the stdio fixture alive even when Node decides the readline wrapper has
+// no pending work between protocol frames.
+process.stdin.resume();
 input.on('line', (line) => {
   let message;
   try {
