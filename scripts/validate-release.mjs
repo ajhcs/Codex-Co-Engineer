@@ -16,11 +16,14 @@ const json = async (relative) => JSON.parse(await text(relative));
 const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/release.md',
+  'docs/future-work.md', 'docs/mcp-pending-call.md', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',
   `${PLUGIN}/.codex-plugin/plugin.json`, `${PLUGIN}/.mcp.json`, `${PLUGIN}/package.json`,
   `${PLUGIN}/README.md`, `${PLUGIN}/bin/setup.mjs`,
   `${PLUGIN}/mcp/v3/server.mjs`, `${PLUGIN}/mcp/v3/supervisor.mjs`,
   `${PLUGIN}/mcp/v3/task-store.mjs`, `${PLUGIN}/mcp/v3/acp-worker.mjs`,
+  `${PLUGIN}/mcp/v3/contract.mjs`, `${PLUGIN}/mcp/v3/deadline.mjs`,
+  `${PLUGIN}/mcp/v3/diagnostics.mjs`, `${PLUGIN}/mcp/v3/mailbox.mjs`,
   `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`, `${PLUGIN}/mcp/v3/single-turn.flow.mjs`,
   `${PLUGIN}/mcp/v3/process-boundary.mjs`,
   `${PLUGIN}/assets/acpx-runtime.mjs`, `${PLUGIN}/assets/acpx-runtime.manifest.json`,
@@ -49,8 +52,11 @@ const serverText = await text(`${PLUGIN}/mcp/v3/server.mjs`);
 if (manifest.name !== 'codex-co-engineer' || packageJson.name !== 'codex-co-engineer') {
   fail('Plugin manifest and package must use the codex-co-engineer identifier.');
 }
-if (manifest.version !== '3.0.2' || packageJson.version !== '3.0.2' || !serverText.includes("version: '3.0.2'")) {
-  fail('Plugin manifest, package, and MCP server must all be version 3.0.2.');
+const contractText = await text(`${PLUGIN}/mcp/v3/contract.mjs`);
+if (manifest.version !== '3.1.0' || packageJson.version !== '3.1.0'
+  || !contractText.includes("VERSION = '3.1.0'")
+  || !serverText.includes('version: VERSION')) {
+  fail('Plugin manifest, package, contract, and MCP server must all be version 3.1.0.');
 }
 if (manifest.interface?.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
 if (manifest.interface?.developerName !== 'Codex-Co-Engineer') fail('Public developer name mismatch.');
@@ -62,7 +68,7 @@ if (!/^name: control-codex-co-engineer-agents$/mu.test(skillText)) {
   fail('Skill name must be the lowercase control-codex-co-engineer-agents identifier.');
 }
 const changelog = await text('CHANGELOG.md');
-if (!changelog.includes('## [3.0.2]')) fail('CHANGELOG.md must record the 3.0.2 release.');
+if (!changelog.includes('## [3.1.0]')) fail('CHANGELOG.md must record the 3.1.0 release.');
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') fail('Unexpected test script.');
 if (JSON.stringify(packageJson.files) !== JSON.stringify([
   '.codex-plugin', '.mcp.json', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
@@ -71,7 +77,7 @@ if (JSON.stringify(packageJson.files) !== JSON.stringify([
 const server = mcp.mcpServers?.['codex-co-engineer'];
 if (server?.command !== 'node'
   || JSON.stringify(server.args) !== JSON.stringify(['--no-warnings', './mcp/v3/server.mjs', '--stdio'])
-  || server.tool_timeout_sec !== 65) fail('MCP launch contract mismatch.');
+  || server.tool_timeout_sec !== 14405) fail('MCP launch contract mismatch.');
 for (const variable of [
   'HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
   'DBUS_SESSION_BUS_ADDRESS', 'CODEX_CO_ENGINEER_STATE_DIR',
@@ -85,6 +91,9 @@ if (JSON.stringify(toolNames) !== JSON.stringify(['status', 'delegate', 'task', 
 }
 if (!serverText.includes('wait_ms') || !serverText.includes('event_cursor') || !serverText.includes("pattern: '^[0-9]{1,16}$'")) {
   fail('task tool must advertise bounded wait_ms/cursor live progress.');
+}
+if (!serverText.includes('wait_until') || !serverText.includes('expected_duration_ms') || !serverText.includes('diagnostics')) {
+  fail('task/delegate must advertise durable terminal waits, expected duration, and diagnostics.');
 }
 const mcpEntries = await readdir(absolute(`${PLUGIN}/mcp`));
 if (JSON.stringify(mcpEntries) !== JSON.stringify(['v3'])) fail('Legacy MCP modules remain packaged.');
@@ -193,4 +202,4 @@ for (const relative of tracked) {
   }
 }
 
-process.stdout.write('Codex-Co-Engineer 3.0.2 release validation passed.\n');
+process.stdout.write('Codex-Co-Engineer 3.1.0 release validation passed.\n');

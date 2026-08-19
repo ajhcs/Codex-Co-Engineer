@@ -11,10 +11,13 @@ local worktree isolation, bounded cancellation, and inspectable receipts. It
 is not another sandbox or policy engine.
 
 The stable machine identifier is `codex-co-engineer`. The bundled skill is
-`control-codex-co-engineer-agents`. Version 3.0.2 exposes five tools:
-`status`, `delegate`, `task`, `tasks`, and `cancel`. `task` can wait
-with optional `wait_ms` and `cursor`; it does not push unsolicited stdio
-callbacks across assistant turns.
+`control-codex-co-engineer-agents`. Version 3.1.0 exposes five tools:
+`status`, `delegate`, `task`, `tasks`, and `cancel`. `delegate` records
+`expected_duration_ms` and a 20% deadline margin. `task` can wait with
+`wait_until: "terminal"` until the recorded deadline, inspect
+summary/diagnostics views, extend a deadline with an explicit reason, and
+deliver a same-session reply. It does not push unsolicited stdio callbacks
+across assistant turns.
 
 ## What Codex-Co-Engineer is for
 
@@ -163,6 +166,7 @@ Local review:
   "role": "review",
   "workspace_mode": "managed",
   "prompt": "Review the current branch and report concrete correctness risks.",
+  "expected_duration_ms": 3000000,
   "timeout_ms": 3600000
 }
 ```
@@ -184,8 +188,8 @@ Cursor Cloud implementation:
 ## Handoff and cleanup
 
 Terminal managed tasks retain their worktree and branch for Codex inspection;
-they are not silently deleted. Watch with `task` (optionally `wait_ms` +
-`cursor`), then run the authoritative handoff from the recorded worktree:
+they are not silently deleted. Watch with `task` (`wait_until: "terminal"` plus optional `cursor`), then
+run the authoritative handoff from the recorded worktree:
 
 ```bash
 worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown

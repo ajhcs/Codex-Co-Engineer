@@ -534,7 +534,8 @@ export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } =
   const { task } = await readTask(root, taskId);
   const prompt = await readPrompt(root, taskId);
   const taskTimeoutMs = validTimeout(task.timeout_ms, DEFAULT_TASK_TIMEOUT_MS);
-  const deadlineAt = Date.now() + taskTimeoutMs;
+  const parsedDeadline = Date.parse(task.deadline_at ?? '');
+  const deadlineAt = Number.isFinite(parsedDeadline) ? parsedDeadline : Date.now() + taskTimeoutMs;
   const runIdempotencyKey = task.run_idempotency_key ?? `${task.id}:run:1`;
   const agentId = task.provider_agent_id ?? `bc-${randomUUID()}`;
   let client;

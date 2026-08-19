@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, watch as watchDirectory } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
@@ -54,6 +55,66 @@ export class AcpWorkerError extends Error {
 
 function fail(code, message) {
   throw new AcpWorkerError(code, message);
+}
+
+function taskTimeoutMs(task, now = Date.now()) {
+  const deadline = Date.parse(task?.deadline_at ?? '');
+  if (Number.isFinite(deadline)) return Math.max(1, deadline - now);
+  return task?.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+}
+
+function isUserFacingPermission(params) {
+  const title = String(params?.raw?.toolCall?.title ?? params?.raw?.question ?? '');
+  return /\?|user input|needs? attention|confirm|approval required|fake permission/iu.test(title);
+}
+
+function safeQuestionId(value) {
+  const normalized = String(value ?? 'permission').replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, 'q');
+  return (normalized || 'permission').slice(0, 80);
+}
+
+async function handlePermissionRequest(root, taskId, params, signal) {
+  if (!isUserFacingPermission(params)) return undefined;
+  const { task } = await readTask(root, taskId);
+  const sessionId = params.sessionId ?? task.acp_session_id;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined;
+  const questionId = safeQuestionId(params.raw?.toolCall?.toolCallId ?? randomUUID());
+  await recordNeedsAttention(root, taskId, {
+    session_id: sessionId,
+    question_id: questionId,
+    prompt: typeof params.raw?.toolCall?.title === 'string' ? params.raw.toolCall.title : 'Provider requested approval.',
+    options: Array.isArray(params.raw?.options) ? params.raw.options : null,
+    stage: 'provider_feedback',
+  });
+  const reply = await waitForReply(root, taskId, questionId, { signal });
+  return replyDecision(reply, params.raw?.options ?? []);
+}
+
+function startDeadlineWatch(root, taskId, onTimeout) {
+  let timer;
+  let watcher;
+  const arm = async () => {
+    const { task } = await readTask(root, taskId);
+    const remaining = taskTimeoutMs(task);
+    clearTimeout(timer);
+    if (remaining <= 1) {
+      onTimeout();
+      return;
+    }
+    timer = setTimeout(onTimeout, remaining);
+  };
+  try {
+    watcher = watchDirectory(taskPaths(root, taskId).directory, { persistent: true }, () => {
+      arm().catch(() => {});
+    });
+  } catch {
+    watcher = null;
+  }
+  arm().catch(() => {});
+  return () => {
+    clearTimeout(timer);
+    try { watcher?.close?.(); } catch { /* already closed */ }
+  };
 }
 
 function plainObject(value) {
@@ -434,6 +495,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
   let stdout = '';
   let stderr = '';
   let timer;
+  let stopDeadline;
   let termination;
   let cancel;
   let timedOut = false;
@@ -475,10 +537,10 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       started_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, task.id, { type: 'transport', state: 'prompt_dispatched', transport: 'cli', fallback_from: 'acp' });
-    timer = setTimeout(() => {
+    stopDeadline = startDeadlineWatch(root, task.id, () => {
       timedOut = true;
       cancel();
-    }, task.timeout_ms ?? DEFAULT_TIMEOUT_MS);
+    });
     const exit = await closed;
     await termination;
     signal?.removeEventListener('abort', cancel);
@@ -503,10 +565,12 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     });
   } catch (error) {
     const failure = publicError(error, prompt);
-    const terminalStatus = signal?.aborted || error?.code === 'cancelled' ? 'cancelled' : 'failed';
+    const terminalStatus = signal?.aborted || error?.code === 'cancelled'
+      ? 'cancelled'
+      : error?.code === 'timeout' || timedOut ? 'timeout' : 'failed';
     await appendTaskEvent(root, task.id, { type: 'terminal', status: terminalStatus, error: failure }).catch(() => {});
     await updateTask(root, task.id, {
-      status: signal?.aborted || error?.code === 'cancelled' ? 'cancelled' : 'failed',
+      status: terminalStatus,
       error: failure,
       provider_process_group: null,
       provider_process_start_ticks: null,
@@ -515,6 +579,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     }).catch(() => {});
     throw error;
   } finally {
+    stopDeadline?.();
     clearTimeout(timer);
     if (cancel) signal?.removeEventListener('abort', cancel);
     if (child) await (termination ??= requestChildTreeTermination(child));
@@ -559,6 +624,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   let stderr = '';
   let termination;
   let timer;
+  let stopDeadline;
   let timedOut = false;
   let cancel;
   let dispatchUncertain = false;
@@ -587,10 +653,10 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       termination ??= requestChildTreeTermination(child);
     };
     signal?.addEventListener('abort', cancel, { once: true });
-    timer = setTimeout(() => {
+    stopDeadline = startDeadlineWatch(root, task.id, () => {
       timedOut = true;
       cancel();
-    }, timeoutMs);
+    });
     await spawned;
     // ACPX has spawned, but its JSON flow protocol does not acknowledge that
     // the prompt was accepted. Treat all later failures as non-replayable.
@@ -649,7 +715,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       if (fallback) return fallback;
     }
     const current = (await readTask(root, task.id)).task;
-    const status = signal?.aborted ? 'cancelled' : 'failed';
+    const status = signal?.aborted ? 'cancelled' : (error?.code === 'timeout' || timedOut ? 'timeout' : 'failed');
     const failure = publicError(error, prompt);
     await appendTaskEvent(root, task.id, { type: 'terminal', status, error: failure }).catch(() => {});
     await updateTask(root, task.id, {
@@ -662,6 +728,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     }).catch(() => {});
     throw error;
   } finally {
+    stopDeadline?.();
     clearTimeout(timer);
     if (cancel) signal?.removeEventListener('abort', cancel);
     if (child) await (termination ??= requestChildTreeTermination(child));
@@ -670,7 +737,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   }
 }
 
-async function makeRuntime({ root, cwd, configuration, timeoutMs }) {
+async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal }) {
   const stateDir = path.join(path.resolve(root), 'acp');
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await chmod(stateDir, 0o700);
@@ -683,6 +750,7 @@ async function makeRuntime({ root, cwd, configuration, timeoutMs }) {
     mcpServers: [],
     permissionMode: 'approve-all',
     timeoutMs,
+    onPermissionRequest: (params, extra = {}) => handlePermissionRequest(root, taskId, params, extra.signal ?? signal),
   });
 }
 
@@ -699,18 +767,23 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   const cwd = requireAbsoluteDirectory(task.cwd);
   const prompt = await readPrompt(root, taskId);
   const configuration = providerConfiguration(task);
-  const timeoutMs = task.timeout_ms ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000) fail('invalid_timeout', 'timeout_ms must be at least 1000.');
+  const timeoutMs = taskTimeoutMs(task);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) fail('invalid_timeout', 'timeout_ms must be at least 1000.');
 
   if (task.provider === 'dsh') {
     return runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
   }
 
-  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs });
+  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal });
   const controller = new AbortController();
-  const abort = () => controller.abort(signal?.reason ?? new AcpWorkerError('cancelled', 'Task cancelled.'));
+  let timedOut = false;
+  const abort = () => controller.abort(signal?.reason ?? new AcpWorkerError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'ACP task exceeded its recorded deadline.' : 'Task cancelled.'));
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
+  const stopDeadline = startDeadlineWatch(root, taskId, () => {
+    timedOut = true;
+    abort();
+  });
 
   let turn;
   let handle;
@@ -777,7 +850,9 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       const fallback = await fallbackToCliIfSafe({ root, task, prompt, signal, error });
       if (fallback) return fallback;
     }
-    const status = controller.signal.aborted ? 'cancelled' : 'failed';
+    const status = timedOut || error?.code === 'timeout'
+      ? 'timeout'
+      : controller.signal.aborted ? 'cancelled' : 'failed';
     await updateTask(root, taskId, {
       status,
       error: failure,
@@ -787,6 +862,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     await appendTaskEvent(root, taskId, { type: 'terminal', status, error: failure }).catch(() => {});
     throw error;
   } finally {
+    stopDeadline?.();
     signal?.removeEventListener('abort', abort);
     // This closes the retained stdio client but does not send session/close or
     // discard the persisted ACP identity. A later worker can resume it.

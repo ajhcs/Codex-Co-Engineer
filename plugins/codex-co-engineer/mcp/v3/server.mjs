@@ -2,21 +2,24 @@
 
 import readline from 'node:readline';
 
+import { MCP_PENDING_CALL_BUDGET_MS, VERSION, publicState } from './contract.mjs';
+import { deadlineProjection } from './deadline.mjs';
 import { listTasks, stateRoot } from './task-store.mjs';
-import { cancelTask, submitTask, supervisorStatus, taskStatus } from './supervisor.mjs';
+import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
+const inflight = new Map();
 
 const TOOLS = [
   {
     name: 'status',
-    description: 'Show the local Co-Engineer supervisor and recent task state.',
+    description: 'Show the local Co-Engineer supervisor, provider capabilities, advertised MCP pending-call budget, and recent task state.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'delegate',
-    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Local tasks use a managed worktree by default; direct mode is explicit.',
+    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Provide expected_duration_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override. Local tasks use a managed worktree by default; direct mode is explicit.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -26,7 +29,19 @@ const TOOLS = [
         prompt: { type: 'string', minLength: 1, maxLength: 262144 },
         role: { type: 'string', enum: ['review', 'implement'], default: 'implement' },
         workspace_mode: { type: 'string', enum: ['managed', 'direct'], default: 'managed' },
+        expected_duration_ms: {
+          type: 'integer',
+          minimum: 1000,
+          maximum: 86400000,
+          description: 'Codex estimate of task runtime. Recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is supplied as an explicit override.',
+        },
         timeout_ms: { type: 'integer', minimum: 1000, maximum: 86400000 },
+        silence_timeout_ms: {
+          type: 'integer',
+          minimum: 5000,
+          maximum: 86400000,
+          description: 'Optional provider-silence watchdog. A terminal wait wakes if no durable activity arrives within this window.',
+        },
         create_pr: { type: 'boolean', default: false, description: 'Cursor Cloud only.' },
         starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable Cursor Cloud commit SHA.' },
       },
@@ -36,7 +51,7 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: 'Inspect one task receipt, a compact live progress snapshot, and an event_cursor. Optional wait_ms waits until meaningful progress or a terminal state. Terminal, status, and tool-call boundaries wake promptly; text deltas are coalesced. Cursor catch-up is bounded. Unsolicited stdio callbacks across assistant turns are not available.',
+    description: 'Inspect one task. view=summary is the default compact receipt plus diagnostic envelope and event_cursor. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -44,13 +59,57 @@ const TOOLS = [
         wait_ms: {
           type: 'integer',
           minimum: 0,
-          maximum: 60000,
-          description: 'Optional bounded wait. Returns on meaningful progress, terminal state, or timeout. 0 is a non-blocking snapshot. Text deltas are coalesced; terminal/status/tool-call boundaries wake promptly.',
+          maximum: MCP_PENDING_CALL_BUDGET_MS,
+          description: 'Optional bounded wait. 0 is a non-blocking snapshot. Omit with wait_until=terminal to wait until the recorded deadline, capped by the advertised MCP pending-call budget.',
+        },
+        wait_until: {
+          type: 'string',
+          enum: ['progress', 'terminal'],
+          description: 'progress wakes on meaningful live events (default). terminal waits for success, failure, timeout, cancellation, transport loss, environment block, needs_attention, silence, or the recorded deadline, and does not wake on routine text deltas.',
+        },
+        wake_on_needs_attention: {
+          type: 'boolean',
+          default: true,
+          description: 'When wait_until=terminal, wake if the provider needs a same-session reply. Default true.',
+        },
+        view: {
+          type: 'string',
+          enum: ['summary', 'diagnostics'],
+          description: 'summary is compact coordination. diagnostics is a bounded, redacted, cursor-paged evidence page and never waits.',
         },
         cursor: {
           type: 'string',
           pattern: '^[0-9]{1,16}$',
-          description: 'Opaque event_cursor from a previous task result. Wait for events after this boundary instead of hammering empty polls.',
+          description: 'Opaque event_cursor from a previous task result. Wait or page from this boundary instead of hammering empty polls.',
+        },
+        max_bytes: {
+          type: 'integer',
+          minimum: 1024,
+          maximum: 65536,
+          description: 'Diagnostics page size cap.',
+        },
+        extend_expected_duration_ms: {
+          type: 'integer',
+          minimum: 1000,
+          maximum: 86400000,
+          description: 'Replace the remaining estimate. The new deadline is now + ceil(extend_expected_duration_ms * 1.20). Requires extend_reason. Never silently rolls the deadline.',
+        },
+        extend_reason: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 512,
+          description: 'Required when extending the deadline. Persisted on the receipt.',
+        },
+        reply: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['session_id', 'question_id', 'response'],
+          description: 'Exactly-once same-session reply for a needs_attention question. Unsupported providers return an explicit error instead of starting a new prompt.',
+          properties: {
+            session_id: { type: 'string', minLength: 1, maxLength: 128 },
+            question_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
+            response: { description: 'Selected option id, permission outcome, or bounded text.' },
+          },
         },
       },
       required: ['task_id'],
@@ -83,7 +142,11 @@ function publicTask(task) {
     provider_process_start_ticks: _providerProcessStartTicks,
     ...receipt
   } = task;
-  return receipt;
+  return {
+    ...receipt,
+    state: publicState(task.status),
+    deadline: deadlineProjection(task),
+  };
 }
 
 function result(value) {
@@ -100,7 +163,7 @@ function errorResult(error) {
   return { isError: true, ...result({ error: { code, message } }) };
 }
 
-async function callTool(name, args = {}) {
+async function callTool(name, args = {}, { signal } = {}) {
   const root = stateRoot();
   if (name === 'status') {
     const value = await supervisorStatus(root);
@@ -108,17 +171,25 @@ async function callTool(name, args = {}) {
   }
   if (name === 'delegate') {
     const value = await submitTask(args, { root });
-    return result({ task: publicTask(value.task), runtime: value.runtime });
+    return result({
+      task: publicTask(value.task),
+      runtime: value.runtime,
+      state: publicState(value.task.status),
+      deadline: deadlineProjection(value.task),
+    });
   }
   if (name === 'task') {
-    const value = await taskStatus(root, args.task_id, {
-      cursor: args.cursor,
-      wait_ms: args.wait_ms,
-    });
+    const value = await inspectTask(root, args, { signal });
     return result({
       task: publicTask(value.task),
       runtime: value.runtime,
       progress: value.progress,
+      state: value.state,
+      summary: value.summary,
+      diagnostic: value.diagnostic,
+      diagnostics: value.diagnostics ?? null,
+      capabilities: value.capabilities,
+      view: value.view,
     });
   }
   if (name === 'tasks') return result({ tasks: (await listTasks(root)).map(publicTask) });
@@ -132,7 +203,12 @@ function send(value) {
 
 async function handle(message) {
   if (!message || message.jsonrpc !== '2.0') return;
-  if (message.method === 'notifications/initialized' || message.method === 'notifications/cancelled') return;
+  if (message.method === 'notifications/initialized') return;
+  if (message.method === 'notifications/cancelled') {
+    const requestId = message.params?.requestId ?? message.params?.id;
+    inflight.get(requestId)?.abort();
+    return;
+  }
   if (message.method === 'initialize') {
     const requested = message.params?.protocolVersion;
     negotiated = PROTOCOLS.has(requested) ? requested : '2025-11-25';
@@ -142,7 +218,7 @@ async function handle(message) {
       result: {
         protocolVersion: negotiated,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: '3.0.2' },
+        serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: VERSION },
       },
     });
     return;
@@ -152,11 +228,15 @@ async function handle(message) {
     return;
   }
   if (message.method === 'tools/call') {
+    const controller = new AbortController();
+    if (message.id !== undefined) inflight.set(message.id, controller);
     let response;
     try {
-      response = await callTool(message.params?.name, message.params?.arguments ?? {});
+      response = await callTool(message.params?.name, message.params?.arguments ?? {}, { signal: controller.signal });
     } catch (error) {
       response = errorResult(error);
+    } finally {
+      inflight.delete(message.id);
     }
     send({ jsonrpc: '2.0', id: message.id, result: response });
     return;

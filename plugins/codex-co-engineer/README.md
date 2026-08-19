@@ -12,7 +12,7 @@ coding agents:
 Codex remains the chief engineer, reviewer, and merge authority. Providers
 retain their normal shell, coding, and dependency-installation capabilities.
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-This release is 3.0.2.
+This release is 3.1.0.
 
 ## Tools
 
@@ -32,14 +32,16 @@ repository root, and a prompt. Providers are `grok`, `cursor-local`,
 
 `task` always returns a compact `progress` snapshot (`event_cursor`,
 `last_event`, `new_event_count`, `more_events`, `waited_ms`,
-`wait_reason`) derived from the append-only event log. Pass the previous
-`event_cursor` as `cursor` and a bounded `wait_ms` (0-60000) to block
-until meaningful progress or a terminal state. Terminal, status, and
-tool-call boundaries wake promptly; text deltas are coalesced. Cursor
-catch-up reads a bounded chunk and sets `more_events` when more log
-remains. The five-tool API is unchanged; unsolicited stdio callbacks
-across assistant turns are not available. Do not expect `task.json`
-itself to rewrite `last_event` on every text delta.
+`wait_reason`) plus a normalized `state` and diagnostic envelope. Pass
+`wait_until: "terminal"` to block until success, failure, timeout,
+cancellation, transport loss, environment block, or `needs_attention`
+without waking on routine text. Omit `wait_ms` in that mode to wait until
+the recorded deadline, capped by the advertised 4-hour MCP pending-call
+budget. `view: "diagnostics"` is a side-effect-free cursor-paged evidence
+page. `reply` delivers a same-session answer exactly once where the
+provider supports it. Deadline extensions require `extend_reason`. The
+five-tool API is unchanged; unsolicited stdio callbacks across assistant
+turns are not available.
 
 ## Provider matrix
 
@@ -184,7 +186,7 @@ until the operator removes the exact terminal task state.
 ## Handoff and cleanup
 
 Terminal managed tasks retain their worktree and branch for inspection. Watch
-with `task` (optionally `wait_ms` + `cursor`), then run:
+with `task` (`wait_until: "terminal"` and optional `cursor`), then run:
 
 ```bash
 worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
@@ -211,7 +213,8 @@ Local review:
   "role": "review",
   "repo": "/absolute/path/to/repository",
   "workspace_mode": "managed",
-  "prompt": "Review authentication changes and report actionable findings."
+  "prompt": "Review authentication changes and report actionable findings.",
+  "expected_duration_ms": 600000
 }
 ```
 
@@ -229,21 +232,22 @@ Cursor Cloud implementation:
 }
 ```
 
-Watch a running task instead of empty-polling:
+Watch a running task until it finishes or needs attention:
 
 ```json
 {
   "task_id": "review-auth-1",
-  "wait_ms": 25000,
+  "wait_until": "terminal",
   "cursor": "184"
 }
 ```
 
-Use the `event_cursor` from the previous `task` result. The call returns a
-compact progress snapshot when meaningful progress arrives, the task
-becomes terminal, or `wait_ms` elapses. Text deltas are coalesced; a large
-event log is paged with `more_events`. Unsolicited stdio callbacks across
-assistant turns are not available.
+Use the `event_cursor` from the previous `task` result. A terminal wait
+returns when the task succeeds, fails, times out, is cancelled, loses
+transport, needs a reply, or hits the advertised MCP pending-call budget.
+Routine text deltas do not wake Codex. Disconnecting the waiter does not
+stop provider work. Unsolicited stdio callbacks across assistant turns are
+not available.
 
 For an implementation, use `role: "implement"`. A local managed task creates
 and locks its worktree before the provider starts.

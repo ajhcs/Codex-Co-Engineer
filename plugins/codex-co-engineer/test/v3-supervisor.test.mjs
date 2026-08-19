@@ -374,7 +374,7 @@ test('task wait returns when a later event arrives or the task is cancelled', as
       }, 20);
     });
     const [value] = await Promise.all([pending, cancellation]);
-    assert.ok(['terminal', 'progress'].includes(value.progress.wait_reason));
+    assert.ok(['terminal', 'progress', 'attention'].includes(value.progress.wait_reason));
     assert.ok(['cancelling', 'cancelled', 'transport_lost'].includes(value.task.status));
   } finally {
     await rm(root, { recursive: true, force: true });

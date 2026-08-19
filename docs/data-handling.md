@@ -94,8 +94,8 @@ operator deliberately removes that exact task directory after handoff.
 ## Handoff and cleanup
 
 Terminal managed tasks retain their worktree and branch; completion does not
-silently delete evidence. Watch with `task` (optionally `wait_ms` +
-`cursor`), inspect the receipt, and run:
+silently delete evidence. Watch with `task` (`wait_until: "terminal"`
+and optional `cursor`), inspect the summary or diagnostics view, and run:
 
 ```bash
 worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown

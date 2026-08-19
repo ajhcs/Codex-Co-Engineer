@@ -12,7 +12,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.0.2');
+  assert.equal(manifest.version, '3.1.0');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.composerIcon, './assets/icon.svg');
@@ -26,7 +26,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.0.2');
+  assert.equal(packageJson.version, '3.1.0');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),

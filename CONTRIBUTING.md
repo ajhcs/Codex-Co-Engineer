@@ -34,7 +34,8 @@ after the provider-free gate.
 
 - Preserve `codex-co-engineer` as the stable MCP/package identifier, present
   the product as Codex-Co-Engineer, and keep the five-tool surface small.
-  Extend `task` in place for live wait/progress; do not add a sixth tool.
+  Extend `task` in place for live wait/progress, terminal waits, diagnostics,
+  deadline extension, and same-session reply; do not add a sixth tool.
 - Local tasks use ACP first and may use the same provider's CLI only when ACP
   fails before prompt dispatch. Never replay an accepted prompt.
 - `workspace_mode: "managed"` is the default for local tasks and creates one

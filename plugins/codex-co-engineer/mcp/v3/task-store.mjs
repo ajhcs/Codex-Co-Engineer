@@ -4,16 +4,27 @@ import { appendFile, chmod, mkdir, open, readFile, readdir, rename, stat, unlink
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import {
+  ATTENTION_STATUSES,
+  MAX_EVENT_LOG_BYTES,
+  MCP_PENDING_CALL_BUDGET_MS,
+  PROVIDER_SILENCE_WATCHDOG_MIN_MS,
+  STORED_TERMINAL,
+  TASK_TERMINAL_WATCH_FALLBACK_MS,
+} from './contract.mjs';
+import { parseDeadlineAt, remainingDeadlineMs } from './deadline.mjs';
+
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
 export const LAUNCH_RESERVATION_GRACE_MS = 15_000;
-export const MAX_TASK_WAIT_MS = 60_000;
+export const MAX_TASK_WAIT_MS = MCP_PENDING_CALL_BUDGET_MS;
 export const TEXT_DELTA_COALESCE_MS = 400;
 export const TASK_WAIT_WATCH_FALLBACK_MS = 1_000;
 export const MAX_EVENT_READ_BYTES = 64 * 1024;
 export const EVENT_TAIL_PEEK_BYTES = 16 * 1024;
 export const EVENT_CURSOR_PATTERN = /^[0-9]{1,16}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
-const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
+export const TERMINAL = new Set(STORED_TERMINAL);
+export const ATTENTION = new Set(ATTENTION_STATUSES);
 const UPDATE_LOCK_STALE_MS = 2_000;
 const LOCAL_UPDATE_TAILS = new Map();
 const OVERSIZE_EVENT_SCAN_BYTES = 4 * 1024;
@@ -80,6 +91,8 @@ export function taskPaths(root, taskId) {
     request: path.join(directory, 'worker-request.json'),
     runtime: path.join(directory, 'runtime.json'),
     log: path.join(directory, 'worker.log'),
+    attention: path.join(directory, 'attention.json'),
+    replies: path.join(directory, 'replies'),
     updateLock: path.join(directory, 'update.lock'),
   };
 }
@@ -325,6 +338,21 @@ export function parseTaskWaitMs(value) {
   return value;
 }
 
+export function parseWaitUntil(value) {
+  if (value === undefined || value === null || value === '') return 'progress';
+  if (value === 'progress' || value === 'terminal') return value;
+  throw Object.assign(new Error('wait_until must be progress or terminal.'), { code: 'invalid_wait_until' });
+}
+
+export function resolveTerminalWaitMs(task, now = Date.now()) {
+  const remaining = remainingDeadlineMs(task, now);
+  if (remaining != null) return Math.min(MAX_TASK_WAIT_MS, remaining);
+  if (Number.isInteger(task?.timeout_ms) && task.timeout_ms > 0) {
+    return Math.min(MAX_TASK_WAIT_MS, task.timeout_ms);
+  }
+  return MAX_TASK_WAIT_MS;
+}
+
 function sanitizePublicEvent(value, depth = 0) {
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
@@ -376,6 +404,7 @@ function emptyProgressParse() {
     eventCount: 0,
     immediateCount: 0,
     textDeltaCount: 0,
+    corruptCount: 0,
   };
 }
 
@@ -404,6 +433,7 @@ function parseCompleteEventLines(buffer) {
   let eventCount = 0;
   let immediateCount = 0;
   let textDeltaCount = 0;
+  let corruptCount = 0;
   for (const line of complete.split('\n')) {
     if (!line) continue;
     eventCount += 1;
@@ -412,11 +442,11 @@ function parseCompleteEventLines(buffer) {
       if (isTextDeltaEvent(lastEvent)) textDeltaCount += 1;
       else immediateCount += 1;
     } catch {
-      // A corrupt complete line is skipped for projection but still consumed
-      // so waiters cannot get stuck on it.
+      corruptCount += 1;
+      lastEvent = { type: 'status', corrupt: true };
     }
   }
-  return { completeBytes: lastNewline + 1, lastEvent, eventCount, immediateCount, textDeltaCount };
+  return { completeBytes: lastNewline + 1, lastEvent, eventCount, immediateCount, textDeltaCount, corruptCount };
 }
 
 async function skipOversizedEvent(handle, start, size) {
@@ -434,6 +464,7 @@ async function skipOversizedEvent(handle, start, size) {
         eventCount: 1,
         immediateCount: 1,
         textDeltaCount: 0,
+        corruptCount: 0,
       };
     }
     offset += bytesRead;
@@ -450,6 +481,9 @@ function progressSnapshot(start, skipped, parsed, size, requested, { hitBudget =
     more_events: requested !== null && hitBudget && consumed < size,
     immediate_event_count: requested === null ? 0 : parsed.immediateCount,
     text_delta_count: requested === null ? 0 : parsed.textDeltaCount,
+    corrupt_event_count: requested === null ? 0 : parsed.corruptCount,
+    event_bytes: size,
+    resource_limit: size >= MAX_EVENT_LOG_BYTES,
   };
 }
 
@@ -496,8 +530,31 @@ function receiptAdvanced(current, baseline) {
   return current.status !== baseline.status || current.revision !== baseline.revision;
 }
 
-function waitWakeReason(task, progress, initialTask, { coalesceFrom, coalesceMs, clock }) {
+function waitWakeReason(task, progress, initialTask, {
+  coalesceFrom,
+  coalesceMs,
+  clock,
+  waitUntil = 'progress',
+  wakeOnAttention = true,
+  deadlineAt = null,
+  silenceTimeoutMs = null,
+  lastActivityAt = null,
+} = {}) {
   if (TERMINAL.has(task.status)) return 'terminal';
+  if (wakeOnAttention && task.status === 'needs_attention') return 'attention';
+  if (waitUntil === 'terminal' && wakeOnAttention && ATTENTION.has(task.status)) return 'attention';
+  if (deadlineAt != null && clock() >= deadlineAt) return 'deadline';
+  if (
+    Number.isInteger(silenceTimeoutMs)
+    && silenceTimeoutMs >= PROVIDER_SILENCE_WATCHDOG_MIN_MS
+    && lastActivityAt != null
+    && clock() >= lastActivityAt + silenceTimeoutMs
+  ) {
+    return 'silence';
+  }
+  if ((progress.corrupt_event_count ?? 0) > 0) return 'corrupt';
+  if (progress.resource_limit) return 'resource_limit';
+  if (waitUntil === 'terminal') return null;
   if (receiptAdvanced(task, initialTask)) return 'progress';
   if (progress.immediate_event_count > 0) return 'progress';
   if (progress.more_events && progress.new_event_count > 0) return 'progress';
@@ -615,26 +672,42 @@ async function raceWait({
   }
 }
 
+function lastActivityFrom(task, progress, fallback) {
+  const eventAt = Date.parse(progress?.last_event?.at ?? '');
+  if (Number.isFinite(eventAt)) return eventAt;
+  const updated = Date.parse(task?.updated_at ?? task?.created_at ?? '');
+  if (Number.isFinite(updated)) return updated;
+  return fallback;
+}
+
 export async function waitForTaskProgress(root, taskId, {
   cursor,
   wait_ms,
+  wait_until,
+  wake_on_needs_attention = true,
   signal,
   now = Date.now,
   watch = defaultWatch,
   delay = waitDelay,
   coalesce_ms = TEXT_DELTA_COALESCE_MS,
-  fallback_ms = TASK_WAIT_WATCH_FALLBACK_MS,
+  fallback_ms,
 } = {}) {
-  const waitMs = parseTaskWaitMs(wait_ms);
+  const waitUntil = parseWaitUntil(wait_until);
+  const { task: initialTask, paths } = await readTask(root, taskId);
+  const started = now();
+  const waitMs = wait_ms === undefined && waitUntil === 'terminal'
+    ? resolveTerminalWaitMs(initialTask, started)
+    : parseTaskWaitMs(wait_ms);
   const coalesceMs = Number.isInteger(coalesce_ms) && coalesce_ms >= 0 && coalesce_ms <= MAX_TASK_WAIT_MS
     ? coalesce_ms
     : TEXT_DELTA_COALESCE_MS;
+  const defaultFallback = waitUntil === 'terminal' ? TASK_TERMINAL_WATCH_FALLBACK_MS : TASK_WAIT_WATCH_FALLBACK_MS;
   const fallbackMs = Number.isInteger(fallback_ms) && fallback_ms >= 1 && fallback_ms <= MAX_TASK_WAIT_MS
     ? fallback_ms
-    : TASK_WAIT_WATCH_FALLBACK_MS;
-  const started = now();
-  const { task: initialTask, paths } = await readTask(root, taskId);
+    : defaultFallback;
   const initialProgress = await readTaskEventProgress(root, taskId, { cursor });
+  const deadlineAt = parseDeadlineAt(initialTask.deadline_at);
+  const silenceTimeoutMs = Number.isInteger(initialTask.silence_timeout_ms) ? initialTask.silence_timeout_ms : null;
   const snapshot = (task, progress, reason) => ({
     task,
     progress: {
@@ -644,33 +717,39 @@ export async function waitForTaskProgress(root, taskId, {
       more_events: Boolean(progress.more_events),
       waited_ms: Math.max(0, now() - started),
       wait_reason: reason,
+      wait_until: waitUntil,
     },
   });
-  const terminal = (task) => TERMINAL.has(task.status);
   const requestedCursor = parseEventCursor(cursor);
   const evaluate = (task, progress, coalesceFrom) => waitWakeReason(task, progress, initialTask, {
     coalesceFrom,
     coalesceMs,
     clock: now,
+    waitUntil,
+    wakeOnAttention: wake_on_needs_attention !== false,
+    deadlineAt,
+    silenceTimeoutMs,
+    lastActivityAt: lastActivityFrom(task, progress, started),
   });
 
   if (waitMs === 0) {
-    return snapshot(initialTask, initialProgress, terminal(initialTask) ? 'terminal' : 'current');
+    return snapshot(initialTask, initialProgress, evaluate(initialTask, initialProgress, null) ?? 'current');
   }
-  if (terminal(initialTask)) {
-    return snapshot(initialTask, initialProgress, 'terminal');
-  }
-  if (requestedCursor !== null && initialProgress.immediate_event_count > 0) {
-    return snapshot(initialTask, initialProgress, 'progress');
-  }
-  if (requestedCursor !== null && initialProgress.more_events && initialProgress.new_event_count > 0) {
-    return snapshot(initialTask, initialProgress, 'progress');
-  }
-  if (requestedCursor === null && initialProgress.last_event) {
-    return snapshot(initialTask, initialProgress, 'current');
+  const immediate = evaluate(initialTask, initialProgress, requestedCursor !== null && initialProgress.text_delta_count > 0 ? started : null);
+  if (immediate) return snapshot(initialTask, initialProgress, immediate);
+  if (waitUntil === 'progress') {
+    if (requestedCursor !== null && initialProgress.immediate_event_count > 0) {
+      return snapshot(initialTask, initialProgress, 'progress');
+    }
+    if (requestedCursor !== null && initialProgress.more_events && initialProgress.new_event_count > 0) {
+      return snapshot(initialTask, initialProgress, 'progress');
+    }
+    if (requestedCursor === null && initialProgress.last_event) {
+      return snapshot(initialTask, initialProgress, 'current');
+    }
   }
   if (signal?.aborted) {
-    return snapshot(initialTask, initialProgress, 'timeout');
+    return snapshot(initialTask, initialProgress, 'disconnected');
   }
 
   let coalesceFrom = requestedCursor !== null && initialProgress.text_delta_count > 0 ? started : null;
@@ -710,10 +789,17 @@ export async function waitForTaskProgress(root, taskId, {
     if (wake) return snapshot(currentTask, currentProgress, wake);
 
     while (now() < deadline) {
-      if (signal?.aborted) break;
+      if (signal?.aborted) {
+        return snapshot(currentTask, currentProgress, 'disconnected');
+      }
       const remaining = deadline - now();
       if (remaining <= 0) break;
-      const coalesceRemaining = coalesceFrom == null ? null : Math.max(0, coalesceFrom + coalesceMs - now());
+      const silenceRemaining = silenceTimeoutMs == null
+        ? null
+        : Math.max(0, lastActivityFrom(currentTask, currentProgress, started) + silenceTimeoutMs - now());
+      const coalesceRemaining = waitUntil === 'terminal'
+        ? silenceRemaining
+        : (coalesceFrom == null ? null : Math.max(0, coalesceFrom + coalesceMs - now()));
       const reason = await raceWait({
         delay,
         remainingMs: remaining,
@@ -723,7 +809,9 @@ export async function waitForTaskProgress(root, taskId, {
         signal,
       });
       gate.detachWaiter();
-      if (reason === 'abort') break;
+      if (reason === 'abort') {
+        return snapshot(currentTask, currentProgress, 'disconnected');
+      }
       currentTask = (await readTask(root, taskId)).task;
       currentProgress = await readTaskEventProgress(root, taskId, { cursor });
       if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
@@ -744,9 +832,14 @@ export async function waitForTaskProgress(root, taskId, {
 
     const finalTask = (await readTask(root, taskId)).task;
     const finalProgress = await readTaskEventProgress(root, taskId, { cursor });
-    if (terminal(finalTask)) return snapshot(finalTask, finalProgress, 'terminal');
-    if (receiptAdvanced(finalTask, initialTask) || progressAdvanced(finalProgress, initialProgress)) {
+    const finalWake = evaluate(finalTask, finalProgress, coalesceFrom);
+    if (finalWake) return snapshot(finalTask, finalProgress, finalWake);
+    if (waitUntil === 'progress' && (receiptAdvanced(finalTask, initialTask) || progressAdvanced(finalProgress, initialProgress))) {
       return snapshot(finalTask, finalProgress, 'progress');
+    }
+    if (signal?.aborted) return snapshot(finalTask, finalProgress, 'disconnected');
+    if (waitUntil === 'terminal' && waitMs >= MAX_TASK_WAIT_MS && (remainingDeadlineMs(finalTask, now()) ?? 0) > 0) {
+      return snapshot(finalTask, finalProgress, 'transport_budget');
     }
     return snapshot(finalTask, finalProgress, 'timeout');
   } finally {

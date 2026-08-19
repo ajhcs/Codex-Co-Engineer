@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText } from '../mcp/v3/acp-worker.mjs';
+import { submitReply } from '../mcp/v3/mailbox.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -242,8 +243,34 @@ test('DSH deadline kills a detached ACPX descendant before terminalizing', async
   assert.ok(Number.isInteger(pid) && pid > 1);
   assert.equal(await processExited(pid), true);
   const { task } = await readTask(value.root, value.taskId);
-  assert.equal(task.status, 'failed');
+  assert.equal(task.status, 'timeout');
   assert.equal(task.dispatch_uncertain, true);
   assert.equal(task.fallback_safe, false);
   assert.equal((await readdir(path.join(value.root, 'tasks', value.taskId))).includes('acpx-home'), false);
+});
+
+test('user-facing ACP permission requests persist needs_attention and accept one same-session reply', async () => {
+  const value = await fixture({ prompt: 'need permission please', id: 'perm-one', timeoutMs: 8_000 });
+  const running = runAcpTask({ root: value.root, taskId: value.taskId });
+  const deadline = Date.now() + 5_000;
+  let attention;
+  while (Date.now() < deadline) {
+    const current = (await readTask(value.root, value.taskId)).task;
+    if (current.status === 'needs_attention') {
+      attention = current;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(attention?.status, 'needs_attention');
+  assert.ok(attention.attention?.session_id);
+  assert.ok(attention.attention?.question_id);
+  await submitReply(value.root, value.taskId, {
+    session_id: attention.attention.session_id,
+    question_id: attention.attention.question_id,
+    response: 'allow_once',
+  });
+  const terminal = await running;
+  assert.equal(terminal.status, 'completed');
+  assert.equal((await readTask(value.root, value.taskId)).task.status, 'completed');
 });

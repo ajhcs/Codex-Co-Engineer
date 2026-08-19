@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { MCP_PENDING_CALL_BUDGET_MS } from '../mcp/v3/contract.mjs';
 import {
   EVENT_TAIL_PEEK_BYTES,
   MAX_EVENT_READ_BYTES,
+  MAX_TASK_WAIT_MS,
   TEXT_DELTA_COALESCE_MS,
   appendTaskEvent,
   clearTaskLaunchReservation,
@@ -152,7 +154,9 @@ test('event cursors reject non-boundary offsets and wait_ms bounds', () => {
   assert.throws(() => parseEventCursor(4), (error) => error.code === 'invalid_event_cursor');
   assert.equal(parseTaskWaitMs(undefined), 0);
   assert.equal(parseTaskWaitMs(25_000), 25_000);
-  assert.throws(() => parseTaskWaitMs(60_001), (error) => error.code === 'invalid_wait_ms');
+  assert.equal(parseTaskWaitMs(60_001), 60_001);
+  assert.equal(MAX_TASK_WAIT_MS, MCP_PENDING_CALL_BUDGET_MS);
+  assert.throws(() => parseTaskWaitMs(MAX_TASK_WAIT_MS + 1), (error) => error.code === 'invalid_wait_ms');
   assert.throws(() => parseTaskWaitMs(1.5), (error) => error.code === 'invalid_wait_ms');
 });
 
@@ -480,7 +484,7 @@ test('status replacement and abort both settle without leaking watchers', async 
   await new Promise((resolve) => setTimeout(resolve, 15));
   controller.abort();
   const aborted = await pending;
-  assert.equal(aborted.progress.wait_reason, 'timeout');
+  assert.equal(aborted.progress.wait_reason, 'disconnected');
   assert.ok(aborted.progress.waited_ms < 200);
   assert.equal(state.closed, state.opened);
 });

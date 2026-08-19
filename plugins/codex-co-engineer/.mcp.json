@@ -28,7 +28,7 @@
         "CODEX_CO_ENGINEER_CURSOR_COMMAND",
         "CODEX_CO_ENGINEER_ACPX_COMMAND"
       ],
-      "tool_timeout_sec": 65
+      "tool_timeout_sec": 14405
     }
   }
 }

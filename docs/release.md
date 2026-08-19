@@ -10,7 +10,8 @@ release-gate run --repo "$PWD"
 The package supports Node.js 24 and newer. The release gate is intentionally
 pinned to Node.js 24, MCP Inspector 2.2.0, and the recorded ACPX/DSH
 provenance so the release receipt is reproducible. The gate validates the
-thin five-tool catalog, package contents, provider-free Inspector smoke test,
+thin five-tool catalog (with durable wait/diagnostics/reply parameters on
+`task`), package contents, provider-free Inspector smoke test,
 ACPX reproducibility/provenance, and both package inventories. It does not
 require provider credentials or send repository content to a model.
 
@@ -54,6 +55,10 @@ After the provider-free gate passes:
    local and owner-only. They may contain bounded agent output/code context and
    must be treated as private state; verify that prompts and credentials are
    redacted.
+8. Record the longest Codex Desktop MCP pending-call interval using
+   [mcp-pending-call.md](mcp-pending-call.md). Do not treat the advertised
+   4-hour `tool_timeout_sec` as a measured Desktop limit until those probes
+   have been run on the shipping host.
 
 ## Handoff and cleanup
 

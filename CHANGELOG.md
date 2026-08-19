@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-19
+
+### Added
+
+- `delegate` records `expected_duration_ms`, a visible 20% margin, and
+  `deadline_at = created_at + ceil(expected_duration_ms * 1.20)`. Explicit
+  `timeout_ms` overrides are stored as `deadline_source: "explicit"`. Deadline
+  extensions require `extend_expected_duration_ms` plus `extend_reason` and
+  are appended to `deadline_extensions`; the deadline is never rolled silently.
+- `task` `wait_until: "terminal"` waits for a terminal or needs-attention
+  state without waking on routine text deltas. Disconnecting the waiter or
+  cancelling the MCP call does not stop or own provider work.
+- Summary and diagnostics views on `task`. Diagnostics are side-effect free,
+  cursor-paged, byte-capped, and secret-redacted. Alerts use a normalized
+  diagnostic envelope instead of a bare `ERROR`.
+- Same-session, exactly-once `task.reply` for Grok and Cursor Local ACP
+  sessions. DSH, Cursor Cloud, and CLI fallback report
+  `same_session_reply_unsupported` rather than starting a new prompt.
+- Provider capability reporting on `status` and task receipts, including live
+  progress, reply, restart recovery, cancellation confirmation, and evidence
+  class.
+- Durable restart reconciliation of unfinished tasks, including deadline
+  expiry when the worker is gone and immediate wake when attention is still
+  required.
+- A deterministic MCP pending-call probe and documented real-host acceptance
+  procedure. 5-minute, 30-minute, and 4-hour Codex Desktop measurements were
+  not executed in this worktree.
+
+### Changed
+
+- Keep the five-tool catalog. Terminal wait, diagnostics, deadline extension,
+  and reply are parameters on `task` / `delegate`.
+- Raise the plugin-advertised MCP pending-call budget to 4 hours
+  (`wait_ms` max 14400000, `tool_timeout_sec` 14405). This is an advertised
+  budget, not a measured Desktop hard limit. If the host cuts the call
+  earlier, reconnect from `event_cursor`.
+- Watcher failure during a terminal wait uses a 15-second local fallback
+  rather than rapid polling.
+
 ## [3.0.2] - 2026-08-19
 
 ### Fixed

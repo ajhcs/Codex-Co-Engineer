@@ -7,7 +7,17 @@ import readline from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { appendTaskEvent, createTask } from '../mcp/v3/task-store.mjs';
+import { readFileSync } from 'node:fs';
+import { appendTaskEvent, createTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
+
+function currentRuntime() {
+  const proc = readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+  return {
+    pid: process.pid,
+    process_group: process.pid,
+    process_start_ticks: proc.slice(proc.lastIndexOf(')') + 2).trim().split(/\s+/u)[19],
+  };
+}
 
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'v3', 'server.mjs');
 
@@ -47,8 +57,11 @@ async function withServer(callback, environment = process.env) {
     child.stdin.write(`${JSON.stringify(message)}\n`);
     return nextValue();
   };
+  const notify = (message) => {
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+  };
   try {
-    return await callback({ state, request });
+    return await callback({ state, request, notify });
   } finally {
     child.stdin.end();
     child.kill('SIGTERM');
@@ -72,11 +85,17 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.equal(values[0].result.serverInfo.name, 'codex-co-engineer');
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
-  assert.equal(values[0].result.serverInfo.version, '3.0.2');
+  assert.equal(values[0].result.serverInfo.version, '3.1.0');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
-  assert.deepEqual(Object.keys(taskTool.inputSchema.properties), ['task_id', 'wait_ms', 'cursor']);
-  assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 60000);
+  assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
+    'task_id', 'wait_ms', 'wait_until', 'wake_on_needs_attention', 'view', 'cursor', 'max_bytes',
+    'extend_expected_duration_ms', 'extend_reason', 'reply',
+  ]);
+  assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 14400000);
+  assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
+  const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
+  assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'expected_duration_ms'));
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
 });
@@ -138,6 +157,33 @@ test('task returns a compact live snapshot and can wait for the next event', asy
     });
     assert.equal(invalid.result.isError, true);
     assert.equal(invalid.result.structuredContent.error.code, 'invalid_event_cursor');
+  });
+});
+
+test('cancelling a pending task wait does not terminate provider work', async () => {
+  await withServer(async ({ state, request, notify }) => {
+    await createTask({
+      root: state,
+      prompt: 'keep running',
+      record: { id: 'server-disconnect', status: 'running', provider: 'grok' },
+    });
+    await writeRuntimeRecord(state, 'server-disconnect', currentRuntime());
+    const pending = request({
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: { name: 'task', arguments: { task_id: 'server-disconnect', wait_until: 'terminal', wait_ms: 2000 } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    notify({
+      jsonrpc: '2.0',
+      method: 'notifications/cancelled',
+      params: { requestId: 7 },
+    });
+    const disconnected = await pending;
+    assert.equal(disconnected.result.structuredContent.progress.wait_reason, 'disconnected');
+    assert.equal(disconnected.result.structuredContent.task.status, 'running');
+    assert.equal(disconnected.result.structuredContent.state, 'running');
   });
 });
 

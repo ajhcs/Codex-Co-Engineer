@@ -62,11 +62,15 @@ tests a server launched with only the MCP manifest's allowlisted environment.
 ## Task inputs
 
 Repository paths, prompts, roles, deadlines, and workspace/PR intent are
-inputs to `delegate`; they are not global policy. `task` accepts optional
-`wait_ms` (0-60000) and `cursor` arguments for a bounded wait. The
-result includes a compact `progress` snapshot; text deltas are coalesced
-and large logs are paged with `more_events`. It does not stream raw
-events or emit unsolicited stdio callbacks across assistant turns.
+inputs to `delegate`; they are not global policy. Pass
+`expected_duration_ms` so the recorded deadline is
+`ceil(expected_duration_ms * 1.20)`. `task` accepts `wait_until`
+(`progress` or `terminal`), optional `wait_ms` (0-14400000), `cursor`,
+`view` (`summary` or `diagnostics`), audited deadline extension fields,
+and a same-session `reply` object. Terminal waits are event-driven and do
+not wake on routine text. Diagnostics are side-effect-free and redacted.
+It does not stream raw events or emit unsolicited stdio callbacks across
+assistant turns. See [MCP pending-call budget](mcp-pending-call.md).
 
 ### Local providers
 

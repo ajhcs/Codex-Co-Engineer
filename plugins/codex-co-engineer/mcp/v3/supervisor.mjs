@@ -7,6 +7,16 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  ACTIVE_STATUSES,
+  VERSION,
+  mcpPendingCallReport,
+  providerCapabilities,
+  publicState,
+} from './contract.mjs';
+import { deadlineReached, nextDeadlineExtension, resolveTaskDeadline } from './deadline.mjs';
+import { compactSummary, diagnosticEnvelope, readTaskDiagnostics } from './diagnostics.mjs';
+import { submitReply } from './mailbox.mjs';
+import {
   appendTaskEvent,
   clearTaskLaunchReservation,
   createLaunchReservation,
@@ -41,7 +51,7 @@ import {
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
 const CLOUD_WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cursor-cloud-worker.mjs');
-const ACTIVE = new Set(['accepted', 'starting', 'running', 'cancelling', 'transport_lost']);
+const ACTIVE = new Set(ACTIVE_STATUSES);
 const PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
 const WORKSPACE_MODES = new Set(['managed', 'direct']);
 const WORKTREE_CREATE_MAX_BUFFER = 16 * 1024 * 1024;
@@ -444,6 +454,12 @@ export async function submitTask(input, dependencies = {}) {
     fail('invalid_starting_ref', 'starting_ref is supported only for Cursor Cloud tasks.');
   }
   const workspaceMode = resolveWorkspaceMode(input.provider, input.workspace_mode);
+  const deadline = resolveTaskDeadline(input);
+  if (input.silence_timeout_ms !== undefined && input.silence_timeout_ms !== null) {
+    if (!Number.isInteger(input.silence_timeout_ms) || input.silence_timeout_ms < 5_000 || input.silence_timeout_ms > 86_400_000) {
+      fail('invalid_silence_timeout_ms', 'silence_timeout_ms must be an integer from 5000 to 86400000.');
+    }
+  }
   const root = dependencies.root ?? stateRoot();
   try {
     await readTask(root, id);
@@ -490,7 +506,13 @@ export async function submitTask(input, dependencies = {}) {
         ...(agentArgv ? { agent_argv: agentArgv } : {}),
         launch_reservation: createLaunchReservation(),
         starting_ref: input.starting_ref,
-        timeout_ms: input.timeout_ms,
+        timeout_ms: deadline.timeout_ms,
+        expected_duration_ms: deadline.expected_duration_ms,
+        duration_margin: deadline.duration_margin,
+        deadline_at: deadline.deadline_at,
+        deadline_source: deadline.deadline_source,
+        deadline_extensions: [],
+        silence_timeout_ms: input.silence_timeout_ms ?? null,
         create_pr: input.create_pr === true,
       },
     });
@@ -575,8 +597,37 @@ function currentProviderIdentity(task) {
   return processIdentity(task?.provider_process_group, task?.provider_process_group, task?.provider_process_start_ticks);
 }
 
+export async function extendTaskDeadline(root, taskId, { expected_duration_ms, reason } = {}) {
+  const { task } = await readTask(root, taskId);
+  const changes = nextDeadlineExtension(task, { expected_duration_ms, reason });
+  const next = await updateTask(root, taskId, changes);
+  await appendTaskEvent(root, taskId, {
+    type: 'deadline_extended',
+    reason: reason?.trim?.().slice(0, 512) ?? null,
+    previous_deadline_at: task.deadline_at ?? null,
+    deadline_at: next.deadline_at,
+    expected_duration_ms: next.expected_duration_ms,
+  });
+  return next;
+}
+
 async function reconcileInactiveTask(root, task, runtime) {
   if (!ACTIVE.has(task.status) || launchReservationActive(task) || await runtimeActive(runtime)) return task;
+  if (deadlineReached(task)) {
+    const timedOut = await updateTask(root, task.id, {
+      status: 'timeout',
+      launch_reservation: null,
+      error: {
+        code: 'deadline_reached',
+        message: 'The recorded task deadline was reached and the worker is no longer running.',
+      },
+      failed_stage: 'deadline',
+      finished_at: new Date().toISOString(),
+    });
+    await appendTaskEvent(root, task.id, { type: 'terminal', status: 'timeout', reason: 'deadline_reached' }).catch(() => {});
+    await recordManagedCleanup(root, timedOut, undefined);
+    return timedOut;
+  }
 
   if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
     try {
@@ -746,24 +797,61 @@ export async function cancelTask(root, taskId, dependencies = {}) {
 export async function taskStatus(root, taskId, options = {}) {
   const { task: initialTask } = await readTask(root, taskId);
   const runtime = taskRuntime(await readRuntimeRecord(root, taskId), initialTask);
-  const reconciled = await reconcileInactiveTask(root, initialTask, runtime);
+  await reconcileInactiveTask(root, initialTask, runtime);
+  const view = options.view === 'diagnostics' ? 'diagnostics' : 'summary';
   const waited = await waitForTaskProgress(root, taskId, {
     cursor: options.cursor,
-    wait_ms: options.wait_ms,
+    wait_ms: view === 'diagnostics' ? 0 : options.wait_ms,
+    wait_until: options.wait_until,
+    wake_on_needs_attention: options.wake_on_needs_attention,
+    signal: options.signal,
   });
   const latestRuntime = taskRuntime(await readRuntimeRecord(root, taskId), waited.task);
   const task = await projectLiveLastEvent(
     root,
     await reconcileInactiveTask(root, waited.task, latestRuntime),
   );
-  return {
+  const progress = {
+    ...waited.progress,
+    last_event: task.last_event ?? waited.progress.last_event,
+  };
+  const extras = {
+    wait_reason: progress.wait_reason,
+    last_event: progress.last_event,
+    event_cursor: progress.event_cursor,
+  };
+  const result = {
     task,
     runtime: latestRuntime,
-    progress: {
-      ...waited.progress,
-      last_event: task.last_event ?? waited.progress.last_event,
-    },
+    progress,
+    state: publicState(task.status),
+    summary: compactSummary(task, progress, latestRuntime, extras),
+    diagnostic: diagnosticEnvelope(task, latestRuntime, extras),
+    capabilities: providerCapabilities(task.provider),
+    view,
   };
+  if (view === 'diagnostics') {
+    result.diagnostics = await readTaskDiagnostics(root, taskId, {
+      cursor: options.cursor,
+      max_bytes: options.max_bytes,
+      runtime: latestRuntime,
+      progress,
+    });
+  }
+  return result;
+}
+
+export async function inspectTask(root, args = {}, options = {}) {
+  if (args.extend_expected_duration_ms != null || args.extend_reason) {
+    await extendTaskDeadline(root, args.task_id, {
+      expected_duration_ms: args.extend_expected_duration_ms,
+      reason: args.extend_reason,
+    });
+  }
+  if (args.reply) {
+    await submitReply(root, args.task_id, args.reply);
+  }
+  return taskStatus(root, args.task_id, { ...args, ...options });
 }
 
 export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
@@ -784,10 +872,17 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
     };
   }
   return {
-    version: '3.0.2',
+    version: VERSION,
     healthy: boundary.ready,
     active: tasks.filter((task) => ACTIVE.has(task.status)).length,
     providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
+    capabilities: {
+      grok: providerCapabilities('grok'),
+      'cursor-local': providerCapabilities('cursor-local'),
+      dsh: providerCapabilities('dsh'),
+      'cursor-cloud': providerCapabilities('cursor-cloud'),
+    },
+    mcp_pending_call: mcpPendingCallReport(),
     local_boundary: boundary,
     readiness,
     tasks: await Promise.all(tasks.slice(0, 20).map((task) => projectLiveLastEvent(root, task))),
