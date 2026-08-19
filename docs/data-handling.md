@@ -86,6 +86,9 @@ State contains:
 MCP `task`/`status` results may overlay a compact live `last_event` from
 `events.jsonl` while the durable `task.json` receipt is still mid-run.
 Those snapshots omit prompt text, argv, secrets, and raw event streams.
+Public MCP receipts from `status`, `delegate`, `task`, `tasks`, and
+`cancel` also redact secrets in `result`, errors, nested handoff/validation,
+and events.
 
 It can contain sensitive private-repository context. Do not publish or commit
 the state directory. Terminal task state is retained for inspection until the

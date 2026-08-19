@@ -2,8 +2,16 @@
 
 import readline from 'node:readline';
 
-import { MCP_PENDING_CALL_BUDGET_MS, VERSION, publicState } from './contract.mjs';
+import {
+  MAX_EXPECTED_DURATION_MS,
+  MAX_TIMEOUT_MS,
+  MCP_PENDING_CALL_BUDGET_MS,
+  MIN_DURATION_MS,
+  VERSION,
+  publicState,
+} from './contract.mjs';
 import { deadlineProjection } from './deadline.mjs';
+import { sanitizePublicReceipt } from './diagnostics.mjs';
 import { listTasks, stateRoot } from './task-store.mjs';
 import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
 
@@ -19,7 +27,7 @@ const TOOLS = [
   },
   {
     name: 'delegate',
-    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Provide expected_duration_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override. Local tasks use a managed worktree by default; direct mode is explicit.',
+    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -31,11 +39,16 @@ const TOOLS = [
         workspace_mode: { type: 'string', enum: ['managed', 'direct'], default: 'managed' },
         expected_duration_ms: {
           type: 'integer',
-          minimum: 1000,
-          maximum: 86400000,
-          description: 'Codex estimate of task runtime. Recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is supplied as an explicit override.',
+          minimum: MIN_DURATION_MS,
+          maximum: MAX_EXPECTED_DURATION_MS,
+          description: 'Codex estimate of task runtime. Recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is supplied as an explicit override of at least that margin.',
         },
-        timeout_ms: { type: 'integer', minimum: 1000, maximum: 86400000 },
+        timeout_ms: {
+          type: 'integer',
+          minimum: MIN_DURATION_MS,
+          maximum: MAX_TIMEOUT_MS,
+          description: 'Backwards-compatible explicit deadline. Required when expected_duration_ms is omitted. When both are supplied, timeout_ms must be at least ceil(expected_duration_ms * 1.20).',
+        },
         silence_timeout_ms: {
           type: 'integer',
           minimum: 5000,
@@ -46,6 +59,10 @@ const TOOLS = [
         starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable Cursor Cloud commit SHA.' },
       },
       required: ['task_id', 'provider', 'repo', 'prompt'],
+      anyOf: [
+        { required: ['expected_duration_ms'] },
+        { required: ['timeout_ms'] },
+      ],
       additionalProperties: false,
     },
   },
@@ -90,9 +107,9 @@ const TOOLS = [
         },
         extend_expected_duration_ms: {
           type: 'integer',
-          minimum: 1000,
-          maximum: 86400000,
-          description: 'Replace the remaining estimate. The new deadline is now + ceil(extend_expected_duration_ms * 1.20). Requires extend_reason. Never silently rolls the deadline.',
+          minimum: MIN_DURATION_MS,
+          maximum: MAX_EXPECTED_DURATION_MS,
+          description: 'Replace the remaining estimate. The new deadline is now + ceil(extend_expected_duration_ms * 1.20) and must be strictly later than the recorded deadline. Requires extend_reason. Never silently rolls the deadline.',
         },
         extend_reason: {
           type: 'string',
@@ -142,15 +159,16 @@ function publicTask(task) {
     provider_process_start_ticks: _providerProcessStartTicks,
     ...receipt
   } = task;
-  return {
+  return sanitizePublicReceipt({
     ...receipt,
     state: publicState(task.status),
     deadline: deadlineProjection(task),
-  };
+  });
 }
 
 function result(value) {
-  const safe = JSON.parse(JSON.stringify(value, (_key, nested) => nested === undefined ? null : nested));
+  const sanitized = sanitizePublicReceipt(value) ?? {};
+  const safe = JSON.parse(JSON.stringify(sanitized, (_key, nested) => nested === undefined ? null : nested));
   return {
     content: [{ type: 'text', text: JSON.stringify(safe) }],
     structuredContent: safe,

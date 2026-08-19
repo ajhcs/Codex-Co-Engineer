@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { PROVIDER_CAPABILITIES, publicState } from '../mcp/v3/contract.mjs';
-import { compactSummary, diagnosticEnvelope, readTaskDiagnostics, redactDiagnosticText } from '../mcp/v3/diagnostics.mjs';
-import { appendTaskEvent, createTask } from '../mcp/v3/task-store.mjs';
+import {
+  compactSummary,
+  diagnosticEnvelope,
+  lastActivityMs,
+  readTaskDiagnostics,
+  redactDiagnosticText,
+} from '../mcp/v3/diagnostics.mjs';
+import { appendTaskEvent, createTask, taskPaths } from '../mcp/v3/task-store.mjs';
 
 test('normalized states map stored receipts onto the public contract', () => {
   assert.equal(publicState('completed'), 'succeeded');
@@ -89,6 +95,53 @@ test('diagnostics paging is bounded, cursor-stable, and redacts secrets', async 
     });
     assert.ok(Number(second.event_cursor) >= Number(first.event_cursor));
     assert.equal(redactDiagnosticText('token sk-live-secret-1234567890'), 'token [REDACTED]');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('diagnostics paging skips an oversized event line and advances the cursor', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-diag-oversize-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'page an oversized line',
+      record: { id: 'diag-oversize', status: 'running', provider: 'grok' },
+    });
+    const eventsPath = taskPaths(root, 'diag-oversize').events;
+    await appendFile(eventsPath, `${'x'.repeat(8_000)}\n`, 'utf8');
+    await appendTaskEvent(root, 'diag-oversize', { type: 'provider', event: { type: 'tool_call', title: 'after-oversize' } });
+    const first = await readTaskDiagnostics(root, 'diag-oversize', { cursor: '0', max_bytes: 1024 });
+    assert.ok(Number(first.event_cursor) > 0);
+    assert.equal(first.more_events, true);
+    assert.equal(first.events.some((event) => event?.truncated === true), true);
+    const second = await readTaskDiagnostics(root, 'diag-oversize', {
+      cursor: first.event_cursor,
+      max_bytes: 1024,
+    });
+    assert.ok(Number(second.event_cursor) > Number(first.event_cursor));
+    assert.equal(JSON.stringify(second.events).includes('after-oversize'), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('lastActivityMs tail-scans a large ledger in bounded chunks', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-diag-tail-'));
+  try {
+    const { task } = await createTask({
+      root,
+      prompt: 'scan the tail',
+      record: { id: 'diag-tail', status: 'running', provider: 'grok', updated_at: '2026-08-19T00:00:00.000Z' },
+    });
+    const lastAt = '2026-08-19T12:34:56.000Z';
+    const older = '{"at":"2026-08-19T01:00:00.000Z","type":"status"}\n'.repeat(40_000);
+    const eventsPath = taskPaths(root, 'diag-tail').events;
+    await writeFile(eventsPath, `${older}{"at":"${lastAt}","type":"terminal"}\n`, 'utf8');
+    const started = Date.now();
+    const activity = await lastActivityMs(root, task);
+    assert.equal(activity, Date.parse(lastAt));
+    assert.ok(Date.now() - started < 2_000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

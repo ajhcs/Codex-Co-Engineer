@@ -1,7 +1,7 @@
 import {
-  DEFAULT_TASK_TIMEOUT_MS,
   DURATION_MARGIN,
-  MAX_DURATION_MS,
+  MAX_EXPECTED_DURATION_MS,
+  MAX_TIMEOUT_MS,
   MIN_DURATION_MS,
   publicState,
 } from './contract.mjs';
@@ -13,16 +13,30 @@ function fail(code, message) {
   throw Object.assign(new Error(message), { code });
 }
 
-function requireDuration(value, field, code) {
-  if (!Number.isInteger(value) || value < MIN_DURATION_MS || value > MAX_DURATION_MS) {
-    fail(code, `${field} must be an integer from ${MIN_DURATION_MS} to ${MAX_DURATION_MS}.`);
+function requireExpectedDuration(value) {
+  if (!Number.isInteger(value) || value < MIN_DURATION_MS || value > MAX_EXPECTED_DURATION_MS) {
+    fail('invalid_expected_duration_ms', `expected_duration_ms must be an integer from ${MIN_DURATION_MS} to ${MAX_EXPECTED_DURATION_MS}.`);
+  }
+  return value;
+}
+
+function requireTimeout(value) {
+  if (!Number.isInteger(value) || value < MIN_DURATION_MS || value > MAX_TIMEOUT_MS) {
+    fail('invalid_timeout_ms', `timeout_ms must be an integer from ${MIN_DURATION_MS} to ${MAX_TIMEOUT_MS}.`);
   }
   return value;
 }
 
 export function computeMarginTimeoutMs(expectedDurationMs) {
-  const expected = requireDuration(expectedDurationMs, 'expected_duration_ms', 'invalid_expected_duration_ms');
-  return Math.min(MAX_DURATION_MS, Math.ceil(expected * DURATION_MARGIN));
+  const expected = requireExpectedDuration(expectedDurationMs);
+  const timeout = Math.ceil(expected * DURATION_MARGIN);
+  if (timeout > MAX_TIMEOUT_MS) {
+    fail(
+      'invalid_expected_duration_ms',
+      `expected_duration_ms plus the ${DURATION_MARGIN} margin exceeds the maximum timeout of ${MAX_TIMEOUT_MS}.`,
+    );
+  }
+  return timeout;
 }
 
 export function resolveTaskDeadline(input = {}, { now = Date.now() } = {}) {
@@ -30,12 +44,12 @@ export function resolveTaskDeadline(input = {}, { now = Date.now() } = {}) {
   const expected = input.expected_duration_ms;
   const timeout = input.timeout_ms;
   if (expected !== undefined && expected !== null) {
-    requireDuration(expected, 'expected_duration_ms', 'invalid_expected_duration_ms');
+    requireExpectedDuration(expected);
     const computed = computeMarginTimeoutMs(expected);
     if (timeout !== undefined && timeout !== null) {
-      requireDuration(timeout, 'timeout_ms', 'invalid_timeout_ms');
-      if (timeout < expected) {
-        fail('invalid_timeout_ms', 'timeout_ms must be at least expected_duration_ms.');
+      requireTimeout(timeout);
+      if (timeout < computed) {
+        fail('invalid_timeout_ms', 'timeout_ms must be at least ceil(expected_duration_ms * 1.20).');
       }
       return Object.freeze({
         expected_duration_ms: expected,
@@ -54,7 +68,7 @@ export function resolveTaskDeadline(input = {}, { now = Date.now() } = {}) {
     });
   }
   if (timeout !== undefined && timeout !== null) {
-    requireDuration(timeout, 'timeout_ms', 'invalid_timeout_ms');
+    requireTimeout(timeout);
     return Object.freeze({
       expected_duration_ms: null,
       duration_margin: DURATION_MARGIN,
@@ -63,13 +77,7 @@ export function resolveTaskDeadline(input = {}, { now = Date.now() } = {}) {
       deadline_source: 'explicit',
     });
   }
-  return Object.freeze({
-    expected_duration_ms: null,
-    duration_margin: DURATION_MARGIN,
-    timeout_ms: DEFAULT_TASK_TIMEOUT_MS,
-    deadline_at: new Date(now + DEFAULT_TASK_TIMEOUT_MS).toISOString(),
-    deadline_source: 'default',
-  });
+  fail('missing_deadline', 'expected_duration_ms or timeout_ms is required.');
 }
 
 export function parseDeadlineAt(value) {
@@ -102,6 +110,10 @@ export function nextDeadlineExtension(task, { expected_duration_ms, reason, now 
     fail('deadline_expired', 'The recorded deadline has already passed; a silent roll-forward is not allowed.');
   }
   const resolved = resolveTaskDeadline({ expected_duration_ms }, { now });
+  const nextDeadline = parseDeadlineAt(resolved.deadline_at);
+  if (currentDeadline != null && (nextDeadline == null || nextDeadline <= currentDeadline)) {
+    fail('deadline_not_extended', 'The new deadline must be strictly later than the recorded deadline.');
+  }
   const previous = task.deadline_at ?? null;
   return Object.freeze({
     expected_duration_ms: resolved.expected_duration_ms,

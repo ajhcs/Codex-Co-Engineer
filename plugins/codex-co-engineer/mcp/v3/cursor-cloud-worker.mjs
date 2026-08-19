@@ -1,18 +1,19 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { watch as watchDirectory } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, updateTask } from './task-store.mjs';
+import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
 
 const runFile = promisify(execFile);
-const DEFAULT_TASK_TIMEOUT_MS = 8 * 60 * 60 * 1000;
 const CLEANUP_TIMEOUT_MS = 10_000;
+const DEADLINE_REFRESH_MS = 1_000;
 const CANCEL_TIMEOUT_MS = 30_000;
 const PROVIDER_CALL_TIMEOUT_MS = 5_000;
 const COMMIT_SHA = /^[0-9a-f]{40}$/iu;
@@ -79,6 +80,94 @@ function deadlineCall(deadlineAt, factory, label) {
     'timeout',
     `Cursor Cloud task exceeded its deadline during ${label}.`,
   );
+}
+
+function recordedDeadlineAt(task) {
+  const parsed = Date.parse(task?.deadline_at ?? '');
+  if (Number.isFinite(parsed)) return parsed;
+  const timeoutMs = validTimeout(task?.timeout_ms, 0);
+  if (timeoutMs) return Date.now() + timeoutMs;
+  fail('invalid_timeout', 'Task is missing a recorded deadline.');
+}
+
+async function waitForRunCompletion({
+  root,
+  taskId,
+  waitPromise,
+  deadlineAt,
+  watch = watchDirectory,
+  refreshMs = DEADLINE_REFRESH_MS,
+}) {
+  let currentDeadline = deadlineAt;
+  let timer;
+  let refreshTimer;
+  let watcher;
+  let settled = false;
+  const operation = Promise.resolve(waitPromise);
+  operation.catch(() => {});
+
+  return new Promise((resolve, reject) => {
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(refreshTimer);
+      try { watcher?.close?.(); } catch { /* already closed */ }
+      fn(value);
+    };
+
+    const armTimer = () => {
+      clearTimeout(timer);
+      const remaining = remainingUntil(currentDeadline);
+      if (remaining <= 0) {
+        finish(reject, timeoutError('timeout', 'Cursor Cloud task exceeded its deadline during run completion.'));
+        return;
+      }
+      timer = setTimeout(() => {
+        finish(reject, timeoutError('timeout', 'Cursor Cloud task exceeded its deadline during run completion.'));
+      }, remaining);
+    };
+
+    const refreshDeadline = () => {
+      if (settled) return;
+      readTask(root, taskId).then(({ task }) => {
+        if (settled) return;
+        const parsed = Date.parse(task.deadline_at ?? '');
+        if (Number.isFinite(parsed) && parsed > currentDeadline) {
+          currentDeadline = parsed;
+          armTimer();
+        }
+      }).catch(() => {});
+    };
+
+    try {
+      watcher = watch(taskPaths(root, taskId).directory, { persistent: true }, () => refreshDeadline());
+      if (typeof watcher?.on === 'function') {
+        watcher.on('error', () => {
+          try { watcher?.close?.(); } catch { /* already closed */ }
+          watcher = null;
+        });
+      }
+    } catch {
+      watcher = null;
+    }
+
+    const poll = () => {
+      clearTimeout(refreshTimer);
+      if (settled) return;
+      refreshTimer = setTimeout(() => {
+        refreshDeadline();
+        poll();
+      }, Math.max(20, refreshMs));
+    };
+
+    armTimer();
+    poll();
+    operation.then(
+      (result) => finish(resolve, result),
+      (error) => finish(reject, error),
+    );
+  });
 }
 
 function cleanupCall(factory, label) {
@@ -530,12 +619,18 @@ async function persistCancelledRun({ root, taskId, client, task, key, runId }) {
   });
 }
 
-export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } = {}) {
+export async function runCursorCloudTask({
+  root,
+  taskId,
+  sdk,
+  apiKey,
+  signal,
+  watch = watchDirectory,
+  deadlineRefreshMs = DEADLINE_REFRESH_MS,
+} = {}) {
   const { task } = await readTask(root, taskId);
   const prompt = await readPrompt(root, taskId);
-  const taskTimeoutMs = validTimeout(task.timeout_ms, DEFAULT_TASK_TIMEOUT_MS);
-  const parsedDeadline = Date.parse(task.deadline_at ?? '');
-  const deadlineAt = Number.isFinite(parsedDeadline) ? parsedDeadline : Date.now() + taskTimeoutMs;
+  const deadlineAt = recordedDeadlineAt(task);
   const runIdempotencyKey = task.run_idempotency_key ?? `${task.id}:run:1`;
   const agentId = task.provider_agent_id ?? `bc-${randomUUID()}`;
   let client;
@@ -659,7 +754,14 @@ export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } =
     const rawWait = Promise.resolve().then(() => run.wait());
     rawWait.catch(() => {});
     waitPromise = rawWait;
-    const result = await deadlineCall(deadlineAt, () => rawWait, 'run completion');
+    const result = await waitForRunCompletion({
+      root,
+      taskId,
+      waitPromise: rawWait,
+      deadlineAt,
+      watch,
+      refreshMs: deadlineRefreshMs,
+    });
     return persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, result });
   } catch (error) {
     timedOut ||= error?.code === 'timeout';

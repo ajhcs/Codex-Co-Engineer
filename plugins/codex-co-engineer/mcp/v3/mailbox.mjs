@@ -225,14 +225,38 @@ export async function waitForReply(root, taskId, questionId, {
 
   let watcher = null;
   let watchFailed = false;
+  let rearmAttempted = false;
   let notify = null;
+
+  const closeWatcher = () => {
+    try { watcher?.close?.(); } catch { /* already closed */ }
+    watcher = null;
+  };
+
+  const onWatchError = () => {
+    if (!rearmAttempted) {
+      rearmAttempted = true;
+      arm();
+      notify?.();
+      return;
+    }
+    watchFailed = true;
+    closeWatcher();
+    notify?.();
+  };
+
   const arm = () => {
-    try {
-      watcher?.close?.();
-    } catch { /* already closed */ }
+    closeWatcher();
     try {
       watcher = watch(paths.directory, { persistent: true }, () => notify?.());
-      watchFailed = !watcher || typeof watcher.close !== 'function';
+      if (!watcher || typeof watcher.close !== 'function') {
+        watchFailed = true;
+        watcher = null;
+        return;
+      }
+      if (typeof watcher.on === 'function') {
+        watcher.on('error', onWatchError);
+      }
     } catch {
       watchFailed = true;
       watcher = null;
@@ -261,19 +285,30 @@ export async function waitForReply(root, taskId, questionId, {
     }
     fail('reply_timeout', 'Timed out waiting for a same-session reply.');
   } finally {
-    try { watcher?.close?.(); } catch { /* already closed */ }
+    closeWatcher();
   }
 }
+
+const RECOGNIZED_REPLY_OUTCOMES = Object.freeze([
+  'allow_once',
+  'allow_always',
+  'reject_once',
+  'reject_always',
+  'cancel',
+]);
 
 export function replyDecision(payload, options = []) {
   const value = typeof payload?.response === 'string'
     ? payload.response
     : payload?.response?.outcome ?? payload?.response?.optionId ?? payload?.response?.option_id;
-  if (['allow_once', 'allow_always', 'reject_once', 'reject_always', 'cancel'].includes(value)) {
+  if (RECOGNIZED_REPLY_OUTCOMES.includes(value)) {
     return { outcome: value };
   }
-  const matched = options.find((option) => option?.optionId === value || option?.kind === value);
-  if (matched?.kind) return { outcome: matched.kind };
-  if (typeof value === 'string' && value.length > 0) return { outcome: 'allow_once', optionId: value };
+  const matched = Array.isArray(options)
+    ? options.find((option) => option?.optionId === value || option?.kind === value)
+    : null;
+  if (typeof matched?.kind === 'string' && matched.kind.length > 0) {
+    return { outcome: matched.kind, ...(matched.optionId ? { optionId: matched.optionId } : {}) };
+  }
   return { outcome: 'cancel' };
 }

@@ -27,7 +27,8 @@ The MCP server exposes five tools:
 | `cancel` | Stop one owned local process group or Cursor Cloud run |
 
 `delegate` requires a stable `task_id`, a provider, an absolute Git
-repository root, and a prompt. Providers are `grok`, `cursor-local`,
+repository root, a prompt, and `expected_duration_ms` or a
+backwards-compatible `timeout_ms`. Providers are `grok`, `cursor-local`,
 `cursor-cloud`, and `dsh`; roles are `review` and `implement`.
 
 `task` always returns a compact `progress` snapshot (`event_cursor`,
@@ -228,6 +229,7 @@ Cursor Cloud implementation:
   "repo": "/absolute/path/to/clean-checkout",
   "starting_ref": "0123456789abcdef0123456789abcdef01234567",
   "prompt": "Implement the requested change, run tests, and commit the result.",
+  "expected_duration_ms": 3600000,
   "create_pr": true
 }
 ```

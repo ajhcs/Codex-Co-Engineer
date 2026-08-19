@@ -30,6 +30,23 @@
   procedure. 5-minute, 30-minute, and 4-hour Codex Desktop measurements were
   not executed in this worktree.
 
+### Fixed
+
+- Keep expected-duration and timeout maxima separate so the recorded deadline
+  is always at least `ceil(expected_duration_ms * 1.20)` instead of silently
+  capping the margin. Explicit `timeout_ms` must meet that floor.
+  `delegate` requires `expected_duration_ms` or a backwards-compatible
+  `timeout_ms`.
+- Reject deadline extensions that would not move `deadline_at` strictly later.
+- Diagnostics paging skips a single oversized event line and advances the
+  cursor; last-activity reads the event-log tail in bounded chunks.
+- Same-session reply watchers attach an error handler, re-arm once, then use
+  the low-frequency fallback. Unmatched reply text fails closed to `cancel`.
+- Public MCP receipts redact secrets in `result`, errors, nested handoff, and
+  events.
+- Cursor Cloud run-completion waits re-arm when an audited deadline extension
+  is persisted.
+
 ### Changed
 
 - Keep the five-tool catalog. Terminal wait, diagnostics, deadline extension,

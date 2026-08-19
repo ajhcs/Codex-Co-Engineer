@@ -7,7 +7,19 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import { cancelCursorCloudTask, reconcileCursorCloudTask, runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
+import { extendTaskDeadline } from '../mcp/v3/supervisor.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
+
+async function createCloudTask({ root, prompt, record }) {
+  return createTask({
+    root,
+    prompt,
+    record: {
+      timeout_ms: 30_000,
+      ...record,
+    },
+  });
+}
 
 const run = promisify(execFile);
 
@@ -30,7 +42,7 @@ test('uses stable Cursor agent/run idempotency and records returned PR', async (
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
   await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'initial']);
   const { stdout: head } = await run('git', ['-C', repo, 'rev-parse', 'HEAD']);
-  await createTask({ root, prompt: 'implement it', record: {
+  await createCloudTask({ root, prompt: 'implement it', record: {
     id: 'cloud-one', status: 'accepted', provider: 'cursor-cloud', role: 'implement', cwd: repo, create_pr: true,
   } });
   const observed = {};
@@ -67,7 +79,7 @@ test('uses the configured origin instead of an insteadOf credential rewrite', as
     'url.https://x-access-token:ghs_testtoken12345678@github.com/.insteadOf',
     'https://github.com/',
   ]);
-  await createTask({ root, prompt: 'implement it', record: {
+  await createCloudTask({ root, prompt: 'implement it', record: {
     id: 'cloud-origin-config', status: 'accepted', provider: 'cursor-cloud', role: 'implement', cwd: repo,
   } });
   const sdk = { Agent: { archive: async () => {}, create: async () => ({
@@ -83,7 +95,7 @@ test('uses the configured origin instead of an insteadOf credential rewrite', as
 test('rejects an initial run with a mismatched request identity', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-request-mismatch-'));
   const repo = await createCloudRepo(root);
-  await createTask({ root, prompt: 'reject the wrong run', record: {
+  await createCloudTask({ root, prompt: 'reject the wrong run', record: {
     id: 'cloud-request-mismatch', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   let providerStatus = 'running';
@@ -117,7 +129,7 @@ test('pins review tasks to the exact local HEAD and rejects mutable refs', async
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
   const { stdout: head } = await run('git', ['-C', repo, 'rev-parse', 'HEAD']);
-  await createTask({ root, prompt: 'review it', record: {
+  await createCloudTask({ root, prompt: 'review it', record: {
     id: 'cloud-review-sha', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   const observed = {};
@@ -138,7 +150,7 @@ test('pins review tasks to the exact local HEAD and rejects mutable refs', async
   await run('git', ['init', '-b', 'main', mutableRepo]);
   await commitRepo(mutableRepo);
   await run('git', ['-C', mutableRepo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root: mutableRoot, prompt: 'review it', record: {
+  await createCloudTask({ root: mutableRoot, prompt: 'review it', record: {
     id: 'cloud-review-ref', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: mutableRepo, starting_ref: 'main',
   } });
   let created = false;
@@ -155,7 +167,7 @@ test('rejects an origin URL containing embedded credentials', async () => {
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://token@example.test/repo.git']);
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-url', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   let created = false;
@@ -178,7 +190,7 @@ test('rejects repository URLs with query, fragment, or non-http origin data', as
     await run('git', ['init', '-b', 'main', repo]);
     await commitRepo(repo);
     await run('git', ['-C', repo, 'remote', 'add', 'origin', suffix.includes('://') ? suffix : `https://example.test/repo.git${suffix}`]);
-    await createTask({ root, prompt: 'review', record: {
+    await createCloudTask({ root, prompt: 'review', record: {
       id: `cloud-url-${suffix.replace(/[^a-z]+/giu, '-')}`, status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
     } });
     await assert.rejects(
@@ -190,7 +202,7 @@ test('rejects repository URLs with query, fragment, or non-http origin data', as
 
 test('cancels the provider run and archives the cloud agent', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-cancel-'));
-  await createTask({ root, prompt: 'stop it', record: {
+  await createCloudTask({ root, prompt: 'stop it', record: {
     id: 'cloud-cancel', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-one', prompt_dispatched: true,
   } });
@@ -210,7 +222,7 @@ test('cancels the provider run and archives the cloud agent', async () => {
 
 test('refuses to cancel an arbitrary cloud run when the receipt lacks its run id', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-recover-cancel-'));
-  await createTask({ root, prompt: 'stop it', record: {
+  await createCloudTask({ root, prompt: 'stop it', record: {
     id: 'cloud-recover', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', prompt_dispatched: true,
   } });
@@ -234,7 +246,7 @@ test('times out, cancels, and archives a hanging cloud run', async () => {
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'hang', record: {
+  await createCloudTask({ root, prompt: 'hang', record: {
     id: 'cloud-timeout', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo, timeout_ms: 200,
   } });
   let cancelled = 0;
@@ -268,7 +280,7 @@ test('keeps a task transport-lost when provider confirmation remains active afte
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'fail after dispatch', record: {
+  await createCloudTask({ root, prompt: 'fail after dispatch', record: {
     id: 'cloud-cancel-confirmation', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   let archived = 0;
@@ -294,7 +306,7 @@ test('keeps a task transport-lost when provider confirmation remains active afte
 
 test('does not claim cancellation succeeded when provider state cannot be checked', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-cancel-uncertain-'));
-  await createTask({ root, prompt: 'stop it', record: {
+  await createCloudTask({ root, prompt: 'stop it', record: {
     id: 'cloud-cancel-uncertain', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-one', prompt_dispatched: true,
   } });
@@ -314,7 +326,7 @@ test('does not claim cancellation succeeded when provider state cannot be checke
 
 test('maps cancellation SDK or credential loading failure to transport_lost', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-cancel-load-'));
-  await createTask({ root, prompt: 'stop it', record: {
+  await createCloudTask({ root, prompt: 'stop it', record: {
     id: 'cloud-cancel-load', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-one', prompt_dispatched: true,
   } });
@@ -339,7 +351,7 @@ test('maps cancellation SDK or credential loading failure to transport_lost', as
 
 test('keeps cancellation terminal while reporting a failed archive truthfully', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-cancel-archive-'));
-  await createTask({ root, prompt: 'stop it', record: {
+  await createCloudTask({ root, prompt: 'stop it', record: {
     id: 'cloud-cancel-archive', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-one', prompt_dispatched: true,
   } });
@@ -361,7 +373,7 @@ test('does not recover an arbitrary cloud run after an uncertain dispatch', asyn
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-dispatch-uncertain', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   let archived = 0;
@@ -393,7 +405,7 @@ test('requires an immutable commit starting reference for implementation tasks',
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
   await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'initial']);
-  await createTask({ root, prompt: 'implement', record: {
+  await createCloudTask({ root, prompt: 'implement', record: {
     id: 'cloud-start-ref', status: 'accepted', provider: 'cursor-cloud', role: 'implement', cwd: repo, starting_ref: 'main',
   } });
   let created = false;
@@ -410,7 +422,7 @@ test('treats a non-retryable dispatch rejection as a failed task, not an uncerta
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-dispatch-rejected', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   const sdk = { Agent: {
@@ -436,7 +448,7 @@ test('records a truthful archive flag when terminal cleanup fails', async () => 
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-archive-fails', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   const sdk = { Agent: {
@@ -453,7 +465,7 @@ test('records a truthful archive flag when terminal cleanup fails', async () => 
 
 test('reconciliation fails closed without an exact recorded run identity', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-reconcile-identity-'));
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-reconcile-identity', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', prompt_dispatched: true,
   } });
@@ -476,7 +488,7 @@ test('reconciliation fails closed without an exact recorded run identity', async
 
 test('reconciliation rejects a provider response for a different run identity', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-reconcile-mismatch-'));
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-reconcile-mismatch', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-recorded', prompt_dispatched: true,
   } });
@@ -492,7 +504,7 @@ test('reconciliation rejects a provider response for a different run identity', 
 
 test('maps reconciliation SDK or credential loading failure to transport_lost', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-reconcile-load-'));
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-reconcile-load', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-one', prompt_dispatched: true,
   } });
@@ -509,7 +521,7 @@ test('maps reconciliation SDK or credential loading failure to transport_lost', 
 
 test('reconciliation records a truthful archive result', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-reconcile-archive-'));
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-reconcile-archive', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-agent', provider_run_id: 'run-finished', prompt_dispatched: true,
   } });
@@ -534,7 +546,7 @@ test('does not dispatch after cancellation wins the provider-agent registration 
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'review', record: {
+  await createCloudTask({ root, prompt: 'review', record: {
     id: 'cloud-race', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   let sent = false;
@@ -558,7 +570,7 @@ test('cancels and archives an exact late run when cancellation overlaps a pendin
   await run('git', ['init', '-b', 'main', repo]);
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
-  await createTask({ root, prompt: 'cancel while dispatch is pending', record: {
+  await createCloudTask({ root, prompt: 'cancel while dispatch is pending', record: {
     id: 'cloud-pending-send', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
     provider_agent_id: 'bc-pending-send',
   } });
@@ -628,7 +640,7 @@ test('cancels and archives an exact late run when cancellation overlaps a pendin
 test('does not overwrite a cancellation receipt when pending send returns a different run', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-pending-mismatch-'));
   const repo = await createCloudRepo(root);
-  await createTask({ root, prompt: 'cancel the mismatched late run', record: {
+  await createCloudTask({ root, prompt: 'cancel the mismatched late run', record: {
     id: 'cloud-pending-mismatch', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
     provider_agent_id: 'bc-pending-mismatch',
   } });
@@ -706,7 +718,7 @@ test('recovers a crashed dispatch only by replaying its exact idempotent create 
   await commitRepo(repo);
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
   const { stdout: head } = await run('git', ['-C', repo, 'rev-parse', 'HEAD']);
-  await createTask({ root, prompt: 'recover this exact dispatch', record: {
+  await createCloudTask({ root, prompt: 'recover this exact dispatch', record: {
     id: 'cloud-crash-recovery', status: 'starting', provider: 'cursor-cloud', role: 'review', cwd: repo,
     provider_agent_id: 'bc-crash-recovery', provider_repo_url: 'https://github.com/example/repo.git',
     starting_ref: head.trim(), prompt_dispatched: true, run_idempotency_key: 'cloud-crash-recovery:run:1',
@@ -744,7 +756,7 @@ test('accepts one exact provider request identity and leaves ambiguous matches t
     id: 'run-request-identity', agentId: 'bc-request-identity', status: 'finished',
     wait: async () => ({ id: 'run-request-identity', status: 'finished', result: 'done', git: { branches: [] } }),
   };
-  await createTask({ root, prompt: 'recover by request identity', record: {
+  await createCloudTask({ root, prompt: 'recover by request identity', record: {
     id: 'cloud-request-identity', status: 'starting', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-request-identity', prompt_dispatched: true, run_idempotency_key: key,
   } });
@@ -760,7 +772,7 @@ test('accepts one exact provider request identity and leaves ambiguous matches t
   assert.equal(created, 0);
 
   const ambiguousRoot = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-request-ambiguous-'));
-  await createTask({ root: ambiguousRoot, prompt: 'ambiguous request identity', record: {
+  await createCloudTask({ root: ambiguousRoot, prompt: 'ambiguous request identity', record: {
     id: 'cloud-request-ambiguous', status: 'starting', provider: 'cursor-cloud', role: 'review', cwd: ambiguousRoot,
     provider_agent_id: 'bc-request-ambiguous', prompt_dispatched: true, run_idempotency_key: key,
   } });
@@ -794,7 +806,7 @@ test('recursively redacts prompt, bearer, and API-key material from normal provi
     ['xai', 'live-token-value-1234567890'].join('-'),
     ['ghp', 'live-token-value-1234567890'].join('_'),
   ];
-  await createTask({ root, prompt, record: {
+  await createCloudTask({ root, prompt, record: {
     id: 'cloud-result-redaction', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
   const sdk = { Agent: {
@@ -846,7 +858,7 @@ test('recursively redacts prompt and provider credentials from reconciled result
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-reconcile-redaction-'));
   const prompt = 'reconcile private prompt';
   const apiKey = 'reconcile-api-secret-456';
-  await createTask({ root, prompt, record: {
+  await createCloudTask({ root, prompt, record: {
     id: 'cloud-reconcile-redaction', status: 'running', provider: 'cursor-cloud', role: 'review', cwd: root,
     provider_agent_id: 'bc-reconcile-redaction', provider_run_id: 'run-reconcile-redaction', prompt_dispatched: true,
   } });
@@ -868,4 +880,59 @@ test('recursively redacts prompt and provider credentials from reconciled result
   assert.doesNotMatch(serialized, new RegExp(prompt, 'u'));
   assert.doesNotMatch(serialized, new RegExp(apiKey, 'u'));
   assert.equal(task.provider_error.authorization, '[redacted]');
+});
+
+test('run-completion wait re-arms when an audited deadline extension is recorded', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-deadline-extend-'));
+  const repo = await createCloudRepo(root);
+  const originalMs = 400;
+  await createCloudTask({ root, prompt: 'keep going', record: {
+    id: 'cloud-deadline-extend',
+    status: 'accepted',
+    provider: 'cursor-cloud',
+    role: 'review',
+    cwd: repo,
+    timeout_ms: originalMs,
+    deadline_at: new Date(Date.now() + originalMs).toISOString(),
+    expected_duration_ms: 150,
+    duration_margin: 1.2,
+    deadline_source: 'margin',
+    deadline_extensions: [],
+  } });
+  let finishRun;
+  const finished = new Promise((resolve) => { finishRun = resolve; });
+  const cloudRun = {
+    id: 'run-extend',
+    status: 'running',
+    wait: async () => finished,
+    cancel: async () => { cloudRun.status = 'cancelled'; },
+  };
+  const sdk = { Agent: {
+    create: async () => ({ send: async () => cloudRun, close() {} }),
+    getRun: async () => ({ id: cloudRun.id, status: cloudRun.status }),
+    archive: async () => {},
+  } };
+  const worker = runCursorCloudTask({
+    root,
+    taskId: 'cloud-deadline-extend',
+    sdk,
+    apiKey: 'test-key',
+    deadlineRefreshMs: 20,
+  });
+  const started = Date.now();
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if ((await readTask(root, 'cloud-deadline-extend')).task.status === 'running') break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await readTask(root, 'cloud-deadline-extend')).task.status, 'running');
+  await extendTaskDeadline(root, 'cloud-deadline-extend', {
+    expected_duration_ms: 5_000,
+    reason: 'provider is still running the test suite',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  finishRun({ id: 'run-extend', status: 'finished', result: 'done', git: { branches: [] } });
+  const terminal = await worker;
+  assert.equal(terminal.status, 'completed');
+  assert.ok(Date.now() - started > originalMs);
+  assert.equal((await readTask(root, 'cloud-deadline-extend')).task.deadline_source, 'extended');
 });

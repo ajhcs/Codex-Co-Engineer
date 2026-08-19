@@ -13,7 +13,7 @@ is not another sandbox or policy engine.
 The stable machine identifier is `codex-co-engineer`. The bundled skill is
 `control-codex-co-engineer-agents`. Version 3.1.0 exposes five tools:
 `status`, `delegate`, `task`, `tasks`, and `cancel`. `delegate` records
-`expected_duration_ms` and a 20% deadline margin. `task` can wait with
+`expected_duration_ms` or `timeout_ms` and a 20% deadline margin. `task` can wait with
 `wait_until: "terminal"` until the recorded deadline, inspect
 summary/diagnostics views, extend a deadline with an explicit reason, and
 deliver a same-session reply. It does not push unsolicited stdio callbacks
@@ -181,6 +181,7 @@ Cursor Cloud implementation:
   "role": "implement",
   "starting_ref": "0123456789abcdef0123456789abcdef01234567",
   "prompt": "Implement the requested change, run tests, and commit the result.",
+  "expected_duration_ms": 3600000,
   "create_pr": true
 }
 ```

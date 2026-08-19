@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { DURATION_MARGIN } from '../mcp/v3/contract.mjs';
+import { DURATION_MARGIN, MAX_EXPECTED_DURATION_MS, MAX_TIMEOUT_MS } from '../mcp/v3/contract.mjs';
 import {
   computeMarginTimeoutMs,
   nextDeadlineExtension,
@@ -40,6 +40,23 @@ test('recorded deadline is ceil(expected_duration_ms * 1.20) and never a silent 
     () => resolveTaskDeadline({ expected_duration_ms: 600_000, timeout_ms: 500_000 }),
     (error) => error.code === 'invalid_timeout_ms',
   );
+  assert.throws(
+    () => resolveTaskDeadline({ expected_duration_ms: 600_000, timeout_ms: 650_000 }),
+    (error) => error.code === 'invalid_timeout_ms' && /ceil\(expected_duration_ms \* 1\.20\)/u.test(error.message),
+  );
+  assert.equal(computeMarginTimeoutMs(MAX_EXPECTED_DURATION_MS), MAX_TIMEOUT_MS);
+  assert.equal(computeMarginTimeoutMs(MAX_EXPECTED_DURATION_MS), Math.ceil(MAX_EXPECTED_DURATION_MS * DURATION_MARGIN));
+});
+
+test('delegate requires expected_duration_ms or an explicit timeout_ms', () => {
+  assert.throws(
+    () => resolveTaskDeadline({}),
+    (error) => error.code === 'missing_deadline',
+  );
+  const explicitOnly = resolveTaskDeadline({ timeout_ms: 5_000 }, { now: 1_000 });
+  assert.equal(explicitOnly.expected_duration_ms, null);
+  assert.equal(explicitOnly.timeout_ms, 5_000);
+  assert.equal(explicitOnly.deadline_source, 'explicit');
 });
 
 test('short, medium, and multi-hour fixtures use estimate plus 20%', () => {
@@ -90,6 +107,22 @@ test('deadline extension is audited and refuses a silent roll after expiry', asy
       }),
       (error) => error.code === 'invalid_extend_reason',
     );
+    assert.throws(
+      () => nextDeadlineExtension(stored, {
+        expected_duration_ms: 1_000,
+        reason: 'would shrink the recorded deadline',
+        now: now + 5_000,
+      }),
+      (error) => error.code === 'deadline_not_extended',
+    );
+    assert.throws(
+      () => nextDeadlineExtension(stored, {
+        expected_duration_ms: 10_000,
+        reason: 'same remaining window is not an extension',
+        now,
+      }),
+      (error) => error.code === 'deadline_not_extended',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -100,6 +133,16 @@ test('delegate persists estimate, margin, and deadline on the receipt', async ()
   const repo = path.join(root, 'repo');
   try {
     await mkdir(repo);
+    await assert.rejects(
+      submitTask({
+        task_id: 'missing-deadline',
+        provider: 'grok',
+        repo,
+        prompt: 'needs a deadline',
+        workspace_mode: 'direct',
+      }, { root, env: {}, probeBoundary: readyBoundary }),
+      (error) => error.code === 'missing_deadline',
+    );
     const value = await submitTask({
       task_id: 'estimate-one',
       provider: 'grok',

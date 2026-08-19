@@ -1,4 +1,4 @@
-import { open, readFile, stat } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -21,6 +21,9 @@ import {
 } from './task-store.mjs';
 
 const REDACTED = '[REDACTED]';
+const OVERSIZE_EVENT_SCAN_BYTES = 4 * 1024;
+const LAST_ACTIVITY_CHUNK_BYTES = 16 * 1024;
+const RAW_PUBLIC_KEYS = /^(?:argv|agent_argv|cli_argv|env|stderr|stdout|home|pid|ppid|command|prompt|provider_process_group|provider_process_start_ticks)$/iu;
 const TOKEN_PATTERNS = [
   /\b(?:sk|xai)-[A-Za-z0-9_-]{8,}\b/gu,
   /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{8,}\b/gu,
@@ -68,21 +71,27 @@ export function redactDiagnosticText(value) {
   return text.slice(0, 4_096);
 }
 
-function redactValue(value, depth = 0) {
+function redactValue(value, depth = 0, { maxDepth = 4, maxKeys = 24, maxItems = 16 } = {}) {
   if (value == null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value === 'string') return redactDiagnosticText(value);
-  if (typeof value !== 'object' || depth >= 4) return undefined;
-  if (Array.isArray(value)) return value.slice(0, 16).map((entry) => redactValue(entry, depth + 1)).filter((entry) => entry !== undefined);
+  if (typeof value !== 'object' || depth >= maxDepth) return undefined;
+  if (Array.isArray(value)) {
+    return value.slice(0, maxItems).map((entry) => redactValue(entry, depth + 1, { maxDepth, maxKeys, maxItems })).filter((entry) => entry !== undefined);
+  }
   const out = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (SECRET_KEY.test(key) || /^(?:argv|env|stderr|stdout|home|pid|ppid|command)$/iu.test(key)) continue;
-    const next = redactValue(entry, depth + 1);
+    if (SECRET_KEY.test(key) || RAW_PUBLIC_KEYS.test(key)) continue;
+    const next = redactValue(entry, depth + 1, { maxDepth, maxKeys, maxItems });
     if (next === undefined) continue;
     out[key.slice(0, 64)] = next;
-    if (Object.keys(out).length >= 24) break;
+    if (Object.keys(out).length >= maxKeys) break;
   }
   return out;
+}
+
+export function sanitizePublicReceipt(value) {
+  return redactValue(value, 0, { maxDepth: 6, maxKeys: 64, maxItems: 100 });
 }
 
 function errorFields(task) {
@@ -172,7 +181,7 @@ function gitEvidence(task) {
     resulting_commit: task.handoff?.head ?? task.result_sha ?? null,
     remote_branch: task.provider_remote_branch ?? task.handoff?.branch ?? null,
     pull_request: task.provider_pr_url ?? task.handoff?.pull_request ?? null,
-    validation: task.handoff?.validation ?? task.validation ?? null,
+    validation: sanitizePublicReceipt(task.handoff?.validation ?? task.validation ?? null) ?? null,
     workspace_kind: task.workspace_kind ?? null,
     workspace_mode: task.workspace_mode ?? null,
   });
@@ -244,6 +253,33 @@ export function compactSummary(task, progress, runtime, extras = {}) {
   });
 }
 
+async function skipOversizedEventLine(handle, start, size) {
+  const window = Buffer.alloc(OVERSIZE_EVENT_SCAN_BYTES);
+  let offset = start;
+  while (offset < size) {
+    const length = Math.min(window.length, size - offset);
+    const { bytesRead } = await handle.read(window, 0, length, offset);
+    if (bytesRead === 0) break;
+    const newline = window.subarray(0, bytesRead).indexOf(0x0a);
+    if (newline !== -1) return offset + newline + 1;
+    offset += bytesRead;
+  }
+  return size;
+}
+
+function parseEventLines(text) {
+  const events = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      events.push(redactValue(JSON.parse(line)));
+    } catch {
+      events.push({ type: 'status', corrupt: true });
+    }
+  }
+  return events;
+}
+
 async function readPagedEvents(eventsPath, cursor, maxBytes) {
   const requested = parseEventCursor(cursor) ?? 0;
   const handle = await open(eventsPath, 'r');
@@ -263,19 +299,23 @@ async function readPagedEvents(eventsPath, cursor, maxBytes) {
     const { bytesRead } = await handle.read(buffer, 0, length, requested);
     const slice = buffer.subarray(0, bytesRead);
     const lastNewline = slice.lastIndexOf(0x0a);
-    const complete = lastNewline === -1 ? '' : slice.subarray(0, lastNewline + 1).toString('utf8');
-    const events = [];
-    for (const line of complete.split('\n')) {
-      if (!line) continue;
-      try {
-        events.push(redactValue(JSON.parse(line)));
-      } catch {
-        events.push({ type: 'status', corrupt: true });
+    if (lastNewline === -1) {
+      const hitBudget = bytesRead >= maxBytes;
+      if (hitBudget || requested + bytesRead < size) {
+        const consumed = await skipOversizedEventLine(handle, requested, size);
+        return {
+          events: [{ type: 'status', truncated: true }],
+          event_cursor: String(consumed),
+          more_events: consumed < size,
+          bytes: size,
+        };
       }
+      return { events: [], event_cursor: String(requested), more_events: false, bytes: size };
     }
-    const consumed = requested + (lastNewline === -1 ? 0 : lastNewline + 1);
+    const complete = slice.subarray(0, lastNewline + 1).toString('utf8');
+    const consumed = requested + lastNewline + 1;
     return {
-      events,
+      events: parseEventLines(complete),
       event_cursor: String(consumed),
       more_events: consumed < size,
       bytes: size,
@@ -316,20 +356,47 @@ export async function readTaskDiagnostics(root, taskId, { cursor, max_bytes, run
 
 export async function lastActivityMs(root, task) {
   const updated = Date.parse(task?.updated_at ?? '');
+  const fallback = Number.isFinite(updated) ? updated : Date.parse(task?.created_at ?? '') || 0;
+  const eventsPath = path.join(taskPaths(root, task.id).events);
+  let handle;
   try {
-    const raw = await readFile(path.join(taskPaths(root, task.id).events), 'utf8');
-    const lines = raw.trim().split('\n').filter(Boolean);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      try {
-        const parsed = JSON.parse(lines[index]);
-        const at = Date.parse(parsed?.at ?? '');
-        if (Number.isFinite(at)) return at;
-      } catch {
-        // Keep scanning older complete lines.
-      }
-    }
+    handle = await open(eventsPath, 'r');
   } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+    if (error?.code === 'ENOENT') return fallback;
+    throw error;
   }
-  return Number.isFinite(updated) ? updated : Date.parse(task?.created_at ?? '') || 0;
+  try {
+    const size = (await handle.stat()).size;
+    let end = size;
+    while (end > 0) {
+      const start = Math.max(0, end - LAST_ACTIVITY_CHUNK_BYTES);
+      const length = end - start;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, start);
+      const slice = buffer.subarray(0, bytesRead);
+      let textStart = 0;
+      if (start > 0) {
+        const firstNewline = slice.indexOf(0x0a);
+        if (firstNewline === -1) {
+          end = start;
+          continue;
+        }
+        textStart = firstNewline + 1;
+      }
+      const lines = slice.subarray(textStart).toString('utf8').split('\n').filter(Boolean);
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        try {
+          const parsed = JSON.parse(lines[index]);
+          const at = Date.parse(parsed?.at ?? '');
+          if (Number.isFinite(at)) return at;
+        } catch {
+          // Keep scanning older complete lines.
+        }
+      }
+      end = start;
+    }
+  } finally {
+    await handle.close();
+  }
+  return fallback;
 }

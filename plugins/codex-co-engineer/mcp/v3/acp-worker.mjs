@@ -28,7 +28,7 @@ const MAX_EVENT_DEPTH = 6;
 const MAX_EVENT_KEYS = 64;
 const MAX_EVENT_ITEMS = 64;
 const MAX_CLI_OUTPUT = 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
 const ACPX_TERMINATION_POLL_MS = 25;
@@ -60,7 +60,8 @@ function fail(code, message) {
 function taskTimeoutMs(task, now = Date.now()) {
   const deadline = Date.parse(task?.deadline_at ?? '');
   if (Number.isFinite(deadline)) return Math.max(1, deadline - now);
-  return task?.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+  if (Number.isInteger(task?.timeout_ms) && task.timeout_ms >= 1) return task.timeout_ms;
+  fail('invalid_timeout', 'Task is missing a recorded deadline.');
 }
 
 function isUserFacingPermission(params) {

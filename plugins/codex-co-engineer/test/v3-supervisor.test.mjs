@@ -87,6 +87,7 @@ test('direct local mode uses the caller worktree and does not invoke bootstrap',
       repo,
       prompt: 'make the direct change',
       workspace_mode: 'direct',
+      expected_duration_ms: 10_000,
     }, {
       root,
       env: {},
@@ -139,7 +140,7 @@ test('local boundary failure happens before workspace, task, or prompt creation'
   let createCalls = 0;
   try {
     await assert.rejects(
-      submitTask({ task_id: 'no-boundary', provider: 'grok', repo: '/repo', prompt: 'do not persist' }, {
+      submitTask({ task_id: 'no-boundary', provider: 'grok', repo: '/repo', prompt: 'do not persist', expected_duration_ms: 10_000 }, {
         root,
         env: {},
         probeBoundary: async () => ({
@@ -213,7 +214,7 @@ test('managed launch failure marks the task failed and cleans an abandoned write
   };
   try {
     await assert.rejects(
-      submitTask({ task_id: 'launch-fail', provider: 'grok', repo: '/repo', prompt: 'implement' }, {
+      submitTask({ task_id: 'launch-fail', provider: 'grok', repo: '/repo', prompt: 'implement', expected_duration_ms: 10_000 }, {
         root,
         env: {},
         execute,

@@ -3,9 +3,10 @@
 ## Durable, low-token agent completion waits
 
 Status: implemented in 3.1.0 with remaining real-host MCP pending-call
-measurement  
-Priority: high  
-Component: Codex-Co-Engineer  
+measurement.
+
+Priority: high
+Component: Codex-Co-Engineer
 Last updated: 2026-08-19
 
 ### Goal
@@ -29,8 +30,8 @@ The five-tool catalog is unchanged. The proposed `wait_until_terminal` and
 ```text
 delegate(
   ...,
-  expected_duration_ms,
-  timeout_ms = ceil(expected_duration_ms * 1.20),
+  expected_duration_ms | timeout_ms,
+  timeout_ms >= ceil(expected_duration_ms * 1.20) when both are supplied,
   silence_timeout_ms?
 )
 
@@ -50,8 +51,10 @@ task(
 
 Recorded deadline fields are visible on the receipt: `expected_duration_ms`,
 `duration_margin` (1.20), `timeout_ms`, `deadline_at`, `deadline_source`, and
-`deadline_extensions`. Codex may extend the deadline before expiry with an
-explicit reason; silent roll-forward is rejected.
+`deadline_extensions`. `delegate` requires `expected_duration_ms` or a
+backwards-compatible explicit `timeout_ms`. Codex may extend the deadline
+before expiry with an explicit reason; the new deadline must be strictly
+later, and silent roll-forward is rejected.
 
 `wait_until: "terminal"` is event-driven (`fs.watch`) with a 15-second local
 fallback only after watcher failure. Cancelling the MCP tool call aborts the

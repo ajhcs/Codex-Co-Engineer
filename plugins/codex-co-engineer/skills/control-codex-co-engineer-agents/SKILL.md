@@ -16,10 +16,12 @@ Use the five MCP tools for delegation and lifecycle control.
    acceptance validate the boundary from their actual MCP environment.
 3. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh`.
 4. Call `delegate` with a stable task ID, absolute Git root, a clear prompt,
-   and `expected_duration_ms`. The recorded deadline is
-   `ceil(expected_duration_ms * 1.20)` unless `timeout_ms` is an explicit
-   override. Do not silently roll the deadline; extend it only with
-   `extend_expected_duration_ms` and `extend_reason` before expiry.
+   and `expected_duration_ms` or a backwards-compatible `timeout_ms`. The
+   recorded deadline is `ceil(expected_duration_ms * 1.20)` unless
+   `timeout_ms` is an explicit override of at least that margin. Do not
+   silently roll the deadline; extend it only with
+   `extend_expected_duration_ms` and `extend_reason` before expiry, and only
+   when the new deadline is strictly later.
 5. Use `role: "review"` for analysis and `role: "implement"` for changes.
 6. For local tasks, use `workspace_mode: "managed"` by default. Use
    `workspace_mode: "direct"` only when direct mutation of the supplied

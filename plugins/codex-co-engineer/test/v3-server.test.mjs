@@ -96,6 +96,12 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'expected_duration_ms'));
+  assert.equal(delegateTool.inputSchema.properties.expected_duration_ms.maximum, 86400000);
+  assert.equal(delegateTool.inputSchema.properties.timeout_ms.maximum, 103680000);
+  assert.deepEqual(delegateTool.inputSchema.anyOf, [
+    { required: ['expected_duration_ms'] },
+    { required: ['timeout_ms'] },
+  ]);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
 });
@@ -196,6 +202,65 @@ test('status works without starting a daemon or provider', async () => {
     value.result.structuredContent.local_boundary.ready,
   );
   assert.equal(value.result.structuredContent.active, 0);
+});
+
+test('public MCP receipts redact secrets from result, errors, handoff, and events', async () => {
+  await withServer(async ({ state, request }) => {
+    const secrets = [
+      'sk-result-secret-1234567890',
+      'sk-error-secret-1234567890',
+      'xai-provider-secret-99999999',
+      'sk-handoff-secret-1234567890',
+      'sk-nested-secret-1234567890',
+      'sk-event-secret-1234567890',
+    ];
+    await createTask({
+      root: state,
+      prompt: 'do not leak sk-prompt-secret-1234567890',
+      record: {
+        id: 'server-secrets',
+        status: 'completed',
+        provider: 'grok',
+        result: `done with ${secrets[0]}`,
+        error: { code: 'provider_failed', message: `boom ${secrets[1]}` },
+        provider_error: { message: `provider ${secrets[2]}`, apiKey: secrets[2] },
+        handoff: {
+          head: 'a'.repeat(40),
+          validation: {
+            output: `failed ${secrets[3]}`,
+            apiKey: secrets[4],
+            nested: { note: secrets[3] },
+          },
+        },
+      },
+    });
+    await appendTaskEvent(state, 'server-secrets', {
+      type: 'provider',
+      event: { type: 'tool_call', title: 'read', text: `chunk ${secrets[5]}`, apiKey: secrets[5] },
+    });
+    const calls = [
+      { name: 'status', arguments: {} },
+      { name: 'task', arguments: { task_id: 'server-secrets' } },
+      { name: 'task', arguments: { task_id: 'server-secrets', view: 'diagnostics' } },
+      { name: 'tasks', arguments: {} },
+      { name: 'cancel', arguments: { task_id: 'server-secrets' } },
+    ];
+    for (const [index, call] of calls.entries()) {
+      const response = await request({
+        jsonrpc: '2.0',
+        id: 20 + index,
+        method: 'tools/call',
+        params: call,
+      });
+      const serialized = JSON.stringify(response);
+      for (const secret of [...secrets, 'sk-prompt-secret-1234567890']) {
+        assert.doesNotMatch(serialized, new RegExp(secret, 'u'), `${call.name} leaked ${secret}`);
+      }
+      if (call.name === 'task') {
+        assert.equal(response.result.structuredContent.task.result.includes('[REDACTED]'), true);
+      }
+    }
+  });
 });
 
 test('status fails local providers closed when the MCP environment lacks the user-bus locator', async () => {
