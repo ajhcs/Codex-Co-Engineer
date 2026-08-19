@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PLUGIN = 'plugins/plumbob-harness-control';
+const PLUGIN = 'plugins/codex-co-engineer';
 
 function fail(message) { throw new Error(message); }
 const absolute = (relative) => path.join(ROOT, relative);
@@ -27,7 +27,8 @@ const required = [
   `${PLUGIN}/assets/acpx-third-party-notices.md`,
   `${PLUGIN}/vendor/dsh-acp-demo/LICENSE`, `${PLUGIN}/vendor/dsh-acp-demo/PROVENANCE.json`,
   `${PLUGIN}/vendor/dsh-acp-demo/package.json`,
-  `${PLUGIN}/skills/control-plumbob-agents/SKILL.md`,
+  `${PLUGIN}/skills/control-codex-co-engineer-agents/SKILL.md`,
+  `${PLUGIN}/skills/control-codex-co-engineer-agents/agents/openai.yaml`,
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/inspector-preflight.mjs',
   'scripts/process-boundary-preflight.mjs', 'scripts/mcp-environment-preflight.mjs',
   'tools/acpx-vendor/package.json', 'tools/acpx-vendor/package-lock.json',
@@ -45,16 +46,29 @@ const manifest = await json(`${PLUGIN}/.codex-plugin/plugin.json`);
 const packageJson = await json(`${PLUGIN}/package.json`);
 const mcp = await json(`${PLUGIN}/.mcp.json`);
 const serverText = await text(`${PLUGIN}/mcp/v3/server.mjs`);
-if (manifest.version !== '3.0.1' || packageJson.version !== '3.0.1' || !serverText.includes("version: '3.0.1'")) {
-  fail('Plugin manifest, package, and MCP server must all be version 3.0.1.');
+if (manifest.name !== 'codex-co-engineer' || packageJson.name !== 'codex-co-engineer') {
+  fail('Plugin manifest and package must use the codex-co-engineer identifier.');
+}
+if (manifest.version !== '3.0.2' || packageJson.version !== '3.0.2' || !serverText.includes("version: '3.0.2'")) {
+  fail('Plugin manifest, package, and MCP server must all be version 3.0.2.');
 }
 if (manifest.interface?.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
+if (manifest.interface?.developerName !== 'Codex-Co-Engineer') fail('Public developer name mismatch.');
+if (JSON.stringify(Object.keys(mcp.mcpServers ?? {})) !== JSON.stringify(['codex-co-engineer'])) {
+  fail('MCP manifest must expose exactly the codex-co-engineer server key.');
+}
+const skillText = await text(`${PLUGIN}/skills/control-codex-co-engineer-agents/SKILL.md`);
+if (!/^name: control-codex-co-engineer-agents$/mu.test(skillText)) {
+  fail('Skill name must be the lowercase control-codex-co-engineer-agents identifier.');
+}
+const changelog = await text('CHANGELOG.md');
+if (!changelog.includes('## [3.0.2]')) fail('CHANGELOG.md must record the 3.0.2 release.');
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') fail('Unexpected test script.');
 if (JSON.stringify(packageJson.files) !== JSON.stringify([
   '.codex-plugin', '.mcp.json', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
 ])) fail('Co-Engineer package roots changed.');
 
-const server = mcp.mcpServers?.['plumbob-harness-control'];
+const server = mcp.mcpServers?.['codex-co-engineer'];
 if (server?.command !== 'node'
   || JSON.stringify(server.args) !== JSON.stringify(['--no-warnings', './mcp/v3/server.mjs', '--stdio'])
   || server.tool_timeout_sec !== 65) fail('MCP launch contract mismatch.');
@@ -160,4 +174,20 @@ for (const obsolete of [
   }
 }
 
-process.stdout.write('Codex-Co-Engineer 3.0 release validation passed.\n');
+const forbiddenLegacy = [
+  ['plumbob', '-', 'harness', '-', 'control'].join(''),
+  ['plumbob', '_', 'harness', '_', 'control'].join(''),
+  ['plumbob', '-', 'acpx'].join(''),
+  ['control', '-', 'plumbob', '-', 'agents'].join(''),
+  ['PLUMBOB', '_', 'HARNESS'].join(''),
+];
+for (const relative of tracked) {
+  const value = await readFile(absolute(relative)).catch(() => null);
+  if (!value || value.includes(0)) continue;
+  const source = value.toString('utf8');
+  if (forbiddenLegacy.some((token) => source.toLowerCase().includes(token.toLowerCase()))) {
+    fail(`Legacy product identifier remains in ${relative}.`);
+  }
+}
+
+process.stdout.write('Codex-Co-Engineer 3.0.2 release validation passed.\n');

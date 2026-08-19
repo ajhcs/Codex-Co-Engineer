@@ -34,7 +34,7 @@ npm run setup:check
 ```
 
 In a source checkout, that directory is
-`plugins/plumbob-harness-control`. For a Codex-managed installation, use the
+`plugins/codex-co-engineer`. For a Codex-managed installation, use the
 package path reported by Codex or its plugin manager instead of assuming a
 project-relative path.
 

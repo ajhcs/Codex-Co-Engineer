@@ -231,7 +231,7 @@ test('managed launch failure marks the task failed and cleans an abandoned write
     const task = (await readTask(root, 'launch-fail')).task;
     assert.equal(task.status, 'failed');
     assert.equal(task.error.code, 'worker_failed');
-    assert.doesNotMatch(task.error.message, /private|secret|plumbob/iu);
+    assert.doesNotMatch(task.error.message, /private|secret/iu);
     assert.deepEqual(calls.at(-1), [
       'worktree-bootstrap',
       ['lock', 'clean', 'launch-fail', '--repo', '/worktrees/launch-fail', '--policy', 'dead-local', '--lock-id', 'dead-lock'],

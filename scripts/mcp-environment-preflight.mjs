@@ -9,9 +9,9 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PLUGIN = path.join(ROOT, 'plugins', 'plumbob-harness-control');
+const PLUGIN = path.join(ROOT, 'plugins', 'codex-co-engineer');
 const manifest = JSON.parse(await readFile(path.join(PLUGIN, '.mcp.json'), 'utf8'));
-const definition = manifest.mcpServers?.['plumbob-harness-control'];
+const definition = manifest.mcpServers?.['codex-co-engineer'];
 assert.ok(definition, 'Co-Engineer MCP definition is missing.');
 
 const required = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
@@ -64,7 +64,7 @@ try {
     })}\n`);
   });
   const status = response.result?.structuredContent;
-  assert.equal(status?.version, '3.0.1');
+  assert.equal(status?.version, '3.0.2');
   assert.equal(status?.healthy, true, JSON.stringify(status?.local_boundary));
   assert.equal(status?.local_boundary?.ready, true, JSON.stringify(status?.local_boundary));
   assert.equal(status?.local_boundary?.boundary, 'systemd-user-service-cgroup');

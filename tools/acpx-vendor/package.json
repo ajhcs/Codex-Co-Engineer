@@ -1,5 +1,5 @@
 {
-  "name": "plumbob-acpx-runtime-vendor",
+  "name": "codex-co-engineer-acpx-runtime-vendor",
   "private": true,
   "version": "0.1.0",
   "description": "Reproducible build workspace for the embedded ACPX runtime bundle.",

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-08-19
+
+### Changed
+
+- Adopt `codex-co-engineer` as the package, plugin, MCP server, skill, and
+  repository-path identifier. Human-facing branding is Codex-Co-Engineer.
+- Remove leftover environment fallbacks and vendor package names from the
+  previous identity.
+- Rewrite the root and plugin READMEs around the current 3.x supervisor,
+  provider matrix, workspace model, and discovery/install paths.
+
 ## [3.0.1] - 2026-08-19
 
 ### Fixed

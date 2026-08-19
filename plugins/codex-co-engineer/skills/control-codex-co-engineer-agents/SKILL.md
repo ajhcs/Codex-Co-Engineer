@@ -1,5 +1,5 @@
 ---
-name: control-plumbob-agents
+name: control-codex-co-engineer-agents
 description: Delegate review and implementation work to Grok, Cursor Local, Cursor Cloud, or DeepSeek Harness through the Codex-Co-Engineer ACP-first MCP supervisor. Use for parallel coding, review, task monitoring, worktree-isolated or direct local changes, and cancellation.
 ---
 

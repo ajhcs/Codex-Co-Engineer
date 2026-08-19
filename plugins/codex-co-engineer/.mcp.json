@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "plumbob-harness-control": {
+    "codex-co-engineer": {
       "cwd": ".",
       "command": "node",
       "args": [

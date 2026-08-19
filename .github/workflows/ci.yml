@@ -23,11 +23,11 @@ jobs:
       - run: node scripts/release-prerequisites.mjs
       - run: node scripts/validate-release.mjs
       - run: npm --prefix tools/acpx-vendor ci --ignore-scripts --no-audit --no-fund
-      - run: npm --prefix plugins/plumbob-harness-control test
+      - run: npm --prefix plugins/codex-co-engineer test
       - run: npm --prefix plugins/cursor-cloud-control test
       - run: npm --prefix tools/acpx-vendor run test:publish-provenance
       - run: node scripts/inspector-preflight.mjs
       - run: npm --prefix tools/acpx-vendor run test:reproducible
       - run: npm --prefix tools/acpx-vendor run verify:publish-provenance
-      - run: npm pack ./plugins/plumbob-harness-control --dry-run --ignore-scripts --offline --json
+      - run: npm pack ./plugins/codex-co-engineer --dry-run --ignore-scripts --offline --json
       - run: npm pack ./plugins/cursor-cloud-control --dry-run --ignore-scripts --offline --json

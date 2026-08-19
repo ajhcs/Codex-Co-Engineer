@@ -1,21 +1,46 @@
 # Codex-Co-Engineer
 
-Codex-Co-Engineer is a small stdio MCP supervisor that lets Codex delegate
-real review and implementation work to authenticated peer coding agents:
+**Codex-Co-Engineer** is a small stdio [MCP](https://modelcontextprotocol.io/)
+supervisor that lets Codex delegate real review and implementation work to
+authenticated peer coding agents.
 
-- Grok Build on the local host
-- Cursor Local
-- Cursor Cloud
-- DeepSeek Harness (DSH) with Muse Spark
+Codex stays the chief engineer, reviewer, and merge authority. The peers keep
+their normal coding capabilities, persistent logins, shell access, and
+dependency installation. Codex-Co-Engineer adds lifecycle tracking, optional
+local worktree isolation, bounded cancellation, and inspectable receipts. It
+is not another sandbox or policy engine.
 
-Codex remains the chief engineer, reviewer, and merge authority. Providers
-retain their normal coding capabilities, persistent logins, shell access, and
-dependency installation. Co-Engineer adds lifecycle tracking, optional local
-worktree isolation, bounded cancellation, and useful receipts—not another
-sandbox or policy engine.
+The stable machine identifier is `codex-co-engineer`. The bundled skill is
+`control-codex-co-engineer-agents`. Version 3.0.2 exposes five tools:
+`status`, `delegate`, `task`, `tasks`, and `cancel`.
 
-The stable plugin identifier is `plumbob-harness-control`. Version 3 exposes
-five tools: `status`, `delegate`, `task`, `tasks`, and `cancel`.
+## What Codex-Co-Engineer is for
+
+Use Codex-Co-Engineer when you want Codex to:
+
+- run a review or implementation on Grok Build, Cursor Local, Cursor Cloud, or
+  DeepSeek Harness (DSH) / Muse Spark
+- keep one writer per managed local worktree and branch
+- poll a durable receipt instead of a fire-and-forget shell job
+- cancel an owned local process group or Cursor Cloud run
+- inspect the result before Codex pushes, opens a PR, or merges
+
+Do not use it as a security sandbox, a credential broker, or a replacement for
+the provider's own login and approval flow.
+
+## Provider matrix
+
+| Provider | Identifier | Transport | Workspace | Local process boundary |
+| --- | --- | --- | --- | --- |
+| Grok Build | `grok` | ACP first; CLI fallback only before prompt dispatch | Managed worktree by default, or explicit `direct` | Required |
+| Cursor Local | `cursor-local` | ACP first; CLI fallback only before prompt dispatch | Managed worktree by default, or explicit `direct` | Required |
+| DeepSeek Harness / Muse | `dsh` | Official rc.7 ACP composition through ACPX | Managed worktree by default, or explicit `direct` | Required |
+| Cursor Cloud | `cursor-cloud` | Official Cursor SDK | Remote provider branch; no local worktree | Not used |
+
+Roles are `review` and `implement`. An accepted prompt is never replayed
+through another transport. ACPX does not provide an authoritative prompt-sent
+acknowledgement, so a DSH task is marked `dispatch_uncertain` as soon as ACPX
+spawns and is never replayed through CLI.
 
 ## Install
 
@@ -23,8 +48,8 @@ Requirements:
 
 - Node.js 24 or newer. The release gate is intentionally pinned to Node 24.
 - Git and the `worktree-bootstrap` CLI/skill for managed local workspaces.
-- Linux with a working `systemd --user` manager, `systemd-run` 244 or
-  newer, and a unified cgroup v2 hierarchy for local providers.
+- Linux with a working `systemd --user` manager, `systemd-run` 244 or newer,
+  and a unified cgroup v2 hierarchy for local providers.
 - Authenticated Grok Build and Cursor Local CLIs.
 - A Cursor Cloud API key in its normal owner-only configuration file.
 - The DSH/Muse model credential in its normal owner-only configuration file.
@@ -34,7 +59,7 @@ installed plugin package directory—the directory containing `package.json`
 and `bin/setup.mjs`. In this source checkout that directory is:
 
 ```bash
-cd plugins/plumbob-harness-control
+cd plugins/codex-co-engineer
 npm run setup
 npm run setup:check
 ```
@@ -62,42 +87,34 @@ unavailable when that boundary is unavailable. The release gate also launches
 the MCP through the manifest's exact environment allowlist before accepting a
 local-provider release.
 
-Cursor Cloud uses `CURSOR_API_KEY`,
-`CURSOR_API_KEY_FILE`, or the existing owner-only
-`~/.config/cursor-cloud-control/api-key`. The DSH key defaults to the
-owner-only `~/.config/codex-co-engineer/model-api-key`. Never put credentials
-in MCP arguments or prompts.
+Cursor Cloud uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the existing
+owner-only `~/.config/cursor-cloud-control/api-key`. The DSH key defaults to
+the owner-only `~/.config/codex-co-engineer/model-api-key`. Never put
+credentials in MCP arguments or prompts.
 
-## Delegation model
+## Safety and workspace model
 
-Local Grok and Cursor tasks use ACP. DSH uses the official rc.7 ACP
-composition through ACPX. Cursor Cloud uses the official Cursor SDK. A local
-CLI fallback is allowed only when ACP fails before prompt dispatch; an
-accepted prompt is never replayed through another transport. ACPX does not
-provide an authoritative prompt-sent acknowledgement, so a DSH task is marked
-`dispatch_uncertain` as soon as ACPX spawns and is never replayed through CLI.
-
-Every local worker is launched as a manager-owned transient `systemd --user`
-service with `KillMode=control-group` solely so cancellation reaches detached
+Local workers are launched as manager-owned transient `systemd --user`
+services with `KillMode=control-group` solely so cancellation reaches detached
 descendants and the worker survives the launching client. This is a
 lifecycle/cleanup boundary, not a sandbox: providers inherit the normal
 environment, network, filesystem, credentials, and shell capabilities. Local
 dispatch fails closed when the Linux systemd/cgroup prerequisite is not
-available. This check occurs before Co-Engineer creates a managed worktree,
-task receipt, or prompt file. Cursor Cloud runs in the provider's remote
-environment and does not depend on the local process boundary.
+available. The check occurs before Codex-Co-Engineer creates a managed
+worktree, task receipt, or prompt file. Cursor Cloud runs in the provider's
+remote environment and does not depend on the local process boundary.
 
-Cursor Local and DSH's official fallback CLIs take the prompt positionally,
-so it may be visible to other processes running as the same Unix user for the
+Cursor Local and DSH's official fallback CLIs take the prompt positionally, so
+it may be visible to other processes running as the same Unix user for the
 duration of that fallback. Grok fallback uses an owner-only prompt file.
 
 ### Local workspace modes
 
 Local providers accept `workspace_mode`:
 
-- `managed` (default) creates and locks one
-  `worktree-bootstrap` worktree and branch per task. This is the normal mode
-  for parallel implementation and review.
+- `managed` (default) creates and locks one `worktree-bootstrap` worktree and
+  branch per task. This is the normal mode for parallel implementation and
+  review.
 - `direct` runs against the supplied checkout. Use it only when you
   explicitly accept direct mutation of that checkout.
 
@@ -108,9 +125,9 @@ one task → one worktree → one branch → one writer
 ```
 
 If `worktree-bootstrap` fails before returning an authoritative receipt and
-path, Co-Engineer does not guess at or delete an unknown worktree. Inspect the
-repository with `git worktree list` and the `worktree-bootstrap` lock tooling;
-clean only an exact task/lock that the tooling identifies.
+path, Codex-Co-Engineer does not guess at or delete an unknown worktree.
+Inspect the repository with `git worktree list` and the `worktree-bootstrap`
+lock tooling; clean only an exact task/lock that the tooling identifies.
 
 ### Cursor Cloud requirements
 
@@ -132,7 +149,9 @@ tasks reject it. A local implementation returns its branch and handoff for
 Codex to inspect; Codex may push and open a PR only after confirming that real
 commits exist. Codex controls the final merge.
 
-Example local review:
+## Examples
+
+Local review:
 
 ```json
 {
@@ -146,7 +165,7 @@ Example local review:
 }
 ```
 
-Example Cursor Cloud implementation:
+Cursor Cloud implementation:
 
 ```json
 {
@@ -159,9 +178,6 @@ Example Cursor Cloud implementation:
   "create_pr": true
 }
 ```
-
-Providers are `grok`, `cursor-local`, `cursor-cloud`, and `dsh`. Roles
-are `review` and `implement`.
 
 ## Handoff and cleanup
 
@@ -198,16 +214,46 @@ normal authenticated environment because they are trusted peer coding agents.
 
 Task prompts, events, logs, runtime identities, local paths, branch names, and
 opaque provider IDs are stored under the owner-only state directory, normally
-`$XDG_STATE_HOME/codex-co-engineer` or
-`~/.local/state/codex-co-engineer`. Task directories are `0700`; files are
-`0600`. Prompts and session data are retained for inspection until the
-operator removes the exact terminal task state. See
-[data handling](docs/data-handling.md).
+`$XDG_STATE_HOME/codex-co-engineer` or `~/.local/state/codex-co-engineer`.
+Task directories are `0700`; files are `0600`. Prompts and session data are
+retained for inspection until the operator removes the exact terminal task
+state. See [data handling](docs/data-handling.md).
+
+## Troubleshooting
+
+**How do I check whether Codex-Co-Engineer can dispatch locally?**
+Call `status`. Local providers are ready only when `local_boundary.ready` is
+true. If it is false, the MCP process is missing Linux `systemd --user`,
+`systemd-run` 244+, unified cgroup v2, or the forwarded user-session locators
+(`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`).
+
+**Setup passed, but local providers are unavailable.**
+`setup:check` does not prove the MCP environment. Re-run `status` from the
+actual MCP server process, then confirm the plugin `.mcp.json` allowlist
+forwards `HOME`, `PATH`, `XDG_*`, and `DBUS_SESSION_BUS_ADDRESS`.
+
+**Where is the installed plugin?**
+Use the package path reported by Codex or its plugin manager. In this
+repository the source package is `plugins/codex-co-engineer`.
+
+**A managed worktree appeared without a receipt.**
+Do not guess or delete it. Inspect `git worktree list` and
+`worktree-bootstrap lock inspect`, then clean only an exact identified
+task/lock.
+
+**Cursor Cloud returned HTTP 400 for a valid SHA.**
+Treat it as a provider visibility failure. Make the commit reachable from an
+open PR or the default branch, then retry. Do not replay a prompt that was
+already dispatched.
+
+**Can I put API keys in the MCP tool arguments?**
+No. Use normal provider login or the owner-only key files. Credentials must
+not appear in MCP arguments, prompts, receipts, fixtures, or Git.
 
 ## Development and release
 
 ```bash
-npm --prefix plugins/plumbob-harness-control test
+npm --prefix plugins/codex-co-engineer test
 node scripts/validate-release.mjs
 node scripts/inspector-preflight.mjs
 ```

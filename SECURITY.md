@@ -10,7 +10,7 @@ controls.
 ## Supported versions
 
 Security fixes target the latest release on the default branch. Report the
-stable MCP identifier `plumbob-harness-control` together with the public
+stable MCP identifier `codex-co-engineer` together with the public
 package version.
 
 ## Report privately

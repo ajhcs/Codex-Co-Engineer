@@ -8,7 +8,7 @@ Authoritative reproduction uses `npm ci --offline` in a clean temporary
 tree and therefore requires a preseeded npm cache; it does not claim an
 empty-cache or network-free dependency bootstrap.
 
-Exact lock SHA-512: `sha512-yugpDRvMZI1PxzGHMsM+ePY8FqQHkEJytF5S4wE4+bYF54pECLiFQEE1QGhgJHrYFAfGtZe+MvKqDkU2YrME8Q==`
+Exact lock SHA-512: `sha512-gZHGpLTRyflEcNQszD/mm/Bsg36LAUfV+lM8PNv5c7kAjB/5y2rjNDiMUGgUSc44qJQq+OnIiaax4OsXunP11Q==`
 
 ## Bundled runtime licenses
 

@@ -766,7 +766,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
     };
   }
   return {
-    version: '3.0.1',
+    version: '3.0.2',
     healthy: boundary.ready,
     active: tasks.filter((task) => ACTIVE.has(task.status)).length,
     providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],

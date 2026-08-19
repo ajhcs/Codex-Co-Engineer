@@ -1,6 +1,6 @@
 {
-  "name": "plumbob-harness-control",
-  "version": "3.0.1",
+  "name": "codex-co-engineer",
+  "version": "3.0.2",
   "private": false,
   "description": "Codex-Co-Engineer: ACP-first delegation to Grok, Cursor, Cursor Cloud, and DeepSeek Harness.",
   "license": "MIT",

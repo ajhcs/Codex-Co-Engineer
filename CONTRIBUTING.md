@@ -19,7 +19,7 @@ host boundary.
 
 ```bash
 node --version
-npm --prefix plugins/plumbob-harness-control test
+npm --prefix plugins/codex-co-engineer test
 node scripts/validate-release.mjs
 node scripts/inspector-preflight.mjs
 git diff --check
@@ -32,8 +32,8 @@ after the provider-free gate.
 
 ## Public contract
 
-- Preserve `plumbob-harness-control` as the stable MCP identifier and keep
-  the five-tool surface small.
+- Preserve `codex-co-engineer` as the stable MCP/package identifier, present
+  the product as Codex-Co-Engineer, and keep the five-tool surface small.
 - Local tasks use ACP first and may use the same provider's CLI only when ACP
   fails before prompt dispatch. Never replay an accepted prompt.
 - `workspace_mode: "managed"` is the default for local tasks and creates one

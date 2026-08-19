@@ -21,7 +21,7 @@ const vendorRoot = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(vendorRoot, '..', '..');
 const checkedAssets = join(
   repositoryRoot,
-  'plugins/plumbob-harness-control/assets',
+  'plugins/codex-co-engineer/assets',
 );
 const ASSET_NAMES = [
   'acpx-runtime.mjs',

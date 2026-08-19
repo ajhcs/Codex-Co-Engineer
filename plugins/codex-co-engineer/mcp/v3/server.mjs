@@ -122,7 +122,7 @@ async function handle(message) {
       result: {
         protocolVersion: negotiated,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: '3.0.1' },
+        serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: '3.0.2' },
       },
     });
     return;
