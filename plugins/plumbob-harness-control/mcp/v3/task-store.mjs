@@ -6,7 +6,8 @@ import path from 'node:path';
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
-const UPDATE_LOCK_STALE_MS = 30_000;
+const UPDATE_LOCK_STALE_MS = 2_000;
+const LOCAL_UPDATE_TAILS = new Map();
 
 export function requireTaskId(value) {
   if (typeof value !== 'string' || !TASK_ID.test(value)) {
@@ -82,6 +83,7 @@ export async function createTask({ root = stateRoot(), prompt, record }) {
   const now = new Date().toISOString();
   const id = requireTaskId(record.id);
   const paths = taskPaths(root, id);
+  await prepareDirectory(path.resolve(root));
   await prepareDirectory(path.dirname(paths.directory));
   await mkdir(paths.directory, { mode: 0o700 });
   await chmod(paths.directory, 0o700);
@@ -112,8 +114,15 @@ export async function readPrompt(root, taskId) {
 }
 
 async function liveLockOwner(lockFile) {
+  let raw;
+  let metadata;
   try {
-    const [raw, metadata] = await Promise.all([readFile(lockFile, 'utf8'), stat(lockFile)]);
+    [raw, metadata] = await Promise.all([readFile(lockFile, 'utf8'), stat(lockFile)]);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    return true;
+  }
+  try {
     const value = JSON.parse(raw);
     if (!Number.isInteger(value.pid) || typeof value.start_ticks !== 'string') {
       return Date.now() - metadata.mtimeMs < UPDATE_LOCK_STALE_MS;
@@ -125,9 +134,8 @@ async function liveLockOwner(lockFile) {
     } catch {
       return false;
     }
-  } catch (error) {
-    if (error?.code === 'ENOENT') return false;
-    return true;
+  } catch {
+    return Date.now() - metadata.mtimeMs < UPDATE_LOCK_STALE_MS;
   }
 }
 
@@ -171,6 +179,21 @@ async function acquireUpdateLock(lockFile) {
 
 export async function updateTask(root, taskId, changes) {
   const paths = taskPaths(root, taskId);
+  let releaseLocal;
+  const localGate = new Promise((resolve) => { releaseLocal = resolve; });
+  const previousLocal = LOCAL_UPDATE_TAILS.get(paths.record) ?? Promise.resolve();
+  const localTail = previousLocal.then(() => localGate, () => localGate);
+  LOCAL_UPDATE_TAILS.set(paths.record, localTail);
+  await previousLocal.catch(() => {});
+  try {
+    return await updateTaskWithFileLock(root, paths, taskId, changes);
+  } finally {
+    releaseLocal();
+    if (LOCAL_UPDATE_TAILS.get(paths.record) === localTail) LOCAL_UPDATE_TAILS.delete(paths.record);
+  }
+}
+
+async function updateTaskWithFileLock(root, paths, taskId, changes) {
   const lock = await acquireUpdateLock(paths.updateLock);
   try {
     const { task } = await readTask(root, taskId);
@@ -179,7 +202,8 @@ export async function updateTask(root, taskId, changes) {
       throw new TypeError('Task update must be an object.');
     }
     if (TERMINAL.has(task.status) && nextChanges.status && nextChanges.status !== task.status) return task;
-    if (task.status === 'cancelling' && nextChanges.status && !['cancelling', 'cancelled'].includes(nextChanges.status)) {
+    if (task.status === 'cancelling' && nextChanges.status
+      && !['cancelling', 'cancelled', 'transport_lost'].includes(nextChanges.status)) {
       return task;
     }
     const next = normalizeRecord({

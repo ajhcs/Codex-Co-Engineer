@@ -1,7 +1,7 @@
 {
   "name": "plumbob-harness-control",
   "version": "3.0.0",
-  "description": "Codex-Co-Engineer delegates real coding work to Grok, Cursor Local, Cursor Cloud, and DeepSeek Harness.",
+  "description": "Codex-Co-Engineer delegates real coding work to Grok, Cursor Local, Cursor Cloud, and DeepSeek Harness through a thin ACP-first supervisor.",
   "author": {
     "name": "Plumbob"
   },
@@ -21,8 +21,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex-Co-Engineer",
-    "shortDescription": "Delegate work to Grok, Cursor, and DSH",
-    "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Writers receive isolated Git worktrees; Codex retains review and merge authority.",
+    "shortDescription": "Delegate work to Grok, Cursor Local/Cloud, and DSH",
+    "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Local tasks support managed or explicitly direct workspaces and require a Linux systemd/cgroup cleanup boundary; Cloud tasks start from pushed immutable commit SHAs. Codex retains review and merge authority.",
     "developerName": "Plumbob",
     "category": "Developer Tools",
     "capabilities": [
@@ -32,9 +32,9 @@
     ],
     "defaultPrompt": [
       "Show Codex-Co-Engineer status.",
-      "Delegate a review to Grok or Cursor.",
+      "Delegate a review to Grok, Cursor, or DSH.",
       "Run parallel implementation tasks in managed worktrees.",
-      "Use Cursor Cloud for a pushed branch and optional draft PR."
+      "Use Cursor Cloud with a pushed commit SHA and optional PR."
     ],
     "brandColor": "#111111",
     "composerIcon": "./assets/icon.svg",

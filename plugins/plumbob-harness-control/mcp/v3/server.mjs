@@ -16,7 +16,7 @@ const TOOLS = [
   },
   {
     name: 'delegate',
-    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Every local task receives a managed worktree and branch.',
+    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Local tasks use a managed worktree by default; direct mode is explicit.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -25,9 +25,10 @@ const TOOLS = [
         repo: { type: 'string', description: 'Absolute Git worktree root.' },
         prompt: { type: 'string', minLength: 1, maxLength: 262144 },
         role: { type: 'string', enum: ['review', 'implement'], default: 'implement' },
+        workspace_mode: { type: 'string', enum: ['managed', 'direct'], default: 'managed' },
         timeout_ms: { type: 'integer', minimum: 1000, maximum: 86400000 },
-        create_pr: { type: 'boolean', default: false },
-        starting_ref: { type: 'string', minLength: 1, maxLength: 512 },
+        create_pr: { type: 'boolean', default: false, description: 'Cursor Cloud only.' },
+        starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable Cursor Cloud commit SHA.' },
       },
       required: ['task_id', 'provider', 'repo', 'prompt'],
       additionalProperties: false,
@@ -88,7 +89,10 @@ function errorResult(error) {
 
 async function callTool(name, args = {}) {
   const root = stateRoot();
-  if (name === 'status') return result(await supervisorStatus(root));
+  if (name === 'status') {
+    const value = await supervisorStatus(root);
+    return result({ ...value, tasks: value.tasks.map(publicTask) });
+  }
   if (name === 'delegate') {
     const value = await submitTask(args, { root });
     return result({ task: publicTask(value.task), runtime: value.runtime });

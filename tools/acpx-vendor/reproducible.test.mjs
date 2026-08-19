@@ -33,6 +33,7 @@ const VENDOR_FILES = [
   'package-lock.json',
   'package.json',
   'src/entry.mjs',
+  'src/hardening-overlay.mjs',
 ];
 const CACHE_UNAVAILABLE_CODE = 'ACPX_REPRO_CACHE_UNAVAILABLE';
 const INSTALL_FAILED_CODE = 'ACPX_REPRO_INSTALL_FAILED';

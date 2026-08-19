@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { appendTaskEvent, readPrompt, readTask, taskPaths, updateTask } from './task-store.mjs';
+import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
 
@@ -22,8 +22,23 @@ const PROVIDERS = Object.freeze({
 const MAX_ARG_COUNT = 64;
 const MAX_ARG_BYTES = 16 * 1024;
 const MAX_EVENT_TEXT = 4 * 1024;
+const MAX_EVENT_BYTES = 32 * 1024;
+const MAX_EVENT_DEPTH = 6;
+const MAX_EVENT_KEYS = 64;
+const MAX_EVENT_ITEMS = 64;
 const MAX_CLI_OUTPUT = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+const OMIT_EVENT_KEYS = new Set(['rawinput', 'rawoutput', 'content', 'availablecommands']);
+const SENSITIVE_EVENT_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|password|secret|cookie|credential|private[_-]?key)/iu;
+const TOKEN_PATTERNS = [
+  /\b(?:sk|xai)-[A-Za-z0-9_-]{8,}\b/gu,
+  /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{8,}\b/gu,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/giu,
+  /\b(?:api[_-]?key|authorization|token|secret|password)\s*[:=]\s*["']?[^,\s"']+/giu,
+];
+const REDACTED = '[REDACTED]';
+const TRUNCATED = '[TRUNCATED]';
 
 export class AcpWorkerError extends Error {
   constructor(code, message, options) {
@@ -73,34 +88,75 @@ function providerConfiguration(task) {
   return { agent: definition.agent, override: null };
 }
 
-function boundedEvent(event) {
-  if (!plainObject(event)) return { type: 'status', text: String(event).slice(0, MAX_EVENT_TEXT) };
-  const safe = { ...event };
-  for (const key of ['text', 'title', 'status']) {
-    if (typeof safe[key] === 'string' && safe[key].length > MAX_EVENT_TEXT) {
-      safe[key] = `${safe[key].slice(0, MAX_EVENT_TEXT)}…`;
-    }
+function boundedText(value, prompt, budget) {
+  let text = sanitizeText(value, prompt);
+  if (text.length > MAX_EVENT_TEXT) text = `${text.slice(0, MAX_EVENT_TEXT)}…`;
+  if (text.length <= budget.remaining) {
+    budget.remaining -= text.length;
+    return text;
   }
-  delete safe.rawInput;
-  delete safe.rawOutput;
-  delete safe.content;
-  delete safe.availableCommands;
-  return safe;
+  if (budget.remaining <= 0) return TRUNCATED;
+  const clipped = text.slice(0, Math.max(0, budget.remaining - 1));
+  budget.remaining = 0;
+  return `${clipped}…`;
 }
 
-function publicError(error) {
+function boundedValue(value, prompt, budget, depth = 0, ancestors = new WeakSet()) {
+  if (budget.remaining <= 0) return TRUNCATED;
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (typeof value === 'string') return boundedText(value, prompt, budget);
+  if (typeof value !== 'object') return boundedText(String(value), prompt, budget);
+  if (ancestors.has(value)) return REDACTED;
+  if (depth >= MAX_EVENT_DEPTH) return TRUNCATED;
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const bounded = value
+        .slice(0, MAX_EVENT_ITEMS)
+        .map((entry) => boundedValue(entry, prompt, budget, depth + 1, ancestors));
+      if (value.length > MAX_EVENT_ITEMS) bounded.push(TRUNCATED);
+      return bounded;
+    }
+    const bounded = {};
+    const entries = Object.entries(value);
+    for (const [key, entry] of entries.slice(0, MAX_EVENT_KEYS)) {
+      const normalizedKey = key.toLowerCase();
+      if (OMIT_EVENT_KEYS.has(normalizedKey)) continue;
+      const safeKey = key.slice(0, 128);
+      if (SENSITIVE_EVENT_KEY.test(key)) bounded[safeKey] = REDACTED;
+      else bounded[safeKey] = boundedValue(entry, prompt, budget, depth + 1, ancestors);
+      if (budget.remaining <= 0) break;
+    }
+    if (entries.length > MAX_EVENT_KEYS && budget.remaining > 0) bounded._truncated = true;
+    return bounded;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+export function boundedEvent(event, prompt = '') {
+  const budget = { remaining: MAX_EVENT_BYTES };
+  if (!plainObject(event)) return { type: 'status', text: boundedText(String(event), prompt, budget) };
+  const safe = boundedValue(event, prompt, budget);
+  return plainObject(safe) ? safe : { type: 'status', text: boundedText(safe, prompt, budget) };
+}
+
+export function publicError(error, prompt = '') {
+  const rawCode = typeof error?.code === 'string' ? error.code : 'acp_worker_failed';
+  const code = /^[A-Za-z0-9._-]{1,128}$/u.test(rawCode) ? rawCode : 'acp_worker_failed';
+  const message = error instanceof Error ? error.message : 'ACP worker failed.';
   return {
-    code: typeof error?.code === 'string' ? error.code : 'acp_worker_failed',
-    message: error instanceof Error ? error.message.slice(0, MAX_EVENT_TEXT) : 'ACP worker failed.',
+    code,
+    message: boundedText(message, prompt, { remaining: MAX_EVENT_TEXT }),
   };
 }
 
-function sanitizeText(value, prompt) {
+export function sanitizeText(value, prompt) {
   let text = String(value ?? '');
   if (prompt) text = text.replaceAll(prompt, '[REDACTED_PROMPT]');
-  return text
-    .replace(/\b(?:sk|ghp|xai)[-_][A-Za-z0-9_-]{16,}\b/gu, '[REDACTED_TOKEN]')
-    .replace(/\b(api[_-]?key|authorization)\s*[:=]\s*\S+/giu, '$1=[REDACTED]');
+  for (const pattern of TOKEN_PATTERNS) text = text.replace(pattern, REDACTED);
+  return text;
 }
 
 function processStartTicks(pid) {
@@ -148,6 +204,28 @@ async function secureAcpxSessions() {
     }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function awaitSupervisorRegistration(root, taskId, signal) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (signal?.aborted) fail('cancelled', 'Task was cancelled before worker registration.');
+    const { task } = await readTask(root, taskId);
+    if (!['accepted', 'transport_lost'].includes(task.status)) {
+      fail('cancelled', `Task cannot start from ${task.status}.`);
+    }
+    if (await readRuntimeRecord(root, taskId)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  fail('worker_registration_timeout', 'Supervisor did not register the worker before dispatch.');
+}
+
+async function removeStalePromptTransports(root, taskId) {
+  const directory = taskPaths(root, taskId).directory;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isFile() && /^(?:cli-prompt-|flow-input-)/u.test(entry.name)) {
+      await rm(path.join(directory, entry.name), { force: true });
+    }
   }
 }
 
@@ -210,17 +288,19 @@ function extractedCliResult(stdout, prompt) {
 }
 
 export async function runCliFallback({ root, task, prompt, signal } = {}) {
-  if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled before startup.');
   const promptFile = path.join(taskPaths(root, task.id).directory, `cli-prompt-${randomUUID()}.txt`);
-  await writeFile(promptFile, prompt, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  const argv = cliCommand(task, promptFile, prompt);
   let child;
   let stdout = '';
   let stderr = '';
   let timer;
   let termination;
+  let cancel;
   let timedOut = false;
   try {
+    if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled before startup.');
+    await writeFile(promptFile, prompt, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled before startup.');
+    const argv = cliCommand(task, promptFile, prompt);
     child = spawn(argv[0], argv.slice(1), {
       cwd: task.cwd,
       env: process.env,
@@ -236,11 +316,12 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     });
     child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-MAX_CLI_OUTPUT); });
     child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-MAX_CLI_OUTPUT / 4); });
-    const cancel = () => {
+    cancel = () => {
       termination ??= terminateChildGroup(child);
     };
     signal?.addEventListener('abort', cancel, { once: true });
     await spawned;
+    if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled before startup.');
     await updateTask(root, task.id, {
       status: 'running',
       transport: 'cli',
@@ -278,10 +359,11 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       finished_at: new Date().toISOString(),
     });
   } catch (error) {
-    const failure = publicError(error);
-    await appendTaskEvent(root, task.id, { type: 'terminal', status: signal?.aborted ? 'cancelled' : 'failed', error: failure }).catch(() => {});
+    const failure = publicError(error, prompt);
+    const terminalStatus = signal?.aborted || error?.code === 'cancelled' ? 'cancelled' : 'failed';
+    await appendTaskEvent(root, task.id, { type: 'terminal', status: terminalStatus, error: failure }).catch(() => {});
     await updateTask(root, task.id, {
-      status: signal?.aborted ? 'cancelled' : 'failed',
+      status: signal?.aborted || error?.code === 'cancelled' ? 'cancelled' : 'failed',
       error: failure,
       provider_process_group: null,
       provider_process_start_ticks: null,
@@ -291,6 +373,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     throw error;
   } finally {
     clearTimeout(timer);
+    if (cancel) signal?.removeEventListener('abort', cancel);
     if (child && childGroupAlive(child)) await terminateChildGroup(child);
     await rm(promptFile, { force: true });
   }
@@ -369,7 +452,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     signal?.removeEventListener('abort', cancel);
     if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled.');
     if (exit.code !== 0) {
-      const detail = stderr.trim() || stdout.trim() || `ACPX exited ${exit.code ?? exit.signal}`;
+      const detail = sanitizeText(stderr.trim() || stdout.trim() || `ACPX exited ${exit.code ?? exit.signal}`, prompt);
       fail('acpx_failed', detail.slice(-MAX_EVENT_TEXT));
     }
     const flow = parseFlowResult(stdout);
@@ -378,7 +461,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     const outputValue = typeof rawOutput === 'string'
       ? rawOutput
       : rawOutput?.text ?? rawOutput?.result ?? rawOutput?.output;
-    const output = typeof outputValue === 'string' ? outputValue.slice(0, MAX_EVENT_TEXT) : null;
+    const output = typeof outputValue === 'string' ? sanitizeText(outputValue, prompt).slice(0, MAX_EVENT_TEXT) : null;
     const compact = { type: 'text_delta', text: output ?? 'DSH ACP task completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed', stop_reason: 'end_turn' });
@@ -397,7 +480,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     if (current.prompt_dispatched !== true && current.dispatch_intent !== true && !authenticationFailure(error)) {
       await updateTask(root, task.id, {
         status: 'starting',
-        acp_error: publicError(error),
+        acp_error: publicError(error, prompt),
         fallback_safe: true,
         provider_process_group: null,
         provider_process_start_ticks: null,
@@ -405,7 +488,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       throw error;
     }
     const status = signal?.aborted ? 'cancelled' : 'failed';
-    const failure = publicError(error);
+    const failure = publicError(error, prompt);
     await appendTaskEvent(root, task.id, { type: 'terminal', status, error: failure }).catch(() => {});
     await updateTask(root, task.id, {
       status,
@@ -465,9 +548,9 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
           type: 'transport',
           state: 'acp_failed_before_dispatch',
           fallback: 'cli',
-          error: publicError(error),
+          error: publicError(error, prompt),
         }).catch(() => {});
-        await updateTask(root, taskId, { status: 'starting', fallback_from: 'acp', acp_error: publicError(error) });
+        await updateTask(root, taskId, { status: 'starting', fallback_from: 'acp', acp_error: publicError(error, prompt) });
         return runCliFallback({ root, task: { ...task, ...current }, prompt, signal });
       }
       throw error;
@@ -515,7 +598,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     let output = '';
     try {
       for await (const event of turn.events) {
-        const compact = boundedEvent(event);
+        const compact = boundedEvent(event, prompt);
         await appendTaskEvent(root, taskId, { type: 'provider', event: compact });
         lastEvent = compact;
         if (compact.type === 'text_delta' && compact.stream !== 'thought' && typeof compact.text === 'string') {
@@ -533,13 +616,13 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       stop_reason: result.stopReason ?? null,
       last_event: lastEvent,
       result: output || null,
-      ...(result.status === 'failed' ? { error: publicError(result.error), fallback_safe: false } : {}),
+      ...(result.status === 'failed' ? { error: publicError(result.error, prompt), fallback_safe: false } : {}),
       finished_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, taskId, { type: 'terminal', status, stop_reason: result.stopReason ?? null });
     return terminal;
   } catch (error) {
-    const failure = publicError(error);
+    const failure = publicError(error, prompt);
     const current = (await readTask(root, taskId)).task;
     if (current.prompt_dispatched !== true && current.dispatch_intent !== true && !authenticationFailure(error)) {
       await appendTaskEvent(root, taskId, {
@@ -582,20 +665,22 @@ async function runCli(argv) {
   const requestPath = argv[1];
   if (!path.isAbsolute(requestPath)) fail('invalid_request', 'Request path must be absolute.');
   const request = JSON.parse(await readFile(requestPath, 'utf8'));
-  if (process.env.WORKTREE_BOOTSTRAP_TASK) {
-    await runFile('worktree-bootstrap', [
-      'verify',
-      process.env.WORKTREE_BOOTSTRAP_TASK,
-      '--repo',
-      process.cwd(),
-      '--require-writer',
-    ]);
-  }
   const controller = new AbortController();
   const cancel = () => controller.abort(new AcpWorkerError('cancelled', 'Worker signal received.'));
   process.once('SIGINT', cancel);
   process.once('SIGTERM', cancel);
   try {
+    await awaitSupervisorRegistration(request.root, request.task_id, controller.signal);
+    await removeStalePromptTransports(request.root, request.task_id);
+    if (process.env.WORKTREE_BOOTSTRAP_TASK) {
+      await runFile('worktree-bootstrap', [
+        'verify',
+        process.env.WORKTREE_BOOTSTRAP_TASK,
+        '--repo',
+        process.cwd(),
+        '--require-writer',
+      ]);
+    }
     let task = await runAcpTask({ root: request.root, taskId: request.task_id, signal: controller.signal });
     if (process.env.WORKTREE_BOOTSTRAP_TASK) {
       try {

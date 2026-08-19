@@ -17,10 +17,10 @@ function inspect(method, toolName) {
     '--method', method,
   ];
   if (toolName) argv.push('--tool-name', toolName, '--tool-args-json', '{}');
-  argv.push('--format', 'json');
+  argv.push('--format', 'json', '-e', `CODEX_CO_ENGINEER_STATE_DIR=${state}`);
   const result = spawnSync(inspector, argv, {
     cwd: ROOT,
-    env: { ...process.env, CODEX_CO_ENGINEER_STATE_DIR: state },
+    env: process.env,
     encoding: 'utf8',
     timeout: 30_000,
   });
@@ -37,6 +37,7 @@ try {
   assert.equal(status.version, '3.0.0');
   assert.equal(status.healthy, true);
   assert.equal(status.active, 0);
+  assert.deepEqual(status.tasks, []);
   assert.deepEqual(status.providers, ['grok', 'cursor-local', 'dsh', 'cursor-cloud']);
   process.stdout.write(`${JSON.stringify({ tools: listed.tools.map((tool) => tool.name), status }, null, 2)}\n`);
 } finally {

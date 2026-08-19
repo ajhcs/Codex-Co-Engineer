@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { runAcpTask } from '../mcp/v3/acp-worker.mjs';
+import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText } from '../mcp/v3/acp-worker.mjs';
 import { createTask, readTask } from '../mcp/v3/task-store.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -45,6 +45,33 @@ test('runs a prompt through ACP and persists a compact receipt', async () => {
   assert.match(events, /"status":"completed"/u);
 });
 
+test('recursively bounds and redacts provider events and errors', () => {
+  const prompt = 'private prompt sk-prompt-secret-1234567890';
+  const event = {
+    type: 'provider_update',
+    text: `${prompt} xai-live-secret-1234567890`,
+    nested: {
+      prompt,
+      apiKey: 'sk-live-secret-1234567890',
+      authorization: 'Bearer live-secret-1234567890',
+      rawOutput: 'private provider payload',
+      deep: { deeper: { deepest: { value: 'bounded' } } },
+    },
+    list: Array.from({ length: 80 }, (_, index) => `entry-${index}`),
+    huge: 'x'.repeat(20_000),
+  };
+  const safe = boundedEvent(event, prompt);
+  const serialized = JSON.stringify(safe);
+  assert.doesNotMatch(serialized, /private prompt|sk-prompt-secret|xai-live-secret|sk-live-secret|Bearer live-secret/u);
+  assert.equal(safe.nested.apiKey, '[REDACTED]');
+  assert.equal(safe.nested.authorization, '[REDACTED]');
+  assert.equal(safe.nested.rawOutput, undefined);
+  assert.ok(serialized.length < 32 * 1024);
+  assert.equal(sanitizeText(`failure: ${prompt} ghp_live-secret-1234567890`, prompt).includes(prompt), false);
+  const failure = publicError(new Error(`provider failed for ${prompt} with token ghp_live-secret-1234567890`), prompt);
+  assert.doesNotMatch(failure.message, /private prompt|ghp_live-secret/u);
+});
+
 test('ACP startup failure falls back once before prompt dispatch', async () => {
   const value = await fixture({
     agentArgv: ['/definitely/missing/acp-agent'],
@@ -59,6 +86,26 @@ test('ACP startup failure falls back once before prompt dispatch', async () => {
   assert.equal(task.result, 'CLI_FALLBACK_OK');
   assert.equal(task.prompt_dispatched, true);
   assert.equal(task.fallback_safe, false);
+});
+
+test('pre-aborted CLI fallback records a terminal cancellation', async () => {
+  const value = await fixture({
+    id: 'pre-aborted-fallback',
+    cliArgv: [process.execPath, '-e', 'process.stdout.write("SHOULD_NOT_RUN")'],
+  });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    runCliFallback({ root: value.root, task: (await readTask(value.root, value.taskId)).task, prompt: 'private fallback prompt', signal: controller.signal }),
+    (error) => error.code === 'cancelled',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'cancelled');
+  assert.equal(task.error.code, 'cancelled');
+  assert.ok(task.finished_at);
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.match(events, /"status":"cancelled"/u);
+  assert.equal((await readdir(path.join(value.root, 'tasks', value.taskId))).some((entry) => entry.startsWith('cli-prompt-')), false);
 });
 
 test('authentication failures do not trigger a futile CLI fallback', async () => {

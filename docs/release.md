@@ -1,30 +1,67 @@
 # Release process
 
-The authoritative gate runs once against an exact clean local candidate:
+The authoritative gate runs once against one exact clean local candidate:
 
 ```sh
 release-gate plan --repo "$PWD"
 release-gate run --repo "$PWD"
 ```
 
-The gate checks Node 24 and MCP Inspector 2.2.0, validates the 3.x five-tool
-surface, bootstraps the pinned ACPX source tree, runs the Co-Engineer tests and
-provider-free Inspector smoke test, verifies ACPX reproducibility/provenance,
-and inspects package inventories. It does not require provider credentials.
+The package supports Node.js 24 and newer. The release gate is intentionally
+pinned to Node.js 24, MCP Inspector 2.2.0, and the recorded ACPX/DSH
+provenance so the release receipt is reproducible. The gate validates the
+thin five-tool catalog, package contents, provider-free Inspector smoke test,
+ACPX reproducibility/provenance, and both package inventories. It does not
+require provider credentials or send repository content to a model.
 
-GitHub Actions mirrors the portable stages. It is diagnostic, not a replacement
-for the exact-tree receipt.
+GitHub Actions mirrors the portable stages. It is diagnostic evidence, not a
+replacement for the exact-tree local receipt.
+
+## Host acceptance
 
 After the provider-free gate passes:
 
 1. Run `npm run setup:check` on the target host.
-2. Run one bounded live acceptance task through Grok, Cursor Local, Cursor
+   This validates CLI, ACPX/DSH, Cursor SDK, and `worktree-bootstrap`
+   dependencies; it does not prove the local process boundary.
+2. Validate Linux `systemd --user`, `systemd-run` 244 or newer, and unified
+   cgroup v2 with the release/live process-boundary acceptance. The transient
+   scope uses `KillMode=control-group` solely for descendant cleanup and is
+   not a sandbox or capability restriction.
+3. Verify persistent normal authentication for Grok and Cursor Local, the
+   owner-only DSH model key, and the owner-only Cursor Cloud API key.
+4. Run one bounded opt-in acceptance task through Grok, Cursor Local, Cursor
    Cloud, and DSH.
-3. Verify terminal receipts, zero active tasks, clean caller checkouts, and no
-   abandoned provider run.
-4. Inspect the packed payload and commit author metadata for personal data.
-5. Open the release PR. Codex reviews and merges only after CI and independent
-   provider review pass.
+5. For local tasks, verify ACP first; if fallback occurs, prove it happened
+   before prompt dispatch. Verify terminal receipts, zero active tasks, clean
+   direct-mode caller checkouts, and retained managed-worktree handoffs.
+6. For Cursor Cloud, use a clean checkout with a provider-accessible origin
+   and an exact immutable `starting_ref` commit SHA that is already pushed.
+   Verify the remote run, branch, and any PR are archived or accounted for.
+7. Inspect the packed payload and current commit metadata for credentials,
+   personal paths, and machine-specific information. Live receipts remain
+   local and must not contain credentials or raw private repository content.
 
-Live acceptance receipts stay local and must not contain credentials or raw
-private repository content.
+## Handoff and cleanup
+
+Codex reviews and merges. Managed local worktrees remain until their result is
+accepted or deliberately discarded:
+
+```sh
+worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
+worktree-bootstrap lock inspect TASK --repo /absolute/worktree
+worktree-bootstrap lock clean TASK --repo /absolute/worktree \
+  --policy dead-local --lock-id LOCK_ID
+git worktree remove /absolute/worktree
+```
+
+Use the exact lock ID reported by inspection; never delete a lock by hand.
+Remove only the corresponding branch and terminal task-state directory after
+the receipt is no longer needed. Direct-mode tasks have no managed worktree.
+Cursor Cloud remote branches and PRs are provider artifacts and require
+explicit review/closure.
+
+Open the release PR only after the local gate, CI, package/privacy review, and
+independent provider review pass. `create_pr` is Cloud-only; local workers
+return commits and handoff evidence for Codex to decide whether a PR should be
+opened. Never create an empty PR.

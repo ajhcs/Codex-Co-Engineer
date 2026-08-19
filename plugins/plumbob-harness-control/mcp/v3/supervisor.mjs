@@ -24,12 +24,20 @@ import {
   loadCursorSdk,
   reconcileCursorCloudTask,
 } from './cursor-cloud-worker.mjs';
+import {
+  inspectProcessBoundary,
+  launchProcessBoundary,
+  restoreProcessBoundary,
+  stopProcessBoundary,
+} from './process-boundary.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
 const CLOUD_WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cursor-cloud-worker.mjs');
 const ACTIVE = new Set(['accepted', 'starting', 'running', 'cancelling', 'transport_lost']);
 const PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
+const WORKSPACE_MODES = new Set(['managed', 'direct']);
+const WORKTREE_CREATE_MAX_BUFFER = 16 * 1024 * 1024;
 
 export class SupervisorError extends Error {
   constructor(code, message, options) {
@@ -81,15 +89,28 @@ async function workerEnvironment(provider, source = process.env) {
   return env;
 }
 
-function parseWorktreeResult(stdout) {
-  let value;
-  try {
-    value = JSON.parse(stdout);
-  } catch {
-    fail('worktree_create_failed', 'worktree-bootstrap did not return JSON.');
+function parseJsonSuffix(stdout) {
+  const text = String(stdout ?? '').trim();
+  for (let index = text.lastIndexOf('{'); index >= 0; index = text.lastIndexOf('{', index - 1)) {
+    try {
+      return JSON.parse(text.slice(index));
+    } catch {
+      // Bootstrap commands may write arbitrary text before the final receipt.
+    }
   }
-  if (value?.status !== 'ready' || typeof value.worktree_path !== 'string' || typeof value.branch !== 'string') {
-    fail('worktree_create_failed', 'worktree-bootstrap returned an invalid ready receipt.');
+  return null;
+}
+
+function parseWorktreeResult(stdout, taskId) {
+  const value = parseJsonSuffix(stdout);
+  if (value?.status !== 'ready'
+    || value.task !== taskId
+    || typeof value.worktree_path !== 'string'
+    || !path.isAbsolute(value.worktree_path)
+    || path.resolve(value.worktree_path) !== value.worktree_path
+    || typeof value.branch !== 'string'
+    || value.branch.length === 0) {
+    fail('worktree_create_failed', 'worktree-bootstrap did not return a valid ready receipt.');
   }
   return value;
 }
@@ -103,9 +124,9 @@ export async function createWriterWorkspace({ taskId, repo, execute = execFile }
     if (!base) fail('worktree_create_failed', 'Writer source must be attached to a branch.');
     const { stdout } = await execute('worktree-bootstrap', ['create', taskId, '--repo', repo, '--base', base], {
       encoding: 'utf8',
-      maxBuffer: 1024 * 1024,
+      maxBuffer: WORKTREE_CREATE_MAX_BUFFER,
     });
-    return parseWorktreeResult(stdout);
+    return parseWorktreeResult(stdout, taskId);
   } catch (error) {
     if (error instanceof SupervisorError) throw error;
     throw new SupervisorError('worktree_create_failed', error?.stderr?.trim() || error?.message || 'worktree-bootstrap failed.', { cause: error });
@@ -115,10 +136,92 @@ export async function createWriterWorkspace({ taskId, repo, execute = execFile }
 async function readerWorkspace(repo, execute = execFile) {
   normalizedAbsolute(repo, 'repo');
   const resolved = await realpath(repo);
-  const { stdout } = await execute('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
-  const root = path.resolve(stdout.trim());
+  const [{ stdout: rootOutput }, { stdout: branchOutput }, { stdout: shaOutput }] = await Promise.all([
+    execute('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }),
+    execute('git', ['-C', resolved, 'branch', '--show-current'], { encoding: 'utf8' }),
+    execute('git', ['-C', resolved, 'rev-parse', 'HEAD'], { encoding: 'utf8' }),
+  ]);
+  const root = path.resolve(rootOutput.trim());
   if (root !== resolved) fail('invalid_repo', 'repo must identify the Git worktree root.');
-  return { worktree_path: resolved, branch: null, start_sha: null, task: null, status: 'ready' };
+  return {
+    worktree_path: resolved,
+    branch: branchOutput.trim() || null,
+    start_sha: shaOutput.trim() || null,
+    task: null,
+    status: 'ready',
+  };
+}
+
+function resolveWorkspaceMode(provider, requested) {
+  const value = requested ?? 'managed';
+  if (!WORKSPACE_MODES.has(value)) {
+    fail('invalid_workspace_mode', 'workspace_mode must be managed or direct.');
+  }
+  // Cursor Cloud owns the remote workspace/branch. It never receives a local
+  // worktree, so normalize its effective mode to direct while retaining the
+  // simple managed/direct public vocabulary for local providers.
+  return provider === 'cursor-cloud' ? 'direct' : value;
+}
+
+function workspaceReference(workspace, taskId) {
+  const task = workspace?.task ?? workspace?.worktree_task ?? taskId;
+  const worktreePath = workspace?.worktree_path ?? workspace?.cwd;
+  if (typeof task !== 'string' || typeof worktreePath !== 'string'
+    || !path.isAbsolute(worktreePath) || path.resolve(worktreePath) !== worktreePath) {
+    return null;
+  }
+  return { task, worktree_path: worktreePath };
+}
+
+/**
+ * Remove only a provably abandoned worktree-bootstrap writer lock. The
+ * worktree and branch are intentionally retained for inspection/merge; this
+ * helper never performs destructive Git cleanup and treats every failure as a
+ * warning for the task receipt.
+ */
+export async function cleanupManagedWorkspace({ workspace, taskId, execute = execFile } = {}) {
+  const reference = workspaceReference(workspace, taskId);
+  if (!reference) return { state: 'unavailable', cleaned: false };
+  try {
+    const { stdout } = await execute('worktree-bootstrap', [
+      'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
+    ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    const lock = parseJsonSuffix(stdout);
+    if (!lock || lock.state === 'unlocked') return { state: 'unlocked', cleaned: false };
+    const health = lock.health ?? lock;
+    if (health.state !== 'abandoned' || typeof lock.lock_id !== 'string' || lock.lock_id.length === 0) {
+      return { state: health.state ?? lock.state ?? 'unknown', cleaned: false };
+    }
+    await execute('worktree-bootstrap', [
+      'lock', 'clean', reference.task,
+      '--repo', reference.worktree_path,
+      '--policy', 'dead-local',
+      '--lock-id', lock.lock_id,
+    ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    return { state: 'cleaned', cleaned: true, lock_id: lock.lock_id };
+  } catch (error) {
+    return {
+      state: 'cleanup_failed',
+      cleaned: false,
+      error: { code: error?.code ?? 'worktree_cleanup_failed', message: error?.message ?? 'Worktree lock cleanup failed.' },
+    };
+  }
+}
+
+async function recordManagedCleanup(root, task, execute) {
+  if (task?.workspace_kind !== 'managed-worktree') return null;
+  const result = await cleanupManagedWorkspace({
+    workspace: task,
+    taskId: task.worktree_task ?? task.id,
+    execute,
+  });
+  if (result.error) {
+    await appendTaskEvent(root, task.id, {
+      type: 'cleanup_warning',
+      code: result.error.code,
+    }).catch(() => {});
+  }
+  return result;
 }
 
 async function writeRequest(root, taskId) {
@@ -142,7 +245,16 @@ function processStartTicks(pid) {
   }
 }
 
-async function launchWorker({ root, taskId, cwd, writer, provider, env: sourceEnv = process.env, spawn = nodeSpawn }) {
+export async function launchWorker({
+  root,
+  taskId,
+  cwd,
+  writer,
+  provider,
+  env: sourceEnv = process.env,
+  spawn = nodeSpawn,
+  launchBoundary = launchProcessBoundary,
+} = {}) {
   const paths = await writeRequest(root, taskId);
   const log = await open(paths.log, 'a', 0o600);
   const worker = provider === 'cursor-cloud' ? CLOUD_WORKER : WORKER;
@@ -152,34 +264,58 @@ async function launchWorker({ root, taskId, cwd, writer, provider, env: sourceEn
     ? ['launch', taskId, '--repo', cwd, '--', ...workerArgv]
     : workerArgv;
   let child;
+  let boundary;
   try {
-    child = spawn(command, args, {
-      cwd,
-      env: await workerEnvironment(provider, sourceEnv),
-      detached: true,
-      stdio: ['ignore', log.fd, log.fd],
-    });
-    await new Promise((resolve, reject) => {
-      child.once('spawn', resolve);
-      child.once('error', reject);
-    });
+    const env = await workerEnvironment(provider, sourceEnv);
+    if (provider === 'cursor-cloud') {
+      child = spawn(command, args, {
+        cwd,
+        env,
+        detached: true,
+        stdio: ['ignore', log.fd, log.fd],
+      });
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+    } else {
+      boundary = await launchBoundary({
+        command,
+        args,
+        cwd,
+        env,
+        stdio: ['ignore', log.fd, log.fd],
+        taskId,
+      });
+      child = boundary.child;
+    }
   } finally {
     await log.close();
   }
   child.unref();
   try {
+    const current = (await readTask(root, taskId)).task;
+    if (!['accepted', 'transport_lost'].includes(current.status)) {
+      if (boundary?.handle) await stopProcessBoundary(boundary.handle);
+      fail('cancelled', `Task cannot launch from ${current.status}.`);
+    }
     const runtime = await writeRuntimeRecord(root, taskId, {
       pid: child.pid,
-      process_group: child.pid,
+      process_group: boundary ? null : child.pid,
       process_start_ticks: processStartTicks(child.pid),
       command: writer ? 'worktree-bootstrap' : process.execPath,
+      ...(boundary ? { process_boundary: boundary.receipt } : {}),
     });
     await appendTaskEvent(root, taskId, { type: 'worker', state: 'spawned', pid: child.pid });
     return runtime;
   } catch (error) {
-    try { process.kill(-child.pid, 'SIGTERM'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    try { process.kill(-child.pid, 'SIGKILL'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
+    if (boundary?.handle) {
+      await stopProcessBoundary(boundary.handle).catch(() => {});
+    } else {
+      try { process.kill(-child.pid, 'SIGTERM'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
+    }
     throw error;
   }
 }
@@ -191,6 +327,13 @@ export async function submitTask(input, dependencies = {}) {
   if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) fail('invalid_prompt', 'prompt must be non-empty text.');
   const role = input.role ?? 'implement';
   if (!['review', 'implement'].includes(role)) fail('invalid_role', 'role must be review or implement.');
+  if (input.provider !== 'cursor-cloud' && input.create_pr === true) {
+    fail('invalid_create_pr', 'create_pr is supported only for Cursor Cloud tasks.');
+  }
+  if (input.provider !== 'cursor-cloud' && input.starting_ref !== undefined) {
+    fail('invalid_starting_ref', 'starting_ref is supported only for Cursor Cloud tasks.');
+  }
+  const workspaceMode = resolveWorkspaceMode(input.provider, input.workspace_mode);
   const root = dependencies.root ?? stateRoot();
   try {
     await readTask(root, id);
@@ -200,37 +343,41 @@ export async function submitTask(input, dependencies = {}) {
     if (error?.code !== 'ENOENT') throw error;
   }
   const launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env);
-  // Every local provider receives a managed worktree. Review agents retain
-  // normal coding capabilities without ever touching the caller's checkout.
-  const writer = input.provider !== 'cursor-cloud';
-  const workspace = writer
-    ? await (dependencies.createWorkspace ?? createWriterWorkspace)({ taskId: id, repo: input.repo })
-    : await readerWorkspace(input.repo, dependencies.execute);
-  const agentArgv = input.provider === 'cursor-cloud' ? undefined : providerArgv(input.provider, dependencies.env ?? process.env);
-  const { task } = await createTask({
-    root,
-    prompt: input.prompt,
-    record: {
-      id,
-      status: 'accepted',
-      provider: input.provider,
-      role,
-      source_repo: input.repo,
-      cwd: workspace.worktree_path,
-      branch: workspace.branch,
-      start_sha: workspace.start_sha,
-      worktree_task: workspace.task,
-      workspace_kind: writer ? 'managed-worktree' : 'provider-managed',
-      ...(agentArgv ? { agent_argv: agentArgv } : {}),
-      starting_ref: input.starting_ref,
-      timeout_ms: input.timeout_ms,
-      create_pr: input.create_pr === true,
-    },
-  });
-  await appendTaskEvent(root, id, { type: 'accepted', provider: input.provider, role });
-  let runtime;
+  const managed = input.provider !== 'cursor-cloud' && workspaceMode === 'managed';
+  const writer = managed;
+  let workspace = null;
+  let taskCreated = false;
   try {
-    runtime = await (dependencies.launch ?? launchWorker)({
+    workspace = managed
+      ? await (dependencies.createWorkspace ?? createWriterWorkspace)({ taskId: id, repo: input.repo })
+      : await readerWorkspace(input.repo, dependencies.execute);
+    const agentArgv = input.provider === 'cursor-cloud' ? undefined : providerArgv(input.provider, dependencies.env ?? process.env);
+    const { task } = await createTask({
+      root,
+      prompt: input.prompt,
+      record: {
+        id,
+        status: 'accepted',
+        provider: input.provider,
+        role,
+        source_repo: input.repo,
+        cwd: workspace.worktree_path,
+        branch: workspace.branch,
+        start_sha: workspace.start_sha,
+        worktree_task: workspace.task,
+        workspace_mode: workspaceMode,
+        workspace_kind: input.provider === 'cursor-cloud'
+          ? 'provider-managed'
+          : managed ? 'managed-worktree' : 'direct',
+        ...(agentArgv ? { agent_argv: agentArgv } : {}),
+        starting_ref: input.starting_ref,
+        timeout_ms: input.timeout_ms,
+        create_pr: input.create_pr === true,
+      },
+    });
+    taskCreated = true;
+    await appendTaskEvent(root, id, { type: 'accepted', provider: input.provider, role });
+    const runtime = await (dependencies.launch ?? launchWorker)({
       root,
       taskId: id,
       cwd: task.cwd,
@@ -238,15 +385,24 @@ export async function submitTask(input, dependencies = {}) {
       provider: input.provider,
       env: launchEnv,
     });
+    return { task: (await readTask(root, id)).task, runtime };
   } catch (error) {
-    await updateTask(root, id, {
-      status: 'failed',
-      error: { code: error?.code ?? 'worker_start_failed', message: error?.message ?? 'Worker failed to start.' },
-      finished_at: new Date().toISOString(),
-    }).catch(() => {});
+    if (taskCreated) {
+      await updateTask(root, id, {
+        status: 'failed',
+        error: { code: error?.code ?? 'worker_start_failed', message: error?.message ?? 'Worker failed to start.' },
+        finished_at: new Date().toISOString(),
+      }).catch(() => {});
+      await recordManagedCleanup(root, (await readTask(root, id)).task, dependencies.execute);
+    } else if (managed) {
+      await cleanupManagedWorkspace({
+        workspace,
+        taskId: id,
+        execute: dependencies.execute,
+      });
+    }
     throw error;
   }
-  return { task: (await readTask(root, id)).task, runtime };
 }
 
 function processIdentity(pid, processGroup, expectedTicks) {
@@ -260,8 +416,46 @@ function currentProcessIdentity(runtime) {
   return processIdentity(runtime?.pid, runtime?.process_group, runtime?.process_start_ticks);
 }
 
+function runtimeLeaderAlive(runtime) {
+  return Number.isInteger(runtime?.pid)
+    && runtime.pid >= 2
+    && typeof runtime.process_start_ticks === 'string'
+    && processStartTicks(runtime.pid) === runtime.process_start_ticks;
+}
+
+async function runtimeActive(runtime) {
+  if (runtime?.process_boundary) {
+    if (!runtimeLeaderAlive(runtime)) return false;
+    try {
+      const handle = restoreProcessBoundary(runtime.process_boundary);
+      const state = await inspectProcessBoundary(handle);
+      return state.found && !state.empty;
+    } catch {
+      return false;
+    }
+  }
+  return Boolean(currentProcessIdentity(runtime));
+}
+
+async function stopRuntimeBoundary(runtime) {
+  if (!runtime?.process_boundary) return null;
+  const handle = restoreProcessBoundary(runtime.process_boundary);
+  return stopProcessBoundary(handle);
+}
+
 function currentProviderIdentity(task) {
   return processIdentity(task?.provider_process_group, task?.provider_process_group, task?.provider_process_start_ticks);
+}
+
+function processGroupAlive(processGroup) {
+  if (!Number.isInteger(processGroup) || processGroup < 2) return false;
+  try {
+    process.kill(-processGroup, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
 }
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -333,7 +527,22 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   const identity = currentProcessIdentity(runtime);
   const providerIdentity = currentProviderIdentity(task);
   await updateTask(root, taskId, { status: 'cancelling' });
+  if (runtime?.process_boundary) {
+    try {
+      await (dependencies.stopBoundary ?? stopRuntimeBoundary)(runtime);
+    } catch (error) {
+      await recordManagedCleanup(root, task, dependencies.execute);
+      return updateTask(root, taskId, {
+        status: 'transport_lost',
+        error: { code: error?.code ?? 'cancel_incomplete', message: 'The owned local task cgroup could not be proven empty.' },
+      });
+    }
+    await recordManagedCleanup(root, task, dependencies.execute);
+    await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', boundary: 'systemd-user-scope-cgroup' });
+    return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
+  }
   if (!identity && !providerIdentity) {
+    await recordManagedCleanup(root, task, dependencies.execute);
     await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', reason: 'worker_not_running' });
     return updateTask(root, taskId, {
       status: 'cancelled',
@@ -344,22 +553,24 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   for (const owned of [providerIdentity, identity].filter(Boolean)) {
     try { process.kill(-owned.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
   }
-  for (let index = 0; index < 20 && currentProcessIdentity(runtime); index += 1) await wait(100);
-  for (let index = 0; index < 20 && currentProviderIdentity(task); index += 1) await wait(100);
-  if (currentProcessIdentity(runtime)) {
+  for (let index = 0; index < 20 && identity && processGroupAlive(identity.process_group); index += 1) await wait(100);
+  for (let index = 0; index < 20 && providerIdentity && processGroupAlive(providerIdentity.process_group); index += 1) await wait(100);
+  if (identity && processGroupAlive(identity.process_group)) {
     try { process.kill(-identity.process_group, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
-    for (let index = 0; index < 20 && currentProcessIdentity(runtime); index += 1) await wait(100);
+    for (let index = 0; index < 20 && processGroupAlive(identity.process_group); index += 1) await wait(100);
   }
-  if (currentProviderIdentity(task)) {
+  if (providerIdentity && processGroupAlive(providerIdentity.process_group)) {
     try { process.kill(-providerIdentity.process_group, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
-    for (let index = 0; index < 20 && currentProviderIdentity(task); index += 1) await wait(100);
+    for (let index = 0; index < 20 && processGroupAlive(providerIdentity.process_group); index += 1) await wait(100);
   }
-  if (currentProcessIdentity(runtime) || currentProviderIdentity(task)) {
+  if ((identity && processGroupAlive(identity.process_group)) || (providerIdentity && processGroupAlive(providerIdentity.process_group))) {
+    await recordManagedCleanup(root, task, dependencies.execute);
     return updateTask(root, taskId, {
       status: 'transport_lost',
       error: { code: 'cancel_incomplete', message: 'Owned process group remained after SIGKILL.' },
     });
   }
+  await recordManagedCleanup(root, task, dependencies.execute);
   await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled' });
   return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
 }
@@ -367,14 +578,29 @@ export async function cancelTask(root, taskId, dependencies = {}) {
 export async function taskStatus(root, taskId) {
   let task = (await readTask(root, taskId)).task;
   const runtime = await readRuntimeRecord(root, taskId);
-  if (ACTIVE.has(task.status) && !currentProcessIdentity(runtime)) {
+  if (ACTIVE.has(task.status) && !(await runtimeActive(runtime))) {
     if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
       task = await reconcileCursorCloudTask({ root, taskId });
     } else {
+      let boundaryStopped = false;
+      if (runtime?.process_boundary) {
+        try {
+          await stopRuntimeBoundary(runtime);
+          boundaryStopped = true;
+        } catch {
+          // Keep the task reconcilable when exact cgroup cleanup cannot be proven.
+        }
+      }
       task = await updateTask(root, taskId, {
         status: 'transport_lost',
-        error: { code: 'worker_not_running', message: 'Recorded worker is not running; inspect or cancel this task without replaying it.' },
+        error: {
+          code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
+          message: boundaryStopped
+            ? 'Recorded worker stopped; its owned cgroup was emptied without replaying the task.'
+            : 'Recorded worker is not running; inspect or cancel this task without replaying it.',
+        },
       });
+      await recordManagedCleanup(root, task, undefined);
     }
   }
   return { task, runtime };
@@ -386,7 +612,7 @@ export async function supervisorStatus(root = stateRoot()) {
     const task = tasks[index];
     if (!ACTIVE.has(task.status)) continue;
     const runtime = await readRuntimeRecord(root, task.id);
-    if (currentProcessIdentity(runtime)) continue;
+    if (await runtimeActive(runtime)) continue;
     if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
       try {
         tasks[index] = await reconcileCursorCloudTask({ root, taskId: task.id });
@@ -397,10 +623,25 @@ export async function supervisorStatus(root = stateRoot()) {
         });
       }
     } else {
+      let boundaryStopped = false;
+      if (runtime?.process_boundary) {
+        try {
+          await stopRuntimeBoundary(runtime);
+          boundaryStopped = true;
+        } catch {
+          // Preserve an active uncertain receipt for explicit cancellation.
+        }
+      }
       tasks[index] = await updateTask(root, task.id, {
         status: 'transport_lost',
-        error: { code: 'worker_not_running', message: 'Recorded worker is not running; inspect or cancel this task without replaying it.' },
+        error: {
+          code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
+          message: boundaryStopped
+            ? 'Recorded worker stopped; its owned cgroup was emptied without replaying the task.'
+            : 'Recorded worker is not running; inspect or cancel this task without replaying it.',
+        },
       });
+      await recordManagedCleanup(root, tasks[index], undefined);
     }
   }
   return {

@@ -13,12 +13,39 @@ const VENDOR = path.join(PLUGIN, 'vendor', 'dsh-acp-demo');
 const env = process.env;
 const configBase = env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config');
 const stateBase = env.XDG_STATE_HOME ? path.resolve(env.XDG_STATE_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.local', 'state');
-const configDir = path.join(configBase, 'codex-co-engineer');
-const configFile = path.join(configDir, 'dsh-acp.yml');
+const defaultConfigDir = path.join(configBase, 'codex-co-engineer');
+const configuredConfigFile = env.CODEX_CO_ENGINEER_DSH_ACP_CONFIG?.trim();
+if (configuredConfigFile && !path.isAbsolute(configuredConfigFile)) {
+  throw new Error('CODEX_CO_ENGINEER_DSH_ACP_CONFIG must be an absolute path.');
+}
+const configFile = configuredConfigFile ? path.resolve(configuredConfigFile) : path.join(defaultConfigDir, 'dsh-acp.yml');
+const configDir = path.dirname(configFile);
 const persistenceRoot = path.join(stateBase, 'codex-co-engineer', 'dsh-sessions');
+const commands = Object.freeze({
+  dsh: env.CODEX_CO_ENGINEER_DSH_COMMAND?.trim() || 'dsh',
+  acpx: env.CODEX_CO_ENGINEER_ACPX_COMMAND?.trim() || 'acpx',
+  dshAcp: env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND?.trim() || 'dsh-acp-demo',
+  worktreeBootstrap: 'worktree-bootstrap',
+});
 
 async function exists(file) {
   try { await stat(file); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+}
+
+async function executablePath(command) {
+  if (!command) return null;
+  const candidates = path.isAbsolute(command) || command.includes(path.sep)
+    ? [path.resolve(command)]
+    : (env.PATH ?? '').split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, command));
+  for (const candidate of candidates) {
+    try {
+      const metadata = await stat(candidate);
+      if (metadata.isFile() && (metadata.mode & 0o111) !== 0) return candidate;
+    } catch {
+      // Keep searching PATH.
+    }
+  }
+  return null;
 }
 
 async function validConfig() {
@@ -37,18 +64,22 @@ async function validConfig() {
 
 async function check() {
   const results = {};
-  for (const [name, argv] of Object.entries({
-    dsh: ['dsh', ['--version']],
-    acpx: ['acpx', ['--version']],
-    dshAcp: ['which', ['dsh-acp-demo']],
-  })) {
+  for (const [name, command, args] of [
+    ['dsh', commands.dsh, ['--version']],
+    ['acpx', commands.acpx, ['--version']],
+    ['worktreeBootstrap', commands.worktreeBootstrap, ['--version']],
+  ]) {
     try {
-      const { stdout, stderr } = await run(argv[0], argv[1], { cwd: tmpdir(), encoding: 'utf8', timeout: 10_000 });
+      const { stdout, stderr } = await run(command, args, { cwd: tmpdir(), encoding: 'utf8', timeout: 10_000 });
       results[name] = { ok: true, output: `${stdout}${stderr}`.trim().slice(0, 500) };
     } catch (error) {
       results[name] = { ok: false, output: `${error?.stdout ?? ''}${error?.stderr ?? ''}`.trim().slice(0, 500) };
     }
   }
+  const dshAcpPath = await executablePath(commands.dshAcp);
+  results.dshAcp = dshAcpPath
+    ? { ok: true, output: dshAcpPath }
+    : { ok: false, output: `${commands.dshAcp} was not found on PATH.` };
   try {
     const childEnv = { ...env };
     delete childEnv.npm_config_prefix;
@@ -107,7 +138,7 @@ async function install() {
     await rm(staging, { recursive: true, force: true });
   }
   await mkdir(configDir, { recursive: true, mode: 0o700 });
-  await chmod(configDir, 0o700);
+  if (!configuredConfigFile) await chmod(configDir, 0o700);
   await mkdir(persistenceRoot, { recursive: true, mode: 0o700 });
   await chmod(persistenceRoot, 0o700);
   if (!await exists(configFile)) {

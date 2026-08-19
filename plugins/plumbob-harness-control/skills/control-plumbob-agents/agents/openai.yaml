@@ -1,11 +1,11 @@
 interface:
   display_name: "Codex-Co-Engineer"
-  short_description: "Delegate work to Grok, Cursor, and DSH"
-  default_prompt: "Use $control-plumbob-agents to show status and delegate the requested work to the best peer agent."
+  short_description: "Delegate work to Grok, Cursor Local/Cloud, and DSH"
+  default_prompt: "Use $control-plumbob-agents to show status and delegate the requested work to the best peer agent, selecting managed/direct local workspaces or a pushed immutable Cloud SHA as appropriate."
 dependencies:
   tools:
     - type: "mcp"
       value: "plumbob-harness-control"
-      description: "ACP-first delegation and lifecycle control for Grok, Cursor Local, Cursor Cloud, and DSH"
+      description: "ACP-first delegation, workspace, PR, and lifecycle control for Grok, Cursor Local, Cursor Cloud, and DSH; local workers use a Linux systemd/cgroup cleanup boundary"
 policy:
   allow_implicit_invocation: true

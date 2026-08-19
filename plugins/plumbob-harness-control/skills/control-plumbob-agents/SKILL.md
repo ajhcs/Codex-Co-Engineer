@@ -1,6 +1,6 @@
 ---
 name: control-plumbob-agents
-description: Delegate review and implementation work to Grok, Cursor Local, Cursor Cloud, or DeepSeek Harness through the Codex-Co-Engineer ACP-first MCP supervisor. Use for parallel coding, review, task monitoring, worktree-isolated changes, or cancellation.
+description: Delegate review and implementation work to Grok, Cursor Local, Cursor Cloud, or DeepSeek Harness through the Codex-Co-Engineer ACP-first MCP supervisor. Use for parallel coding, review, task monitoring, worktree-isolated or direct local changes, and cancellation.
 ---
 
 # Codex-Co-Engineer
@@ -8,26 +8,63 @@ description: Delegate review and implementation work to Grok, Cursor Local, Curs
 Use the five MCP tools for delegation and lifecycle control.
 
 1. Call `status` when provider or supervisor readiness is unknown.
-2. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh` for the task.
-3. Call `delegate` with a stable task ID, an absolute Git root, and a clear prompt.
-4. Use `role: review` for analysis and `role: implement` for changes.
-5. Let Co-Engineer create and lock worktrees for every local task.
-6. Poll `task` until terminal. Never replay an active or prompt-dispatched task.
-7. Use `cancel` for an explicit cancellation or verified orphan recovery.
-8. Inspect commits and receipts before merging. Codex owns final merge authority.
+2. Before local dispatch, ensure the host has Linux, a working
+   `systemd --user` manager, `systemd-run` 244 or newer, and unified cgroup
+   v2. `setup:check` checks CLI/worktree dependencies but not this boundary;
+   release/live acceptance must prove it.
+3. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh`.
+4. Call `delegate` with a stable task ID, absolute Git root, and clear prompt.
+5. Use `role: "review"` for analysis and `role: "implement"` for changes.
+6. For local tasks, use `workspace_mode: "managed"` by default. Use
+   `workspace_mode: "direct"` only when direct mutation of the supplied
+   checkout is intentional.
+7. For Cursor Cloud, provide a provider-accessible origin and an exact
+   immutable commit SHA in `starting_ref` that is already pushed.
+8. Set `create_pr` only for Cursor Cloud. Local tasks reject it; Codex
+   decides whether local commits justify a PR after inspecting the handoff.
+9. Poll `task` until terminal. Never replay an active or prompt-dispatched
+   task.
+10. Use `cancel` for explicit cancellation or verified orphan recovery.
+11. Inspect commits, handoff, and receipts before Codex merges anything.
 
-Grok and Cursor Local use persistent ACP sessions. DSH uses the official rc7
+Grok and Cursor Local use persistent ACP sessions. DSH uses the official rc.7
 ACP composition through ACPX. Cursor Cloud uses the official Cursor SDK. A
 local CLI fallback is allowed only when ACP fails before prompt dispatch.
+
+The systemd user scope used for local workers sets `KillMode=control-group`
+only so cancellation reaches detached descendants. It is not a sandbox and
+does not restrict environment, network, filesystem, credentials, or shell
+capabilities. Local dispatch fails closed if the boundary is unavailable.
 
 Use normal persistent provider authentication. Never put credentials in MCP
 arguments or prompts. Configured provider sessions are standing authorization
 for task-scoped calls; preserve normal approval boundaries for deployments,
 destructive Git operations, and merges.
 
-All local tasks follow `one task -> one worktree -> one branch -> one writer`.
-Cursor Cloud owns its cloud branch. Create a PR only when a task has
-real commits; do not create empty PRs.
+Managed local tasks follow:
 
-Prompts and repository content can leave the machine for the selected provider.
-Send only material that provider is authorized to process.
+```text
+one task -> one worktree -> one branch -> one writer
+```
+
+Terminal managed tasks retain their worktree for inspection. Obtain the
+authoritative handoff before accepting or discarding work:
+
+```bash
+worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
+```
+
+After merge or deliberate discard, inspect the exact writer lock. Clean only a
+dead lock with its reported ID, then remove the exact worktree/branch and
+terminal task-state directory when its receipt is no longer needed:
+
+```bash
+worktree-bootstrap lock inspect TASK --repo /absolute/worktree
+worktree-bootstrap lock clean TASK --repo /absolute/worktree \
+  --policy dead-local --lock-id LOCK_ID
+git worktree remove /absolute/worktree
+```
+
+Direct-mode tasks have no managed worktree, so inspect the caller checkout
+explicitly. Prompts and repository content can leave the machine for the
+selected provider; send only material that provider is authorized to process.

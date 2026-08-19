@@ -55,6 +55,13 @@ timeout_seconds = 120
 env = { MCP_INSPECTOR_COMMAND = "mcp-inspector" }
 
 [[stages]]
+name = "local-process-boundary"
+kind = "integration_tests"
+command = ["node", "scripts/process-boundary-preflight.mjs"]
+failure_class = "environment_blocked"
+timeout_seconds = 30
+
+[[stages]]
 name = "acpx-reproducible-build"
 kind = "build"
 command = ["npm", "--prefix", "tools/acpx-vendor", "run", "test:reproducible"]

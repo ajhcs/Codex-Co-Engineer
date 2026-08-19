@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -75,6 +75,26 @@ test('a lock left by a dead process is recovered', async () => {
   await writeFile(paths.updateLock, `${JSON.stringify({ pid: 999999999, start_ticks: '1', nonce: 'dead' })}\n`, { mode: 0o600 });
   const task = await updateTask(root, 'stale-lock', { recovered: true });
   assert.equal(task.recovered, true);
+});
+
+test('an old malformed update lock is recovered', async () => {
+  const root = await temporaryRoot();
+  const { paths } = await createTask({ root, prompt: 'recover malformed', record: { id: 'malformed-lock', status: 'running' } });
+  await writeFile(paths.updateLock, '{partial', { mode: 0o600 });
+  const old = new Date(Date.now() - 10_000);
+  await utimes(paths.updateLock, old, old);
+  const task = await updateTask(root, 'malformed-lock', { recovered: true });
+  assert.equal(task.recovered, true);
+});
+
+test('uncertain cancellation can remain reconcilable without accepting a late completion', async () => {
+  const root = await temporaryRoot();
+  await createTask({ root, prompt: 'cancel', record: { id: 'cancel-uncertain', status: 'running' } });
+  await updateTask(root, 'cancel-uncertain', { status: 'cancelling' });
+  await updateTask(root, 'cancel-uncertain', { status: 'transport_lost', error: { code: 'cancel_unconfirmed' } });
+  const uncertain = (await readTask(root, 'cancel-uncertain')).task;
+  assert.equal(uncertain.status, 'transport_lost');
+  assert.equal(uncertain.finished_at, undefined);
 });
 
 test('events are JSONL and listTasks ignores invalid task directories', async () => {
