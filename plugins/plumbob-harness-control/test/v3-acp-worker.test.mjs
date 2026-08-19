@@ -95,6 +95,8 @@ test('recursively bounds and redacts provider events and errors', () => {
       prompt,
       apiKey: 'sk-live-secret-1234567890',
       authorization: 'Bearer live-secret-1234567890',
+      token: 'structured-token-secret-1234567890',
+      bearer: 'structured-bearer-secret-1234567890',
       rawOutput: 'private provider payload',
       deep: { deeper: { deepest: { value: 'bounded' } } },
     },
@@ -103,9 +105,11 @@ test('recursively bounds and redacts provider events and errors', () => {
   };
   const safe = boundedEvent(event, prompt);
   const serialized = JSON.stringify(safe);
-  assert.doesNotMatch(serialized, /private prompt|sk-prompt-secret|xai-live-secret|sk-live-secret|Bearer live-secret/u);
+  assert.doesNotMatch(serialized, /private prompt|sk-prompt-secret|xai-live-secret|sk-live-secret|Bearer live-secret|structured-token-secret|structured-bearer-secret/u);
   assert.equal(safe.nested.apiKey, '[REDACTED]');
   assert.equal(safe.nested.authorization, '[REDACTED]');
+  assert.equal(safe.nested.token, '[REDACTED]');
+  assert.equal(safe.nested.bearer, '[REDACTED]');
   assert.equal(safe.nested.rawOutput, undefined);
   assert.ok(serialized.length < 32 * 1024);
   assert.equal(sanitizeText(`failure: ${prompt} ghp_live-secret-1234567890`, prompt).includes(prompt), false);

@@ -32,14 +32,14 @@ const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
 const ACPX_TERMINATION_POLL_MS = 25;
 const OMIT_EVENT_KEYS = new Set(['rawinput', 'rawoutput', 'content', 'availablecommands']);
-const SENSITIVE_EVENT_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|password|secret|cookie|credential|private[_-]?key)/iu;
+const SENSITIVE_EVENT_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|token|password|secret|cookie|credential|private[_-]?key)/iu;
 const TOKEN_PATTERNS = [
   /\b(?:sk|xai)-[A-Za-z0-9_-]{8,}\b/gu,
   /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{8,}\b/gu,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
   /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu,
-  /\b(?:[A-Z][A-Z0-9]*_)*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|AUTH(?:ORIZATION)?|CREDENTIALS?|PRIVATE[_-]?KEY)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;'"&]+)/giu,
-  /\b(?:api[_-]?key|authorization|token|secret|password)\s*[:=]\s*["']?[^,\s"']+/giu,
+  /\b(?:[A-Z][A-Z0-9]*_)*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|AUTH(?:ORIZATION)?|BEARER|CREDENTIALS?|PRIVATE[_-]?KEY)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;'"&]+)/giu,
+  /\b(?:api[_-]?key|authorization|bearer|token|secret|password)\s*[:=]\s*["']?[^,\s"']+/giu,
 ];
 const REDACTED = '[REDACTED]';
 const TRUNCATED = '[TRUNCATED]';

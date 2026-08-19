@@ -30,13 +30,17 @@ Requirements:
 - The DSH/Muse model credential in its normal owner-only configuration file.
 
 Install the plugin through Codex, then run its one-time setup from the
-installed plugin directory:
+installed plugin package directory—the directory containing `package.json`
+and `bin/setup.mjs`. In this source checkout that directory is:
 
 ```bash
 cd plugins/plumbob-harness-control
 npm run setup
 npm run setup:check
 ```
+
+For a Codex-managed installation, use the package path reported by Codex or
+its plugin manager instead of assuming it is relative to the current project.
 
 Setup installs the pinned ACPX, Cursor SDK, and cohesive DSH rc.7
 composition, creates owner-only DSH configuration/session directories, and
@@ -49,10 +53,12 @@ cursor-agent login
 bin/set-model-api-key
 ```
 
-`npm run setup:check` validates the provider CLIs, ACPX/DSH composition,
-Cursor SDK, and `worktree-bootstrap` dependency. It does not prove that the
-Linux systemd/cgroup process boundary is usable. The release gate and live
-host acceptance must validate that prerequisite before starting local agents.
+`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
+and `worktree-bootstrap` dependency. It does not install or authenticate Grok
+or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or prove
+that the Linux systemd/cgroup process boundary is usable. Call the `status`
+tool after setup to check provider readiness; the release gate and live host
+acceptance must validate the process boundary before starting local agents.
 
 Cursor Cloud uses `CURSOR_API_KEY`,
 `CURSOR_API_KEY_FILE`, or the existing owner-only
@@ -69,11 +75,12 @@ accepted prompt is never replayed through another transport. ACPX does not
 provide an authoritative prompt-sent acknowledgement, so a DSH task is marked
 `dispatch_uncertain` as soon as ACPX spawns and is never replayed through CLI.
 
-Every local worker is launched inside a transient `systemd --user` scope with
-`KillMode=control-group` solely so cancellation reaches detached descendants.
-This is a lifecycle/cleanup boundary, not a sandbox: providers inherit the
-normal environment, network, filesystem, credentials, and shell capabilities.
-Local dispatch fails closed when the Linux systemd/cgroup prerequisite is not
+Every local worker is launched as a manager-owned transient `systemd --user`
+service with `KillMode=control-group` solely so cancellation reaches detached
+descendants and the worker survives the launching client. This is a
+lifecycle/cleanup boundary, not a sandbox: providers inherit the normal
+environment, network, filesystem, credentials, and shell capabilities. Local
+dispatch fails closed when the Linux systemd/cgroup prerequisite is not
 available. Cursor Cloud runs in the provider's remote environment.
 
 Cursor Local and DSH's official fallback CLIs take the prompt positionally,
@@ -107,6 +114,14 @@ Cursor Cloud does not use a local worktree. The supplied repository must have
 an origin that Cursor can access, and `starting_ref` must be an exact,
 immutable commit SHA that has already been pushed to that origin. This avoids
 silently sending a different local branch state to the remote provider.
+
+An exact SHA that is reachable only from a feature branch can still be
+invisible to Cursor until that branch is provider-visible through an open
+pull request or the default branch. Create the draft PR (or make the commit
+reachable from the default branch) before final Cloud acceptance. If Cursor
+returns HTTP 400 for an otherwise-valid SHA, surface it as a provider
+visibility failure in the receipt and fix reachability before retrying; do not
+blindly replay the task.
 
 `create_pr` is a Cursor Cloud-only option and defaults to `false`. Local
 tasks reject it. A local implementation returns its branch and handoff for

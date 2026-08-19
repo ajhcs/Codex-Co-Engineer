@@ -20,6 +20,10 @@ Use the five MCP tools for delegation and lifecycle control.
    checkout is intentional.
 7. For Cursor Cloud, provide a provider-accessible origin and an exact
    immutable commit SHA in `starting_ref` that is already pushed.
+   Before final acceptance, make a feature-branch SHA provider-visible through
+   an open draft PR or the default branch. Treat an HTTP 400 for an otherwise
+   valid SHA as a visibility failure; surface it in the receipt and fix
+   reachability before retrying.
 8. Set `create_pr` only for Cursor Cloud. Local tasks reject it; Codex
    decides whether local commits justify a PR after inspecting the handoff.
 9. Poll `task` until terminal. Never replay an active or prompt-dispatched
@@ -33,8 +37,9 @@ local CLI fallback is allowed only when ACP fails before prompt dispatch. ACPX
 does not provide an authoritative prompt-sent acknowledgement; after ACPX
 spawns, DSH receipts say `dispatch_uncertain` and never fall back to CLI.
 
-The systemd user scope used for local workers sets `KillMode=control-group`
-only so cancellation reaches detached descendants. It is not a sandbox and
+The manager-owned transient systemd user service used for local workers sets
+`KillMode=control-group` only so cancellation reaches detached descendants and
+workers survive the launching client. It is not a sandbox and
 does not restrict environment, network, filesystem, credentials, or shell
 capabilities. Local dispatch fails closed if the boundary is unavailable.
 

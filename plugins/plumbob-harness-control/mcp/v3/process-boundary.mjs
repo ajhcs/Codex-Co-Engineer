@@ -9,8 +9,9 @@ import { promisify } from 'node:util';
  *
  * This is not a provider sandbox: the command, environment, working directory,
  * credentials, network, and filesystem capabilities are inherited unchanged.
- * The only extra contract is a systemd user scope with KillMode=control-group,
- * so an owned stop reaches detached descendants as well as the worker leader.
+ * The only extra contract is a manager-owned systemd user service with
+ * KillMode=control-group, so an owned stop reaches detached descendants as
+ * well as the worker leader and the worker survives the launching client.
  * The module is provider-free and is not wired into the MCP surface by itself.
  */
 
@@ -24,7 +25,9 @@ export const PROCESS_BOUNDARY_DEFAULTS = Object.freeze({
 const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const SYSTEMCTL = '/usr/bin/systemctl';
 const CGROUP_ROOT = '/sys/fs/cgroup';
-const UNIT = /^codex-co-engineer-[a-f0-9]{32}\.scope$/u;
+const UNIT = /^codex-co-engineer-[a-f0-9]{32}\.(?:service|scope)$/u;
+const SERVICE_UNIT = /^codex-co-engineer-[a-f0-9]{32}\.service$/u;
+const SCOPE_UNIT = /^codex-co-engineer-[a-f0-9]{32}\.scope$/u;
 const INVOCATION_ID = /^[a-f0-9]{32}$/u;
 const CONTROL_GROUP = /^\/user\.slice\/[A-Za-z0-9_.@:/-]+$/u;
 const HANDLES = new WeakMap();
@@ -76,7 +79,7 @@ function parseProperties(text) {
 }
 
 function requireLinux(host) {
-  if (host.platform !== 'linux') fail('linux_required', 'The process boundary requires Linux systemd user scopes.');
+  if (host.platform !== 'linux') fail('linux_required', 'The process boundary requires Linux systemd user services.');
   if (!Number.isInteger(host.uid) || host.uid < 0) fail('posix_uid_required', 'The process boundary requires a normal Linux user identity.');
 }
 
@@ -103,7 +106,12 @@ function requireCwd(cwd) {
 }
 
 function requireUnit(unit) {
-  if (typeof unit !== 'string' || !UNIT.test(unit)) fail('invalid_unit', 'unit is not an owned Co-Engineer scope name.');
+  if (typeof unit !== 'string' || !UNIT.test(unit)) fail('invalid_unit', 'unit is not an owned Co-Engineer process-boundary name.');
+  return unit;
+}
+
+function requireServiceUnit(unit) {
+  if (typeof unit !== 'string' || !SERVICE_UNIT.test(unit)) fail('invalid_unit', 'unit is not an owned Co-Engineer service name.');
   return unit;
 }
 
@@ -128,11 +136,34 @@ function requireInvocationId(invocationId) {
   return invocationId;
 }
 
-function receiptFromRecord(record) {
+function requireLogPath(logPath) {
+  if (logPath === undefined) return undefined;
+  if (typeof logPath !== 'string' || !path.isAbsolute(logPath) || path.resolve(logPath) !== logPath || logPath.includes('\0')) {
+    fail('invalid_log_path', 'logPath must be an absolute, normalized path without NUL.');
+  }
+  return logPath;
+}
+
+function requireEnvironment(env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) fail('invalid_env', 'env must be an environment object.');
+  return Object.entries(env).map(([name, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || typeof value !== 'string' || value.includes('\0')) {
+      fail('invalid_env', 'env must contain POSIX variable names and NUL-free string values.');
+    }
+    return `--setenv=${name}=${value}`;
+  });
+}
+
+function receiptFromRecord(record, boundary = 'systemd-user-service-cgroup') {
+  const unit = requireUnit(record.unit);
+  if ((boundary === 'systemd-user-service-cgroup' && !SERVICE_UNIT.test(unit))
+    || (boundary === 'systemd-user-scope-cgroup' && !SCOPE_UNIT.test(unit))) {
+    fail('invalid_unit', 'unit type does not match the process-boundary receipt.');
+  }
   return Object.freeze({
     version: PROCESS_BOUNDARY_VERSION,
-    boundary: 'systemd-user-scope-cgroup',
-    unit: requireUnit(record.unit),
+    boundary,
+    unit,
     description: requireDescription(record.description),
     invocation_id: requireInvocationId(record.invocation_id),
     control_group: requireControlGroup(record.control_group),
@@ -203,31 +234,34 @@ export async function probeProcessBoundary({ adapter } = {}) {
   }
   const systemdMajor = Number(/^systemd\s+(\d+)/mu.exec(runner.stdout)?.[1]);
   if (!Number.isInteger(systemdMajor) || systemdMajor < 244) {
-    return unavailable('systemd_too_old', 'Use systemd 244 or newer for transient user scopes.');
+    return unavailable('systemd_too_old', 'Use systemd 244 or newer for transient user services.');
   }
 
   return Object.freeze({
     ready: true,
     status: 'prerequisites_ready',
     provider_started: false,
-    boundary: 'systemd-user-scope-cgroup',
+    boundary: 'systemd-user-service-cgroup',
     manager_version: compact(properties.Version, 80),
     control_group: properties.ControlGroup,
-    capabilities: { kill_mode: 'control-group', environment: 'inherited', provider_sandbox: false },
+    capabilities: { kill_mode: 'control-group', environment: 'inherited', provider_sandbox: false, manager_owned: true },
   });
 }
 
-export function buildProcessBoundaryArgv({ unit, description, command, args = [], cwd } = {}) {
-  requireUnit(unit);
+export function buildProcessBoundaryArgv({ unit, description, command, args = [], cwd, env = {}, logPath } = {}) {
+  requireServiceUnit(unit);
   requireDescription(description);
   requireCommand(command);
   const normalizedArgs = requireArgs(args);
   const workingDirectory = requireCwd(cwd);
+  const outputPath = requireLogPath(logPath);
   return [
-    '--user', '--scope', '--quiet', '--collect', `--unit=${unit}`,
+    '--user', '--quiet', '--collect', '--no-block', '--service-type=exec', `--unit=${unit}`,
     `--property=Description=${description}`,
     '--property=KillMode=control-group',
     ...(workingDirectory ? [`--working-directory=${workingDirectory}`] : []),
+    ...(outputPath ? [`--property=StandardOutput=append:${outputPath}`, `--property=StandardError=append:${outputPath}`] : []),
+    ...requireEnvironment(env),
     '--', command, ...normalizedArgs,
   ];
 }
@@ -256,12 +290,12 @@ async function showUnit(host, unit) {
   const result = await safeExec(host, SYSTEMCTL, [
     '--user', 'show', unit, '--no-pager',
     '--property=Id', '--property=Description', '--property=LoadState', '--property=ActiveState',
-    '--property=ControlGroup', '--property=KillMode', '--property=InvocationID',
+    '--property=ControlGroup', '--property=KillMode', '--property=InvocationID', '--property=MainPID',
   ]);
   if (!result.ok) {
     const detail = `${result.stderr} ${result.error?.message ?? ''}`;
     if (/not found|could not be found|no such unit/iu.test(detail)) return { found: false, properties: null };
-    fail('systemd_inspect_failed', `Cannot inspect owned scope (${compact(detail)}).`, { cause: result.error });
+    fail('systemd_inspect_failed', `Cannot inspect owned process boundary (${compact(detail)}).`, { cause: result.error });
   }
   const properties = parseProperties(result.stdout);
   if (properties.LoadState === 'not-found' || !properties.Id) return { found: false, properties };
@@ -274,7 +308,7 @@ function validateOwnedUnit(receipt, properties) {
     || properties.InvocationID !== receipt.invocation_id
     || properties.ControlGroup !== receipt.control_group
     || properties.KillMode !== 'control-group') {
-    fail('ownership_mismatch', 'The systemd scope no longer matches its owned generation.');
+    fail('ownership_mismatch', 'The systemd process boundary no longer matches its owned generation.');
   }
 }
 
@@ -362,16 +396,18 @@ export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS
       empty = await waitForEmpty(record, timeoutMs);
     }
   }
-  if (!empty) fail('cgroup_not_empty', 'Owned systemd scope still has descendants after TERM and KILL.');
+  if (!empty) fail('cgroup_not_empty', 'Owned systemd process boundary still has descendants after TERM and KILL.');
   record.stopped = true;
   return Object.freeze({ stopped: true, cgroup_empty: true, forced, idempotent: false });
 }
 
 export function restoreProcessBoundary(receipt, { adapter } = {}) {
-  if (!receipt || receipt.version !== PROCESS_BOUNDARY_VERSION || receipt.boundary !== 'systemd-user-scope-cgroup') {
+  const legacyScope = receipt?.version === PROCESS_BOUNDARY_VERSION && receipt?.boundary === 'systemd-user-scope-cgroup';
+  const managerService = receipt?.version === PROCESS_BOUNDARY_VERSION && receipt?.boundary === 'systemd-user-service-cgroup';
+  if (!legacyScope && !managerService) {
     fail('invalid_receipt', 'A process-boundary receipt from this version is required.');
   }
-  const normalized = receiptFromRecord(receipt);
+  const normalized = receiptFromRecord(receipt, legacyScope ? 'systemd-user-scope-cgroup' : 'systemd-user-service-cgroup');
   const host = requireAdapter(adapter);
   requireLinux(host);
   const handle = Object.freeze({ kind: 'systemd-user-process-boundary', ...normalized });
@@ -379,24 +415,29 @@ export function restoreProcessBoundary(receipt, { adapter } = {}) {
   return handle;
 }
 
-export async function launchProcessBoundary({ command, args = [], cwd, env = process.env, stdio = 'pipe', adapter, taskId } = {}) {
+export async function launchProcessBoundary({ command, args = [], cwd, env = process.env, stdio = 'pipe', logPath, adapter, taskId } = {}) {
   const host = requireAdapter(adapter);
   requireLinux(host);
   requireCommand(command);
   const normalizedArgs = requireArgs(args);
   const workingDirectory = requireCwd(cwd);
-  if (!env || typeof env !== 'object' || Array.isArray(env)) fail('invalid_env', 'env must be an environment object.');
+  requireEnvironment(env);
+  const outputPath = requireLogPath(logPath);
   if (taskId !== undefined && (typeof taskId !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/u.test(taskId))) {
     fail('invalid_task_id', 'taskId must contain only safe task identifier characters.');
   }
   const token = randomUUID().replaceAll('-', '');
-  const unit = `codex-co-engineer-${token}.scope`;
+  const unit = `codex-co-engineer-${token}.service`;
   const description = `codex-co-engineer-task:${token}`;
   const child = host.spawn(SYSTEMD_RUN, buildProcessBoundaryArgv({
-    unit, description, command, args: normalizedArgs, cwd: workingDirectory,
+    unit, description, command, args: normalizedArgs, cwd: workingDirectory, env, logPath: outputPath,
   }), {
     cwd: workingDirectory,
-    env,
+    // The transient service receives exactly `env` through --setenv above.
+    // The short-lived systemd-run client also needs the caller's D-Bus session
+    // variables so a deliberately minimal provider environment cannot make
+    // the manager lookup fail before the service is queued.
+    env: { ...process.env, ...env },
     detached: false,
     shell: false,
     stdio,
@@ -410,16 +451,22 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
           await host.sleep(PROCESS_BOUNDARY_DEFAULTS.pollMs);
           continue;
         }
-        if (shown.properties.KillMode !== 'control-group') fail('ownership_mismatch', 'The transient scope did not retain KillMode=control-group.');
+        if (shown.properties.KillMode !== 'control-group') fail('ownership_mismatch', 'The transient service did not retain KillMode=control-group.');
+        const mainPid = Number(shown.properties.MainPID);
+        if (!Number.isSafeInteger(mainPid) || mainPid < 2) {
+          await host.sleep(PROCESS_BOUNDARY_DEFAULTS.pollMs);
+          continue;
+        }
         const receipt = receiptFromRecord({
           unit,
           description,
           invocation_id: shown.properties.InvocationID,
           control_group: shown.properties.ControlGroup,
         });
+        const worker = Object.freeze({ pid: mainPid, unref() {} });
         const handle = Object.freeze({ kind: 'systemd-user-process-boundary', ...receipt });
-        HANDLES.set(handle, { host, receipt, child, stopped: false });
-        return { handle, child, receipt };
+        HANDLES.set(handle, { host, receipt, child: worker, launcher: child, stopped: false });
+        return { handle, child: worker, receipt };
       }
       await host.sleep(PROCESS_BOUNDARY_DEFAULTS.pollMs);
     }
@@ -430,5 +477,5 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
   }
   await cleanupUnverifiedLaunch(host, unit, description);
   child.kill?.('SIGTERM');
-  fail('unit_verification_failed', 'The transient scope could not be verified before its launch deadline.');
+  fail('unit_verification_failed', 'The transient service could not be verified before its launch deadline.');
 }

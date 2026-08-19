@@ -15,6 +15,14 @@ async function commitRepo(repo) {
   await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'initial']);
 }
 
+async function createCloudRepo(root) {
+  const repo = path.join(root, 'repo');
+  await run('git', ['init', '-b', 'main', repo]);
+  await commitRepo(repo);
+  await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+  return repo;
+}
+
 test('uses stable Cursor agent/run idempotency and records returned PR', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-cloud-'));
   const repo = path.join(root, 'repo');
@@ -49,6 +57,36 @@ test('uses stable Cursor agent/run idempotency and records returned PR', async (
   assert.equal(terminal.pr_url, 'https://github.com/example/repo/pull/1');
   assert.equal(terminal.provider_agent_archived, true);
   assert.equal(observed.archived, observed.create.agentId);
+});
+
+test('rejects an initial run with a mismatched request identity', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-request-mismatch-'));
+  const repo = await createCloudRepo(root);
+  await createTask({ root, prompt: 'reject the wrong run', record: {
+    id: 'cloud-request-mismatch', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  let providerStatus = 'running';
+  let archived = 0;
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async () => ({
+        id: 'run-request-mismatch', agentId: 'bc-request-mismatch', requestId: 'wrong-request',
+        wait: async () => ({ id: 'run-request-mismatch', status: 'finished', git: { branches: [] } }),
+        cancel: async () => { providerStatus = 'cancelled'; },
+      }),
+      close() {},
+    }),
+    getRun: async (runId, options) => ({ id: runId, agentId: options.agentId, status: providerStatus }),
+    archive: async () => { archived += 1; },
+  } };
+  await assert.rejects(
+    runCursorCloudTask({ root, taskId: 'cloud-request-mismatch', sdk, apiKey: 'cursor-secret' }),
+    (error) => error.code === 'cursor_run_identity_mismatch',
+  );
+  const task = (await readTask(root, 'cloud-request-mismatch')).task;
+  assert.equal(task.status, 'failed');
+  assert.equal(task.provider_run_id, undefined);
+  assert.equal(archived, 1);
 });
 
 test('pins review tasks to the exact local HEAD and rejects mutable refs', async () => {
@@ -566,6 +604,80 @@ test('cancels and archives an exact late run when cancellation overlaps a pendin
   assert.notEqual(final.status, 'completed');
 });
 
+test('does not overwrite a cancellation receipt when pending send returns a different run', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-pending-mismatch-'));
+  const repo = await createCloudRepo(root);
+  await createTask({ root, prompt: 'cancel the mismatched late run', record: {
+    id: 'cloud-pending-mismatch', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+    provider_agent_id: 'bc-pending-mismatch',
+  } });
+  let signalSendStarted;
+  const sendStarted = new Promise((resolve) => { signalSendStarted = resolve; });
+  let releaseOriginalSend;
+  const originalSend = new Promise((resolve) => { releaseOriginalSend = resolve; });
+  let recoveredStatus = 'running';
+  let lateStatus = 'running';
+  let createCalls = 0;
+  let recoveredCancelCalls = 0;
+  let lateCancelCalls = 0;
+  let archiveCalls = 0;
+  const recoveredRun = {
+    id: 'run-recovered',
+    agentId: 'bc-pending-mismatch',
+    wait: async () => ({ id: 'run-recovered', status: recoveredStatus, git: { branches: [] } }),
+  };
+  const lateRun = {
+    id: 'run-different',
+    agentId: 'bc-pending-mismatch',
+    wait: async () => ({ id: 'run-different', status: lateStatus, git: { branches: [] } }),
+    cancel: async () => { lateCancelCalls += 1; lateStatus = 'cancelled'; },
+  };
+  const sdk = { Agent: {
+    create: async () => {
+      createCalls += 1;
+      if (createCalls === 1) {
+        return {
+          send: async () => {
+            signalSendStarted();
+            return originalSend;
+          },
+          close() {},
+        };
+      }
+      return { send: async () => recoveredRun, close() {} };
+    },
+    listRuns: async () => ({ items: [] }),
+    cancelRun: async (runId, options) => {
+      assert.equal(runId, 'run-recovered');
+      assert.equal(options.agentId, 'bc-pending-mismatch');
+      recoveredCancelCalls += 1;
+      recoveredStatus = 'cancelled';
+    },
+    getRun: async (runId, options) => ({
+      id: runId,
+      agentId: options.agentId,
+      status: runId === 'run-recovered' ? recoveredStatus : lateStatus,
+    }),
+    archive: async () => { archiveCalls += 1; },
+  } };
+  const worker = runCursorCloudTask({ root, taskId: 'cloud-pending-mismatch', sdk, apiKey: 'cursor-secret' }).catch((error) => error);
+  await sendStarted;
+  await updateTask(root, 'cloud-pending-mismatch', { status: 'cancelling' });
+  const cancelled = await cancelCursorCloudTask({ root, taskId: 'cloud-pending-mismatch', sdk, apiKey: 'cursor-secret' });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.provider_run_id, 'run-recovered');
+  releaseOriginalSend(lateRun);
+  const workerError = await worker;
+  assert.equal(workerError.code, 'cursor_run_identity_mismatch');
+  const final = (await readTask(root, 'cloud-pending-mismatch')).task;
+  assert.equal(final.status, 'cancelled');
+  assert.equal(final.provider_run_id, 'run-recovered');
+  assert.equal(final.provider_run_cancelled, true);
+  assert.equal(recoveredCancelCalls, 1);
+  assert.equal(lateCancelCalls, 1);
+  assert.equal(archiveCalls, 1);
+});
+
 test('recovers a crashed dispatch only by replaying its exact idempotent create request', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-crash-recovery-'));
   const repo = path.join(root, 'repo');
@@ -652,6 +764,15 @@ test('recursively redacts prompt, bearer, and API-key material from normal provi
   await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
   const prompt = 'private prompt value';
   const apiKey = 'cursor-api-secret-123';
+  const modelKey = 'env-model-value-1234567890';
+  const cursorKey = 'env-cursor-value-1234567890';
+  const xaiKey = 'env-xai-value-1234567890';
+  const bearer = 'structured-bearer-value-1234567890';
+  const commonTokens = [
+    ['sk', 'live-token-value-1234567890'].join('-'),
+    ['xai', 'live-token-value-1234567890'].join('-'),
+    ['ghp', 'live-token-value-1234567890'].join('_'),
+  ];
   await createTask({ root, prompt, record: {
     id: 'cloud-result-redaction', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
   } });
@@ -659,8 +780,22 @@ test('recursively redacts prompt, bearer, and API-key material from normal provi
     create: async () => ({
       send: async () => ({ id: 'run-redaction', wait: async () => ({
         id: 'run-redaction', status: 'finished',
-        result: `provider echoed ${prompt}; Authorization: Bearer ${apiKey}; api_key=${apiKey}`,
-        error: { message: `failed for ${prompt}`, token: apiKey, nested: { prompt, authorization: `Bearer ${apiKey}` } },
+        result: [
+          `provider echoed ${prompt}; Authorization: Bearer ${apiKey}; api_key=${apiKey}`,
+          ['MODEL_API_KEY', modelKey].join('='),
+          ['CURSOR_API_KEY', cursorKey].join(': '),
+          ['XAI_API_KEY', xaiKey].join(' = '),
+          ...commonTokens,
+        ].join('; '),
+        error: {
+          message: `failed for ${prompt}`,
+          token: apiKey,
+          bearer,
+          MODEL_API_KEY: modelKey,
+          CURSOR_API_KEY: cursorKey,
+          XAI_API_KEY: xaiKey,
+          nested: { prompt, authorization: `Bearer ${apiKey}` },
+        },
         git: { branches: [{ repoUrl: 'https://example.test/repo.git', prUrl: `https://example.test/pull?token=${apiKey}` }] },
       }) }),
       close() {},
@@ -673,8 +808,15 @@ test('recursively redacts prompt, bearer, and API-key material from normal provi
   assert.equal(terminal.status, 'completed');
   assert.doesNotMatch(serialized, new RegExp(prompt, 'u'));
   assert.doesNotMatch(serialized, new RegExp(apiKey, 'u'));
+  for (const secret of [modelKey, cursorKey, xaiKey, bearer, ...commonTokens]) {
+    assert.doesNotMatch(serialized, new RegExp(secret, 'u'));
+  }
   assert.doesNotMatch(serialized, /Bearer\s+cursor-api-secret/iu);
   assert.equal(task.provider_error.token, '[redacted]');
+  assert.equal(task.provider_error.bearer, '[redacted]');
+  assert.equal(task.provider_error.MODEL_API_KEY, '[redacted]');
+  assert.equal(task.provider_error.CURSOR_API_KEY, '[redacted]');
+  assert.equal(task.provider_error.XAI_API_KEY, '[redacted]');
   assert.equal(task.provider_error.nested.prompt, '[redacted]');
   assert.equal(task.branches[0].prUrl, 'https://example.test/pull?token=[redacted]');
 });

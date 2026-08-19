@@ -40,8 +40,9 @@ Cursor Local and DSH's official fallback CLIs take the prompt positionally,
 so it may be visible to other processes running as the same Unix user during
 that fallback. Grok fallback uses an owner-only prompt file.
 
-Each local worker runs in a transient `systemd --user` scope with
-`KillMode=control-group` so cancellation reaches detached descendants. This
+Each local worker runs in a manager-owned transient `systemd --user` service
+with `KillMode=control-group` so cancellation reaches detached descendants and
+the worker survives the launching client. This
 is only a lifecycle/cleanup boundary, not a provider sandbox: the normal
 environment, credentials, network, filesystem, and shell capabilities are
 inherited unchanged. Local dispatch fails closed when Linux systemd or unified
@@ -78,6 +79,14 @@ supplied repository must have a provider-accessible origin, and
 origin. A local branch name or unpushed work is not a valid cloud starting
 point.
 
+An exact SHA reachable only from a feature branch can remain invisible to
+Cursor until the branch is provider-visible through an open pull request or
+the default branch. Create the draft PR (or make the commit reachable from
+the default branch) before final Cloud acceptance. If the provider returns
+HTTP 400 for an otherwise-valid SHA, surface it as a visibility failure in
+the receipt and fix reachability before retrying; do not blindly replay the
+task.
+
 `create_pr` is Cursor Cloud-only and defaults to `false`. Local tasks reject
 it. Local implementations return their branch and handoff for Codex to
 inspect; Codex may push and open a PR only after verifying real commits.
@@ -95,7 +104,8 @@ Requirements:
 - a Cursor Cloud API key
 - a Muse/Meta model API key for DSH
 
-From the installed plugin directory:
+From the installed plugin package directory—the directory containing
+`package.json` and `bin/setup.mjs`:
 
 ```bash
 npm run setup
@@ -103,13 +113,20 @@ npm run setup:check
 npm test
 ```
 
+In a source checkout, that directory is
+`plugins/plumbob-harness-control`. For a Codex-managed installation, use the
+package path reported by Codex or its plugin manager instead of assuming a
+project-relative path.
+
 Setup installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and the cohesive
 official DSH `0.1.0-rc.7` composition. It writes a key-free DSH ACP
 configuration and owner-only session directory; it does not perform login.
-`npm run setup:check` validates the CLI, ACPX/DSH, Cursor SDK, and
-`worktree-bootstrap` dependencies. It does not validate the Linux
-systemd/cgroup process boundary; release and live host acceptance perform
-that check before local dispatch.
+`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
+and `worktree-bootstrap` dependencies. It does not install or authenticate
+Grok or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or
+validate the Linux systemd/cgroup process boundary. Call the `status` tool
+after setup to check provider readiness; release and live host acceptance
+perform the process-boundary check before local dispatch.
 
 Authenticate providers normally so sessions persist across Codex tasks:
 

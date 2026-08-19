@@ -22,12 +22,15 @@ replacement for the exact-tree local receipt.
 After the provider-free gate passes:
 
 1. Run `npm run setup:check` on the target host.
-   This validates CLI, ACPX/DSH, Cursor SDK, and `worktree-bootstrap`
-   dependencies; it does not prove the local process boundary.
+   This validates DSH/ACPX, the Cursor SDK, and `worktree-bootstrap`
+   dependencies. It does not install or authenticate Grok or Cursor Local,
+   validate their CLIs or the Cursor Cloud key, or prove the local process
+   boundary. Use the `status` tool to check provider readiness.
 2. Validate Linux `systemd --user`, `systemd-run` 244 or newer, and unified
-   cgroup v2 with the release/live process-boundary acceptance. The transient
-   scope uses `KillMode=control-group` solely for descendant cleanup and is
-   not a sandbox or capability restriction.
+   cgroup v2 with the release/live process-boundary acceptance. The
+   manager-owned transient systemd user service uses
+   `KillMode=control-group` solely for descendant cleanup and to survive the
+   launching client; it is not a sandbox or capability restriction.
 3. Verify persistent normal authentication for Grok and Cursor Local, the
    owner-only DSH model key, and the owner-only Cursor Cloud API key.
 4. Run one bounded opt-in acceptance task through Grok, Cursor Local, Cursor
@@ -39,7 +42,13 @@ After the provider-free gate passes:
    direct-mode caller checkouts, and retained managed-worktree handoffs.
 6. For Cursor Cloud, use a clean checkout with a provider-accessible origin
    and an exact immutable `starting_ref` commit SHA that is already pushed.
-   Verify the remote run, branch, and any PR are archived or accounted for.
+   An exact SHA reachable only from a feature branch can remain invisible to
+   Cursor until an open PR or default-branch reachability makes it
+   provider-visible. Create the draft PR before final Cloud acceptance (or
+   make the commit reachable from the default branch). Surface a provider
+   HTTP 400 for an otherwise-valid SHA as a visibility check/failure in the
+   receipt, fix reachability, and only then retry. Verify the remote run,
+   branch, and any PR are archived or accounted for.
 7. Inspect the packed payload and current commit metadata for credentials,
    personal paths, and machine-specific information. Live receipts remain
    local and owner-only. They may contain bounded agent output/code context and

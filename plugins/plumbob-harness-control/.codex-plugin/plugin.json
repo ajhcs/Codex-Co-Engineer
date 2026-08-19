@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Codex-Co-Engineer",
     "shortDescription": "Delegate work to Grok, Cursor Local/Cloud, and DSH",
-    "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Local tasks support managed or explicitly direct workspaces and require a Linux systemd/cgroup cleanup boundary; Cloud tasks start from pushed immutable commit SHAs. Codex retains review and merge authority.",
+    "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Local tasks support managed or explicitly direct workspaces and require a Linux manager-owned transient systemd user service with a cgroup cleanup boundary; Cloud tasks start from pushed immutable commit SHAs. Codex retains review and merge authority.",
     "developerName": "Plumbob",
     "category": "Developer Tools",
     "capabilities": [

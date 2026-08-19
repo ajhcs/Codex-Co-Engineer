@@ -31,19 +31,25 @@ function fakeChild() {
   return child;
 }
 
-test('builds a systemd scope without narrowing provider argv or environment', () => {
+test('builds a manager-owned systemd service without narrowing provider argv or environment', () => {
   const argv = buildProcessBoundaryArgv({
-    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.scope',
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
     description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     command: '/usr/bin/node',
     args: ['worker.mjs', '--provider-capability', 'full'],
     cwd: '/workspace/repo',
+    env: { HOME: '/home/test-user', MODEL_API_KEY: 'provider-secret' },
+    logPath: '/state/task.log',
   });
   assert.deepEqual(argv, [
-    '--user', '--scope', '--quiet', '--collect', '--unit=codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.scope',
+    '--user', '--quiet', '--collect', '--no-block', '--service-type=exec', '--unit=codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
     '--property=Description=codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     '--property=KillMode=control-group',
     '--working-directory=/workspace/repo',
+    '--property=StandardOutput=append:/state/task.log',
+    '--property=StandardError=append:/state/task.log',
+    '--setenv=HOME=/home/test-user',
+    '--setenv=MODEL_API_KEY=provider-secret',
     '--', '/usr/bin/node', 'worker.mjs', '--provider-capability', 'full',
   ]);
   assert.equal(argv.some((entry) => /MemoryMax|TasksMax|NoNewPrivileges|Private|Restrict|Protect/iu.test(entry)), false);
@@ -74,9 +80,9 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
       return fakeChild();
     },
     execFile: async (_command, args) => {
-      const unit = args.find((value) => value.startsWith('codex-co-engineer-') && value.endsWith('.scope'))
-        ?? 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.scope';
-      const token = unit.slice('codex-co-engineer-'.length, -'.scope'.length);
+      const unit = args.find((value) => value.startsWith('codex-co-engineer-') && value.endsWith('.service'))
+        ?? 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service';
+      const token = unit.slice('codex-co-engineer-'.length, -'.service'.length);
       return { stdout: [
         `Id=${unit}`,
         `Description=codex-co-engineer-task:${token}`,
@@ -85,6 +91,7 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
         `ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}`,
         'KillMode=control-group',
         'InvocationID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        'MainPID=4242',
       ].join('\n') };
     },
     readFile: async () => 'populated 1\nfrozen 0\n',
@@ -97,15 +104,21 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
     cwd: '/workspace/repo',
     env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
+    logPath: '/state/task.log',
     adapter: host,
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/bin/systemd-run');
-  assert.deepEqual(calls[0].options.env, environment);
+  assert.equal(calls[0].options.env.MODEL_API_KEY, environment.MODEL_API_KEY);
+  assert.equal(calls[0].options.env.HOME, environment.HOME);
   assert.equal(calls[0].options.cwd, '/workspace/repo');
   assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
   assert.deepEqual(calls[0].args.slice(-3), ['/usr/bin/node', 'worker.mjs', '--full-capability']);
-  assert.equal(value.receipt.boundary, 'systemd-user-scope-cgroup');
+  assert.equal(value.receipt.boundary, 'systemd-user-service-cgroup');
+  assert.equal(value.receipt.unit.endsWith('.service'), true);
+  assert.equal(value.child.pid, 4242);
+  assert.equal(calls[0].args.includes('--setenv=MODEL_API_KEY=provider-secret'), true);
+  assert.equal(calls[0].args.includes('--property=StandardOutput=append:/state/task.log'), true);
 });
 
 test('stop signals all members, escalates only after the owned cgroup stays populated, and is idempotent', async () => {

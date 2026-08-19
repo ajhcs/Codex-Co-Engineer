@@ -25,28 +25,37 @@ The default DSH configuration is
 `~/.config/codex-co-engineer/model-api-key`. Cursor Cloud also recognizes
 the existing owner-only `~/.config/cursor-cloud-control/api-key`.
 
-Run the following from the installed plugin directory:
+Run the following from the installed plugin package directory—the directory
+containing `package.json` and `bin/setup.mjs`:
 
 ```bash
 npm run setup
 npm run setup:check
 ```
 
+In a source checkout, that directory is
+`plugins/plumbob-harness-control`. For a Codex-managed installation, use the
+package path reported by Codex or its plugin manager instead of assuming a
+project-relative path.
+
 The package supports Node.js 24 and newer. The exact release gate is pinned
 to Node.js 24 so release receipts are reproducible.
 
 Local worker launch additionally requires Linux with a working
 `systemd --user` manager, `systemd-run` 244 or newer, and a unified cgroup
-v2 hierarchy. The transient systemd scope uses
-`KillMode=control-group` only to make cancellation reach detached
-descendants; it is not a sandbox and does not restrict environment, network,
-filesystem, credentials, or provider shell capabilities. Local dispatch fails
-closed when this boundary cannot be verified.
+v2 hierarchy. The manager-owned transient systemd user service uses
+`KillMode=control-group` only to make cancellation reach detached descendants
+and let the worker survive the launching client; it is not a sandbox and does
+not restrict environment, network, filesystem, credentials, or provider shell
+capabilities. Local dispatch fails closed when this boundary cannot be
+verified.
 
-`npm run setup:check` validates the provider CLIs, ACPX/DSH composition,
-Cursor SDK, and `worktree-bootstrap` dependency. It does not prove the
-systemd/cgroup prerequisite. The release gate and live host acceptance must
-validate that Linux process boundary before local agents run.
+`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
+and `worktree-bootstrap` dependency. It does not install or authenticate Grok
+or Cursor Local, validate their CLIs, validate the Cursor Cloud key, or prove
+the systemd/cgroup prerequisite. Call the `status` tool after setup to check
+provider readiness. The release gate and live host acceptance must validate
+the Linux process boundary before local agents run.
 
 ## Task inputs
 
@@ -65,6 +74,12 @@ is intentional. Direct mode does not create a disposable worktree.
 Cursor Cloud requires a provider-accessible Git origin and an exact immutable
 commit SHA in `starting_ref`. The SHA must already be pushed; a local branch
 name or unpushed work is not an acceptable cloud starting point.
+An exact SHA reachable only from a feature branch can remain invisible to
+Cursor until the branch is provider-visible through an open pull request or
+the default branch. Create the draft PR (or make the commit reachable from
+the default branch) before final Cloud acceptance. Surface an HTTP 400 for an
+otherwise-valid SHA as a provider visibility failure and fix reachability
+before retrying.
 `create_pr` is supported only for Cursor Cloud and defaults to `false`.
 Local tasks reject `create_pr`; Codex inspects their handoff and commits
 before deciding whether to push or open a PR.

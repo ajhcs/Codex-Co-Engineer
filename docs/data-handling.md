@@ -25,12 +25,14 @@ boundary is not trusted.
 
 Local worker launch requires Linux with a working `systemd --user` manager,
 `systemd-run` 244 or newer, and unified cgroup v2. Co-Engineer places the
-worker in a transient scope with `KillMode=control-group` solely so
-cancellation reaches detached descendants. This is a lifecycle/cleanup
+worker in a manager-owned transient systemd user service with
+`KillMode=control-group` solely so cancellation reaches detached descendants
+and the worker survives the launching client. This is a lifecycle/cleanup
 boundary, not a sandbox: the provider's environment, credentials, network,
 filesystem, and shell capabilities are inherited unchanged. Local dispatch
 fails closed when it cannot verify this boundary. `setup:check` validates
-CLI/worktree dependencies but does not replace the release/live cgroup check.
+DSH/ACPX, Cursor SDK, and worktree dependencies but does not install or
+authenticate Grok/Cursor Local or replace the release/live cgroup check.
 
 If managed bootstrap fails before it emits an authoritative receipt/path,
 Co-Engineer cannot safely identify or delete an unknown worktree. Inspect
@@ -41,6 +43,14 @@ Cursor Cloud receives a remote repository reference and an exact pushed
 starting commit SHA. It does not see unpushed local commits. Its provider-
 managed branch and any requested PR remain remote artifacts until Codex
 reviews them.
+
+An exact SHA reachable only from a feature branch can remain invisible to
+Cursor until the branch is provider-visible through an open pull request or
+the default branch. Create the draft PR (or make the commit reachable from
+the default branch) before final Cloud acceptance. If the provider returns
+HTTP 400 for an otherwise-valid SHA, surface it as a visibility failure in
+the receipt and fix reachability before retrying; do not blindly replay the
+task.
 
 `create_pr` is a Cursor Cloud-only request. Local tasks reject it and return
 their branch/handoff for Codex to inspect before any push or PR creation.

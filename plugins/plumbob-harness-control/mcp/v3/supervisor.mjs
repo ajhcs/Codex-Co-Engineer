@@ -330,6 +330,7 @@ export async function launchWorker({
         cwd,
         env,
         stdio: ['ignore', log.fd, log.fd],
+        logPath: paths.log,
         taskId,
       });
       child = boundary.child;
@@ -664,7 +665,7 @@ export async function cancelTask(root, taskId, dependencies = {}) {
       });
     }
     await recordManagedCleanup(root, task, dependencies.execute);
-    await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', boundary: 'systemd-user-scope-cgroup' });
+    await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', boundary: runtime.process_boundary.boundary });
     return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
   }
   if (!identity && !providerIdentity) {

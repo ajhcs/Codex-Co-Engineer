@@ -23,6 +23,12 @@ const AMBIGUOUS_SEND_CODES = new Set([
   'connection_reset',
   'service_unavailable',
 ]);
+const SECRET_ASSIGNMENT_PATTERN = /\b((?:[A-Za-z][A-Za-z0-9]*[_-])*(?:api[\s_-]?key|access[\s_-]?token|refresh[\s_-]?token|authorization|bearer|credential|password|secret|token|private[\s_-]?key))(\s*[:=]\s*)(?:\b(?:Bearer|Basic)\s+[^\s,;'"&]+|"[^"]*"|'[^']*'|[^\s,;'"&]+)/giu;
+const COMMON_TOKEN_PATTERNS = [
+  /\b(?:sk|xai)-[A-Za-z0-9_-]{8,}\b/giu,
+  /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{8,}\b/giu,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
+];
 
 function fail(code, message, options = {}) {
   const error = new Error(message, options);
@@ -98,7 +104,12 @@ function redactedString(value, sensitiveValues = []) {
     .replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/giu, 'https://[redacted]@')
     .replace(/([?&](?:token|access_token|api[_-]?key|secret|password)=)[^&#\s]*/giu, '$1[redacted]')
     .replace(/(bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[redacted]')
+    .replace(SECRET_ASSIGNMENT_PATTERN, (_match, key, separator) => `${key}${separator}[redacted]`)
     .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|password|secret|token)\s*[:=]\s*["']?)[^\s,"'}]+/giu, '$1[redacted]')
+    .replace(/\bcrsr_[A-Za-z0-9_-]{12,}\b/gu, '[redacted]')
+    .replace(COMMON_TOKEN_PATTERNS[0], '[redacted]')
+    .replace(COMMON_TOKEN_PATTERNS[1], '[redacted]')
+    .replace(COMMON_TOKEN_PATTERNS[2], '[redacted]')
     .slice(0, 4096);
 }
 
@@ -117,7 +128,7 @@ function sanitizedThrown(error, codeOverride, sensitiveValues = []) {
   );
 }
 
-const SENSITIVE_PROVIDER_FIELDS = /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|credential|password|secret|token|prompt)$/iu;
+const SENSITIVE_PROVIDER_FIELDS = /^(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|credential|password|secret|token|prompt|private[_-]?key))$/iu;
 
 function sanitizeProviderValue(value, sensitiveValues = [], depth = 0, seen = new WeakSet()) {
   if (value === null || value === undefined) return value ?? null;
@@ -354,6 +365,18 @@ function assertExactRunIdentity(run, agentId, expectedRequestId) {
     fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a run for a different idempotency identity.');
   }
   return run;
+}
+
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timeout', 'transport_lost']);
+
+async function registerProviderRun(root, taskId, runId) {
+  return updateTask(root, taskId, (current) => {
+    if (current.provider_run_id && current.provider_run_id !== runId) {
+      fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a run that conflicts with the recorded run identity.');
+    }
+    if (TERMINAL_TASK_STATUSES.has(current.status)) return {};
+    return { provider_run_id: runId };
+  });
 }
 
 /**
@@ -611,8 +634,8 @@ export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } =
         throw uncertainDispatchError(recoveryError);
       }
     }
-    assertExactRunIdentity(run, agentId);
-    const registered = await updateTask(root, taskId, { provider_run_id: run.id });
+    assertExactRunIdentity(run, agentId, runIdempotencyKey);
+    const registered = await registerProviderRun(root, taskId, run.id);
     if (signal?.aborted || ['cancelling', 'transport_lost', 'cancelled', 'completed', 'failed', 'timeout'].includes(registered.status)) {
       fail('cancelled', 'Task cancellation won the Cursor Cloud run-registration race.');
     }

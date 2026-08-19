@@ -36,10 +36,12 @@ repository contents, or unredacted provider payloads.
   account as part of the trusted boundary.
 - Local workers require Linux, a working `systemd --user` manager,
   `systemd-run` 244 or newer, and unified cgroup v2. Co-Engineer uses a
-  transient scope with `KillMode=control-group` solely to stop detached
-  descendants during cancellation. This is not a sandbox and does not
-  restrict the provider's environment, credentials, network, filesystem, or
-  shell capabilities; local dispatch fails closed when it is unavailable.
+  manager-owned transient systemd user service with
+  `KillMode=control-group` solely to stop detached descendants during
+  cancellation and let the worker survive the launching client. This is not a
+  sandbox and does not restrict the provider's environment, credentials,
+  network, filesystem, or shell capabilities; local dispatch fails closed when
+  it is unavailable.
 - Local tasks default to a managed `worktree-bootstrap` worktree. An explicit
   `workspace_mode: "direct"` request may run against the supplied checkout,
   so direct mode must be treated as full mutation of that checkout.
@@ -49,7 +51,11 @@ repository contents, or unredacted provider payloads.
   only an exact identified task/lock.
 - Cursor Cloud is a remote provider. Its repository must have a provider-
   accessible origin and `starting_ref` must identify an exact, immutable
-  commit SHA that is already pushed. Do not put credentials in an origin URL.
+  commit SHA that is already pushed. A SHA reachable only from a feature branch
+  may remain invisible until an open PR or default-branch reachability exposes
+  it to the provider; create a draft PR before final acceptance and treat a
+  provider HTTP 400 for an otherwise-valid SHA as a visibility failure. Do not
+  put credentials in an origin URL or blindly replay the task.
 - `create_pr` is a Cursor Cloud-only option. Local tasks reject it; local
   commits are handed off for Codex to inspect and push or turn into a PR.
   Codex remains the merge authority.
