@@ -63,8 +63,11 @@ function providerArgv(provider, env = process.env) {
 async function workerEnvironment(provider, source = process.env) {
   const env = { ...source };
   if (provider !== 'dsh' || env.MODEL_API_KEY) return env;
-  const file = env.CODEX_CO_ENGINEER_MODEL_API_KEY_FILE;
-  if (!file) return env;
+  const file = env.CODEX_CO_ENGINEER_MODEL_API_KEY_FILE ?? path.join(
+    env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config'),
+    'codex-co-engineer',
+    'model-api-key',
+  );
   const metadata = await stat(file);
   if ((metadata.mode & 0o077) !== 0) fail('credential_permissions', 'DSH credential file must be owner-only.');
   const key = (await readFile(file, 'utf8')).trim();
