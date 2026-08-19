@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-08-19
+
+### Fixed
+
+- Project a compact live `last_event` / `progress` snapshot from the
+  append-only event log so `task` and `status` no longer stay stale while
+  ACP workers are streaming. `task.json` is still not rewritten on every
+  text delta.
+- Extend `task` with optional bounded `wait_ms` and `cursor` wait
+  arguments so Codex can wait for meaningful progress or a terminal state
+  instead of hammering empty polls. Waits are event-driven; text deltas
+  are coalesced and event-log catch-up is memory-bounded. Unsolicited
+  stdio callbacks across assistant turns are not available.
+- Read the configured `remote.origin.url` for Cursor Cloud so host
+  `insteadOf` credential rewrites cannot leak into receipts or fail
+  dispatch.
+
+### Changed
+
+- Adopt `codex-co-engineer` as the package, plugin, MCP server, skill, and
+  repository-path identifier. Human-facing branding is Codex-Co-Engineer.
+- Remove leftover environment fallbacks and vendor package names from the
+  previous identity.
+- Rewrite the root and plugin READMEs around the current 3.x supervisor,
+  provider matrix, workspace model, and discovery/install paths.
+
+## [3.0.1] - 2026-08-19
+
+### Fixed
+
+- Forward the user-session runtime and D-Bus locators required by transient
+  `systemd --user` services when Codex applies the plugin environment
+  allowlist.
+- Report local process-boundary readiness through `status` and fail local
+  providers closed before creating a worktree, task receipt, or prompt file.
+- Wait for the `systemd-run` client result so queueing failures are classified
+  accurately instead of surfacing as a later unit-inspection failure.
+- Keep the stdio server alive while its newly connected client prepares the
+  first JSON-RPC frame.
+- Exercise the exact manifest-filtered MCP environment in the authoritative
+  release gate.
+
 ## [3.0.0] - 2026-08-19
 
 ### Added

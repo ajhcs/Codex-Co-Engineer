@@ -13,7 +13,7 @@ const inspector = process.env.MCP_INSPECTOR_COMMAND ?? 'mcp-inspector';
 
 function inspect(method, toolName) {
   const argv = [
-    '--cli', 'node', 'plugins/plumbob-harness-control/mcp/v3/server.mjs',
+    '--cli', 'node', 'plugins/codex-co-engineer/mcp/v3/server.mjs',
     '--method', method,
   ];
   if (toolName) argv.push('--tool-name', toolName, '--tool-args-json', '{}');
@@ -34,11 +34,14 @@ try {
   const statusEnvelope = inspect('tools/call', 'status');
   const status = statusEnvelope.structuredContent
     ?? JSON.parse(statusEnvelope.content?.[0]?.text ?? '{}');
-  assert.equal(status.version, '3.0.0');
-  assert.equal(status.healthy, true);
+  assert.equal(status.version, '3.0.2');
+  assert.equal(status.healthy, status.local_boundary.ready);
   assert.equal(status.active, 0);
   assert.deepEqual(status.tasks, []);
   assert.deepEqual(status.providers, ['grok', 'cursor-local', 'dsh', 'cursor-cloud']);
+  for (const provider of ['grok', 'cursor-local', 'dsh']) {
+    if (!status.local_boundary.ready) assert.equal(status.readiness[provider].ready, false);
+  }
   process.stdout.write(`${JSON.stringify({ tools: listed.tools.map((tool) => tool.name), status }, null, 2)}\n`);
 } finally {
   await rm(state, { recursive: true, force: true });

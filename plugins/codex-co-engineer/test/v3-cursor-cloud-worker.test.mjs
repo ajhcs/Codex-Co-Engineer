@@ -59,6 +59,27 @@ test('uses stable Cursor agent/run idempotency and records returned PR', async (
   assert.equal(observed.archived, observed.create.agentId);
 });
 
+test('uses the configured origin instead of an insteadOf credential rewrite', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-config-'));
+  const repo = await createCloudRepo(root);
+  await run('git', [
+    '-C', repo, 'config',
+    'url.https://x-access-token:ghs_testtoken12345678@github.com/.insteadOf',
+    'https://github.com/',
+  ]);
+  await createTask({ root, prompt: 'implement it', record: {
+    id: 'cloud-origin-config', status: 'accepted', provider: 'cursor-cloud', role: 'implement', cwd: repo,
+  } });
+  const sdk = { Agent: { archive: async () => {}, create: async () => ({
+    send: async () => ({ id: 'run-origin', wait: async () => ({ id: 'run-origin', status: 'finished', result: 'done' }) }),
+    close() {},
+  }) } };
+  const terminal = await runCursorCloudTask({ root, taskId: 'cloud-origin-config', sdk, apiKey: 'test-key' });
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.provider_repo_url, 'https://github.com/example/repo.git');
+  assert.doesNotMatch(JSON.stringify(terminal), /ghs_testtoken|x-access-token/u);
+});
+
 test('rejects an initial run with a mismatched request identity', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-request-mismatch-'));
   const repo = await createCloudRepo(root);

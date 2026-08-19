@@ -49,7 +49,7 @@
       "version": "1.3.0",
       "integrity": "sha512-i3h/efaeuMUFAO1HSfo97QZQnnvMd7wWBYtBsdL6UMZg3a78sk3Ffya5Xu7C7tYsXomXoDXJBAzQF2PcFKAhIQ=="
     },
-    "lock_sha512": "sha512-yugpDRvMZI1PxzGHMsM+ePY8FqQHkEJytF5S4wE4+bYF54pECLiFQEE1QGhgJHrYFAfGtZe+MvKqDkU2YrME8Q==",
+    "lock_sha512": "sha512-gZHGpLTRyflEcNQszD/mm/Bsg36LAUfV+lM8PNv5c7kAjB/5y2rjNDiMUGgUSc44qJQq+OnIiaax4OsXunP11Q==",
     "bundler": {
       "package": "esbuild",
       "version": "0.28.2",

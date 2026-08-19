@@ -1,9 +1,9 @@
 {
-  "name": "plumbob-harness-control",
-  "version": "3.0.0",
+  "name": "codex-co-engineer",
+  "version": "3.0.2",
   "description": "Codex-Co-Engineer delegates real coding work to Grok, Cursor Local, Cursor Cloud, and DeepSeek Harness through a thin ACP-first supervisor.",
   "author": {
-    "name": "Plumbob"
+    "name": "Codex-Co-Engineer"
   },
   "license": "MIT",
   "keywords": [
@@ -23,7 +23,7 @@
     "displayName": "Codex-Co-Engineer",
     "shortDescription": "Delegate work to Grok, Cursor Local/Cloud, and DSH",
     "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Local tasks support managed or explicitly direct workspaces and require a Linux manager-owned transient systemd user service with a cgroup cleanup boundary; Cloud tasks start from pushed immutable commit SHAs. Codex retains review and merge authority.",
-    "developerName": "Plumbob",
+    "developerName": "Codex-Co-Engineer",
     "category": "Developer Tools",
     "capabilities": [
       "Interactive",

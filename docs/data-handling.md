@@ -83,6 +83,10 @@ State contains:
 - local repository/worktree paths, branch names, and commit references;
 - opaque local session, cloud agent, run, branch, and PR identifiers.
 
+MCP `task`/`status` results may overlay a compact live `last_event` from
+`events.jsonl` while the durable `task.json` receipt is still mid-run.
+Those snapshots omit prompt text, argv, secrets, and raw event streams.
+
 It can contain sensitive private-repository context. Do not publish or commit
 the state directory. Terminal task state is retained for inspection until the
 operator deliberately removes that exact task directory after handoff.
@@ -90,7 +94,8 @@ operator deliberately removes that exact task directory after handoff.
 ## Handoff and cleanup
 
 Terminal managed tasks retain their worktree and branch; completion does not
-silently delete evidence. Poll `task`, inspect the receipt, and run:
+silently delete evidence. Watch with `task` (optionally `wait_ms` +
+`cursor`), inspect the receipt, and run:
 
 ```bash
 worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown

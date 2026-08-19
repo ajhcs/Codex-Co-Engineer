@@ -9,7 +9,7 @@ import {
   launchProcessBoundary,
   probeProcessBoundary,
   stopProcessBoundary,
-} from '../plugins/plumbob-harness-control/mcp/v3/process-boundary.mjs';
+} from '../plugins/codex-co-engineer/mcp/v3/process-boundary.mjs';
 
 function processAlive(pid) {
   try {

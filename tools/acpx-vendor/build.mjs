@@ -12,7 +12,7 @@ const lockPath = join(here, 'package-lock.json');
 const packagePath = join(here, 'package.json');
 const defaultOutputDirectory = join(
   repositoryRoot,
-  'plugins/plumbob-harness-control/assets',
+  'plugins/codex-co-engineer/assets',
 );
 
 const BUNDLE_NAME = 'acpx-runtime.mjs';

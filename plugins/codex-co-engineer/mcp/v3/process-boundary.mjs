@@ -266,7 +266,7 @@ export function buildProcessBoundaryArgv({ unit, description, command, args = []
   ];
 }
 
-function awaitSpawn(child, timeoutMs) {
+function awaitLauncherResult(child, timeoutMs) {
   if (!child || typeof child.once !== 'function') fail('launch_failed', 'systemd-run did not return a child process handle.');
   return new Promise((resolve, reject) => {
     let timer;
@@ -274,14 +274,25 @@ function awaitSpawn(child, timeoutMs) {
       clearTimeout(timer);
       child.off?.('spawn', onSpawn);
       child.off?.('error', onError);
+      child.off?.('exit', onExit);
     };
-    const onSpawn = () => { cleanup(); resolve(); };
+    const onSpawn = () => {};
     const onError = (error) => { cleanup(); reject(new ProcessBoundaryError('launch_failed', `systemd-run could not start (${compact(error.message)}).`, { cause: error })); };
+    const onExit = (code, signal) => {
+      cleanup();
+      if (code === 0) resolve();
+      else reject(new ProcessBoundaryError(
+        'systemd_run_failed',
+        `systemd-run did not queue the transient service (${code === null ? `signal ${compact(signal)}` : `exit ${code}`}).`,
+      ));
+    };
     child.once('spawn', onSpawn);
     child.once('error', onError);
+    child.once('exit', onExit);
+    if (child.exitCode !== null) queueMicrotask(() => onExit(child.exitCode, child.signalCode));
     timer = setTimeout(() => {
       cleanup();
-      reject(new ProcessBoundaryError('launch_timeout', 'systemd-run did not start within the bounded deadline.'));
+      reject(new ProcessBoundaryError('launch_timeout', 'systemd-run did not queue the transient service within the bounded deadline.'));
     }, timeoutMs);
   });
 }
@@ -443,7 +454,7 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
     stdio,
   });
   try {
-    await awaitSpawn(child, PROCESS_BOUNDARY_DEFAULTS.launchTimeoutMs);
+    await awaitLauncherResult(child, PROCESS_BOUNDARY_DEFAULTS.launchTimeoutMs);
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const shown = await showUnit(host, unit);
       if (shown.found && shown.properties.Description === description && shown.properties.Id === unit) {

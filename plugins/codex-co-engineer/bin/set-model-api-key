@@ -3,7 +3,7 @@ set -euo pipefail
 
 config_home="${XDG_CONFIG_HOME:-${HOME:?}/.config}"
 default_file="${config_home}/codex-co-engineer/model-api-key"
-secret_file="${CODEX_CO_ENGINEER_MODEL_API_KEY_FILE:-${PLUMBOB_HARNESS_MODEL_API_KEY_FILE:-${default_file}}}"
+secret_file="${CODEX_CO_ENGINEER_MODEL_API_KEY_FILE:-${default_file}}"
 secret_dir="$(dirname -- "${secret_file}")"
 
 umask 077

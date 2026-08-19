@@ -129,7 +129,7 @@ async function queryRegistryJson(fetchImpl, url, timeoutMs, codes) {
         credentials: 'omit',
         headers: {
           accept: 'application/json',
-          'user-agent': 'plumbob-acpx-publish-provenance/1',
+          'user-agent': 'codex-co-engineer-acpx-publish-provenance/1',
         },
         signal,
       });

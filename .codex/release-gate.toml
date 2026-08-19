@@ -26,7 +26,7 @@ env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE =
 [[stages]]
 name = "co-engineer-unit"
 kind = "unit_tests"
-command = ["npm", "--prefix", "plugins/plumbob-harness-control", "test"]
+command = ["npm", "--prefix", "plugins/codex-co-engineer", "test"]
 failure_class = "product_test_failed"
 timeout_seconds = 300
 quiet_seconds = 30
@@ -62,6 +62,13 @@ failure_class = "environment_blocked"
 timeout_seconds = 30
 
 [[stages]]
+name = "codex-mcp-environment"
+kind = "integration_tests"
+command = ["node", "scripts/mcp-environment-preflight.mjs"]
+failure_class = "environment_blocked"
+timeout_seconds = 30
+
+[[stages]]
 name = "acpx-reproducible-build"
 kind = "build"
 command = ["npm", "--prefix", "tools/acpx-vendor", "run", "test:reproducible"]
@@ -80,7 +87,7 @@ env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE =
 [[stages]]
 name = "co-engineer-package-inventory"
 kind = "artifact_verification"
-command = ["npm", "pack", "./plugins/plumbob-harness-control", "--dry-run", "--ignore-scripts", "--offline", "--json"]
+command = ["npm", "pack", "./plugins/codex-co-engineer", "--dry-run", "--ignore-scripts", "--offline", "--json"]
 failure_class = "product_test_failed"
 timeout_seconds = 60
 
