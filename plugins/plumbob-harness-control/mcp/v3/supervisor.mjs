@@ -462,7 +462,6 @@ export async function submitTask(input, dependencies = {}) {
       provider: input.provider,
       env: launchEnv,
     });
-    await clearTaskLaunchReservation(root, id, task.launch_reservation?.token).catch(() => {});
     return { task: (await readTask(root, id)).task, runtime };
   } catch (error) {
     if (taskCreated) {
@@ -532,6 +531,44 @@ async function stopRuntimeBoundary(runtime) {
 
 function currentProviderIdentity(task) {
   return processIdentity(task?.provider_process_group, task?.provider_process_group, task?.provider_process_start_ticks);
+}
+
+async function reconcileInactiveTask(root, task, runtime) {
+  if (!ACTIVE.has(task.status) || launchReservationActive(task) || await runtimeActive(runtime)) return task;
+
+  if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
+    try {
+      return await reconcileCursorCloudTask({ root, taskId: task.id });
+    } catch (error) {
+      return updateTask(root, task.id, {
+        status: 'transport_lost',
+        launch_reservation: null,
+        error: { code: error?.code ?? 'cursor_reconcile_failed', message: 'Cursor Cloud state could not be reconciled.' },
+      });
+    }
+  }
+
+  let boundaryStopped = false;
+  if (runtime?.process_boundary) {
+    try {
+      await stopRuntimeBoundary(runtime);
+      boundaryStopped = true;
+    } catch {
+      // Keep the task reconcilable when exact cgroup cleanup cannot be proven.
+    }
+  }
+  const reconciled = await updateTask(root, task.id, {
+    status: 'transport_lost',
+    launch_reservation: null,
+    error: {
+      code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
+      message: boundaryStopped
+        ? 'Recorded worker stopped; its owned cgroup was emptied without replaying the task.'
+        : 'Recorded worker is not running; inspect or cancel this task without replaying it.',
+    },
+  });
+  await recordManagedCleanup(root, reconciled, undefined);
+  return reconciled;
 }
 
 function processGroupAlive(processGroup) {
@@ -665,34 +702,9 @@ export async function cancelTask(root, taskId, dependencies = {}) {
 }
 
 export async function taskStatus(root, taskId) {
-  let task = (await readTask(root, taskId)).task;
-  const runtime = taskRuntime(await readRuntimeRecord(root, taskId), task);
-  if (ACTIVE.has(task.status) && !launchReservationActive(task) && !(await runtimeActive(runtime))) {
-    if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
-      task = await reconcileCursorCloudTask({ root, taskId });
-    } else {
-      let boundaryStopped = false;
-      if (runtime?.process_boundary) {
-        try {
-          await stopRuntimeBoundary(runtime);
-          boundaryStopped = true;
-        } catch {
-          // Keep the task reconcilable when exact cgroup cleanup cannot be proven.
-        }
-      }
-      task = await updateTask(root, taskId, {
-        status: 'transport_lost',
-        launch_reservation: null,
-        error: {
-          code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
-          message: boundaryStopped
-            ? 'Recorded worker stopped; its owned cgroup was emptied without replaying the task.'
-            : 'Recorded worker is not running; inspect or cancel this task without replaying it.',
-        },
-      });
-      await recordManagedCleanup(root, task, undefined);
-    }
-  }
+  const { task: initialTask } = await readTask(root, taskId);
+  const runtime = taskRuntime(await readRuntimeRecord(root, taskId), initialTask);
+  const task = await reconcileInactiveTask(root, initialTask, runtime);
   return { task, runtime };
 }
 
@@ -702,39 +714,7 @@ export async function supervisorStatus(root = stateRoot()) {
     const task = tasks[index];
     if (!ACTIVE.has(task.status)) continue;
     const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
-    if (launchReservationActive(task) || await runtimeActive(runtime)) continue;
-    if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
-      try {
-        tasks[index] = await reconcileCursorCloudTask({ root, taskId: task.id });
-      } catch (error) {
-        tasks[index] = await updateTask(root, task.id, {
-          status: 'transport_lost',
-          launch_reservation: null,
-          error: { code: error?.code ?? 'cursor_reconcile_failed', message: 'Cursor Cloud state could not be reconciled.' },
-        });
-      }
-    } else {
-      let boundaryStopped = false;
-      if (runtime?.process_boundary) {
-        try {
-          await stopRuntimeBoundary(runtime);
-          boundaryStopped = true;
-        } catch {
-          // Preserve an active uncertain receipt for explicit cancellation.
-        }
-      }
-      tasks[index] = await updateTask(root, task.id, {
-        status: 'transport_lost',
-        launch_reservation: null,
-        error: {
-          code: boundaryStopped ? 'worker_not_running' : 'worker_boundary_uncertain',
-          message: boundaryStopped
-            ? 'Recorded worker stopped; its owned cgroup was emptied without replaying the task.'
-            : 'Recorded worker is not running; inspect or cancel this task without replaying it.',
-        },
-      });
-      await recordManagedCleanup(root, tasks[index], undefined);
-    }
+    tasks[index] = await reconcileInactiveTask(root, task, runtime);
   }
   return {
     version: '3.0.0',

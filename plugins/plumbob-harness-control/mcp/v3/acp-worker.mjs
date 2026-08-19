@@ -346,13 +346,33 @@ function authenticationFailure(error) {
 function fallbackStartAllowed(task) {
   return ['accepted', 'starting'].includes(task?.status)
     && task.prompt_dispatched !== true
-    && task.dispatch_intent !== true;
+    && task.dispatch_intent !== true
+    && task.dispatch_uncertain !== true;
 }
 
 function rejectFallbackStart(task) {
   if (fallbackStartAllowed(task)) return;
   fail(task?.status === 'cancelling' || task?.status === 'cancelled' ? 'cancelled' : 'transport_lost',
     `Task cannot start a fallback worker from ${task?.status ?? 'unknown'}.`);
+}
+
+async function fallbackToCliIfSafe({ root, task, prompt, signal, error }) {
+  const failure = publicError(error, prompt);
+  const current = (await readTask(root, task.id)).task;
+  if (!fallbackStartAllowed(current)) return null;
+  const fallbackTask = await updateTask(root, task.id, (latest) => (
+    fallbackStartAllowed(latest)
+      ? { status: 'starting', fallback_from: 'acp', acp_error: failure }
+      : latest
+  ));
+  rejectFallbackStart(fallbackTask);
+  await appendTaskEvent(root, task.id, {
+    type: 'transport',
+    state: 'acp_failed_before_dispatch',
+    fallback: 'cli',
+    error: failure,
+  }).catch(() => {});
+  return runCliFallback({ root, task: { ...task, ...fallbackTask }, prompt, signal });
 }
 
 function cliCommand(task, promptFile, prompt) {
@@ -520,7 +540,6 @@ function parseFlowResult(stdout) {
 }
 
 async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal }) {
-  if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled before startup.');
   const taskDirectory = taskPaths(root, task.id).directory;
   const acpxHome = path.join(taskDirectory, 'acpx-home');
   const inputFile = path.join(taskDirectory, `flow-input-${randomUUID()}.json`);
@@ -544,6 +563,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   let cancel;
   let dispatchUncertain = false;
   try {
+    if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled before startup.');
     await mkdir(acpxHome, { recursive: true, mode: 0o700 });
     await chmod(acpxHome, 0o700);
     await writeFile(inputFile, `${JSON.stringify({ prompt })}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
@@ -624,18 +644,11 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       finished_at: new Date().toISOString(),
     });
   } catch (error) {
-    if (dispatchUncertain && error && typeof error === 'object') error.dispatch_uncertain = true;
-    const current = (await readTask(root, task.id)).task;
-    if (current.prompt_dispatched !== true && current.dispatch_intent !== true && !dispatchUncertain && error?.dispatch_uncertain !== true && !authenticationFailure(error)) {
-      await updateTask(root, task.id, {
-        status: 'starting',
-        acp_error: publicError(error, prompt),
-        fallback_safe: true,
-        provider_process_group: null,
-        provider_process_start_ticks: null,
-      }).catch(() => {});
-      throw error;
+    if (!dispatchUncertain && !authenticationFailure(error)) {
+      const fallback = await fallbackToCliIfSafe({ root, task, prompt, signal, error });
+      if (fallback) return fallback;
     }
+    const current = (await readTask(root, task.id)).task;
     const status = signal?.aborted ? 'cancelled' : 'failed';
     const failure = publicError(error, prompt);
     await appendTaskEvent(root, task.id, { type: 'terminal', status, error: failure }).catch(() => {});
@@ -644,7 +657,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       error: failure,
       provider_process_group: null,
       provider_process_start_ticks: null,
-      fallback_safe: current.prompt_dispatched !== true && current.dispatch_intent !== true && !dispatchUncertain,
+      fallback_safe: fallbackStartAllowed(current),
       finished_at: new Date().toISOString(),
     }).catch(() => {});
     throw error;
@@ -690,27 +703,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000) fail('invalid_timeout', 'timeout_ms must be at least 1000.');
 
   if (task.provider === 'dsh') {
-    try {
-      return await runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
-    } catch (error) {
-      const current = (await readTask(root, taskId)).task;
-      if (fallbackStartAllowed(current) && error?.dispatch_uncertain !== true && !authenticationFailure(error)) {
-        const fallbackTask = await updateTask(root, taskId, (latest) => (
-          fallbackStartAllowed(latest)
-            ? { status: 'starting', fallback_from: 'acp', acp_error: publicError(error, prompt) }
-            : latest
-        ));
-        rejectFallbackStart(fallbackTask);
-        await appendTaskEvent(root, taskId, {
-          type: 'transport',
-          state: 'acp_failed_before_dispatch',
-          fallback: 'cli',
-          error: publicError(error, prompt),
-        }).catch(() => {});
-        return runCliFallback({ root, task: { ...task, ...fallbackTask }, prompt, signal });
-      }
-      throw error;
-    }
+    return runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
   }
 
   const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs });
@@ -780,27 +773,16 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   } catch (error) {
     const failure = publicError(error, prompt);
     const current = (await readTask(root, taskId)).task;
-    if (fallbackStartAllowed(current) && !authenticationFailure(error)) {
-      const fallbackTask = await updateTask(root, taskId, (latest) => (
-        fallbackStartAllowed(latest)
-          ? { status: 'starting', fallback_from: 'acp', acp_error: failure }
-          : latest
-      ));
-      rejectFallbackStart(fallbackTask);
-      await appendTaskEvent(root, taskId, {
-        type: 'transport',
-        state: 'acp_failed_before_dispatch',
-        fallback: 'cli',
-        error: failure,
-      }).catch(() => {});
-      return runCliFallback({ root, task: { ...task, ...fallbackTask }, prompt, signal });
+    if (!authenticationFailure(error)) {
+      const fallback = await fallbackToCliIfSafe({ root, task, prompt, signal, error });
+      if (fallback) return fallback;
     }
     const status = controller.signal.aborted ? 'cancelled' : 'failed';
     await updateTask(root, taskId, {
       status,
       error: failure,
       finished_at: new Date().toISOString(),
-      fallback_safe: current.prompt_dispatched !== true,
+      fallback_safe: fallbackStartAllowed(current),
     }).catch(() => {});
     await appendTaskEvent(root, taskId, { type: 'terminal', status, error: failure }).catch(() => {});
     throw error;

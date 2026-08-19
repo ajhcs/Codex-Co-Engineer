@@ -204,9 +204,16 @@ function providerRepoUrl(value) {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function waitForRemoteStop(client, task, runId, key, deadlineAt = Date.now() + CANCEL_TIMEOUT_MS) {
+async function waitForRemoteStop(
+  client,
+  task,
+  runId,
+  key,
+  deadlineAt = Date.now() + CANCEL_TIMEOUT_MS,
+  maxAttempts = 40,
+) {
   let lastError;
-  for (let attempt = 0; attempt < 40 && remainingUntil(deadlineAt) > 0; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts && remainingUntil(deadlineAt) > 0; attempt += 1) {
     try {
       const current = await boundedCall(
         () => client.Agent.getRun(runId, {
@@ -221,10 +228,16 @@ async function waitForRemoteStop(client, task, runId, key, deadlineAt = Date.now
         lastError.code = 'cursor_cancel_unconfirmed';
         break;
       }
-      if (current.status !== 'running') return current;
+      if (['finished', 'cancelled', 'error'].includes(current.status)) return current;
+      if (current.status !== 'running') {
+        lastError = new Error(`Cursor Cloud returned an unknown state while checking ${runId}.`);
+        lastError.code = 'cursor_cancel_unconfirmed';
+        break;
+      }
     } catch (error) {
       lastError = error;
     }
+    if (attempt + 1 >= maxAttempts) break;
     if (remainingUntil(deadlineAt) <= 0) break;
     await boundedCall(
       () => delay(Math.min(250, remainingUntil(deadlineAt))),
@@ -240,11 +253,25 @@ async function waitForRemoteStop(client, task, runId, key, deadlineAt = Date.now
   );
 }
 
-async function stopRemoteRun(client, task, key, run, waitPromise) {
+async function stopRemoteRun(client, task, key, run, waitPromise, { deadlineAt, maxAttempts = 1 } = {}) {
   let stopped = false;
   let lastError;
+  const cancel = typeof run.cancel === 'function'
+    ? () => run.cancel()
+    : () => client.Agent.cancelRun(run.id, {
+      runtime: 'cloud', agentId: task.provider_agent_id, apiKey: key,
+    });
   try {
-    await cleanupCall(() => run.cancel(), 'run cancellation');
+    if (deadlineAt === undefined) {
+      await cleanupCall(cancel, 'run cancellation');
+    } else {
+      await boundedCall(
+        cancel,
+        Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
+        'cursor_cancel_unconfirmed',
+        `Cursor Cloud run ${run.id} cancellation did not finish.`,
+      );
+    }
   } catch (error) {
     lastError = error;
   }
@@ -256,23 +283,9 @@ async function stopRemoteRun(client, task, key, run, waitPromise) {
     }
   }
   try {
-    const current = await cleanupCall(
-      () => client.Agent.getRun(run.id, {
-        runtime: 'cloud', agentId: task.provider_agent_id, apiKey: key,
-      }),
-      'provider run stop confirmation',
-    );
-    if (current?.id !== run.id) {
-      const identityError = new Error(`Cursor Cloud returned a different run identity while confirming ${run.id}.`);
-      identityError.code = 'cursor_cancel_unconfirmed';
-      throw identityError;
-    }
-    stopped = ['finished', 'cancelled', 'error'].includes(current.status);
-    if (!stopped) {
-      const activeError = new Error(`Cursor Cloud run ${run.id} remains active after cancellation.`);
-      activeError.code = 'cursor_cancel_unconfirmed';
-      lastError = activeError;
-    }
+    const confirmationDeadline = deadlineAt ?? Date.now() + CLEANUP_TIMEOUT_MS;
+    await waitForRemoteStop(client, task, run.id, key, confirmationDeadline, maxAttempts);
+    stopped = true;
   } catch (error) {
     lastError = error;
   }
@@ -437,6 +450,63 @@ async function archiveAgent(client, agentId, key) {
   return true;
 }
 
+async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, result }) {
+  if (result?.id !== undefined && result.id !== run.id) {
+    fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a different run identity at completion.');
+  }
+  const status = result.status === 'finished' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
+  const providerSecrets = [key, prompt];
+  const sanitizedBranches = sanitizeProviderValue(result.git?.branches ?? [], providerSecrets);
+  const branches = Array.isArray(sanitizedBranches) ? sanitizedBranches : [];
+  const providerResult = sanitizeProviderValue(
+    typeof result.result === 'string' ? result.result.slice(0, 4096) : result.result ?? null,
+    providerSecrets,
+  );
+  const providerError = sanitizeProviderValue(result.error ?? null, providerSecrets);
+  let archived = false;
+  try {
+    archived = await archiveAgent(client, agentId, key);
+  } catch (cleanupError) {
+    await appendTaskEvent(root, taskId, {
+      type: 'cleanup_warning',
+      code: cleanupError?.code ?? 'cursor_archive_failed',
+    }).catch(() => {});
+  }
+  const terminal = await updateTask(root, taskId, {
+    status,
+    provider_run_id: result.id,
+    result: providerResult,
+    provider_error: providerError,
+    branches,
+    pr_url: branches.find((entry) => entry?.prUrl)?.prUrl ?? null,
+    provider_agent_archived: archived,
+    finished_at: new Date().toISOString(),
+  });
+  await appendTaskEvent(root, taskId, { type: 'terminal', status, run_id: result.id });
+  return terminal;
+}
+
+async function persistCancelledRun({ root, taskId, client, task, key, runId }) {
+  await updateTask(root, taskId, { provider_run_cancelled: true }).catch(() => {});
+  let archived = false;
+  try {
+    archived = await archiveAgent(client, task.provider_agent_id, key);
+  } catch (cleanupError) {
+    await appendTaskEvent(root, taskId, {
+      type: 'cleanup_warning',
+      code: cleanupError?.code ?? 'cursor_archive_failed',
+    }).catch(() => {});
+  }
+  await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', transport: 'cursor-sdk' });
+  return updateTask(root, taskId, {
+    status: 'cancelled',
+    provider_run_id: runId ?? task.provider_run_id,
+    provider_run_cancelled: true,
+    provider_agent_archived: archived,
+    finished_at: new Date().toISOString(),
+  });
+}
+
 export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } = {}) {
   const { task } = await readTask(root, taskId);
   const prompt = await readPrompt(root, taskId);
@@ -566,39 +636,7 @@ export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } =
     rawWait.catch(() => {});
     waitPromise = rawWait;
     const result = await deadlineCall(deadlineAt, () => rawWait, 'run completion');
-    if (result?.id !== undefined && result.id !== run.id) {
-      fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a different run identity at completion.');
-    }
-    const status = result.status === 'finished' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
-    const providerSecrets = [key, prompt];
-    const sanitizedBranches = sanitizeProviderValue(result.git?.branches ?? [], providerSecrets);
-    const branches = Array.isArray(sanitizedBranches) ? sanitizedBranches : [];
-    const providerResult = sanitizeProviderValue(
-      typeof result.result === 'string' ? result.result.slice(0, 4096) : null,
-      providerSecrets,
-    );
-    const providerError = sanitizeProviderValue(result.error ?? null, providerSecrets);
-    let archived = false;
-    try {
-      archived = await archiveAgent(client, agentId, key);
-    } catch (cleanupError) {
-      await appendTaskEvent(root, taskId, {
-        type: 'cleanup_warning',
-        code: cleanupError?.code ?? 'cursor_archive_failed',
-      });
-    }
-    const terminal = await updateTask(root, taskId, {
-      status,
-      provider_run_id: result.id,
-      result: providerResult,
-      provider_error: providerError,
-      branches,
-      pr_url: branches.find((entry) => entry?.prUrl)?.prUrl ?? null,
-      provider_agent_archived: archived,
-      finished_at: new Date().toISOString(),
-    });
-    await appendTaskEvent(root, taskId, { type: 'terminal', status, run_id: result.id });
-    return terminal;
+    return persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, result });
   } catch (error) {
     timedOut ||= error?.code === 'timeout';
     let current = (await readTask(root, taskId)).task;
@@ -668,55 +706,26 @@ export async function runCursorCloudTask({ root, taskId, sdk, apiKey, signal } =
   }
 }
 
-async function listRunsForCancellation(client, task, key, deadlineAt) {
-  if (!task.provider_agent_id) return [];
+async function getRecordedRunForCancellation(client, task, key, deadlineAt) {
+  if (!task.provider_agent_id) return null;
   if (!task.provider_run_id) {
     fail('cursor_cancel_unconfirmed', 'Cursor Cloud cancellation requires the exact recorded run identity; refusing to cancel an arbitrary run.');
   }
-  let listed;
-  try {
-    listed = await boundedCall(
-      () => client.Agent.listRuns(task.provider_agent_id, { runtime: 'cloud', apiKey: key }),
-      Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
-      'cursor_cancel_unconfirmed',
-      'Cursor Cloud run listing did not finish during cancellation.',
-    );
-  } catch (listError) {
-    let exact;
-    try {
-      exact = await boundedCall(
-        () => client.Agent.getRun(task.provider_run_id, {
-          runtime: 'cloud', agentId: task.provider_agent_id, apiKey: key,
-        }),
-        Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
-        'cursor_cancel_unconfirmed',
-        'Cursor Cloud exact run lookup did not finish during cancellation.',
-      );
-    } catch (exactError) {
-      fail('cursor_cancel_unconfirmed', 'Cursor Cloud run state could not be listed or checked during cancellation.', { cause: exactError });
-    }
-    if (exact?.id !== task.provider_run_id) {
-      fail('cursor_cancel_unconfirmed', 'Cursor Cloud returned no exact run for the recorded cancellation identity.');
-    }
-    return [exact];
+  const run = await boundedCall(
+    () => client.Agent.getRun(task.provider_run_id, {
+      runtime: 'cloud', agentId: task.provider_agent_id, apiKey: key,
+    }),
+    Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
+    'cursor_cancel_unconfirmed',
+    'Cursor Cloud exact run lookup did not finish during cancellation.',
+  );
+  if (run?.id !== task.provider_run_id) {
+    fail('cursor_cancel_unconfirmed', 'Cursor Cloud returned no exact run for the recorded cancellation identity.');
   }
-  if (!Array.isArray(listed?.items)) fail('cursor_cancel_unconfirmed', 'Cursor Cloud returned an invalid run listing.');
-  const runs = listed.items.filter((entry) => entry?.id === task.provider_run_id);
-  if (runs.length === 0) {
-    const exact = await boundedCall(
-      () => client.Agent.getRun(task.provider_run_id, {
-        runtime: 'cloud', agentId: task.provider_agent_id, apiKey: key,
-      }),
-      Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
-      'cursor_cancel_unconfirmed',
-      'Cursor Cloud exact run lookup did not finish during cancellation.',
-    );
-    if (exact?.id !== task.provider_run_id) {
-      fail('cursor_cancel_unconfirmed', 'Cursor Cloud returned no exact run for the recorded cancellation identity.');
-    }
-    runs.push(exact);
+  if (run.agentId !== undefined && run.agentId !== task.provider_agent_id) {
+    fail('cursor_cancel_unconfirmed', 'Cursor Cloud returned a run for a different agent identity.');
   }
-  return runs;
+  return run;
 }
 
 export async function cancelCursorCloudTask({ root, taskId, sdk, apiKey, loadSdk = loadCursorSdk, loadKey = loadCursorApiKey } = {}) {
@@ -788,42 +797,14 @@ export async function cancelCursorCloudTask({ root, taskId, sdk, apiKey, loadSdk
       throw sanitizedThrown(error, 'cursor_cancel_unconfirmed', [key, prompt]);
     }
   }
-  let runs;
+  let run;
   const promptSecret = await readPrompt(root, taskId).catch(() => '');
   try {
-    runs = await listRunsForCancellation(client, task, key, deadlineAt);
-    for (const run of runs) {
-      if (run?.agentId !== undefined && run.agentId !== task.provider_agent_id) {
-        fail('cursor_cancel_unconfirmed', 'Cursor Cloud returned a run for a different agent identity.');
-      }
-      if (!['running', 'finished', 'cancelled', 'error'].includes(run?.status)) {
-        fail('cursor_cancel_unconfirmed', `Cursor Cloud returned an unknown status for the recorded run ${task.provider_run_id}.`);
-      }
-      if (run.status !== 'running') continue;
-      try {
-        await boundedCall(
-          () => client.Agent.cancelRun(run.id, {
-            runtime: 'cloud',
-            agentId: task.provider_agent_id,
-            apiKey: key,
-          }),
-          Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
-          'cursor_cancel_unconfirmed',
-          `Cursor Cloud run ${run.id} cancellation did not finish.`,
-        );
-      } catch (error) {
-        const current = await boundedCall(
-          () => client.Agent.getRun(run.id, {
-            runtime: 'cloud', agentId: task.provider_agent_id, apiKey: key,
-          }),
-          Math.min(PROVIDER_CALL_TIMEOUT_MS, remainingUntil(deadlineAt)),
-          'cursor_cancel_unconfirmed',
-          `Cursor Cloud run ${run.id} could not be checked after cancellation failed.`,
-        ).catch(() => null);
-        if (!current || current.status === 'running') throw error;
-      }
-      await waitForRemoteStop(client, task, run.id, key, deadlineAt);
+    run = await getRecordedRunForCancellation(client, task, key, deadlineAt);
+    if (!['running', 'finished', 'cancelled', 'error'].includes(run?.status)) {
+      fail('cursor_cancel_unconfirmed', `Cursor Cloud returned an unknown status for the recorded run ${task.provider_run_id}.`);
     }
+    if (run.status === 'running') await stopRemoteRun(client, task, key, run, undefined, { deadlineAt, maxAttempts: 40 });
   } catch (error) {
     const failure = publicError(Object.assign(
       new Error('Cursor Cloud cancellation state could not be confirmed; the task must be reconciled before retrying.', { cause: error }),
@@ -832,23 +813,7 @@ export async function cancelCursorCloudTask({ root, taskId, sdk, apiKey, loadSdk
     await updateTask(root, taskId, { status: 'transport_lost', cancel_requested: true, error: failure }).catch(() => {});
     throw sanitizedThrown(error, 'cursor_cancel_unconfirmed', [key, promptSecret]);
   }
-  await updateTask(root, taskId, { provider_run_cancelled: true }).catch(() => {});
-  let archived = false;
-  try {
-    archived = await archiveAgent(client, task.provider_agent_id, key);
-  } catch (cleanupError) {
-    await appendTaskEvent(root, taskId, {
-      type: 'cleanup_warning',
-      code: cleanupError?.code ?? 'cursor_archive_failed',
-    }).catch(() => {});
-  }
-  await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', transport: 'cursor-sdk' });
-  return updateTask(root, taskId, {
-    status: 'cancelled',
-    provider_run_cancelled: true,
-    provider_agent_archived: archived,
-    finished_at: new Date().toISOString(),
-  });
+  return persistCancelledRun({ root, taskId, client, task, key, runId: run.id });
 }
 
 export async function reconcileCursorCloudTask({ root, taskId, sdk, apiKey, loadSdk = loadCursorSdk, loadKey = loadCursorApiKey } = {}) {
@@ -930,24 +895,7 @@ export async function reconcileCursorCloudTask({ root, taskId, sdk, apiKey, load
           error: publicError(Object.assign(new Error('Cursor Cloud cancellation could not be confirmed during reconciliation.', { cause: error }), { code: 'cursor_cancel_unconfirmed' }), [key, prompt]),
         });
       }
-      await updateTask(root, taskId, { provider_run_cancelled: true }).catch(() => {});
-      let archived = false;
-      try {
-        archived = await archiveAgent(client, task.provider_agent_id, key);
-      } catch (cleanupError) {
-        await appendTaskEvent(root, taskId, {
-          type: 'cleanup_warning',
-          code: cleanupError?.code ?? 'cursor_archive_failed',
-        }).catch(() => {});
-      }
-      await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', transport: 'cursor-sdk' });
-      return updateTask(root, taskId, {
-        status: 'cancelled',
-        provider_run_id: run.id,
-        provider_run_cancelled: true,
-        provider_agent_archived: archived,
-        finished_at: new Date().toISOString(),
-      });
+      return persistCancelledRun({ root, taskId, client, task, key, runId: run.id });
     }
     if (run.status === 'running') {
       return updateTask(root, taskId, { status: 'running', provider_run_id: run.id });
@@ -973,33 +921,9 @@ export async function reconcileCursorCloudTask({ root, taskId, sdk, apiKey, load
         error: { code: 'cursor_run_identity_mismatch', message: 'Cursor Cloud returned a different run identity at reconciliation completion.' },
       });
     }
-    const status = result.status === 'finished' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
-    const providerSecrets = [key, prompt];
-    const sanitizedBranches = sanitizeProviderValue(result.git?.branches ?? [], providerSecrets);
-    const branches = Array.isArray(sanitizedBranches) ? sanitizedBranches : [];
-    const providerResult = sanitizeProviderValue(
-      typeof result.result === 'string' ? result.result.slice(0, 4096) : null,
-      providerSecrets,
-    );
-    const providerError = sanitizeProviderValue(result.error ?? null, providerSecrets);
-    let archived = false;
-    try {
-      archived = await archiveAgent(client, task.provider_agent_id, key);
-    } catch (cleanupError) {
-      await appendTaskEvent(root, taskId, {
-        type: 'cleanup_warning',
-        code: cleanupError?.code ?? 'cursor_archive_failed',
-      }).catch(() => {});
-    }
-    return updateTask(root, taskId, {
-      status,
-      provider_run_id: result.id,
-      result: providerResult,
-      provider_error: providerError,
-      branches,
-      pr_url: branches.find((entry) => entry?.prUrl)?.prUrl ?? null,
-      provider_agent_archived: archived,
-      finished_at: new Date().toISOString(),
+    return persistTerminalRun({
+      root, taskId, client, key, prompt,
+      agentId: task.provider_agent_id, run, result,
     });
   } finally {
     try { recoveryAgent?.close?.(); } catch {}
