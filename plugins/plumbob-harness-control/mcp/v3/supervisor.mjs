@@ -90,7 +90,10 @@ export async function createWriterWorkspace({ taskId, repo, execute = execFile }
   requireTaskId(taskId);
   normalizedAbsolute(repo, 'repo');
   try {
-    const { stdout } = await execute('worktree-bootstrap', ['create', taskId, '--repo', repo], {
+    const { stdout: branchOutput } = await execute('git', ['-C', repo, 'branch', '--show-current'], { encoding: 'utf8' });
+    const base = branchOutput.trim();
+    if (!base) fail('worktree_create_failed', 'Writer source must be attached to a branch.');
+    const { stdout } = await execute('worktree-bootstrap', ['create', taskId, '--repo', repo, '--base', base], {
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
     });
