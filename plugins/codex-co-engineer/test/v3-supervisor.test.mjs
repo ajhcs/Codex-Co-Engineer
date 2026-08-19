@@ -366,12 +366,14 @@ test('task wait returns when a later event arrives or the task is cancelled', as
       cursor: baseline.progress.event_cursor,
       wait_ms: 1_000,
     });
-    setTimeout(() => {
-      cancelTask(root, 'wait-cancel', {
-        stopBoundary: async () => {},
-      }).catch(() => {});
-    }, 20);
-    const value = await pending;
+    const cancellation = new Promise((resolve, reject) => {
+      setTimeout(() => {
+        cancelTask(root, 'wait-cancel', {
+          stopBoundary: async () => {},
+        }).then(resolve, reject);
+      }, 20);
+    });
+    const [value] = await Promise.all([pending, cancellation]);
     assert.ok(['terminal', 'progress'].includes(value.progress.wait_reason));
     assert.ok(['cancelling', 'cancelled', 'transport_lost'].includes(value.task.status));
   } finally {
