@@ -10,10 +10,11 @@
   append-only event log so `task` and `status` no longer stay stale while
   ACP workers are streaming. `task.json` is still not rewritten on every
   text delta.
-- Extend `task` with optional bounded `wait_ms` and `cursor` long-poll
+- Extend `task` with optional bounded `wait_ms` and `cursor` wait
   arguments so Codex can wait for meaningful progress or a terminal state
-  instead of hammering empty polls. Unsolicited stdio callbacks across
-  assistant turns are not available.
+  instead of hammering empty polls. Waits are event-driven; text deltas
+  are coalesced and event-log catch-up is memory-bounded. Unsolicited
+  stdio callbacks across assistant turns are not available.
 - Read the configured `remote.origin.url` for Cursor Cloud so host
   `insteadOf` credential rewrites cannot leak into receipts or fail
   dispatch.

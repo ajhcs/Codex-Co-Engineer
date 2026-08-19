@@ -122,7 +122,7 @@ test('task returns a compact live snapshot and can wait for the next event', asy
     setTimeout(() => {
       appendTaskEvent(state, 'server-wait', {
         type: 'provider',
-        event: { type: 'text_delta', text: 'second-visible' },
+        event: { type: 'tool_call', title: 'read', text: 'second-visible' },
       }).catch(() => {});
     }, 20);
     const waited = (await pending).result.structuredContent;

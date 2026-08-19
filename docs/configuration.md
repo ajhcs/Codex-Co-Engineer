@@ -63,8 +63,9 @@ tests a server launched with only the MCP manifest's allowlisted environment.
 
 Repository paths, prompts, roles, deadlines, and workspace/PR intent are
 inputs to `delegate`; they are not global policy. `task` accepts optional
-`wait_ms` (0-60000) and `cursor` arguments for a bounded long-poll. The
-result includes a compact `progress` snapshot; it does not stream raw
+`wait_ms` (0-60000) and `cursor` arguments for a bounded wait. The
+result includes a compact `progress` snapshot; text deltas are coalesced
+and large logs are paged with `more_events`. It does not stream raw
 events or emit unsolicited stdio callbacks across assistant turns.
 
 ### Local providers

@@ -12,7 +12,7 @@ is not another sandbox or policy engine.
 
 The stable machine identifier is `codex-co-engineer`. The bundled skill is
 `control-codex-co-engineer-agents`. Version 3.0.2 exposes five tools:
-`status`, `delegate`, `task`, `tasks`, and `cancel`. `task` can long-poll
+`status`, `delegate`, `task`, `tasks`, and `cancel`. `task` can wait
 with optional `wait_ms` and `cursor`; it does not push unsolicited stdio
 callbacks across assistant turns.
 

@@ -36,7 +36,7 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: 'Inspect one task receipt, a compact live progress snapshot, and an event_cursor. Optional wait_ms long-polls until meaningful progress or a terminal state. Unsolicited stdio callbacks across assistant turns are not available.',
+    description: 'Inspect one task receipt, a compact live progress snapshot, and an event_cursor. Optional wait_ms waits until meaningful progress or a terminal state. Terminal, status, and tool-call boundaries wake promptly; text deltas are coalesced. Cursor catch-up is bounded. Unsolicited stdio callbacks across assistant turns are not available.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -45,7 +45,7 @@ const TOOLS = [
           type: 'integer',
           minimum: 0,
           maximum: 60000,
-          description: 'Optional bounded long-poll. Returns immediately on meaningful progress, terminal state, or timeout. 0 is a non-blocking snapshot.',
+          description: 'Optional bounded wait. Returns on meaningful progress, terminal state, or timeout. 0 is a non-blocking snapshot. Text deltas are coalesced; terminal/status/tool-call boundaries wake promptly.',
         },
         cursor: {
           type: 'string',

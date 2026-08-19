@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { watch as watchDirectory } from 'node:fs';
 import { appendFile, chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -6,13 +7,17 @@ import path from 'node:path';
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
 export const LAUNCH_RESERVATION_GRACE_MS = 15_000;
 export const MAX_TASK_WAIT_MS = 60_000;
-export const TASK_WAIT_POLL_MS = 50;
+export const TEXT_DELTA_COALESCE_MS = 400;
+export const TASK_WAIT_WATCH_FALLBACK_MS = 1_000;
+export const MAX_EVENT_READ_BYTES = 64 * 1024;
+export const EVENT_TAIL_PEEK_BYTES = 16 * 1024;
 export const EVENT_CURSOR_PATTERN = /^[0-9]{1,16}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
 const UPDATE_LOCK_STALE_MS = 2_000;
 const LOCAL_UPDATE_TAILS = new Map();
-const EVENT_TAIL_PEEK_BYTES = 16 * 1024;
+const OVERSIZE_EVENT_SCAN_BYTES = 4 * 1024;
+const TEXT_DELTA_TYPES = new Set(['text_delta', 'thought_delta', 'message_delta', 'output_text_delta']);
 const MAX_PUBLIC_EVENT_TEXT = 4 * 1024;
 const MAX_PUBLIC_EVENT_KEYS = 24;
 const MAX_PUBLIC_EVENT_DEPTH = 4;
@@ -364,25 +369,88 @@ async function assertEventCursorBoundary(handle, offset, size) {
   }
 }
 
+function emptyProgressParse() {
+  return {
+    completeBytes: 0,
+    lastEvent: null,
+    eventCount: 0,
+    immediateCount: 0,
+    textDeltaCount: 0,
+  };
+}
+
+function eventTypeName(entry) {
+  if (!plainObject(entry)) return null;
+  if (entry.type === 'provider' && plainObject(entry.event) && typeof entry.event.type === 'string') {
+    return entry.event.type;
+  }
+  return typeof entry.type === 'string' ? entry.type : null;
+}
+
+export function isTextDeltaEvent(entry) {
+  const type = eventTypeName(entry);
+  return type != null && TEXT_DELTA_TYPES.has(type);
+}
+
+export function isImmediateProgressEvent(entry) {
+  return plainObject(entry) && !isTextDeltaEvent(entry);
+}
+
 function parseCompleteEventLines(buffer) {
   const lastNewline = buffer.lastIndexOf(0x0a);
-  if (lastNewline === -1) {
-    return { completeBytes: 0, lastEvent: null, eventCount: 0 };
-  }
+  if (lastNewline === -1) return emptyProgressParse();
   const complete = buffer.subarray(0, lastNewline + 1).toString('utf8');
   let lastEvent = null;
   let eventCount = 0;
+  let immediateCount = 0;
+  let textDeltaCount = 0;
   for (const line of complete.split('\n')) {
     if (!line) continue;
     eventCount += 1;
     try {
       lastEvent = JSON.parse(line);
+      if (isTextDeltaEvent(lastEvent)) textDeltaCount += 1;
+      else immediateCount += 1;
     } catch {
       // A corrupt complete line is skipped for projection but still consumed
       // so waiters cannot get stuck on it.
     }
   }
-  return { completeBytes: lastNewline + 1, lastEvent, eventCount };
+  return { completeBytes: lastNewline + 1, lastEvent, eventCount, immediateCount, textDeltaCount };
+}
+
+async function skipOversizedEvent(handle, start, size) {
+  const window = Buffer.alloc(OVERSIZE_EVENT_SCAN_BYTES);
+  let offset = start;
+  while (offset < size) {
+    const length = Math.min(window.length, size - offset);
+    const { bytesRead } = await handle.read(window, 0, length, offset);
+    if (bytesRead === 0) break;
+    const newline = window.subarray(0, bytesRead).indexOf(0x0a);
+    if (newline !== -1) {
+      return {
+        completeBytes: (offset - start) + newline + 1,
+        lastEvent: { type: 'status', truncated: true },
+        eventCount: 1,
+        immediateCount: 1,
+        textDeltaCount: 0,
+      };
+    }
+    offset += bytesRead;
+  }
+  return emptyProgressParse();
+}
+
+function progressSnapshot(start, skipped, parsed, size, requested, { hitBudget = false } = {}) {
+  const consumed = start + skipped + parsed.completeBytes;
+  return {
+    event_cursor: String(consumed),
+    new_event_count: requested === null ? 0 : parsed.eventCount,
+    last_event: publicProgressEvent(parsed.lastEvent),
+    more_events: requested !== null && hitBudget && consumed < size,
+    immediate_event_count: requested === null ? 0 : parsed.immediateCount,
+    text_delta_count: requested === null ? 0 : parsed.textDeltaCount,
+  };
 }
 
 export async function readTaskEventProgress(root, taskId, { cursor } = {}) {
@@ -393,36 +461,26 @@ export async function readTaskEventProgress(root, taskId, { cursor } = {}) {
     const size = (await handle.stat()).size;
     if (requested !== null) await assertEventCursorBoundary(handle, requested, size);
     const start = requested !== null ? requested : Math.max(0, size - EVENT_TAIL_PEEK_BYTES);
-    const length = size - start;
-    if (length === 0) {
-      return {
-        event_cursor: String(start),
-        new_event_count: 0,
-        last_event: null,
-      };
-    }
+    const budget = requested !== null ? MAX_EVENT_READ_BYTES : EVENT_TAIL_PEEK_BYTES;
+    const length = Math.min(Math.max(0, size - start), budget);
+    if (length === 0) return progressSnapshot(start, 0, emptyProgressParse(), size, requested);
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
+    const hitBudget = bytesRead >= budget;
     let slice = buffer.subarray(0, bytesRead);
     let skipped = 0;
     if (requested === null && start > 0) {
       const firstNewline = slice.indexOf(0x0a);
-      if (firstNewline === -1) {
-        return {
-          event_cursor: String(start),
-          new_event_count: 0,
-          last_event: null,
-        };
-      }
+      if (firstNewline === -1) return progressSnapshot(start, 0, emptyProgressParse(), size, requested);
       skipped = firstNewline + 1;
       slice = slice.subarray(skipped);
     }
-    const parsed = parseCompleteEventLines(slice);
-    return {
-      event_cursor: String(start + skipped + parsed.completeBytes),
-      new_event_count: requested === null ? 0 : parsed.eventCount,
-      last_event: publicProgressEvent(parsed.lastEvent),
-    };
+    let parsed = parseCompleteEventLines(slice);
+    if (parsed.completeBytes === 0 && requested !== null && hitBudget && start + bytesRead < size) {
+      parsed = await skipOversizedEvent(handle, start, size);
+    }
+    const latestSize = (await handle.stat()).size;
+    return progressSnapshot(start, skipped, parsed, latestSize, requested, { hitBudget });
   } finally {
     await handle.close();
   }
@@ -434,17 +492,148 @@ function progressAdvanced(current, baseline) {
     || Boolean(current.last_event && !baseline.last_event);
 }
 
+function receiptAdvanced(current, baseline) {
+  return current.status !== baseline.status || current.revision !== baseline.revision;
+}
+
+function waitWakeReason(task, progress, initialTask, { coalesceFrom, coalesceMs, clock }) {
+  if (TERMINAL.has(task.status)) return 'terminal';
+  if (receiptAdvanced(task, initialTask)) return 'progress';
+  if (progress.immediate_event_count > 0) return 'progress';
+  if (progress.more_events && progress.new_event_count > 0) return 'progress';
+  if (progress.text_delta_count > 0 && coalesceFrom != null && clock() >= coalesceFrom + coalesceMs) {
+    return 'progress';
+  }
+  return null;
+}
+
+export function waitDelay(milliseconds, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve('abort');
+      return;
+    }
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+      resolve('timeout');
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve('timeout');
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve('abort');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function createNotifyGate() {
+  let pending = null;
+  let resolve = null;
+  let token = 0;
+  return {
+    notify(reason) {
+      token += 1;
+      pending = { token, reason };
+      if (resolve) {
+        const deliver = resolve;
+        resolve = null;
+        deliver(pending);
+      }
+    },
+    take() {
+      if (pending) {
+        const value = pending;
+        pending = null;
+        return Promise.resolve(value.reason);
+      }
+      return new Promise((next) => {
+        resolve = (value) => {
+          if (pending && pending.token === value.token) pending = null;
+          next(value.reason);
+        };
+      });
+    },
+    detachWaiter() {
+      resolve = null;
+    },
+  };
+}
+
+function defaultWatch(directory, listener) {
+  return watchDirectory(directory, { persistent: true }, listener);
+}
+
+function attachTaskWatcher(directory, watch, notify) {
+  const watcher = watch(directory, (_eventType, _filename) => {
+    notify('watch');
+  });
+  if (typeof watcher?.on === 'function') {
+    watcher.on('error', () => notify('watch-error'));
+  }
+  return watcher;
+}
+
+function closeTaskWatcher(watcher) {
+  if (!watcher) return;
+  try { watcher.close(); } catch { /* already closed or unsupported */ }
+}
+
+async function raceWait({
+  delay,
+  remainingMs,
+  coalesceMs,
+  fallbackMs,
+  notifyTake,
+  signal,
+}) {
+  const local = new AbortController();
+  const stop = () => local.abort();
+  const linkAbort = () => stop();
+  if (signal?.aborted) {
+    stop();
+    return 'abort';
+  }
+  signal?.addEventListener('abort', linkAbort, { once: true });
+  try {
+    const candidates = [
+      notifyTake().then((reason) => reason),
+      delay(remainingMs, local.signal).then((reason) => (reason === 'abort' ? 'abort' : 'timeout')),
+    ];
+    if (coalesceMs != null) {
+      candidates.push(delay(coalesceMs, local.signal).then((reason) => (reason === 'abort' ? 'abort' : 'coalesce')));
+    }
+    if (fallbackMs != null) {
+      candidates.push(delay(fallbackMs, local.signal).then((reason) => (reason === 'abort' ? 'abort' : 'fallback')));
+    }
+    return await Promise.race(candidates);
+  } finally {
+    signal?.removeEventListener('abort', linkAbort);
+    stop();
+  }
+}
+
 export async function waitForTaskProgress(root, taskId, {
   cursor,
   wait_ms,
-  poll_ms = TASK_WAIT_POLL_MS,
   signal,
   now = Date.now,
-  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  watch = defaultWatch,
+  delay = waitDelay,
+  coalesce_ms = TEXT_DELTA_COALESCE_MS,
+  fallback_ms = TASK_WAIT_WATCH_FALLBACK_MS,
 } = {}) {
   const waitMs = parseTaskWaitMs(wait_ms);
+  const coalesceMs = Number.isInteger(coalesce_ms) && coalesce_ms >= 0 && coalesce_ms <= MAX_TASK_WAIT_MS
+    ? coalesce_ms
+    : TEXT_DELTA_COALESCE_MS;
+  const fallbackMs = Number.isInteger(fallback_ms) && fallback_ms >= 1 && fallback_ms <= MAX_TASK_WAIT_MS
+    ? fallback_ms
+    : TASK_WAIT_WATCH_FALLBACK_MS;
   const started = now();
-  const initialTask = (await readTask(root, taskId)).task;
+  const { task: initialTask, paths } = await readTask(root, taskId);
   const initialProgress = await readTaskEventProgress(root, taskId, { cursor });
   const snapshot = (task, progress, reason) => ({
     task,
@@ -452,48 +641,118 @@ export async function waitForTaskProgress(root, taskId, {
       event_cursor: progress.event_cursor,
       last_event: task.last_event ?? progress.last_event,
       new_event_count: progress.new_event_count,
+      more_events: Boolean(progress.more_events),
       waited_ms: Math.max(0, now() - started),
       wait_reason: reason,
     },
   });
   const terminal = (task) => TERMINAL.has(task.status);
   const requestedCursor = parseEventCursor(cursor);
+  const evaluate = (task, progress, coalesceFrom) => waitWakeReason(task, progress, initialTask, {
+    coalesceFrom,
+    coalesceMs,
+    clock: now,
+  });
+
   if (waitMs === 0) {
     return snapshot(initialTask, initialProgress, terminal(initialTask) ? 'terminal' : 'current');
   }
   if (terminal(initialTask)) {
     return snapshot(initialTask, initialProgress, 'terminal');
   }
-  if (requestedCursor !== null && initialProgress.new_event_count > 0) {
+  if (requestedCursor !== null && initialProgress.immediate_event_count > 0) {
+    return snapshot(initialTask, initialProgress, 'progress');
+  }
+  if (requestedCursor !== null && initialProgress.more_events && initialProgress.new_event_count > 0) {
     return snapshot(initialTask, initialProgress, 'progress');
   }
   if (requestedCursor === null && initialProgress.last_event) {
     return snapshot(initialTask, initialProgress, 'current');
   }
-  const pollMs = Number.isInteger(poll_ms) && poll_ms >= 1 && poll_ms <= 1_000 ? poll_ms : TASK_WAIT_POLL_MS;
-  while (now() < started + waitMs) {
-    if (signal?.aborted) break;
-    const remaining = started + waitMs - now();
-    if (remaining <= 0) break;
-    await sleep(Math.min(pollMs, remaining));
-    const currentTask = (await readTask(root, taskId)).task;
-    const currentProgress = await readTaskEventProgress(root, taskId, { cursor });
-    if (terminal(currentTask)) return snapshot(currentTask, currentProgress, 'terminal');
-    if (progressAdvanced(currentProgress, initialProgress)
-      || currentTask.status !== initialTask.status
-      || currentTask.revision !== initialTask.revision) {
-      return snapshot(currentTask, currentProgress, 'progress');
+  if (signal?.aborted) {
+    return snapshot(initialTask, initialProgress, 'timeout');
+  }
+
+  let coalesceFrom = requestedCursor !== null && initialProgress.text_delta_count > 0 ? started : null;
+  const deadline = started + waitMs;
+  const gate = createNotifyGate();
+  let watcher = null;
+  let watchFailed = false;
+  let rewatchAttempted = false;
+  const onAbort = () => gate.notify('abort');
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  const armWatch = () => {
+    closeTaskWatcher(watcher);
+    watcher = null;
+    try {
+      watcher = attachTaskWatcher(paths.directory, watch, (reason) => gate.notify(reason));
+      if (!watcher || typeof watcher.close !== 'function') {
+        watchFailed = true;
+        watcher = null;
+      } else {
+        watchFailed = false;
+      }
+    } catch {
+      watchFailed = true;
+      watcher = null;
     }
+  };
+
+  try {
+    armWatch();
+    // Snapshot after arming the watcher so an append/rename that raced the
+    // first read cannot be lost if inotify also missed it.
+    let currentTask = (await readTask(root, taskId)).task;
+    let currentProgress = await readTaskEventProgress(root, taskId, { cursor });
+    if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
+    let wake = evaluate(currentTask, currentProgress, coalesceFrom);
+    if (wake) return snapshot(currentTask, currentProgress, wake);
+
+    while (now() < deadline) {
+      if (signal?.aborted) break;
+      const remaining = deadline - now();
+      if (remaining <= 0) break;
+      const coalesceRemaining = coalesceFrom == null ? null : Math.max(0, coalesceFrom + coalesceMs - now());
+      const reason = await raceWait({
+        delay,
+        remainingMs: remaining,
+        coalesceMs: coalesceRemaining,
+        fallbackMs: watchFailed ? Math.min(fallbackMs, remaining) : null,
+        notifyTake: gate.take,
+        signal,
+      });
+      gate.detachWaiter();
+      if (reason === 'abort') break;
+      currentTask = (await readTask(root, taskId)).task;
+      currentProgress = await readTaskEventProgress(root, taskId, { cursor });
+      if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
+      wake = evaluate(currentTask, currentProgress, coalesceFrom);
+      if (wake) return snapshot(currentTask, currentProgress, wake);
+      if (reason === 'timeout') break;
+      if (reason === 'watch-error') {
+        if (!rewatchAttempted) {
+          rewatchAttempted = true;
+          armWatch();
+        } else {
+          closeTaskWatcher(watcher);
+          watcher = null;
+          watchFailed = true;
+        }
+      }
+    }
+
+    const finalTask = (await readTask(root, taskId)).task;
+    const finalProgress = await readTaskEventProgress(root, taskId, { cursor });
+    if (terminal(finalTask)) return snapshot(finalTask, finalProgress, 'terminal');
+    if (receiptAdvanced(finalTask, initialTask) || progressAdvanced(finalProgress, initialProgress)) {
+      return snapshot(finalTask, finalProgress, 'progress');
+    }
+    return snapshot(finalTask, finalProgress, 'timeout');
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    closeTaskWatcher(watcher);
   }
-  const finalTask = (await readTask(root, taskId)).task;
-  const finalProgress = await readTaskEventProgress(root, taskId, { cursor });
-  if (terminal(finalTask)) return snapshot(finalTask, finalProgress, 'terminal');
-  if (progressAdvanced(finalProgress, initialProgress)
-    || finalTask.status !== initialTask.status
-    || finalTask.revision !== initialTask.revision) {
-    return snapshot(finalTask, finalProgress, 'progress');
-  }
-  return snapshot(finalTask, finalProgress, 'timeout');
 }
 
 export async function projectLiveLastEvent(root, task) {

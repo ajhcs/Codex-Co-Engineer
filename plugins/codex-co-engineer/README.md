@@ -31,12 +31,15 @@ repository root, and a prompt. Providers are `grok`, `cursor-local`,
 `cursor-cloud`, and `dsh`; roles are `review` and `implement`.
 
 `task` always returns a compact `progress` snapshot (`event_cursor`,
-`last_event`, `new_event_count`, `waited_ms`, `wait_reason`) derived from
-the append-only event log. Pass the previous `event_cursor` as `cursor`
-and a bounded `wait_ms` (0-60000) to block until meaningful progress or a
-terminal state. The five-tool API is unchanged; unsolicited stdio
-callbacks across assistant turns are not available. Do not expect
-`task.json` itself to rewrite `last_event` on every text delta.
+`last_event`, `new_event_count`, `more_events`, `waited_ms`,
+`wait_reason`) derived from the append-only event log. Pass the previous
+`event_cursor` as `cursor` and a bounded `wait_ms` (0-60000) to block
+until meaningful progress or a terminal state. Terminal, status, and
+tool-call boundaries wake promptly; text deltas are coalesced. Cursor
+catch-up reads a bounded chunk and sets `more_events` when more log
+remains. The five-tool API is unchanged; unsolicited stdio callbacks
+across assistant turns are not available. Do not expect `task.json`
+itself to rewrite `last_event` on every text delta.
 
 ## Provider matrix
 
@@ -237,8 +240,9 @@ Watch a running task instead of empty-polling:
 ```
 
 Use the `event_cursor` from the previous `task` result. The call returns a
-compact progress snapshot when the event log or receipt advances, the task
-becomes terminal, or `wait_ms` elapses. Unsolicited stdio callbacks across
+compact progress snapshot when meaningful progress arrives, the task
+becomes terminal, or `wait_ms` elapses. Text deltas are coalesced; a large
+event log is paged with `more_events`. Unsolicited stdio callbacks across
 assistant turns are not available.
 
 For an implementation, use `role: "implement"`. A local managed task creates
