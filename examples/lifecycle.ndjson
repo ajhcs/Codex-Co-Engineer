@@ -1,4 +1,0 @@
-{"state":"accepted","at":"2026-08-16T00:00:00.000Z","job_id":"example-job-001","target_fingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
-{"state":"started","at":"2026-08-16T00:00:00.250Z","job_id":"example-job-001"}
-{"state":"working","at":"2026-08-16T00:00:15.000Z","job_id":"example-job-001","last_activity_at":"2026-08-16T00:00:14.900Z","deadline_at":"2026-08-16T01:00:00.000Z"}
-{"state":"completed","at":"2026-08-16T00:02:00.000Z","job_id":"example-job-001","elapsed_seconds":120}

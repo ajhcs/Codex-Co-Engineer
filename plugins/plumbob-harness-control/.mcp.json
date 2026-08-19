@@ -5,27 +5,26 @@
       "command": "node",
       "args": [
         "--no-warnings",
-        "./mcp/server.mjs",
+        "./mcp/v3/server.mjs",
         "--stdio"
       ],
       "env_vars": [
         "XDG_STATE_HOME",
-        "DSH_HOME",
-        "CODEX_CO_ENGINEER_DSH_HOME",
+        "HOME",
+        "PATH",
+        "XDG_CONFIG_HOME",
         "MODEL_API_KEY",
         "XAI_API_KEY",
-        "CODEX_CO_ENGINEER_RUNTIME_WORKSPACE",
-        "CODEX_CO_ENGINEER_ALLOWED_ROOTS",
+        "CURSOR_API_KEY",
+        "CURSOR_API_KEY_FILE",
         "CODEX_CO_ENGINEER_STATE_DIR",
-        "CODEX_TASK_STATE_ROOT",
-        "CODEX_CO_ENGINEER_DAEMON_IDLE_SECONDS",
         "CODEX_CO_ENGINEER_MODEL_API_KEY_FILE",
+        "CODEX_CO_ENGINEER_DSH_ACP_CONFIG",
+        "CODEX_CO_ENGINEER_DSH_ACP_COMMAND",
         "CODEX_CO_ENGINEER_DSH_COMMAND",
         "CODEX_CO_ENGINEER_GROK_COMMAND",
-        "PLUMBOB_HARNESS_WORKSPACE",
-        "PLUMBOB_HARNESS_ALLOWED_ROOTS",
-        "PLUMBOB_HARNESS_STATE_DIR",
-        "PLUMBOB_HARNESS_MODEL_API_KEY_FILE"
+        "CODEX_CO_ENGINEER_CURSOR_COMMAND",
+        "CODEX_CO_ENGINEER_ACPX_COMMAND"
       ],
       "tool_timeout_sec": 65
     }

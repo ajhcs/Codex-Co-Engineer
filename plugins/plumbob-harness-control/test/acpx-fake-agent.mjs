@@ -1,4 +1,4 @@
-/* Minimal ACP stdio agent used only by acpx-worker.test.mjs. */
+/* Minimal ACP stdio agent used by the v3 ACP worker tests. */
 
 import { spawn } from 'node:child_process';
 import { appendFile, writeFile } from 'node:fs/promises';

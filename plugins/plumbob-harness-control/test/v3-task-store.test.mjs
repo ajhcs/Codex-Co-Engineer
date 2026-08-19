@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -53,6 +53,28 @@ test('updates preserve identity and monotonically advance revision', async () =>
   assert.equal(complete.revision, 3);
   assert.equal(complete.id, 'run-1');
   assert.equal(complete.pid, 123);
+});
+
+test('concurrent updates serialize and terminal cancellation wins', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-store-race-'));
+  await createTask({ root, prompt: 'race', record: { id: 'race-one', status: 'running', provider: 'grok', cwd: root } });
+  await Promise.all(Array.from({ length: 12 }, (_, index) => updateTask(root, 'race-one', { marker: index })));
+  const afterRace = (await readTask(root, 'race-one')).task;
+  assert.equal(afterRace.revision, 13);
+  await updateTask(root, 'race-one', { status: 'cancelling' });
+  await updateTask(root, 'race-one', { status: 'completed', result: 'late worker result' });
+  await updateTask(root, 'race-one', { status: 'cancelled' });
+  const terminal = (await readTask(root, 'race-one')).task;
+  assert.equal(terminal.status, 'cancelled');
+  assert.equal(terminal.result, undefined);
+});
+
+test('a lock left by a dead process is recovered', async () => {
+  const root = await temporaryRoot();
+  const { paths } = await createTask({ root, prompt: 'recover', record: { id: 'stale-lock', status: 'running' } });
+  await writeFile(paths.updateLock, `${JSON.stringify({ pid: 999999999, start_ticks: '1', nonce: 'dead' })}\n`, { mode: 0o600 });
+  const task = await updateTask(root, 'stale-lock', { recovered: true });
+  assert.equal(task.recovered, true);
 });
 
 test('events are JSONL and listTasks ignores invalid task directories', async () => {

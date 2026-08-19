@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
+const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
+const UPDATE_LOCK_STALE_MS = 30_000;
 
 export function requireTaskId(value) {
   if (typeof value !== 'string' || !TASK_ID.test(value)) {
@@ -37,6 +39,7 @@ export function taskPaths(root, taskId) {
     request: path.join(directory, 'worker-request.json'),
     runtime: path.join(directory, 'runtime.json'),
     log: path.join(directory, 'worker.log'),
+    updateLock: path.join(directory, 'update.lock'),
   };
 }
 
@@ -108,23 +111,97 @@ export async function readPrompt(root, taskId) {
   return readFile(paths.prompt, 'utf8');
 }
 
-export async function updateTask(root, taskId, changes) {
-  const { task, paths } = await readTask(root, taskId);
-  const nextChanges = typeof changes === 'function' ? await changes({ ...task }) : changes;
-  if (!nextChanges || typeof nextChanges !== 'object' || Array.isArray(nextChanges)) {
-    throw new TypeError('Task update must be an object.');
+async function liveLockOwner(lockFile) {
+  try {
+    const [raw, metadata] = await Promise.all([readFile(lockFile, 'utf8'), stat(lockFile)]);
+    const value = JSON.parse(raw);
+    if (!Number.isInteger(value.pid) || typeof value.start_ticks !== 'string') {
+      return Date.now() - metadata.mtimeMs < UPDATE_LOCK_STALE_MS;
+    }
+    try {
+      const proc = await readFile(`/proc/${value.pid}/stat`, 'utf8');
+      const ticks = proc.slice(proc.lastIndexOf(')') + 2).trim().split(/\s+/u)[19] ?? null;
+      return ticks === value.start_ticks;
+    } catch {
+      return false;
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    return true;
   }
-  const next = normalizeRecord({
-    ...task,
-    ...nextChanges,
-    schema: TASK_SCHEMA,
-    id: task.id,
-    created_at: task.created_at,
-    updated_at: new Date().toISOString(),
-    revision: task.revision + 1,
-  });
-  await writeAtomic(paths.record, `${JSON.stringify(next, null, 2)}\n`);
-  return next;
+}
+
+async function acquireUpdateLock(lockFile) {
+  const nonce = randomUUID();
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const handle = await open(lockFile, 'wx', 0o600);
+      try {
+        let startTicks = null;
+        try {
+          const proc = await readFile(`/proc/${process.pid}/stat`, 'utf8');
+          startTicks = proc.slice(proc.lastIndexOf(')') + 2).trim().split(/\s+/u)[19] ?? null;
+        } catch {
+          // The age lease below remains a safe fallback on non-/proc hosts.
+        }
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, start_ticks: startTicks, nonce })}\n`, 'utf8');
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => {});
+        await unlink(lockFile).catch(() => {});
+        throw error;
+      }
+      return { handle, nonce };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      if (!(await liveLockOwner(lockFile))) {
+        await unlink(lockFile).catch((unlinkError) => {
+          if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+        });
+        continue;
+      }
+      if (attempt === 199) {
+        throw Object.assign(new Error('Timed out waiting for task update lock.'), { code: 'task_update_busy' });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw Object.assign(new Error('Timed out waiting for task update lock.'), { code: 'task_update_busy' });
+}
+
+export async function updateTask(root, taskId, changes) {
+  const paths = taskPaths(root, taskId);
+  const lock = await acquireUpdateLock(paths.updateLock);
+  try {
+    const { task } = await readTask(root, taskId);
+    const nextChanges = typeof changes === 'function' ? await changes({ ...task }) : changes;
+    if (!nextChanges || typeof nextChanges !== 'object' || Array.isArray(nextChanges)) {
+      throw new TypeError('Task update must be an object.');
+    }
+    if (TERMINAL.has(task.status) && nextChanges.status && nextChanges.status !== task.status) return task;
+    if (task.status === 'cancelling' && nextChanges.status && !['cancelling', 'cancelled'].includes(nextChanges.status)) {
+      return task;
+    }
+    const next = normalizeRecord({
+      ...task,
+      ...nextChanges,
+      schema: TASK_SCHEMA,
+      id: task.id,
+      created_at: task.created_at,
+      updated_at: new Date().toISOString(),
+      revision: task.revision + 1,
+    });
+    await writeAtomic(paths.record, `${JSON.stringify(next, null, 2)}\n`);
+    return next;
+  } finally {
+    await lock.handle.close().catch(() => {});
+    try {
+      const current = JSON.parse(await readFile(paths.updateLock, 'utf8'));
+      if (current.nonce === lock.nonce) await unlink(paths.updateLock);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
 }
 
 export async function appendTaskEvent(root, taskId, event) {

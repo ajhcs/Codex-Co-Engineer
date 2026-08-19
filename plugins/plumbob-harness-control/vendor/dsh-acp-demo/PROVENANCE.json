@@ -4,6 +4,9 @@
   "commit": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca",
   "package": "@deepseek-ai/dsh-acp-demo@0.1.0-rc.7",
   "official_pack_sha256": "57c6dde8c5cbb79f62f6858203a77455097475494ab192f9c5acd266fd06db95",
+  "vendored_tree_algorithm": "sha256(filename + NUL + bytes + NUL, sorted)",
+  "vendored_tree_sha256": "6739d27738523afa7416d6995ba676b16f6eda6cee99f4a1c4628158195c108c",
+  "vendored_tree_files": ["LICENSE", "lib/bin.js", "lib/index.js", "lib/invariant.js", "package.json"],
   "license": "MIT",
   "note": "Runtime JavaScript and package metadata are vendored from the official unpublished rc.7 example composition; comments and type declarations were omitted."
 }

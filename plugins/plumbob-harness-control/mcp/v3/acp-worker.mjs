@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { appendTaskEvent, readPrompt, readTask, taskPaths, updateTask } from './task-store.mjs';
+
+process.umask(0o077);
 
 const RUNTIME_URL = new URL('../../assets/acpx-runtime.mjs', import.meta.url);
 const SINGLE_TURN_FLOW = fileURLToPath(new URL('./single-turn.flow.mjs', import.meta.url));
@@ -99,6 +103,54 @@ function sanitizeText(value, prompt) {
     .replace(/\b(api[_-]?key|authorization)\s*[:=]\s*\S+/giu, '$1=[REDACTED]');
 }
 
+function processStartTicks(pid) {
+  try {
+    const value = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return value.slice(value.lastIndexOf(')') + 2).trim().split(/\s+/u)[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function signalChildGroup(child, signalName) {
+  if (!Number.isInteger(child?.pid)) return;
+  try { process.kill(-child.pid, signalName); } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+function childGroupAlive(child) {
+  if (!Number.isInteger(child?.pid)) return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function terminateChildGroup(child) {
+  signalChildGroup(child, 'SIGTERM');
+  for (let attempt = 0; attempt < 20 && childGroupAlive(child); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (childGroupAlive(child)) signalChildGroup(child, 'SIGKILL');
+}
+
+async function secureAcpxSessions() {
+  const directory = path.join(process.env.HOME ? path.resolve(process.env.HOME) : homedir(), '.acpx', 'sessions');
+  try {
+    await chmod(path.dirname(directory), 0o700);
+    await chmod(directory, 0o700);
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isFile()) await chmod(path.join(directory, entry.name), 0o600);
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
 function authenticationFailure(error) {
   const detail = `${error?.code ?? ''} ${error?.message ?? error} ${error?.stderrSummary ?? ''} ${error?.cause?.message ?? ''}`;
   return /not signed in|not authenticated|needs[_ -]?login|log ?in|unauthori[sz]ed|forbidden|credential|api[_ -]?key|\b40[13]\b/iu.test(detail);
@@ -158,6 +210,7 @@ function extractedCliResult(stdout, prompt) {
 }
 
 export async function runCliFallback({ root, task, prompt, signal } = {}) {
+  if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled before startup.');
   const promptFile = path.join(taskPaths(root, task.id).directory, `cli-prompt-${randomUUID()}.txt`);
   await writeFile(promptFile, prompt, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   const argv = cliCommand(task, promptFile, prompt);
@@ -165,6 +218,8 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
   let stdout = '';
   let stderr = '';
   let timer;
+  let termination;
+  let timedOut = false;
   try {
     child = spawn(argv[0], argv.slice(1), {
       cwd: task.cwd,
@@ -176,13 +231,13 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       child.once('spawn', resolve);
       child.once('error', reject);
     });
-    const exited = new Promise((resolve) => {
-      child.once('exit', (code, childSignal) => resolve({ code, signal: childSignal }));
+    const closed = new Promise((resolve) => {
+      child.once('close', (code, childSignal) => resolve({ code, signal: childSignal }));
     });
     child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-MAX_CLI_OUTPUT); });
     child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-MAX_CLI_OUTPUT / 4); });
     const cancel = () => {
-      try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
+      termination ??= terminateChildGroup(child);
     };
     signal?.addEventListener('abort', cancel, { once: true });
     await spawned;
@@ -191,13 +246,20 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       transport: 'cli',
       fallback_from: 'acp',
       prompt_dispatched: true,
+      provider_process_group: child.pid,
+      provider_process_start_ticks: processStartTicks(child.pid),
       started_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, task.id, { type: 'transport', state: 'prompt_dispatched', transport: 'cli', fallback_from: 'acp' });
-    timer = setTimeout(cancel, task.timeout_ms ?? DEFAULT_TIMEOUT_MS);
-    const exit = await exited;
+    timer = setTimeout(() => {
+      timedOut = true;
+      cancel();
+    }, task.timeout_ms ?? DEFAULT_TIMEOUT_MS);
+    const exit = await closed;
+    await termination;
     signal?.removeEventListener('abort', cancel);
     if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled.');
+    if (timedOut) fail('timeout', 'CLI fallback exceeded its task deadline.');
     const result = extractedCliResult(stdout, prompt);
     if (exit.code !== 0) {
       const detail = sanitizeText(stderr || stdout || `CLI exited ${exit.code ?? exit.signal}.`, prompt).slice(-MAX_EVENT_TEXT);
@@ -210,6 +272,8 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       status: 'completed',
       result,
       last_event: compact,
+      provider_process_group: null,
+      provider_process_start_ticks: null,
       fallback_safe: false,
       finished_at: new Date().toISOString(),
     });
@@ -219,12 +283,15 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     await updateTask(root, task.id, {
       status: signal?.aborted ? 'cancelled' : 'failed',
       error: failure,
+      provider_process_group: null,
+      provider_process_start_ticks: null,
       fallback_safe: false,
       finished_at: new Date().toISOString(),
     }).catch(() => {});
     throw error;
   } finally {
     clearTimeout(timer);
+    if (child && childGroupAlive(child)) await terminateChildGroup(child);
     await rm(promptFile, { force: true });
   }
 }
@@ -247,6 +314,7 @@ function parseFlowResult(stdout) {
 }
 
 async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal }) {
+  if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled before startup.');
   const inputFile = path.join(taskPaths(root, task.id).directory, `flow-input-${randomUUID()}.json`);
   await writeFile(inputFile, `${JSON.stringify({ prompt })}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
@@ -263,6 +331,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   let child;
   let stdout = '';
   let stderr = '';
+  let termination;
   try {
     await updateTask(root, task.id, { status: 'starting', transport: 'acp', acp_client: 'acpx-cli', started_at: new Date().toISOString() });
     child = spawn(process.env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx', argv, {
@@ -271,19 +340,32 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const exited = new Promise((resolve, reject) => {
+    const spawned = new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
       child.once('error', reject);
-      child.once('exit', (code, childSignal) => resolve({ code, signal: childSignal }));
+    });
+    const closed = new Promise((resolve) => {
+      child.once('close', (code, childSignal) => resolve({ code, signal: childSignal }));
     });
     child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-1024 * 1024); });
     child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-256 * 1024); });
     const cancel = () => {
-      try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
+      termination ??= terminateChildGroup(child);
     };
     signal?.addEventListener('abort', cancel, { once: true });
-    await updateTask(root, task.id, { status: 'running', prompt_dispatched: true, request_id: randomUUID() });
+    await spawned;
+    await updateTask(root, task.id, {
+      status: 'running',
+      dispatch_intent: true,
+      prompt_dispatched: true,
+      fallback_safe: false,
+      request_id: randomUUID(),
+      provider_process_group: child.pid,
+      provider_process_start_ticks: processStartTicks(child.pid),
+    });
     await appendTaskEvent(root, task.id, { type: 'transport', state: 'prompt_dispatched', transport: 'acp', client: 'acpx-cli' });
-    const exit = await exited;
+    const exit = await closed;
+    await termination;
     signal?.removeEventListener('abort', cancel);
     if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled.');
     if (exit.code !== 0) {
@@ -292,9 +374,11 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     }
     const flow = parseFlowResult(stdout);
     if (flow.status !== 'completed') fail('acpx_failed', `ACPX flow ended in ${flow.status}.`);
-    const output = typeof flow.outputs?.delegate === 'string'
-      ? flow.outputs.delegate.slice(0, MAX_EVENT_TEXT)
-      : null;
+    const rawOutput = flow.outputs?.delegate;
+    const outputValue = typeof rawOutput === 'string'
+      ? rawOutput
+      : rawOutput?.text ?? rawOutput?.result ?? rawOutput?.output;
+    const output = typeof outputValue === 'string' ? outputValue.slice(0, MAX_EVENT_TEXT) : null;
     const compact = { type: 'text_delta', text: output ?? 'DSH ACP task completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed', stop_reason: 'end_turn' });
@@ -302,22 +386,39 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       status: 'completed',
       stop_reason: 'end_turn',
       last_event: compact,
+      result: output,
+      provider_process_group: null,
+      provider_process_start_ticks: null,
       acp_session_id: Object.values(flow.sessionBindings ?? {})[0]?.acpSessionId ?? null,
       finished_at: new Date().toISOString(),
     });
   } catch (error) {
     const current = (await readTask(root, task.id)).task;
+    if (current.prompt_dispatched !== true && current.dispatch_intent !== true && !authenticationFailure(error)) {
+      await updateTask(root, task.id, {
+        status: 'starting',
+        acp_error: publicError(error),
+        fallback_safe: true,
+        provider_process_group: null,
+        provider_process_start_ticks: null,
+      }).catch(() => {});
+      throw error;
+    }
     const status = signal?.aborted ? 'cancelled' : 'failed';
     const failure = publicError(error);
     await appendTaskEvent(root, task.id, { type: 'terminal', status, error: failure }).catch(() => {});
     await updateTask(root, task.id, {
       status,
       error: failure,
+      provider_process_group: null,
+      provider_process_start_ticks: null,
       fallback_safe: current.prompt_dispatched !== true,
       finished_at: new Date().toISOString(),
     }).catch(() => {});
     throw error;
   } finally {
+    if (child && childGroupAlive(child)) await terminateChildGroup(child);
+    await secureAcpxSessions();
     await rm(inputFile, { force: true });
   }
 }
@@ -355,7 +456,22 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000) fail('invalid_timeout', 'timeout_ms must be at least 1000.');
 
   if (task.provider === 'dsh') {
-    return runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
+    try {
+      return await runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
+    } catch (error) {
+      const current = (await readTask(root, taskId)).task;
+      if (current.prompt_dispatched !== true && current.dispatch_intent !== true && !authenticationFailure(error)) {
+        await appendTaskEvent(root, taskId, {
+          type: 'transport',
+          state: 'acp_failed_before_dispatch',
+          fallback: 'cli',
+          error: publicError(error),
+        }).catch(() => {});
+        await updateTask(root, taskId, { status: 'starting', fallback_from: 'acp', acp_error: publicError(error) });
+        return runCliFallback({ root, task: { ...task, ...current }, prompt, signal });
+      }
+      throw error;
+    }
   }
 
   const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs });
@@ -381,6 +497,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     await appendTaskEvent(root, taskId, { type: 'transport', state: 'session_ready', transport: 'acp' });
 
     const requestId = task.request_id ?? randomUUID();
+    await updateTask(root, taskId, { dispatch_intent: true, fallback_safe: false, request_id: requestId });
     turn = runtime.startTurn({
       handle,
       text: prompt,
@@ -391,7 +508,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     });
     // From this point onward the provider may have accepted the prompt. A
     // supervisor must reconcile this task, never replay it through CLI.
-    await updateTask(root, taskId, { prompt_dispatched: true, request_id: requestId });
+    await updateTask(root, taskId, { prompt_dispatched: true });
     const cancel = () => turn.cancel({ reason: 'signal' }).catch(() => {});
     controller.signal.addEventListener('abort', cancel, { once: true });
     let lastEvent = null;
@@ -424,7 +541,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   } catch (error) {
     const failure = publicError(error);
     const current = (await readTask(root, taskId)).task;
-    if (current.prompt_dispatched !== true && !authenticationFailure(error)) {
+    if (current.prompt_dispatched !== true && current.dispatch_intent !== true && !authenticationFailure(error)) {
       await appendTaskEvent(root, taskId, {
         type: 'transport',
         state: 'acp_failed_before_dispatch',
@@ -452,6 +569,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     // This closes the retained stdio client but does not send session/close or
     // discard the persisted ACP identity. A later worker can resume it.
     if (handle) await runtime.close({ handle, reason: 'worker_exit' }).catch(() => {});
+    await secureAcpxSessions();
   }
 }
 
@@ -478,7 +596,26 @@ async function runCli(argv) {
   process.once('SIGINT', cancel);
   process.once('SIGTERM', cancel);
   try {
-    const task = await runAcpTask({ root: request.root, taskId: request.task_id, signal: controller.signal });
+    let task = await runAcpTask({ root: request.root, taskId: request.task_id, signal: controller.signal });
+    if (process.env.WORKTREE_BOOTSTRAP_TASK) {
+      try {
+        const { stdout } = await runFile('worktree-bootstrap', [
+          'handoff',
+          process.env.WORKTREE_BOOTSTRAP_TASK,
+          '--repo',
+          process.cwd(),
+          '--format',
+          'json',
+        ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+        const handoff = JSON.parse(stdout);
+        task = await updateTask(request.root, request.task_id, { handoff });
+      } catch (error) {
+        await appendTaskEvent(request.root, request.task_id, {
+          type: 'cleanup_warning',
+          code: error?.code ?? 'handoff_failed',
+        }).catch(() => {});
+      }
+    }
     process.stdout.write(`${JSON.stringify({ task_id: task.id, status: task.status })}\n`);
   } finally {
     process.off('SIGINT', cancel);

@@ -16,7 +16,7 @@ const TOOLS = [
   },
   {
     name: 'delegate',
-    description: 'Delegate a review or implementation task to Grok, Cursor Local, or DSH. Implementation tasks receive a managed worktree and branch.',
+    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Every local task receives a managed worktree and branch.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -50,7 +50,7 @@ const TOOLS = [
   },
   {
     name: 'cancel',
-    description: 'Cancel one owned local task and its process group.',
+    description: 'Cancel one owned local process group or Cursor Cloud run.',
     inputSchema: {
       type: 'object',
       properties: { task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' } },
@@ -62,7 +62,13 @@ const TOOLS = [
 
 function publicTask(task) {
   if (!task) return task;
-  const { agent_argv: _agentArgv, ...receipt } = task;
+  const {
+    agent_argv: _agentArgv,
+    cli_argv: _cliArgv,
+    provider_process_group: _providerProcessGroup,
+    provider_process_start_ticks: _providerProcessStartTicks,
+    ...receipt
+  } = task;
   return receipt;
 }
 

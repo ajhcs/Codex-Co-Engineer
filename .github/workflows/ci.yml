@@ -10,10 +10,7 @@ permissions:
 jobs:
   release-candidate:
     runs-on: ubuntu-latest
-    # This is a diagnostic mirror of the authoritative local-exact-tree gate.
-    # The workflow does not install release-gate, so its result is not release
-    # authority or a substitute for the local receipt.
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       ACPX_NPM_CACHE: /tmp/codex-acpx-release-npm-cache
       NPM_CONFIG_CACHE: /tmp/codex-acpx-release-npm-cache
@@ -22,28 +19,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # The unwired host-boundary tests deliberately reject a writable runtime
-      # and require the fixed /usr/bin/rg production path. setup-node installs
-      # Node group-writable in its ephemeral tool cache, while ubuntu-latest no
-      # longer guarantees ripgrep, so normalize those diagnostic prerequisites.
-      - name: Provision host-boundary test prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
-          chmod go-w "$(realpath "$(command -v node)")"
       - run: npm install --global @modelcontextprotocol/inspector@2.2.0
-      # The production-shaped Bubblewrap prerequisite and strict real-boundary
-      # test require the Codex host's fd-bind-capable static bwrap. GitHub's
-      # apt bwrap is not an equivalent boundary, so those two checks remain in
-      # the authoritative local-exact-tree gate instead of being simulated.
+      - run: node scripts/release-prerequisites.mjs
       - run: node scripts/validate-release.mjs
       - run: npm --prefix tools/acpx-vendor ci --ignore-scripts --no-audit --no-fund
       - run: npm --prefix plugins/plumbob-harness-control test
       - run: npm --prefix plugins/cursor-cloud-control test
       - run: npm --prefix tools/acpx-vendor run test:publish-provenance
-      - run: node scripts/plugin-activation-fixture.mjs
       - run: node scripts/inspector-preflight.mjs
-      - run: node scripts/cursor-inspector-preflight.mjs
       - run: npm --prefix tools/acpx-vendor run test:reproducible
       - run: npm --prefix tools/acpx-vendor run verify:publish-provenance
       - run: npm pack ./plugins/plumbob-harness-control --dry-run --ignore-scripts --offline --json

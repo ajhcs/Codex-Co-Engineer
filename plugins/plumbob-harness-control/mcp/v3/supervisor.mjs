@@ -18,7 +18,12 @@ import {
   updateTask,
   writeRuntimeRecord,
 } from './task-store.mjs';
-import { cancelCursorCloudTask } from './cursor-cloud-worker.mjs';
+import {
+  cancelCursorCloudTask,
+  loadCursorApiKey,
+  loadCursorSdk,
+  reconcileCursorCloudTask,
+} from './cursor-cloud-worker.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
@@ -154,18 +159,29 @@ async function launchWorker({ root, taskId, cwd, writer, provider, env: sourceEn
       detached: true,
       stdio: ['ignore', log.fd, log.fd],
     });
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
   } finally {
     await log.close();
   }
   child.unref();
-  const runtime = await writeRuntimeRecord(root, taskId, {
-    pid: child.pid,
-    process_group: child.pid,
-    process_start_ticks: processStartTicks(child.pid),
-    command: writer ? 'worktree-bootstrap' : process.execPath,
-  });
-  await appendTaskEvent(root, taskId, { type: 'worker', state: 'spawned', pid: child.pid });
-  return runtime;
+  try {
+    const runtime = await writeRuntimeRecord(root, taskId, {
+      pid: child.pid,
+      process_group: child.pid,
+      process_start_ticks: processStartTicks(child.pid),
+      command: writer ? 'worktree-bootstrap' : process.execPath,
+    });
+    await appendTaskEvent(root, taskId, { type: 'worker', state: 'spawned', pid: child.pid });
+    return runtime;
+  } catch (error) {
+    try { process.kill(-child.pid, 'SIGTERM'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    try { process.kill(-child.pid, 'SIGKILL'); } catch (killError) { if (killError?.code !== 'ESRCH') throw killError; }
+    throw error;
+  }
 }
 
 export async function submitTask(input, dependencies = {}) {
@@ -176,7 +192,17 @@ export async function submitTask(input, dependencies = {}) {
   const role = input.role ?? 'implement';
   if (!['review', 'implement'].includes(role)) fail('invalid_role', 'role must be review or implement.');
   const root = dependencies.root ?? stateRoot();
-  const writer = role === 'implement' && input.provider !== 'cursor-cloud';
+  try {
+    await readTask(root, id);
+    fail('task_exists', `Task ${id} already exists.`);
+  } catch (error) {
+    if (error instanceof SupervisorError) throw error;
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env);
+  // Every local provider receives a managed worktree. Review agents retain
+  // normal coding capabilities without ever touching the caller's checkout.
+  const writer = input.provider !== 'cursor-cloud';
   const workspace = writer
     ? await (dependencies.createWorkspace ?? createWriterWorkspace)({ taskId: id, repo: input.repo })
     : await readerWorkspace(input.repo, dependencies.execute);
@@ -194,6 +220,7 @@ export async function submitTask(input, dependencies = {}) {
       branch: workspace.branch,
       start_sha: workspace.start_sha,
       worktree_task: workspace.task,
+      workspace_kind: writer ? 'managed-worktree' : 'provider-managed',
       ...(agentArgv ? { agent_argv: agentArgv } : {}),
       starting_ref: input.starting_ref,
       timeout_ms: input.timeout_ms,
@@ -201,64 +228,187 @@ export async function submitTask(input, dependencies = {}) {
     },
   });
   await appendTaskEvent(root, id, { type: 'accepted', provider: input.provider, role });
-  const runtime = await (dependencies.launch ?? launchWorker)({
-    root,
-    taskId: id,
-    cwd: task.cwd,
-    writer,
-    provider: input.provider,
-    env: dependencies.env ?? process.env,
-  });
+  let runtime;
+  try {
+    runtime = await (dependencies.launch ?? launchWorker)({
+      root,
+      taskId: id,
+      cwd: task.cwd,
+      writer,
+      provider: input.provider,
+      env: launchEnv,
+    });
+  } catch (error) {
+    await updateTask(root, id, {
+      status: 'failed',
+      error: { code: error?.code ?? 'worker_start_failed', message: error?.message ?? 'Worker failed to start.' },
+      finished_at: new Date().toISOString(),
+    }).catch(() => {});
+    throw error;
+  }
   return { task: (await readTask(root, id)).task, runtime };
 }
 
+function processIdentity(pid, processGroup, expectedTicks) {
+  if (!Number.isInteger(pid) || pid < 2 || !Number.isInteger(processGroup) || processGroup < 2) return null;
+  const ticks = processStartTicks(pid);
+  if (!ticks || ticks !== expectedTicks) return null;
+  return { pid, process_group: processGroup, process_start_ticks: ticks };
+}
+
 function currentProcessIdentity(runtime) {
-  if (!Number.isInteger(runtime?.pid) || runtime.pid < 2) return null;
-  const ticks = processStartTicks(runtime.pid);
-  if (!ticks || ticks !== runtime.process_start_ticks) return null;
-  return { pid: runtime.pid, process_group: runtime.process_group, process_start_ticks: ticks };
+  return processIdentity(runtime?.pid, runtime?.process_group, runtime?.process_start_ticks);
+}
+
+function currentProviderIdentity(task) {
+  return processIdentity(task?.provider_process_group, task?.provider_process_group, task?.provider_process_start_ticks);
 }
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+async function probeCommand(command, args, authenticatedPattern) {
+  try {
+    const { stdout, stderr } = await execFile(command, args, {
+      cwd: '/tmp', encoding: 'utf8', timeout: 5_000, maxBuffer: 256 * 1024,
+    });
+    const output = `${stdout}${stderr}`;
+    if (/not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu.test(output)) {
+      return { installed: true, ready: false, reason: 'needs_login' };
+    }
+    return { installed: true, ready: authenticatedPattern ? authenticatedPattern.test(output) : true };
+  } catch (error) {
+    return { installed: error?.code !== 'ENOENT', ready: false, reason: error?.code === 'ENOENT' ? 'not_installed' : 'probe_failed' };
+  }
+}
+
+async function providerReadiness(env = process.env) {
+  const grokCommand = env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
+  const cursorCommand = env.CODEX_CO_ENGINEER_CURSOR_COMMAND ?? 'cursor-agent';
+  const dshCommand = env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
+  const acpxCommand = env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
+  const dshAcpCommand = env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
+  const [grok, cursorLocal, dshCli, acpx, dshAcp, dshCredential, cursorCloud] = await Promise.all([
+    probeCommand(grokCommand, ['models']),
+    probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu),
+    probeCommand(dshCommand, ['--version']),
+    probeCommand(acpxCommand, ['--version']),
+    probeCommand('which', [dshAcpCommand]),
+    workerEnvironment('dsh', env).then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
+    Promise.all([loadCursorApiKey(env), loadCursorSdk()])
+      .then(() => ({ installed: true, ready: true }))
+      .catch((error) => ({ installed: error?.code !== 'cursor_sdk_missing', ready: false, reason: error?.code ?? 'not_configured' })),
+  ]);
+  return {
+    grok: { ...grok, transport: 'acp' },
+    'cursor-local': { ...cursorLocal, transport: 'acp' },
+    dsh: {
+      installed: dshCli.installed && acpx.installed && dshAcp.installed,
+      ready: dshCli.ready && acpx.ready && dshAcp.ready && dshCredential.ready,
+      transport: 'acpx',
+      ...(!dshCredential.ready ? { reason: dshCredential.reason } : {}),
+    },
+    'cursor-cloud': { ...cursorCloud, transport: 'cursor-sdk' },
+  };
+}
+
 export async function cancelTask(root, taskId, dependencies = {}) {
   const { task } = await readTask(root, taskId);
   if (!ACTIVE.has(task.status)) return task;
-  if (task.provider === 'cursor-cloud' && task.provider_run_id) {
+  if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
+    const runtime = await readRuntimeRecord(root, taskId);
     await updateTask(root, taskId, { status: 'cancelling' });
-    return (dependencies.cancelCloud ?? cancelCursorCloudTask)({
+    const terminal = await (dependencies.cancelCloud ?? cancelCursorCloudTask)({
       root,
       taskId,
       sdk: dependencies.sdk,
       apiKey: dependencies.apiKey,
     });
+    const identity = currentProcessIdentity(runtime);
+    if (identity) {
+      try { process.kill(-identity.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+    }
+    return terminal;
   }
   const runtime = await readRuntimeRecord(root, taskId);
   const identity = currentProcessIdentity(runtime);
+  const providerIdentity = currentProviderIdentity(task);
   await updateTask(root, taskId, { status: 'cancelling' });
-  if (!identity) {
-    return updateTask(root, taskId, { status: 'transport_lost', error: { code: 'worker_not_running', message: 'Recorded worker is not running.' } });
+  if (!identity && !providerIdentity) {
+    await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', reason: 'worker_not_running' });
+    return updateTask(root, taskId, {
+      status: 'cancelled',
+      error: { code: 'worker_not_running', message: 'Recorded worker was not running; no owned process remained to signal.' },
+      finished_at: new Date().toISOString(),
+    });
   }
-  try { process.kill(-identity.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  for (const owned of [providerIdentity, identity].filter(Boolean)) {
+    try { process.kill(-owned.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  }
   for (let index = 0; index < 20 && currentProcessIdentity(runtime); index += 1) await wait(100);
+  for (let index = 0; index < 20 && currentProviderIdentity(task); index += 1) await wait(100);
   if (currentProcessIdentity(runtime)) {
     try { process.kill(-identity.process_group, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+    for (let index = 0; index < 20 && currentProcessIdentity(runtime); index += 1) await wait(100);
+  }
+  if (currentProviderIdentity(task)) {
+    try { process.kill(-providerIdentity.process_group, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+    for (let index = 0; index < 20 && currentProviderIdentity(task); index += 1) await wait(100);
+  }
+  if (currentProcessIdentity(runtime) || currentProviderIdentity(task)) {
+    return updateTask(root, taskId, {
+      status: 'transport_lost',
+      error: { code: 'cancel_incomplete', message: 'Owned process group remained after SIGKILL.' },
+    });
   }
   await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled' });
   return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
 }
 
 export async function taskStatus(root, taskId) {
-  return { task: (await readTask(root, taskId)).task, runtime: await readRuntimeRecord(root, taskId) };
+  let task = (await readTask(root, taskId)).task;
+  const runtime = await readRuntimeRecord(root, taskId);
+  if (ACTIVE.has(task.status) && !currentProcessIdentity(runtime)) {
+    if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
+      task = await reconcileCursorCloudTask({ root, taskId });
+    } else {
+      task = await updateTask(root, taskId, {
+        status: 'transport_lost',
+        error: { code: 'worker_not_running', message: 'Recorded worker is not running; inspect or cancel this task without replaying it.' },
+      });
+    }
+  }
+  return { task, runtime };
 }
 
 export async function supervisorStatus(root = stateRoot()) {
   const tasks = await listTasks(root);
+  for (let index = 0; index < tasks.length; index += 1) {
+    const task = tasks[index];
+    if (!ACTIVE.has(task.status)) continue;
+    const runtime = await readRuntimeRecord(root, task.id);
+    if (currentProcessIdentity(runtime)) continue;
+    if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
+      try {
+        tasks[index] = await reconcileCursorCloudTask({ root, taskId: task.id });
+      } catch (error) {
+        tasks[index] = await updateTask(root, task.id, {
+          status: 'transport_lost',
+          error: { code: error?.code ?? 'cursor_reconcile_failed', message: 'Cursor Cloud state could not be reconciled.' },
+        });
+      }
+    } else {
+      tasks[index] = await updateTask(root, task.id, {
+        status: 'transport_lost',
+        error: { code: 'worker_not_running', message: 'Recorded worker is not running; inspect or cancel this task without replaying it.' },
+      });
+    }
+  }
   return {
     version: '3.0.0',
     healthy: true,
     active: tasks.filter((task) => ACTIVE.has(task.status)).length,
     providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
+    readiness: await providerReadiness(),
     tasks: tasks.slice(0, 20),
   };
 }

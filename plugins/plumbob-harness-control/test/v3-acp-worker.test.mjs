@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import { createTask, readTask } from '../mcp/v3/task-store.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = path.join(HERE, 'acpx-fake-agent.mjs');
+const FAKE_ACPX = path.join(HERE, 'fake-acpx.mjs');
 
 async function fixture(extra = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-'));
@@ -82,4 +83,22 @@ test('provider failure after dispatch is never marked safe to replay', async () 
   assert.equal(task.status, 'failed');
   assert.equal(task.prompt_dispatched, true);
   assert.equal(task.fallback_safe, false);
+});
+
+test('DSH uses the owner-only ACPX flow input and persists its result', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-flow' });
+  const previous = process.env.CODEX_CO_ENGINEER_ACPX_COMMAND;
+  process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = FAKE_ACPX;
+  try {
+    const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+    assert.equal(terminal.status, 'completed');
+    assert.equal(terminal.transport, 'acp');
+    assert.equal(terminal.result, 'DSH_FAKE_OK');
+    assert.equal(terminal.acp_session_id, 'dsh-fake-session');
+    const entries = await readdir(path.join(value.root, 'tasks', value.taskId));
+    assert.equal(entries.some((entry) => entry.startsWith('flow-input-')), false);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_CO_ENGINEER_ACPX_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = previous;
+  }
 });

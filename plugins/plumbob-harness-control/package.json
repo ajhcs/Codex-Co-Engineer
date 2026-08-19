@@ -1,8 +1,8 @@
 {
   "name": "plumbob-harness-control",
-  "version": "2.1.2",
+  "version": "3.0.0",
   "private": false,
-  "description": "Codex-Co-Engineer: a bounded MCP control plane for DeepSeek Harness and Grok Build jobs.",
+  "description": "Codex-Co-Engineer: ACP-first delegation to Grok, Cursor, Cursor Cloud, and DeepSeek Harness.",
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"
@@ -20,6 +20,8 @@
     "package.json"
   ],
   "scripts": {
+    "setup": "node bin/setup.mjs",
+    "setup:check": "node bin/setup.mjs --check",
     "test": "node --no-warnings --test test/*.test.mjs",
     "validate:release": "node ../../scripts/validate-release.mjs"
   }

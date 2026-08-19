@@ -1,11 +1,11 @@
 interface:
   display_name: "Codex-Co-Engineer"
-  short_description: "Control target-bound DeepSeek jobs from Codex"
-  default_prompt: "Use $control-plumbob-agents to preflight a target and show Codex-Co-Engineer status."
+  short_description: "Delegate work to Grok, Cursor, and DSH"
+  default_prompt: "Use $control-plumbob-agents to show status and delegate the requested work to the best peer agent."
 dependencies:
   tools:
     - type: "mcp"
       value: "plumbob-harness-control"
-      description: "Bounded target, lifecycle, and monitoring control for the standalone DeepSeek Harness runtime"
+      description: "ACP-first delegation and lifecycle control for Grok, Cursor Local, Cursor Cloud, and DSH"
 policy:
   allow_implicit_invocation: true
