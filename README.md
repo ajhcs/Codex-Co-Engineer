@@ -1,8 +1,15 @@
 # Codex-Co-Engineer
 
-**Codex-Co-Engineer** is a small stdio [MCP](https://modelcontextprotocol.io/)
-supervisor that lets Codex delegate real review and implementation work to
-authenticated peer coding agents.
+[![Codex-Co-Engineer CI status](https://github.com/ajhcs/Codex-Co-Engineer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ajhcs/Codex-Co-Engineer/actions/workflows/ci.yml)
+[![Latest Codex-Co-Engineer release](https://img.shields.io/github/v/release/ajhcs/Codex-Co-Engineer?sort=semver)](https://github.com/ajhcs/Codex-Co-Engineer/releases/latest)
+[![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Codex-Co-Engineer** is an open-source [Model Context Protocol
+(MCP)](https://modelcontextprotocol.io/) supervisor for multi-agent software
+engineering. It lets Codex delegate real review and implementation work to
+authenticated AI coding agents, including Grok Build, Cursor Local, Cursor
+Cloud, and DeepSeek Harness (DSH).
 
 Codex stays the chief engineer, reviewer, and merge authority. The peers keep
 their normal coding capabilities, persistent logins, shell access, and
