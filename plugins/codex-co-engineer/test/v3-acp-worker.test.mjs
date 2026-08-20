@@ -12,6 +12,7 @@ import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = path.join(HERE, 'acpx-fake-agent.mjs');
 const FAKE_ACPX = path.join(HERE, 'fake-acpx.mjs');
+const FAKE_CLI_TERMINAL_VERDICT = path.join(HERE, 'fake-cli-terminal-verdict.mjs');
 
 async function fixture(extra = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-'));
@@ -77,6 +78,23 @@ test('runs a prompt through ACP and persists a compact receipt', async () => {
   assert.match(events, /fake-chunk-1/u);
   assert.match(events, /"status":"completed"/u);
 });
+
+for (const provider of ['grok', 'cursor-local']) {
+  test(`${provider} preserves a terminal verdict at the end of long ACP output`, async () => {
+    const value = await fixture({
+      provider,
+      id: `${provider}-terminal-verdict`,
+      prompt: 'terminal-verdict',
+    });
+    const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+    assert.equal(terminal.status, 'completed');
+    assert.match(terminal.result, /VERDICT: ACP PASS$/u);
+    assert.equal(terminal.result_truncated, true);
+    assert.equal(terminal.result_original_chars, 5_018);
+    const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+    assert.match(events, /"type":"provider"/u);
+  });
+}
 
 test('does not start a fresh ACP worker from transport_lost', async () => {
   const value = await fixture({ id: 'transport-lost-start' });
@@ -150,6 +168,22 @@ test('ACP startup failure falls back once before prompt dispatch', async () => {
   assert.equal(task.fallback_safe, false);
 });
 
+test('CLI fallback preserves a terminal verdict at the end of long output', async () => {
+  const value = await fixture({
+    id: 'cli-terminal-verdict',
+    cliArgv: [process.execPath, FAKE_CLI_TERMINAL_VERDICT],
+  });
+  const terminal = await runCliFallback({
+    root: value.root,
+    task: (await readTask(value.root, value.taskId)).task,
+    prompt: 'private fallback prompt',
+  });
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.result, /VERDICT: CLI PASS$/u);
+  assert.equal(terminal.result_truncated, true);
+  assert.equal(terminal.result_original_chars, 5_018);
+});
+
 test('pre-aborted CLI fallback records a terminal cancellation', async () => {
   const value = await fixture({
     id: 'pre-aborted-fallback',
@@ -210,6 +244,24 @@ test('DSH scopes ACPX artifacts to the task and removes them after persistence',
     assert.equal(entries.some((entry) => entry.startsWith('flow-input-')), false);
     assert.equal(entries.includes('acpx-home'), false);
   }, { artifactMarker });
+});
+
+test('DSH ACPX preserves a terminal verdict at the end of long output', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-terminal-verdict' });
+  const terminal = await withFakeAcpx('terminal-verdict', () => runAcpTask({ root: value.root, taskId: value.taskId }));
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.result, /VERDICT: DSH PASS$/u);
+  assert.equal(terminal.result_truncated, true);
+  assert.equal(terminal.result_original_chars, 5_018);
+});
+
+test('DSH ACPX preserves bounded nested output values', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-terminal-object' });
+  const terminal = await withFakeAcpx('terminal-object', () => runAcpTask({ root: value.root, taskId: value.taskId }));
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.result.nested.final, /VERDICT: DSH OBJECT PASS$/u);
+  assert.equal(terminal.result_truncated, true);
+  assert.equal(terminal.result_original_chars, 10_025);
 });
 
 test('DSH does not fall back after ACPX has spawned without an acknowledgement', async () => {

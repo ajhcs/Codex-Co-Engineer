@@ -854,6 +854,57 @@ test('recursively redacts prompt, bearer, and API-key material from normal provi
   assert.equal(task.branches[0].prUrl, 'https://example.test/pull?token=[redacted]');
 });
 
+test('Cursor Cloud preserves a terminal verdict at the end of long output', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-result-tail-'));
+  const repo = await createCloudRepo(root);
+  const source = `${'x'.repeat(5_000)}\nVERDICT: CLOUD PASS`;
+  await createCloudTask({ root, prompt: 'review', record: {
+    id: 'cloud-result-tail', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async () => ({ id: 'run-tail', wait: async () => ({
+        id: 'run-tail', status: 'finished', result: source, git: { branches: [] },
+      }) }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+  const terminal = await runCursorCloudTask({ root, taskId: 'cloud-result-tail', sdk, apiKey: 'test-key' });
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.result, /VERDICT: CLOUD PASS$/u);
+  assert.equal(terminal.result_truncated, true);
+  assert.equal(terminal.result_original_chars, source.length);
+});
+
+test('Cursor Cloud preserves bounded nested provider result values', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-result-object-'));
+  const repo = await createCloudRepo(root);
+  const source = {
+    progress: 'x'.repeat(5_000),
+    nested: { final: `${'y'.repeat(5_000)}\nVERDICT: CLOUD OBJECT PASS` },
+    token: 'cursor-object-secret-123456',
+  };
+  await createCloudTask({ root, prompt: 'review', record: {
+    id: 'cloud-result-object', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async () => ({ id: 'run-object', wait: async () => ({
+        id: 'run-object', status: 'finished', result: source, git: { branches: [] },
+      }) }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+  const terminal = await runCursorCloudTask({ root, taskId: 'cloud-result-object', sdk, apiKey: 'test-key' });
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.result.nested.final, /VERDICT: CLOUD OBJECT PASS$/u);
+  assert.equal(terminal.result.token, '[redacted]');
+  assert.equal(terminal.result_truncated, true);
+  assert.equal(terminal.result_original_chars, source.progress.length + source.nested.final.length + source.token.length);
+});
+
 test('recursively redacts prompt and provider credentials from reconciled results', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-reconcile-redaction-'));
   const prompt = 'reconcile private prompt';

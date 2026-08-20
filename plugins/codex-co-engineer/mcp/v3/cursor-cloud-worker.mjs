@@ -8,6 +8,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
+import { boundedProviderResult, boundedProviderValue } from './provider-result.mjs';
 
 process.umask(0o077);
 
@@ -179,7 +180,7 @@ function cleanupCall(factory, label) {
   );
 }
 
-function redactedString(value, sensitiveValues = []) {
+function redactProviderText(value, sensitiveValues = []) {
   let message = String(value ?? 'Cursor Cloud task failed.');
   for (const secret of [...sensitiveValues]
     .filter((entry) => typeof entry === 'string' && entry.length >= 3)
@@ -198,8 +199,11 @@ function redactedString(value, sensitiveValues = []) {
     .replace(/\bcrsr_[A-Za-z0-9_-]{12,}\b/gu, '[redacted]')
     .replace(COMMON_TOKEN_PATTERNS[0], '[redacted]')
     .replace(COMMON_TOKEN_PATTERNS[1], '[redacted]')
-    .replace(COMMON_TOKEN_PATTERNS[2], '[redacted]')
-    .slice(0, 4096);
+    .replace(COMMON_TOKEN_PATTERNS[2], '[redacted]');
+}
+
+function redactedString(value, sensitiveValues = []) {
+  return redactProviderText(value, sensitiveValues).slice(0, 4096);
 }
 
 function publicError(error, sensitiveValues = []) {
@@ -570,10 +574,10 @@ async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, 
   const providerSecrets = [key, prompt];
   const sanitizedBranches = sanitizeProviderValue(result.git?.branches ?? [], providerSecrets);
   const branches = Array.isArray(sanitizedBranches) ? sanitizedBranches : [];
-  const providerResult = sanitizeProviderValue(
-    typeof result.result === 'string' ? result.result.slice(0, 4096) : result.result ?? null,
-    providerSecrets,
-  );
+  const bounded = typeof result.result === 'string'
+    ? boundedProviderResult(result.result, { sanitize: (text) => redactProviderText(text, providerSecrets) })
+    : boundedProviderValue(result.result ?? null, { sanitize: (text) => redactProviderText(text, providerSecrets) });
+  const providerResult = bounded.value;
   const providerError = sanitizeProviderValue(result.error ?? null, providerSecrets);
   let archived = false;
   try {
@@ -588,6 +592,7 @@ async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, 
     status,
     provider_run_id: result.id,
     result: providerResult,
+    ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
     provider_error: providerError,
     branches,
     pr_url: branches.find((entry) => entry?.prUrl)?.prUrl ?? null,

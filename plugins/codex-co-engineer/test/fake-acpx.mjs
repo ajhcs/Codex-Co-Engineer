@@ -91,9 +91,14 @@ if (fakeMode === 'timeout-tree') {
   setInterval(() => {}, 1000);
 }
 
+const output = fakeMode === 'terminal-verdict'
+  ? `${'x'.repeat(5000)}\nVERDICT: DSH PASS`
+  : fakeMode === 'terminal-object'
+    ? { progress: 'x'.repeat(5000), nested: { final: `${'y'.repeat(5000)}\nVERDICT: DSH OBJECT PASS` } }
+    : 'DSH_FAKE_OK';
 process.stdout.write(`${JSON.stringify({
   action: 'flow_run_result',
   status: 'completed',
-  outputs: { delegate: 'DSH_FAKE_OK' },
+  outputs: { delegate: output },
   sessionBindings: { delegate: { acpSessionId: 'dsh-fake-session' } },
 })}\n`);
