@@ -87,13 +87,26 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
   assert.equal(values[0].result.serverInfo.version, '3.1.1');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
+  const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
+  assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
+    'detail', 'task_limit', 'include_tasks', 'response_mode',
+  ]);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
     'task_id', 'wait_ms', 'wait_until', 'wake_on_needs_attention', 'view', 'cursor', 'max_bytes',
-    'extend_expected_duration_ms', 'extend_reason', 'reply',
+    'extend_expected_duration_ms', 'extend_reason', 'reply', 'response_mode',
   ]);
   assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 14400000);
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
+  assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured']);
+  const tasksTool = values[1].result.tools.find((tool) => tool.name === 'tasks');
+  assert.deepEqual(Object.keys(tasksTool.inputSchema.properties), [
+    'detail', 'limit', 'cursor', 'provider', 'state', 'status', 'response_mode',
+  ]);
+  for (const tool of values[1].result.tools) {
+    assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured']);
+    assert.match(tool.description, /response_mode="structured"/u);
+  }
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.match(delegateTool.description, /property named repo/u);
   assert.deepEqual(delegateTool.inputSchema.required, ['task_id', 'provider', 'repo', 'prompt']);
@@ -267,6 +280,12 @@ test('public MCP receipts redact secrets from result, errors, handoff, and event
       for (const secret of [...secrets, 'sk-prompt-secret-1234567890']) {
         assert.doesNotMatch(serialized, new RegExp(secret, 'u'), `${call.name} leaked ${secret}`);
       }
+      assert.equal(response.result.content[0].type, 'text');
+      assert.equal(
+        response.result.content[0].text,
+        JSON.stringify(response.result.structuredContent),
+        `${call.name} default text must duplicate sanitized structuredContent`,
+      );
       if (call.name === 'task') {
         assert.equal(response.result.structuredContent.task.result.includes('[REDACTED]'), true);
         assert.equal(response.result.structuredContent.task.prompt_dispatched, true);
@@ -288,6 +307,56 @@ test('public MCP receipts redact secrets from result, errors, handoff, and event
     for (const secret of [...secrets, 'sk-prompt-secret-1234567890']) {
       assert.doesNotMatch(compactText, new RegExp(secret, 'u'), `compact leaked ${secret}`);
     }
+  });
+});
+
+test('live MCP tool results use structured-first text fallback when response_mode is structured', async () => {
+  await withServer(async ({ state, request }) => {
+    await createTask({
+      root: state,
+      prompt: 'structured transport prompt',
+      record: { id: 'structured-live', status: 'running', provider: 'grok' },
+    });
+    const toolsList = await request({ jsonrpc: '2.0', id: 39, method: 'tools/list' });
+    for (const tool of toolsList.result.tools) {
+      assert.equal(tool.inputSchema.properties.response_mode.enum[0], 'structured');
+      assert.match(tool.description, /response_mode="structured"/u);
+    }
+    for (const [index, call] of [
+      { name: 'status', arguments: { response_mode: 'structured' } },
+      { name: 'task', arguments: { task_id: 'structured-live', response_mode: 'structured' } },
+      { name: 'tasks', arguments: { response_mode: 'structured' } },
+      { name: 'cancel', arguments: { task_id: 'structured-live', response_mode: 'structured' } },
+    ].entries()) {
+      const response = await request({
+        jsonrpc: '2.0',
+        id: 40 + index,
+        method: 'tools/call',
+        params: call,
+      });
+      assert.deepEqual(Object.keys(response.result).sort(), ['content', 'structuredContent'].sort());
+      assert.equal(response.result.content.length, 1);
+      assert.equal(response.result.content[0].type, 'text');
+      assert.ok(response.result.content[0].text.length > 0);
+      const fallback = JSON.parse(response.result.content[0].text);
+      assert.equal(fallback.schema, 'co_engineer.mcp_text_fallback.v1');
+      assert.equal(fallback.authoritative, 'structuredContent');
+      assert.equal(fallback.receipt_in_text, false);
+      assert.equal(typeof response.result.structuredContent, 'object');
+      assert.notEqual(response.result.content[0].text, JSON.stringify(response.result.structuredContent));
+    }
+
+    const legacy = await request({
+      jsonrpc: '2.0',
+      id: 50,
+      method: 'tools/call',
+      params: { name: 'status', arguments: {} },
+    });
+    assert.equal(
+      legacy.result.content[0].text,
+      JSON.stringify(legacy.result.structuredContent),
+      'omitted response_mode must preserve full text duplication',
+    );
   });
 });
 

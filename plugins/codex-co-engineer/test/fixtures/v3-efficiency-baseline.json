@@ -1,11 +1,16 @@
 {
   "baseline_version": "3.1.1",
-  "task_counts": [1, 20, 54],
+  "structured_transport_version": "3.2.0-pr06",
+  "task_counts": [
+    1,
+    20,
+    54
+  ],
   "call_count": 6,
   "wait_call_count": 1,
   "wait_duration_ms": 25,
   "wait_reason": "timeout",
-  "responses": {
+  "duplication_baseline": {
     "1": {
       "status": {
         "text_content_bytes": 3033,
@@ -85,6 +90,89 @@
         "text_content_bytes": 824,
         "structured_content_bytes": 824,
         "jsonrpc_bytes": 1842
+      }
+    }
+  },
+  "responses": {
+    "1": {
+      "status": {
+        "text_content_bytes": 416,
+        "structured_content_bytes": 3033,
+        "jsonrpc_bytes": 3605
+      },
+      "delegate": {
+        "text_content_bytes": 299,
+        "structured_content_bytes": 1041,
+        "jsonrpc_bytes": 1478
+      },
+      "task": {
+        "text_content_bytes": 406,
+        "structured_content_bytes": 4238,
+        "jsonrpc_bytes": 4798
+      },
+      "tasks": {
+        "text_content_bytes": 313,
+        "structured_content_bytes": 827,
+        "jsonrpc_bytes": 1278
+      },
+      "cancel": {
+        "text_content_bytes": 278,
+        "structured_content_bytes": 824,
+        "jsonrpc_bytes": 1236
+      }
+    },
+    "20": {
+      "status": {
+        "text_content_bytes": 743,
+        "structured_content_bytes": 63762,
+        "jsonrpc_bytes": 64725
+      },
+      "delegate": {
+        "text_content_bytes": 299,
+        "structured_content_bytes": 1041,
+        "jsonrpc_bytes": 1478
+      },
+      "task": {
+        "text_content_bytes": 406,
+        "structured_content_bytes": 4238,
+        "jsonrpc_bytes": 4798
+      },
+      "tasks": {
+        "text_content_bytes": 640,
+        "structured_content_bytes": 61555,
+        "jsonrpc_bytes": 62397
+      },
+      "cancel": {
+        "text_content_bytes": 278,
+        "structured_content_bytes": 824,
+        "jsonrpc_bytes": 1236
+      }
+    },
+    "54": {
+      "status": {
+        "text_content_bytes": 743,
+        "structured_content_bytes": 63762,
+        "jsonrpc_bytes": 64725
+      },
+      "delegate": {
+        "text_content_bytes": 299,
+        "structured_content_bytes": 1041,
+        "jsonrpc_bytes": 1478
+      },
+      "task": {
+        "text_content_bytes": 406,
+        "structured_content_bytes": 4238,
+        "jsonrpc_bytes": 4798
+      },
+      "tasks": {
+        "text_content_bytes": 641,
+        "structured_content_bytes": 174795,
+        "jsonrpc_bytes": 175638
+      },
+      "cancel": {
+        "text_content_bytes": 278,
+        "structured_content_bytes": 824,
+        "jsonrpc_bytes": 1236
       }
     }
   }
