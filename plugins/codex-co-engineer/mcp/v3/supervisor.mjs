@@ -42,6 +42,7 @@ import {
   cancelCursorCloudTask,
   loadCursorApiKey,
   loadCursorSdk,
+  preflightCursorCloudOrigin,
   reconcileCursorCloudTask,
 } from './cursor-cloud-worker.mjs';
 import {
@@ -65,6 +66,16 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   invalid_credential_file: 'Provider credential configuration is invalid.',
   invalid_state_dir: 'Co-Engineer state configuration is invalid.',
   invalid_worktree: 'The provider worktree is invalid.',
+  invalid_repo: 'The supplied repository worktree is invalid.',
+  workspace_missing: 'The requested workspace is missing.',
+  workspace_invalid: 'The requested workspace is invalid.',
+  workspace_branch_missing: 'The requested workspace is not attached to a branch.',
+  workspace_branch_mismatch: 'The requested workspace branch does not match its receipt.',
+  workspace_start_ref_missing: 'The requested workspace did not provide an immutable starting commit.',
+  workspace_start_ref_invalid: 'The requested workspace has an invalid starting commit.',
+  workspace_head_mismatch: 'The requested workspace changed before provider launch.',
+  workspace_root_mismatch: 'The requested workspace path is not its Git worktree root.',
+  workspace_dirty: 'The source worktree has uncommitted changes; clean it before managed delegation.',
   worktree_create_failed: 'The managed worktree could not be prepared.',
   worker_boundary_uncertain: 'The worker boundary could not be stopped; reconcile or cancel this task.',
   cancelled: 'The task was cancelled before worker startup.',
@@ -81,6 +92,22 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   boundary_probe_failed: 'The local process boundary could not be checked.',
   systemd_run_failed: 'systemd-run could not queue the local worker service.',
   worker_start_failed: 'The worker failed to start.',
+  cursor_cloud_workspace_missing: 'Cursor Cloud requires an existing Git workspace.',
+  cursor_cloud_workspace_invalid: 'Cursor Cloud requires a valid Git workspace.',
+  cursor_cloud_workspace_dirty: 'Cursor Cloud requires a clean local checkout before dispatch.',
+  cursor_cloud_workspace_changed: 'Cursor Cloud checkout state changed after preflight; retry from the pinned commit.',
+  cursor_cloud_origin_changed: 'Cursor Cloud origin changed after preflight; retry from the pinned provider origin.',
+  cursor_cloud_origin_missing: 'Cursor Cloud requires a provider-visible Git origin or an explicit provider repository override.',
+  cursor_cloud_origin_invalid: 'Cursor Cloud requires a valid provider-visible Git origin.',
+  cursor_cloud_origin_credentials: 'Cursor Cloud origin credentials are not accepted; configure a credential-free origin or provider repository override.',
+  cursor_cloud_origin_unsupported: 'Cursor Cloud does not support this repository origin format.',
+  cursor_cloud_repo_invalid: 'Cursor Cloud requires a valid provider repository URL.',
+  cursor_cloud_repo_credentials: 'Cursor Cloud provider repository URLs cannot contain credentials, query, or fragment data.',
+  cursor_cloud_repo_override_conflict: 'Cursor Cloud accepts one provider repository override.',
+  cursor_cloud_repo_identity_invalid: 'Cursor Cloud could not determine a canonical repository identity.',
+  cursor_cloud_start_ref_unavailable: 'Cursor Cloud requires an immutable starting commit.',
+  cursor_cloud_start_ref_invalid: 'Cursor Cloud requires a full 40-character commit starting reference.',
+  invalid_provider_repo: 'provider_repo_url is supported only for Cursor Cloud tasks.',
 });
 
 export class SupervisorError extends Error {
@@ -193,18 +220,125 @@ function parseWorktreeResult(stdout, taskId) {
   return value;
 }
 
-export async function createWriterWorkspace({ taskId, repo, execute = execFile }) {
-  requireTaskId(taskId);
+function managedSourceDirty(stdout) {
+  // `git status --porcelain=v1` starts every changed entry with two status
+  // columns. Keep the parser deliberately narrow so a mocked or noisy git
+  // command cannot turn an unrelated line into a dirty-worktree failure.
+  return String(stdout ?? '').split(/\r?\n/u).some((line) => /^[ MADRCU?!]{2}\s*\S/u.test(line));
+}
+
+function missingWorkspaceError(error) {
+  if (error?.code === 'ENOENT') return true;
+  return /(?:no such file|cannot change to|does not exist)/iu.test(`${error?.message ?? ''} ${error?.stderr ?? ''}`);
+}
+
+async function validateManagedSource({ repo, execute = execFile }) {
   normalizedAbsolute(repo, 'repo');
+  let branchOutput;
+  let statusOutput;
   try {
-    const { stdout: branchOutput } = await execute('git', ['-C', repo, 'branch', '--show-current'], { encoding: 'utf8' });
-    const base = branchOutput.trim();
-    if (!base) fail('worktree_create_failed', 'Writer source must be attached to a branch.');
+    ({ stdout: branchOutput } = await execute('git', ['-C', repo, 'branch', '--show-current'], { encoding: 'utf8' }));
+    ({ stdout: statusOutput } = await execute('git', ['-C', repo, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' }));
+  } catch (error) {
+    const code = missingWorkspaceError(error) ? 'workspace_missing' : 'workspace_invalid';
+    throw new SupervisorError(code, code === 'workspace_missing'
+      ? 'The source workspace does not exist.'
+      : 'The source workspace is not a valid Git worktree.', { cause: error });
+  }
+  const branch = String(branchOutput ?? '').trim();
+  if (!branch) fail('workspace_branch_missing', 'The source workspace must be attached to a branch.');
+  if (managedSourceDirty(statusOutput)) {
+    fail('workspace_dirty', 'The source worktree must be clean before managed delegation.');
+  }
+  return { branch };
+}
+
+async function validateWorkspaceContract(workspace, taskId, {
+  execute = execFile,
+  checkPath = stat,
+} = {}) {
+  if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) {
+    fail('workspace_missing', 'Managed delegation did not return a workspace.');
+  }
+  if (workspace.status !== undefined && workspace.status !== 'ready') {
+    fail('workspace_invalid', 'Managed delegation returned a workspace that is not ready.');
+  }
+  const workspaceTask = workspace.task ?? workspace.worktree_task;
+  const worktreePath = workspace.worktree_path ?? workspace.cwd;
+  if (typeof workspaceTask !== 'string' || workspaceTask.length === 0 || workspaceTask !== taskId) {
+    fail('workspace_invalid', 'Managed delegation returned an invalid workspace identity.');
+  }
+  if (typeof worktreePath !== 'string' || !path.isAbsolute(worktreePath) || path.resolve(worktreePath) !== worktreePath) {
+    fail('workspace_invalid', 'Managed delegation returned an invalid workspace path.');
+  }
+  if (typeof workspace.branch !== 'string' || workspace.branch.trim().length === 0) {
+    fail('workspace_branch_missing', 'Managed delegation returned a workspace without a branch.');
+  }
+  if (typeof workspace.start_sha !== 'string' || workspace.start_sha.length === 0) {
+    fail('workspace_start_ref_missing', 'Managed delegation returned a workspace without an immutable starting commit.');
+  }
+  if (!/^[0-9a-f]{40}$/iu.test(workspace.start_sha)) {
+    fail('workspace_start_ref_invalid', 'Managed delegation returned an invalid starting commit.');
+  }
+  let metadata;
+  try {
+    metadata = await checkPath(worktreePath);
+  } catch (error) {
+    const code = missingWorkspaceError(error) ? 'workspace_missing' : 'workspace_invalid';
+    fail(code, code === 'workspace_missing'
+      ? 'Managed delegation returned a workspace path that does not exist.'
+      : 'Managed delegation returned a workspace path that cannot be inspected.');
+  }
+  if (typeof metadata?.isDirectory !== 'function' || !metadata.isDirectory()) {
+    fail('workspace_invalid', 'Managed delegation returned a workspace path that is not a directory.');
+  }
+  let outputs;
+  try {
+    outputs = await Promise.all([
+      execute('git', ['-C', worktreePath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }),
+      execute('git', ['-C', worktreePath, 'branch', '--show-current'], { encoding: 'utf8' }),
+      execute('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }),
+    ]);
+  } catch (error) {
+    const code = missingWorkspaceError(error) ? 'workspace_missing' : 'workspace_invalid';
+    fail(code, code === 'workspace_missing'
+      ? 'Managed delegation returned a path that is not an accessible Git worktree.'
+      : 'Managed delegation returned a path that is not a valid Git worktree.');
+  }
+  const [{ stdout: rootOutput }, { stdout: branchOutput }, { stdout: headOutput }] = outputs;
+  const root = String(rootOutput ?? '').trim();
+  if (!path.isAbsolute(root) || path.resolve(root) !== worktreePath) {
+    fail('workspace_root_mismatch', 'Managed delegation returned a path that is not its Git worktree root.');
+  }
+  const branch = String(branchOutput ?? '').trim();
+  if (!branch) fail('workspace_branch_missing', 'Managed delegation returned a detached workspace.');
+  if (branch !== workspace.branch.trim()) {
+    fail('workspace_branch_mismatch', 'Managed delegation returned a branch that does not match its Git worktree.');
+  }
+  const head = String(headOutput ?? '').trim();
+  if (!/^[0-9a-f]{40}$/iu.test(head) || head.toLowerCase() !== workspace.start_sha.toLowerCase()) {
+    fail('workspace_head_mismatch', 'Managed delegation workspace HEAD does not match its recorded starting commit.');
+  }
+  return {
+    ...workspace,
+    task: workspaceTask,
+    worktree_path: worktreePath,
+    branch,
+    start_sha: workspace.start_sha.toLowerCase(),
+  };
+}
+
+export async function createWriterWorkspace({ taskId, repo, execute = execFile, checkPath = stat }) {
+  requireTaskId(taskId);
+  const source = await validateManagedSource({ repo, execute });
+  try {
+    const base = source.branch;
+    if (!base) fail('workspace_branch_missing', 'Writer source must be attached to a branch.');
     const { stdout } = await execute('worktree-bootstrap', ['create', taskId, '--repo', repo, '--base', base], {
       encoding: 'utf8',
       maxBuffer: WORKTREE_CREATE_MAX_BUFFER,
     });
-    return parseWorktreeResult(stdout, taskId);
+    return await validateWorkspaceContract(parseWorktreeResult(stdout, taskId), taskId, { execute, checkPath });
   } catch (error) {
     if (error instanceof SupervisorError) throw error;
     throw new SupervisorError('worktree_create_failed', error?.stderr?.trim() || error?.message || 'worktree-bootstrap failed.', { cause: error });
@@ -213,12 +347,24 @@ export async function createWriterWorkspace({ taskId, repo, execute = execFile }
 
 async function readerWorkspace(repo, execute = execFile) {
   normalizedAbsolute(repo, 'repo');
-  const resolved = await realpath(repo);
-  const [{ stdout: rootOutput }, { stdout: branchOutput }, { stdout: shaOutput }] = await Promise.all([
-    execute('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }),
-    execute('git', ['-C', resolved, 'branch', '--show-current'], { encoding: 'utf8' }),
-    execute('git', ['-C', resolved, 'rev-parse', 'HEAD'], { encoding: 'utf8' }),
-  ]);
+  let resolved;
+  try {
+    resolved = await realpath(repo);
+  } catch (error) {
+    throw new SupervisorError(missingWorkspaceError(error) ? 'workspace_missing' : 'workspace_invalid',
+      missingWorkspaceError(error) ? 'The source workspace does not exist.' : 'The source workspace is invalid.', { cause: error });
+  }
+  let outputs;
+  try {
+    outputs = await Promise.all([
+      execute('git', ['-C', resolved, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }),
+      execute('git', ['-C', resolved, 'branch', '--show-current'], { encoding: 'utf8' }),
+      execute('git', ['-C', resolved, 'rev-parse', 'HEAD'], { encoding: 'utf8' }),
+    ]);
+  } catch (error) {
+    throw new SupervisorError('workspace_invalid', 'The source workspace is not a valid Git worktree.', { cause: error });
+  }
+  const [{ stdout: rootOutput }, { stdout: branchOutput }, { stdout: shaOutput }] = outputs;
   const root = path.resolve(rootOutput.trim());
   if (root !== resolved) fail('invalid_repo', 'repo must identify the Git worktree root.');
   return {
@@ -457,6 +603,13 @@ export async function submitTask(input, dependencies = {}) {
   if (input.provider !== 'cursor-cloud' && input.starting_ref !== undefined) {
     fail('invalid_starting_ref', 'starting_ref is supported only for Cursor Cloud tasks.');
   }
+  if (input.provider !== 'cursor-cloud' && (input.provider_repo_url !== undefined || input.provider_repo !== undefined)) {
+    fail('invalid_provider_repo', 'provider_repo_url is supported only for Cursor Cloud tasks.');
+  }
+  if (input.provider === 'cursor-cloud' && input.provider_repo_url !== undefined
+    && input.provider_repo !== undefined && input.provider_repo_url !== input.provider_repo) {
+    fail('cursor_cloud_repo_override_conflict', 'Provide only one provider repository override.');
+  }
   const workspaceMode = resolveWorkspaceMode(input.provider, input.workspace_mode);
   const deadline = resolveTaskDeadline(input);
   if (input.silence_timeout_ms !== undefined && input.silence_timeout_ms !== null) {
@@ -484,11 +637,38 @@ export async function submitTask(input, dependencies = {}) {
   const managed = input.provider !== 'cursor-cloud' && workspaceMode === 'managed';
   const writer = managed;
   let workspace = null;
+  let cloudPreflight = null;
   let taskCreated = false;
   try {
     workspace = managed
-      ? await (dependencies.createWorkspace ?? createWriterWorkspace)({ taskId: id, repo: input.repo })
+      ? await (dependencies.createWorkspace ?? createWriterWorkspace)({
+        taskId: id,
+        repo: input.repo,
+        ...(dependencies.createWorkspace ? {} : { execute: dependencies.execute, checkPath: dependencies.checkPath }),
+      })
       : await readerWorkspace(input.repo, dependencies.execute);
+    // The built-in bootstrap already returns a verified contract. Re-verify
+    // only injected workspace factories so normal dispatch does not repeat a
+    // stat plus three Git subprocesses on every managed task.
+    if (managed && dependencies.createWorkspace) workspace = await validateWorkspaceContract(workspace, id, {
+      execute: dependencies.execute,
+      checkPath: dependencies.checkPath,
+    });
+    if (input.provider === 'cursor-cloud') {
+      const preflight = dependencies.preflightCloudOrigin ?? preflightCursorCloudOrigin;
+      const readGit = dependencies.readGit ?? (dependencies.execute
+        ? async (cwd, args) => {
+          const result = await dependencies.execute('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+          return String(result?.stdout ?? '').trim();
+        }
+        : undefined);
+      cloudPreflight = await preflight({
+        cwd: workspace.worktree_path,
+        providerRepoUrl: input.provider_repo_url ?? input.provider_repo,
+        startingRef: input.starting_ref,
+        ...(readGit ? { readGit } : {}),
+      });
+    }
     const agentArgv = input.provider === 'cursor-cloud' ? undefined : providerArgv(input.provider, dependencies.env ?? process.env);
     const { task } = await createTask({
       root,
@@ -507,9 +687,15 @@ export async function submitTask(input, dependencies = {}) {
         workspace_kind: input.provider === 'cursor-cloud'
           ? 'provider-managed'
           : managed ? 'managed-worktree' : 'direct',
+        ...(cloudPreflight ? {
+          provider_repo_url: cloudPreflight.provider_repo_url,
+          provider_repo_source: cloudPreflight.provider_repo_source,
+          provider_repo_identity: cloudPreflight.provider_repo_identity,
+          provider_origin_kind: cloudPreflight.provider_origin_kind,
+        } : {}),
         ...(agentArgv ? { agent_argv: agentArgv } : {}),
         launch_reservation: createLaunchReservation(),
-        starting_ref: input.starting_ref,
+        starting_ref: cloudPreflight?.starting_ref ?? input.starting_ref,
         timeout_ms: deadline.timeout_ms,
         expected_duration_ms: deadline.expected_duration_ms,
         duration_margin: deadline.duration_margin,

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import {
   cancelTask,
@@ -15,8 +17,10 @@ import {
   taskStatus,
 } from '../mcp/v3/supervisor.mjs';
 import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
+import { runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
 
 const SHA = 'a'.repeat(40);
+const run = promisify(execFile);
 const readyBoundary = async () => ({
   ready: true,
   status: 'prerequisites_ready',
@@ -30,7 +34,12 @@ test('writer workspace parses noisy pretty JSON and requests a bounded large buf
     taskId: 'parallel-one',
     repo: '/repo',
     execute: async (command, args, options) => {
-      if (command === 'git') return { stdout: 'feature\n' };
+      if (command === 'git') {
+        if (args.includes('--show-toplevel')) return { stdout: '/worktrees/parallel-one\n' };
+        if (args.includes('HEAD')) return { stdout: `${SHA}\n` };
+        if (args.includes('--show-current')) return { stdout: args[1] === '/repo' ? 'feature\n' : 'codex/parallel-one\n' };
+        return { stdout: '' };
+      }
       calls.push([command, args, options]);
       return { stdout: `npm ci: installing dependencies\n${JSON.stringify({
         task: 'parallel-one',
@@ -40,6 +49,7 @@ test('writer workspace parses noisy pretty JSON and requests a bounded large buf
         status: 'ready',
       }, null, 2)}\n` };
     },
+    checkPath: async () => ({ isDirectory: () => true }),
   });
   assert.equal(calls[0][0], 'worktree-bootstrap');
   assert.deepEqual(calls[0][1], ['create', 'parallel-one', '--repo', '/repo', '--base', 'feature']);
@@ -54,6 +64,171 @@ test('invalid worktree receipt fails before dispatch', async () => {
     createWriterWorkspace({ taskId: 'bad', repo: '/repo', execute }),
     (error) => error.code === 'worktree_create_failed',
   );
+});
+
+test('managed delegation rejects a missing or invalid workspace before provider launch', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-workspace-contract-'));
+  const launches = [];
+  try {
+    await assert.rejects(
+      submitTask({ task_id: 'workspace-missing', provider: 'grok', repo: '/repo', prompt: 'do not launch', expected_duration_ms: 10_000 }, {
+        root,
+        env: {},
+        probeBoundary: readyBoundary,
+        createWorkspace: async () => null,
+        launch: async (request) => launches.push(request),
+      }),
+      (error) => error.code === 'workspace_missing' && error.message === 'The requested workspace is missing.',
+    );
+    await assert.rejects(
+      submitTask({ task_id: 'workspace-branch', provider: 'cursor-local', repo: '/repo', prompt: 'do not launch', expected_duration_ms: 10_000 }, {
+        root,
+        env: {},
+        probeBoundary: readyBoundary,
+        createWorkspace: async () => ({
+          task: 'workspace-branch', status: 'ready', worktree_path: '/worktrees/workspace-branch', branch: '', start_sha: SHA,
+        }),
+        launch: async (request) => launches.push(request),
+      }),
+      (error) => error.code === 'workspace_branch_missing',
+    );
+    assert.deepEqual(launches, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('managed workspace verification rejects forged path, root, branch, and HEAD receipts before launch', async () => {
+  const cases = [
+    ['workspace-start-missing', 'workspace_start_ref_missing', (workspace) => { delete workspace.start_sha; }],
+    ['workspace-task-forged', 'workspace_invalid', (workspace) => { workspace.task = 'other-task'; }],
+    ['workspace-path-missing', 'workspace_missing', null, { missingPath: true }],
+    ['workspace-root-forged', 'workspace_root_mismatch', null, { root: '/fake/other' }],
+    ['workspace-branch-forged', 'workspace_branch_mismatch', null, { branch: 'other-branch' }],
+    ['workspace-head-forged', 'workspace_head_mismatch', null, { head: 'b'.repeat(40) }],
+  ];
+  for (const [taskId, expectedCode, mutate, options = {}] of cases) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `co-engineer-supervisor-forged-${taskId}-`));
+    const workspacePath = `/fake/${taskId}`;
+    const workspace = {
+      task: taskId,
+      status: 'ready',
+      worktree_path: workspacePath,
+      branch: 'codex/forged',
+      start_sha: SHA,
+    };
+    mutate?.(workspace);
+    let launches = 0;
+    try {
+      await assert.rejects(
+        submitTask({ task_id: taskId, provider: 'grok', repo: '/repo', prompt: 'must not launch', expected_duration_ms: 10_000 }, {
+          root,
+          env: {},
+          probeBoundary: readyBoundary,
+          createWorkspace: async () => workspace,
+          checkPath: async () => {
+            if (options.missingPath) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+            return { isDirectory: () => true };
+          },
+          execute: async (_command, args) => {
+            if (args.includes('--show-toplevel')) return { stdout: `${options.root ?? workspacePath}\n` };
+            if (args.includes('--show-current')) return { stdout: `${options.branch ?? workspace.branch}\n` };
+            if (args.includes('HEAD')) return { stdout: `${options.head ?? SHA}\n` };
+            throw new Error(`unexpected args ${args.join(' ')}`);
+          },
+          launch: async () => { launches += 1; },
+        }),
+        (error) => error.code === expectedCode,
+      );
+      assert.equal(launches, 0);
+      await assert.rejects(readTask(root, taskId), (error) => error.code === 'ENOENT');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('managed source preflight rejects dirty worktrees before bootstrap', async () => {
+  let bootstrapCalls = 0;
+  await assert.rejects(
+    createWriterWorkspace({
+      taskId: 'dirty-source',
+      repo: '/repo',
+      execute: async (command, args) => {
+        if (command === 'git' && args.includes('--show-current')) return { stdout: 'feature\n' };
+        if (command === 'git' && args.includes('--porcelain=v1')) return { stdout: ' M private.txt\n' };
+        bootstrapCalls += 1;
+        return { stdout: JSON.stringify({ status: 'ready', task: 'dirty-source', branch: 'codex/dirty-source', worktree_path: '/worktrees/dirty-source' }) };
+      },
+    }),
+    (error) => error.code === 'workspace_dirty',
+  );
+  assert.equal(bootstrapCalls, 0);
+});
+
+test('Cursor Cloud origin preflight fails before task creation or provider launch', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-cloud-preflight-'));
+  const repo = path.join(root, 'repo');
+  const launches = [];
+  try {
+    await mkdir(repo);
+    const execute = async (command, args) => {
+      if (command !== 'git') throw new Error(`unexpected command: ${command}`);
+      if (args.includes('--show-toplevel')) return { stdout: `${repo}\n` };
+      if (args.includes('--show-current')) return { stdout: 'feature\n' };
+      if (args.includes('HEAD')) return { stdout: `${SHA}\n` };
+      throw new Error(`unexpected git args: ${args.join(' ')}`);
+    };
+    await assert.rejects(
+      submitTask({ task_id: 'cloud-preflight', provider: 'cursor-cloud', repo, prompt: 'must not launch', expected_duration_ms: 10_000 }, {
+        root,
+        execute,
+        preflightCloudOrigin: async () => { throw Object.assign(new Error('origin missing'), { code: 'cursor_cloud_origin_missing' }); },
+        launch: async (request) => launches.push(request),
+      }),
+      (error) => error.code === 'cursor_cloud_origin_missing'
+        && error.message === 'Cursor Cloud requires a provider-visible Git origin or an explicit provider repository override.',
+    );
+    assert.deepEqual(launches, []);
+    await assert.rejects(readTask(root, 'cloud-preflight'), (error) => error.code === 'ENOENT');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Cloud submit pins the discovered SHA and rejects checkout advancement before SDK dispatch', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-cloud-head-pin-'));
+  const repo = path.join(root, 'repo');
+  try {
+    await run('git', ['init', '-b', 'main', repo]);
+    await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'sha-one']);
+    await run('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+    const { stdout: firstHead } = await run('git', ['-C', repo, 'rev-parse', 'HEAD']);
+    let createCalls = 0;
+    await assert.rejects(
+      submitTask({ task_id: 'cloud-head-pin', provider: 'cursor-cloud', repo, prompt: 'must not dispatch', expected_duration_ms: 10_000 }, {
+        root,
+        launch: async ({ root: taskRoot, taskId }) => {
+          assert.equal((await readTask(taskRoot, taskId)).task.starting_ref, firstHead.trim());
+          await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'sha-two']);
+          return runCursorCloudTask({
+            root: taskRoot,
+            taskId,
+            apiKey: 'test-key',
+            sdk: { Agent: { create: async () => { createCalls += 1; } } },
+          });
+        },
+      }),
+      (error) => error.code === 'cursor_cloud_workspace_changed',
+    );
+    const task = (await readTask(root, 'cloud-head-pin')).task;
+    assert.equal(task.starting_ref, firstHead.trim());
+    assert.equal(task.status, 'failed');
+    assert.equal(task.error.code, 'cursor_cloud_workspace_changed');
+    assert.equal(createCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('managed cleanup fails closed when lock inspection is not parseable', async () => {
@@ -194,15 +369,20 @@ test('status makes boundary health explicit and fails only local providers close
 test('managed launch failure marks the task failed and cleans an abandoned writer lock', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-failure-'));
   const calls = [];
+  const worktreePath = path.join(root, 'worktree');
   const workspace = {
     task: 'launch-fail',
     branch: 'codex/launch-fail',
     start_sha: SHA,
-    worktree_path: '/worktrees/launch-fail',
+    worktree_path: worktreePath,
     status: 'ready',
   };
+  await mkdir(worktreePath);
   const execute = async (command, args) => {
     calls.push([command, args]);
+    if (args.includes('--show-toplevel')) return { stdout: `${worktreePath}\n` };
+    if (args.includes('--show-current')) return { stdout: 'codex/launch-fail\n' };
+    if (args.includes('HEAD')) return { stdout: `${SHA}\n` };
     if (args[0] === 'lock' && args[1] === 'inspect') {
       return { stdout: JSON.stringify({
         task: 'launch-fail',
@@ -235,7 +415,7 @@ test('managed launch failure marks the task failed and cleans an abandoned write
     assert.doesNotMatch(task.error.message, /private|secret/iu);
     assert.deepEqual(calls.at(-1), [
       'worktree-bootstrap',
-      ['lock', 'clean', 'launch-fail', '--repo', '/worktrees/launch-fail', '--policy', 'dead-local', '--lock-id', 'dead-lock'],
+      ['lock', 'clean', 'launch-fail', '--repo', worktreePath, '--policy', 'dead-local', '--lock-id', 'dead-lock'],
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });

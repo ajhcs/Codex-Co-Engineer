@@ -191,7 +191,7 @@ function redactProviderText(value, sensitiveValues = []) {
   // the MCP facade. Remove common credential-bearing URL and header forms
   // before anything reaches a task receipt or worker log.
   return message
-    .replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/giu, 'https://[redacted]@')
+    .replace(/https?:\/\/(?:[^\s/@:]+(?::[^\s/@]*)?@)/giu, 'https://[redacted]@')
     .replace(/([?&](?:token|access_token|api[_-]?key|secret|password)=)[^&#\s]*/giu, '$1[redacted]')
     .replace(/(bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[redacted]')
     .replace(SECRET_ASSIGNMENT_PATTERN, (_match, key, separator) => `${key}${separator}[redacted]`)
@@ -285,25 +285,209 @@ async function gitValue(cwd, args) {
   return stdout.trim();
 }
 
-function providerRepoUrl(value) {
+function repositoryPath(pathname) {
+  const normalized = String(pathname ?? '').replace(/^\/+|\/+$/gu, '');
+  if (!normalized || normalized === '.') fail('cursor_cloud_repo_identity_invalid', 'Cursor Cloud requires a repository path.');
+  return normalized;
+}
+
+function canonicalIdentity(hostname, port, pathname) {
+  const host = String(hostname ?? '').trim().toLowerCase();
+  if (!host) fail('cursor_cloud_repo_identity_invalid', 'Cursor Cloud could not determine a repository host.');
+  const suffix = port ? `:${port}` : '';
+  return `${host}${suffix}/${repositoryPath(pathname).replace(/\.git$/iu, '')}`;
+}
+
+function canonicalHttpsUrl(hostname, port, pathname) {
+  const host = String(hostname ?? '').trim().toLowerCase();
+  if (!host) fail('cursor_cloud_repo_identity_invalid', 'Cursor Cloud could not determine a repository host.');
+  const suffix = port ? `:${port}` : '';
+  return `https://${host}${suffix}/${repositoryPath(pathname)}`;
+}
+
+function normalizeRepositoryReference(value, {
+  credentialCode = 'cursor_cloud_repo_credentials',
+  invalidCode = 'cursor_cloud_repo_invalid',
+  unsupportedCode = credentialCode,
+  allowSsh = true,
+} = {}) {
   if (typeof value !== 'string' || value.length === 0 || /[\u0000-\u0020]/u.test(value)) {
-    fail('cursor_cloud_repo_invalid', 'Cursor Cloud requires a valid repository URL.');
+    fail(invalidCode, 'Cursor Cloud requires a valid provider-visible repository reference.');
   }
+
+  // Git's scp-like syntax (git@github.com:owner/repo.git) is not a URL, but
+  // is a supported SSH origin. The username is transport metadata, never a
+  // provider credential, and is removed from the canonical HTTPS URL.
+  const scp = !value.includes('://')
+    ? /^(?:(?<user>[^@/:\s]+)@)?(?<host>[^/:\s]+):(?<path>[^\s?#]+)$/u.exec(value)
+    : null;
+  if (scp) {
+    if (!allowSsh) fail(unsupportedCode, 'Cursor Cloud requires an http(s) repository URL.');
+    if (scp.groups.user && scp.groups.user !== 'git') {
+      fail(credentialCode, 'Cursor Cloud SSH origins must use the standard git transport account.');
+    }
+    const repoPath = repositoryPath(scp.groups.path);
+    return {
+      url: canonicalHttpsUrl(scp.groups.host, '', repoPath),
+      identity: canonicalIdentity(scp.groups.host, '', repoPath),
+      kind: 'ssh',
+    };
+  }
+
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    fail('cursor_cloud_repo_invalid', 'Cursor Cloud requires a valid repository URL.');
+    fail(invalidCode, 'Cursor Cloud requires a valid provider-visible repository reference.');
   }
-  if (!['http:', 'https:'].includes(parsed.protocol)
-    || !parsed.hostname
-    || parsed.username
-    || parsed.password
-    || parsed.search
-    || parsed.hash) {
-    fail('cursor_cloud_repo_credentials', 'Cursor Cloud requires an http(s) origin without credentials, query, or fragment data.');
+  if (parsed.protocol === 'ssh:' || parsed.protocol === 'git+ssh:') {
+    if (!allowSsh) fail(unsupportedCode, 'Cursor Cloud requires an http(s) repository URL.');
+    if (parsed.username && parsed.username !== 'git') {
+      fail(credentialCode, 'Cursor Cloud SSH origins must use the standard git transport account.');
+    }
+    if (parsed.password || parsed.search || parsed.hash) {
+      fail(credentialCode, 'Cursor Cloud SSH origins cannot contain credentials, query, or fragment data.');
+    }
+    const repoPath = repositoryPath(parsed.pathname);
+    const port = parsed.port === '22' ? '' : parsed.port;
+    return {
+      url: canonicalHttpsUrl(parsed.hostname, port, repoPath),
+      identity: canonicalIdentity(parsed.hostname, port, repoPath),
+      kind: 'ssh',
+    };
   }
-  return parsed.toString();
+  // Keep HTTP input for backwards-compatible receipts; new provider origins
+  // should use HTTPS, while canonical identity remains scheme-neutral.
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) {
+    fail(unsupportedCode, 'Cursor Cloud requires an HTTPS or supported SSH repository origin.');
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    fail(credentialCode, 'Cursor Cloud repository references cannot contain credentials, query, or fragment data.');
+  }
+  const repoPath = repositoryPath(parsed.pathname);
+  const port = parsed.port && !((parsed.protocol === 'https:' && parsed.port === '443') || (parsed.protocol === 'http:' && parsed.port === '80'))
+    ? parsed.port
+    : '';
+  return {
+    url: `${parsed.protocol}//${parsed.hostname.toLowerCase()}${port ? `:${port}` : ''}/${repoPath}`,
+    identity: canonicalIdentity(parsed.hostname, port, repoPath),
+    kind: parsed.protocol === 'https:' ? 'https' : 'http',
+  };
+}
+
+export function canonicalRepositoryIdentity(value) {
+  return normalizeRepositoryReference(value, {
+    credentialCode: 'cursor_cloud_origin_credentials',
+    invalidCode: 'cursor_cloud_origin_invalid',
+    unsupportedCode: 'cursor_cloud_origin_unsupported',
+  }).identity;
+}
+
+export function providerRepoUrl(value) {
+  return normalizeRepositoryReference(value, { allowSsh: false }).url;
+}
+
+async function configuredOrigin(cwd, readGit = gitValue) {
+  try {
+    const result = await readGit(cwd, ['config', '--local', '--get', 'remote.origin.url']);
+    const origin = typeof result === 'string' ? result.trim() : String(result?.stdout ?? '').trim();
+    return origin || null;
+  } catch (error) {
+    // `git config --get` exits 1 when the key is absent. A non-Git workspace
+    // (or another Git failure) gets a distinct, actionable public code.
+    if (error?.code === 1 || error?.status === 1) return null;
+    if (isMissingWorkspaceError(error)) fail('cursor_cloud_workspace_missing', 'Cursor Cloud requires an existing Git workspace.');
+    fail('cursor_cloud_workspace_invalid', 'Cursor Cloud could not read the Git workspace origin.');
+  }
+}
+
+function isMissingWorkspaceError(error) {
+  if (error?.code === 'ENOENT') return true;
+  return /(?:no such file|cannot change to|does not exist)/iu.test(`${error?.message ?? ''} ${error?.stderr ?? ''}`);
+}
+
+function isDirtyGitStatus(value) {
+  return String(value ?? '').split(/\r?\n/u).some((line) => /^[ MADRCU?!]{2}\s*\S/u.test(line));
+}
+
+/**
+ * Resolve a credential-free provider repository reference before any Cursor
+ * SDK call. The local configured origin is read with `git config --local` so
+ * host-level insteadOf rewrites (which may add credentials) are never used.
+ * An explicit provider_repo_url override is canonicalized and may replace a
+ * missing or private local origin.
+ */
+export async function preflightCursorCloudOrigin({
+  cwd,
+  providerRepoUrl: override,
+  providerRepo,
+  startingRef,
+  readGit = gitValue,
+} = {}) {
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || path.resolve(cwd) !== cwd) {
+    fail('cursor_cloud_workspace_invalid', 'Cursor Cloud requires an absolute Git workspace path.');
+  }
+  const providerOverride = override ?? providerRepo;
+  if (override !== undefined && providerRepo !== undefined && override !== providerRepo) {
+    fail('cursor_cloud_repo_override_conflict', 'Provide only one provider repository override.');
+  }
+  let head;
+  try {
+    const result = await readGit(cwd, ['rev-parse', 'HEAD']);
+    head = typeof result === 'string' ? result.trim() : String(result?.stdout ?? '').trim();
+  } catch (error) {
+    if (isMissingWorkspaceError(error)) fail('cursor_cloud_workspace_missing', 'Cursor Cloud requires an existing Git workspace.');
+    fail('cursor_cloud_workspace_invalid', 'Cursor Cloud requires a valid Git workspace with a commit.');
+  }
+  const rawOrigin = await configuredOrigin(cwd, readGit);
+  let status;
+  try {
+    const result = await readGit(cwd, ['status', '--porcelain=v1', '--untracked-files=all']);
+    status = typeof result === 'string' ? result.trim() : String(result?.stdout ?? '').trim();
+  } catch {
+    fail('cursor_cloud_workspace_invalid', 'Cursor Cloud could not validate the Git workspace state.');
+  }
+  if (isDirtyGitStatus(status)) {
+    fail('cursor_cloud_workspace_dirty', 'Cursor Cloud requires a clean local checkout before dispatch.');
+  }
+  let normalized;
+  if (providerOverride !== undefined) {
+    normalized = normalizeRepositoryReference(providerOverride, {
+      credentialCode: 'cursor_cloud_repo_credentials',
+      invalidCode: 'cursor_cloud_repo_invalid',
+      unsupportedCode: 'cursor_cloud_repo_invalid',
+    });
+  } else {
+    if (!rawOrigin) fail('cursor_cloud_origin_missing', 'Cursor Cloud requires a provider-visible Git origin or an explicit provider repository override.');
+    normalized = normalizeRepositoryReference(rawOrigin, {
+      credentialCode: 'cursor_cloud_origin_credentials',
+      invalidCode: 'cursor_cloud_origin_invalid',
+      unsupportedCode: 'cursor_cloud_origin_unsupported',
+    });
+  }
+  const ref = startingRef ?? head;
+  if (!ref) fail('cursor_cloud_start_ref_unavailable', 'Cursor Cloud requires an immutable starting commit.');
+  if (!COMMIT_SHA.test(ref)) fail('cursor_cloud_start_ref_invalid', 'Cursor Cloud tasks require a full 40-character commit startingRef.');
+  let currentHead;
+  try {
+    const result = await readGit(cwd, ['rev-parse', 'HEAD']);
+    currentHead = typeof result === 'string' ? result.trim() : String(result?.stdout ?? '').trim();
+  } catch (error) {
+    if (isMissingWorkspaceError(error)) fail('cursor_cloud_workspace_missing', 'Cursor Cloud requires an existing Git workspace.');
+    fail('cursor_cloud_workspace_invalid', 'Cursor Cloud requires a valid Git workspace with a commit.');
+  }
+  if (!COMMIT_SHA.test(head) || !COMMIT_SHA.test(currentHead) || head.toLowerCase() !== ref.toLowerCase()
+    || currentHead.toLowerCase() !== ref.toLowerCase()) {
+    fail('cursor_cloud_workspace_changed', 'Cursor Cloud checkout HEAD no longer matches its pinned starting commit.');
+  }
+  return Object.freeze({
+    provider_repo_url: normalized.url,
+    provider_repo_identity: normalized.identity,
+    provider_repo_source: providerOverride !== undefined ? 'explicit' : 'derived',
+    provider_origin_kind: providerOverride !== undefined ? 'override' : normalized.kind,
+    local_origin_present: Boolean(rawOrigin),
+    starting_ref: ref,
+  });
 }
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -632,6 +816,7 @@ export async function runCursorCloudTask({
   signal,
   watch = watchDirectory,
   deadlineRefreshMs = DEADLINE_REFRESH_MS,
+  readGit = gitValue,
 } = {}) {
   const { task } = await readTask(root, taskId);
   const prompt = await readPrompt(root, taskId);
@@ -650,24 +835,42 @@ export async function runCursorCloudTask({
   let dispatchUncertain = false;
   try {
     if (signal?.aborted) fail('cancelled', 'Cursor Cloud task was cancelled before startup.');
+    // This preflight is intentionally credential-free and happens before SDK
+    // loading, API-key loading, agent creation, or prompt dispatch. A failed
+    // origin/workspace check therefore cannot trigger a remote run or replay.
+    const explicitProviderRepo = task.provider_repo_source === 'explicit'
+      || (task.provider_repo_source === undefined
+        && (task.provider_origin_kind === 'override' || task.provider_repo_url !== undefined));
+    const preflight = await deadlineCall(
+      deadlineAt,
+      () => preflightCursorCloudOrigin({
+        cwd: task.cwd,
+        ...(explicitProviderRepo && task.provider_repo_url ? { providerRepoUrl: task.provider_repo_url } : {}),
+        startingRef: task.starting_ref,
+        readGit,
+      }),
+      'repository preflight',
+    );
+    if (!explicitProviderRepo) {
+      const expectedIdentity = task.provider_repo_identity
+        ?? (task.provider_repo_url ? canonicalRepositoryIdentity(task.provider_repo_url) : null);
+      if (expectedIdentity && preflight.provider_repo_identity !== expectedIdentity) {
+        fail('cursor_cloud_origin_changed', 'Cursor Cloud provider origin changed after supervisor preflight.');
+      }
+    }
+    const repoUrl = preflight.provider_repo_url;
+    const startingRef = preflight.starting_ref;
     client = sdk ?? await deadlineCall(deadlineAt, () => loadCursorSdk(), 'SDK loading');
     key = apiKey ?? await deadlineCall(deadlineAt, () => loadCursorApiKey(), 'credential loading');
-    const [rawRepoUrl, head] = await Promise.all([
-      deadlineCall(deadlineAt, () => gitValue(task.cwd, ['config', '--local', '--get', 'remote.origin.url']), 'origin discovery'),
-      deadlineCall(deadlineAt, () => gitValue(task.cwd, ['rev-parse', 'HEAD']), 'immutable head discovery'),
-    ]);
-    const repoUrl = providerRepoUrl(rawRepoUrl);
-    const startingRef = task.starting_ref ?? head;
-    if (!startingRef) fail('cursor_cloud_start_ref_unavailable', 'Cursor Cloud requires a starting reference.');
-    if (!COMMIT_SHA.test(startingRef)) {
-      fail('cursor_cloud_start_ref_invalid', 'Cursor Cloud tasks require a full 40-character commit startingRef.');
-    }
     await assertDispatchable(root, taskId, signal, 'startup');
     const started = await updateTask(root, taskId, {
       status: 'starting',
       transport: 'cursor-sdk',
       provider_agent_id: agentId,
       provider_repo_url: repoUrl,
+      provider_repo_source: preflight.provider_repo_source,
+      provider_repo_identity: preflight.provider_repo_identity,
+      provider_origin_kind: preflight.provider_origin_kind,
       starting_ref: startingRef,
       started_at: new Date().toISOString(),
     });
