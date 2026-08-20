@@ -16,7 +16,7 @@ stable machine identifier is `codex-co-engineer`. In-repo release notes:
 
 ![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
 
-![Codex-Co-Engineer 3.1.0 delegates to Grok, Cursor, and DSH, then waits for a terminal receipt](docs/assets/codex-co-engineer-3.1.0.svg)
+![Codex-Co-Engineer 3.1.0: choose one provider, delegate one task, wait until terminal, then inspect the receipt](docs/assets/codex-co-engineer-3.1.0.svg)
 
 ## First 60 seconds
 
