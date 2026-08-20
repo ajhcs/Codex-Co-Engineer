@@ -5,6 +5,8 @@ import { lstat, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { compactTaskCard } from '../plugins/codex-co-engineer/mcp/v3/diagnostics.mjs';
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
 const RELEASE_VERSION = '3.2.0';
@@ -16,7 +18,7 @@ const json = async (relative) => JSON.parse(await text(relative));
 
 const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
-  'docs/configuration.md', 'docs/data-handling.md', 'docs/release.md',
+  'docs/configuration.md', 'docs/data-handling.md', 'docs/efficient-dogfood.md', 'docs/release.md',
   'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/releases/v3.1.0.md',
   'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
@@ -129,6 +131,18 @@ if (!compactTaskText.includes('WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX')
 const taskStoreText = await text(`${PLUGIN}/mcp/v3/task-store.mjs`);
 if (!taskStoreText.includes('waitAnyResult') || !taskStoreText.includes('waitAnyCandidate')) {
   fail('task-store.mjs must retain wait-any runtime coordination.');
+}
+const configurationText = await text('docs/configuration.md');
+if (!configurationText.includes('view: "compact"')
+  || !configurationText.includes('detail: "compact"')
+  || !configurationText.includes('task_ids')
+  || !configurationText.includes('response_mode: "structured"')
+  || !configurationText.includes('efficient-dogfood.md')) {
+  fail('Configuration guide must document the 3.2 compact, wait-any, structured transport, and dogfood workflow contracts.');
+}
+const maximumTaskId = 'a'.repeat(80);
+if (compactTaskCard({ id: maximumTaskId, status: 'running' }).id !== maximumTaskId) {
+  fail('Compact list cards must preserve the complete 80-character task ID coordination key.');
 }
 const mcpEntries = await readdir(absolute(`${PLUGIN}/mcp`));
 if (JSON.stringify(mcpEntries) !== JSON.stringify(['v3'])) fail('Legacy MCP modules remain packaged.');

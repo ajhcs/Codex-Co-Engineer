@@ -235,13 +235,14 @@ export function diagnosticEnvelope(task, runtime = null, extras = {}) {
 
 // Bounds to enforce claimed JSON-RPC byte targets under worst valid values.
 const COMPACT_FIELD_LIMITS = Object.freeze({
-  id: 32,
+  // Task IDs are coordination keys, not display labels. Preserve the full
+  // public TASK_ID contract so compact cards can be fed back to task/cancel.
+  id: 80,
   provider: 32,
   branch: 200,
   start_sha: 40,
   timestamp: 64,
   state: 32,
-  status: 32,
 });
 const COMPACT_MAX_BRANCH_LEN = 24;
 
@@ -277,11 +278,9 @@ export function compactTaskCard(task) {
   const card = {
     id: boundString(task.id, COMPACT_FIELD_LIMITS.id, null),
     state: boundString(publicState(task.status), COMPACT_FIELD_LIMITS.state, null),
-    status: boundString(task.status, COMPACT_FIELD_LIMITS.status, null),
     provider: boundString(task.provider ?? null, COMPACT_FIELD_LIMITS.provider, null),
     created_at: boundString(task.created_at ?? null, COMPACT_FIELD_LIMITS.timestamp, null),
     updated_at: boundString(task.updated_at ?? null, COMPACT_FIELD_LIMITS.timestamp, null),
-    finished_at: boundString(task.finished_at ?? null, COMPACT_FIELD_LIMITS.timestamp, null),
     deadline,
     branch: boundString(rawBranch, COMPACT_MAX_BRANCH_LEN, null),
     start_sha: boundString(rawSha, 40, null),

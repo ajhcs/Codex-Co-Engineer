@@ -74,7 +74,7 @@ async function withServer(callback, environment = process.env) {
 }
 
 function compactKeys() {
-  return ['id','state','status','provider','created_at','updated_at','finished_at','deadline','branch','start_sha'];
+  return ['id','state','provider','created_at','updated_at','deadline','branch','start_sha'];
 }
 
 function jsonRpcBytes(value) {
@@ -165,12 +165,62 @@ test('compactTaskCard bounds every field under worst valid values', async () => 
     deadline_source: 'margin',
   };
   const card = compactTaskCard(worst);
-  assert.ok(card.id.length <= 80);
+  assert.equal(card.id, worst.id);
   assert.ok(card.branch.length <= 200);
   assert.ok(card.start_sha.length <= 40);
   const json = JSON.stringify(card);
   // Single card must be tiny (<700 bytes per spec)
   assert.ok(Buffer.byteLength(json, 'utf8') < 900, `card oversized: ${Buffer.byteLength(json,'utf8')}`);
+});
+
+test('compact status and tasks preserve full valid task IDs as coordination keys', async () => {
+  await withServer(async ({ state, request }) => {
+    const taskId = `task-${'a'.repeat(75)}`;
+    assert.equal(taskId.length, 80);
+    await createTask({
+      root: state,
+      prompt: 'p',
+      record: {
+        id: taskId,
+        status: 'running',
+        provider: 'grok',
+        created_at: '2026-08-20T00:00:00.000Z',
+        updated_at: '2026-08-20T00:00:00.000Z',
+        branch: 'codex/long-id',
+        start_sha: 'a'.repeat(40),
+      },
+    });
+
+    const status = await request({
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'status', arguments: { detail: 'compact', task_limit: 1 } },
+    });
+    assert.equal(status.result.structuredContent.tasks[0].id, taskId);
+
+    const tasks = await request({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'compact', limit: 1 } },
+    });
+    assert.equal(tasks.result.structuredContent.tasks[0].id, taskId);
+
+    const followUp = await request({
+      jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'task', arguments: { task_id: tasks.result.structuredContent.tasks[0].id } },
+    });
+    assert.equal(followUp.result.structuredContent.task.id, taskId);
+
+    const waitAny = await request({
+      jsonrpc: '2.0', id: 4, method: 'tools/call',
+      params: { name: 'tasks', arguments: { task_ids: [tasks.result.structuredContent.tasks[0].id], wait_ms: 0 } },
+    });
+    assert.equal(waitAny.result.structuredContent.tasks[0].task_id, taskId);
+
+    const cancelled = await request({
+      jsonrpc: '2.0', id: 5, method: 'tools/call',
+      params: { name: 'cancel', arguments: { task_id: tasks.result.structuredContent.tasks[0].id } },
+    });
+    assert.equal(cancelled.result.structuredContent.task.id, taskId);
+  });
 });
 
 test('status compact with task_limit and include_tasks=false; task_limit ignored-vs-validated semantics deterministic', async () => {
@@ -344,7 +394,7 @@ test('byte targets under worst valid values: readiness <=8192, compact status 20
       const id = 'worst-'+String(i).padStart(2,'0')+'-'+ 'x'.repeat(70);
       await createTask({ root: state, prompt:'p', record:{
         id: id.slice(0,80),
-        status:'running',
+        status:'environment_blocked',
         provider:'cursor-cloud',
         created_at:'2026-08-20T00:00:00.000Z',
         updated_at:'2026-08-20T00:00:00.000Z',
