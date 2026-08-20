@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -174,16 +174,15 @@ test('rejects an origin URL containing embedded credentials', async () => {
   const sdk = { Agent: { create: async () => { created = true; } } };
   await assert.rejects(
     runCursorCloudTask({ root, taskId: 'cloud-url', sdk, apiKey: 'test-key' }),
-    (error) => error.code === 'cursor_cloud_repo_credentials',
+    (error) => error.code === 'cursor_cloud_origin_credentials',
   );
   assert.equal(created, false);
 });
 
-test('rejects repository URLs with query, fragment, or non-http origin data', async () => {
+test('rejects repository URLs with query or fragment data', async () => {
   for (const [suffix, expectedCode] of [
-    ['?token=secret', 'cursor_cloud_repo_credentials'],
-    ['#fragment', 'cursor_cloud_repo_credentials'],
-    ['ssh://git@example.test/repo.git', 'cursor_cloud_repo_credentials'],
+    ['?token=secret', 'cursor_cloud_origin_credentials'],
+    ['#fragment', 'cursor_cloud_origin_credentials'],
   ]) {
     const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-url-shape-'));
     const repo = path.join(root, 'repo');
@@ -197,6 +196,203 @@ test('rejects repository URLs with query, fragment, or non-http origin data', as
       runCursorCloudTask({ root, taskId: `cloud-url-${suffix.replace(/[^a-z]+/giu, '-')}`, sdk: { Agent: {} }, apiKey: 'test-key' }),
       (error) => error.code === expectedCode,
     );
+  }
+});
+
+test('canonicalizes HTTPS and SSH origins without sending transport credentials', async () => {
+  const origins = [
+    ['https://github.com/example/repo.git', 'https://github.com/example/repo.git'],
+    ['git@github.com:example/repo.git', 'https://github.com/example/repo.git'],
+    ['ssh://git@github.com/example/repo.git', 'https://github.com/example/repo.git'],
+  ];
+  for (const [index, [origin, expected]] of origins.entries()) {
+    const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-shapes-'));
+    const repo = path.join(root, 'repo');
+    await run('git', ['init', '-b', 'main', repo]);
+    await commitRepo(repo);
+    await run('git', ['-C', repo, 'remote', 'add', 'origin', origin]);
+    const taskId = `cloud-origin-${index}`;
+    await createCloudTask({ root, prompt: 'review', record: {
+      id: taskId,
+      status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+    } });
+    let createOptions;
+    const sdk = { Agent: { archive: async () => {}, create: async (options) => {
+      createOptions = options;
+      return { send: async () => ({ id: 'run-origin-shape', wait: async () => ({ id: 'run-origin-shape', status: 'finished', result: 'done' }) }), close() {} };
+    } } };
+    await runCursorCloudTask({ root, taskId, sdk, apiKey: 'test-key' });
+    assert.equal(createOptions.cloud.repos[0].url, expected);
+    assert.doesNotMatch(JSON.stringify(createOptions), /git@|ssh:|token|password/iu);
+  }
+});
+
+test('fails before provider dispatch when the origin is absent', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-missing-'));
+  const repo = path.join(root, 'repo');
+  await run('git', ['init', '-b', 'main', repo]);
+  await commitRepo(repo);
+  await createCloudTask({ root, prompt: 'must not dispatch', record: {
+    id: 'cloud-origin-missing', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  let createCalls = 0;
+  let sendCalls = 0;
+  const sdk = { Agent: {
+    create: async () => { createCalls += 1; return { send: async () => { sendCalls += 1; } }; },
+  } };
+  await assert.rejects(
+    runCursorCloudTask({ root, taskId: 'cloud-origin-missing', sdk, apiKey: 'test-key' }),
+    (error) => error.code === 'cursor_cloud_origin_missing',
+  );
+  const task = (await readTask(root, 'cloud-origin-missing')).task;
+  assert.equal(task.status, 'failed');
+  assert.equal(task.error.code, 'cursor_cloud_origin_missing');
+  assert.equal(createCalls, 0);
+  assert.equal(sendCalls, 0);
+});
+
+test('uses a credential-free provider repository override when local origin is absent', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-override-'));
+  const repo = path.join(root, 'repo');
+  await run('git', ['init', '-b', 'main', repo]);
+  await commitRepo(repo);
+  await createCloudTask({ root, prompt: 'use the provider override', record: {
+    id: 'cloud-origin-override', status: 'accepted', provider: 'cursor-cloud', role: 'implement', cwd: repo,
+    provider_repo_url: 'git@github.com:example/repo.git',
+  } });
+  let createOptions;
+  const sdk = { Agent: {
+    archive: async () => {},
+    create: async (options) => {
+      createOptions = options;
+      return { send: async () => ({ id: 'run-origin-override', wait: async () => ({ id: 'run-origin-override', status: 'finished', result: 'done' }) }), close() {} };
+    },
+  } };
+  const terminal = await runCursorCloudTask({ root, taskId: 'cloud-origin-override', sdk, apiKey: 'test-key' });
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.provider_repo_url, 'https://github.com/example/repo.git');
+  assert.equal(createOptions.cloud.repos[0].url, 'https://github.com/example/repo.git');
+  assert.doesNotMatch(JSON.stringify(createOptions), /git@|ssh:|secret|token/iu);
+});
+
+test('rejects a dirty Cloud checkout before creating a provider agent', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-workspace-dirty-'));
+  const repo = await createCloudRepo(root);
+  await run('git', ['-C', repo, 'config', 'user.name', 'Co-Engineer Test']);
+  await writeFile(path.join(repo, 'dirty.txt'), 'uncommitted\n');
+  await createCloudTask({ root, prompt: 'must not dispatch', record: {
+    id: 'cloud-workspace-dirty', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  let createCalls = 0;
+  await assert.rejects(
+    runCursorCloudTask({
+      root,
+      taskId: 'cloud-workspace-dirty',
+      sdk: { Agent: { create: async () => { createCalls += 1; } } },
+      apiKey: 'test-key',
+    }),
+    (error) => error.code === 'cursor_cloud_workspace_dirty',
+  );
+  assert.equal(createCalls, 0);
+  assert.equal((await readTask(root, 'cloud-workspace-dirty')).task.status, 'failed');
+});
+
+test('rejects credential-bearing provider overrides before creating a cloud run', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-override-invalid-'));
+  const repo = await createCloudRepo(root);
+  await createCloudTask({ root, prompt: 'must not dispatch', record: {
+    id: 'cloud-origin-override-invalid', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+    provider_repo_url: 'https://token:secret@example.test/repo.git',
+  } });
+  let createCalls = 0;
+  const sdk = { Agent: { create: async () => { createCalls += 1; } } };
+  await assert.rejects(
+    runCursorCloudTask({ root, taskId: 'cloud-origin-override-invalid', sdk, apiKey: 'test-key' }),
+    (error) => error.code === 'cursor_cloud_repo_credentials',
+  );
+  assert.equal(createCalls, 0);
+  assert.equal((await readTask(root, 'cloud-origin-override-invalid')).task.status, 'failed');
+});
+
+test('rejects a derived origin that changes after supervisor preflight', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-changed-'));
+  const repo = await createCloudRepo(root);
+  const { stdout: head } = await run('git', ['-C', repo, 'rev-parse', 'HEAD']);
+  await createCloudTask({ root, prompt: 'must not dispatch', record: {
+    id: 'cloud-origin-changed', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+    starting_ref: head.trim(), provider_repo_url: 'https://github.com/example/repo.git',
+    provider_repo_identity: 'github.com/example/repo', provider_repo_source: 'derived', provider_origin_kind: 'https',
+  } });
+  await run('git', ['-C', repo, 'remote', 'set-url', 'origin', 'https://github.com/other/repo.git']);
+  let createCalls = 0;
+  await assert.rejects(
+    runCursorCloudTask({
+      root,
+      taskId: 'cloud-origin-changed',
+      sdk: { Agent: { create: async () => { createCalls += 1; } } },
+      apiKey: 'test-key',
+    }),
+    (error) => error.code === 'cursor_cloud_origin_changed',
+  );
+  assert.equal(createCalls, 0);
+  assert.equal((await readTask(root, 'cloud-origin-changed')).task.status, 'failed');
+});
+
+test('allows an explicit provider repository override when the local origin changes', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-override-change-'));
+  const repo = await createCloudRepo(root);
+  const { stdout: head } = await run('git', ['-C', repo, 'rev-parse', 'HEAD']);
+  await createCloudTask({ root, prompt: 'use the explicit provider repository', record: {
+    id: 'cloud-origin-override-change', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+    starting_ref: head.trim(), provider_repo_url: 'https://github.com/provider/repo.git',
+    provider_repo_identity: 'github.com/provider/repo', provider_repo_source: 'explicit', provider_origin_kind: 'override',
+  } });
+  await run('git', ['-C', repo, 'remote', 'set-url', 'origin', 'https://github.com/other/repo.git']);
+  let createOptions;
+  const terminal = await runCursorCloudTask({
+    root,
+    taskId: 'cloud-origin-override-change',
+    sdk: { Agent: {
+      archive: async () => {},
+      create: async (options) => {
+        createOptions = options;
+        return { send: async () => ({ id: 'run-origin-override-change', wait: async () => ({ id: 'run-origin-override-change', status: 'finished', result: 'done' }) }), close() {} };
+      },
+    } },
+    apiKey: 'test-key',
+  });
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.provider_repo_source, 'explicit');
+  assert.equal(createOptions.cloud.repos[0].url, 'https://github.com/provider/repo.git');
+});
+
+test('canonicalizes equivalent SSH forms and drops default port 22', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-origin-ssh-port-'));
+  const expectedIdentity = 'github.com/example/repo';
+  for (const [index, origin] of [
+    'git@github.com:example/repo.git',
+    'ssh://git@github.com:22/example/repo.git',
+    'https://github.com/example/repo.git',
+  ].entries()) {
+    const repo = path.join(root, `repo-${index}`);
+    await run('git', ['init', '-b', 'main', repo]);
+    await commitRepo(repo);
+    await run('git', ['-C', repo, 'remote', 'add', 'origin', origin]);
+    await createCloudTask({ root, prompt: 'review', record: {
+      id: `cloud-origin-ssh-port-${index}`, status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+    } });
+    let createOptions;
+    const terminal = await runCursorCloudTask({
+      root,
+      taskId: `cloud-origin-ssh-port-${index}`,
+      sdk: { Agent: { archive: async () => {}, create: async (options) => {
+        createOptions = options;
+        return { send: async () => ({ id: `run-origin-ssh-port-${index}`, wait: async () => ({ id: `run-origin-ssh-port-${index}`, status: 'finished', result: 'done' }) }), close() {} };
+      } } },
+      apiKey: 'test-key',
+    });
+    assert.equal(terminal.provider_repo_identity, expectedIdentity);
+    assert.equal(createOptions.cloud.repos[0].url, 'https://github.com/example/repo.git');
   }
 });
 
@@ -903,6 +1099,29 @@ test('Cursor Cloud preserves bounded nested provider result values', async () =>
   assert.equal(terminal.result.token, '[redacted]');
   assert.equal(terminal.result_truncated, true);
   assert.equal(terminal.result_original_chars, source.progress.length + source.nested.final.length + source.token.length);
+});
+
+test('redacts token-only URL userinfo from provider output receipts', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-token-url-redaction-'));
+  const repo = await createCloudRepo(root);
+  const token = 'provider-token-only';
+  await createCloudTask({ root, prompt: 'review', record: {
+    id: 'cloud-token-url-redaction', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async () => ({ id: 'run-token-url-redaction', wait: async () => ({
+        id: 'run-token-url-redaction', status: 'finished',
+        git: { branches: [{ repoUrl: `https://${token}@example.test/repo.git` }] },
+      }) }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+  await runCursorCloudTask({ root, taskId: 'cloud-token-url-redaction', sdk, apiKey: 'test-key' });
+  const task = (await readTask(root, 'cloud-token-url-redaction')).task;
+  assert.equal(task.branches[0].repoUrl, 'https://[redacted]@example.test/repo.git');
+  assert.doesNotMatch(JSON.stringify(task), new RegExp(token, 'u'));
 });
 
 test('recursively redacts prompt and provider credentials from reconciled results', async () => {

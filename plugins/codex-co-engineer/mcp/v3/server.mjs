@@ -76,6 +76,8 @@ const TOOLS = [
         },
         create_pr: { type: 'boolean', default: false, description: 'Cursor Cloud only.' },
         starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable commit SHA for Cursor Cloud only; it does not replace the required repo property.' },
+        provider_repo_url: { type: 'string', minLength: 1, maxLength: 4096, description: 'Optional credential-free provider-visible repository URL override for Cursor Cloud. SSH origins are canonicalized to HTTPS without credentials.' },
+        provider_repo: { type: 'string', minLength: 1, maxLength: 4096, description: 'Backward-compatible alias for provider_repo_url; Cursor Cloud only.' },
         response_mode: RESPONSE_MODE_PROPERTY,
       },
       required: ['task_id', 'provider', 'repo', 'prompt'],
