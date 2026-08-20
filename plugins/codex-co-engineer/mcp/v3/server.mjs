@@ -13,6 +13,7 @@ import {
 import { COMPACT_VIEW } from './compact-task.mjs';
 import { deadlineProjection } from './deadline.mjs';
 import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
+import { buildToolResult, normalizeResponseMode } from './response.mjs';
 import { listTasks, listTasksPage, stateRoot } from './task-store.mjs';
 import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
 
@@ -20,23 +21,32 @@ const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
 const inflight = new Map();
 
+const RESPONSE_MODE_PROPERTY = {
+  type: 'string',
+  enum: ['structured'],
+  description: 'Optional presentation control stripped before business logic. Omit or leave unset for the 3.1.1-compatible full sanitized receipt in content[0].text (equals JSON.stringify(structuredContent)). Set to "structured" for a bounded text fallback while structuredContent remains the authoritative receipt.',
+};
+
+const RESPONSE_MODE_HINT = ' Optional response_mode="structured" opts into bounded content[0].text with authoritative structuredContent; omit for legacy full-text duplication.';
+
 const TOOLS = [
   {
     name: 'status',
-    description: 'Show the local Co-Engineer supervisor, provider capabilities, advertised MCP pending-call budget, and recent task state.',
+    description: `Show the local Co-Engineer supervisor, provider capabilities, advertised MCP pending-call budget, and recent task state.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
         detail: { type: 'string', enum: ['full', 'compact'], description: 'full returns full receipts (default). compact returns redacted compact cards.' },
         task_limit: { type: 'integer', minimum: 0, maximum: 20, description: 'Maximum tasks to return (0-20). Default 20. Ignored when include_tasks is false.' },
         include_tasks: { type: 'boolean', description: 'When false, omit recent tasks for readiness-only checks.' },
+        response_mode: RESPONSE_MODE_PROPERTY,
       },
       additionalProperties: false,
     },
   },
   {
     name: 'delegate',
-    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.',
+    description: `Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,6 +76,7 @@ const TOOLS = [
         },
         create_pr: { type: 'boolean', default: false, description: 'Cursor Cloud only.' },
         starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable commit SHA for Cursor Cloud only; it does not replace the required repo property.' },
+        response_mode: RESPONSE_MODE_PROPERTY,
       },
       required: ['task_id', 'provider', 'repo', 'prompt'],
       anyOf: [
@@ -77,7 +88,7 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: 'Inspect one task. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.',
+    description: `Inspect one task. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -137,6 +148,7 @@ const TOOLS = [
             response: { description: 'Selected option id, permission outcome, or bounded text.' },
           },
         },
+        response_mode: RESPONSE_MODE_PROPERTY,
       },
       required: ['task_id'],
       additionalProperties: false,
@@ -144,7 +156,7 @@ const TOOLS = [
   },
   {
     name: 'tasks',
-    description: 'List recent task receipts.',
+    description: `List recent task receipts.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -154,16 +166,20 @@ const TOOLS = [
         provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'], description: 'Filter by provider.' },
         state: { type: 'string', description: 'Filter by public state (e.g. running, succeeded, failed, transport_lost, needs_attention).' },
         status: { type: 'string', description: 'Alias for state filter (stored or public status).' },
+        response_mode: RESPONSE_MODE_PROPERTY,
       },
       additionalProperties: false,
     },
   },
   {
     name: 'cancel',
-    description: 'Cancel one owned local process group or Cursor Cloud run.',
+    description: `Cancel one owned local process group or Cursor Cloud run.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
-      properties: { task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' } },
+      properties: {
+        task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
+        response_mode: RESPONSE_MODE_PROPERTY,
+      },
       required: ['task_id'],
       additionalProperties: false,
     },
@@ -186,40 +202,39 @@ function publicTask(task) {
   });
 }
 
-function wantsCompact(args) {
-  return args?.detail === 'compact';
-}
-
-function result(value) {
-  const sanitized = sanitizePublicReceipt(value) ?? {};
-  const safe = JSON.parse(JSON.stringify(sanitized, (_key, nested) => nested === undefined ? null : nested));
+function takePresentationArgs(args = {}) {
+  const { response_mode: responseModeRaw, ...businessArgs } = args;
   return {
-    content: [{ type: 'text', text: JSON.stringify(safe) }],
-    structuredContent: safe,
+    responseMode: normalizeResponseMode(responseModeRaw),
+    args: businessArgs,
   };
 }
 
-function errorResult(error) {
-  const code = typeof error?.code === 'string' ? error.code : 'co_engineer_error';
-  const message = error instanceof Error ? error.message : 'Co-Engineer request failed.';
-  return { isError: true, ...result({ error: { code, message } }) };
+function result(value, { responseMode } = {}) {
+  return buildToolResult(value, { responseMode });
 }
 
-async function callTool(name, args = {}, { signal } = {}) {
+function errorResult(error, { responseMode } = {}) {
+  const code = typeof error?.code === 'string' ? error.code : 'co_engineer_error';
+  const message = error instanceof Error ? error.message : 'Co-Engineer request failed.';
+  return { isError: true, ...result({ error: { code, message } }, { responseMode }) };
+}
+
+async function callTool(name, args = {}, { signal, responseMode } = {}) {
   const root = stateRoot();
   if (name === 'status') {
     const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined);
     if (!hasCompact) {
       const value = await supervisorStatus(root);
-      return result({ ...value, tasks: value.tasks.map(publicTask) });
+      return result({ ...value, tasks: value.tasks.map(publicTask) }, { responseMode });
     }
     const value = await supervisorStatus(root, {}, args);
     // Compact/readiness paths must avoid constructing/projecting omitted full public receipts.
     // Only project the window; never build full receipts for compact.
     if (value.detail === 'compact') {
-      return result(value);
+      return result(value, { responseMode });
     }
-    return result({ ...value, tasks: value.tasks.map(publicTask) });
+    return result({ ...value, tasks: value.tasks.map(publicTask) }, { responseMode });
   }
   if (name === 'delegate') {
     const value = await submitTask(args, { root });
@@ -228,11 +243,11 @@ async function callTool(name, args = {}, { signal } = {}) {
       runtime: value.runtime,
       state: publicState(value.task.status),
       deadline: deadlineProjection(value.task),
-    });
+    }, { responseMode });
   }
   if (name === 'task') {
     const value = await inspectTask(root, args, { signal });
-    if (value?.view === COMPACT_VIEW) return result(value);
+    if (value?.view === COMPACT_VIEW) return result(value, { responseMode });
     return result({
       task: publicTask(value.task),
       runtime: value.runtime,
@@ -243,26 +258,25 @@ async function callTool(name, args = {}, { signal } = {}) {
       diagnostics: value.diagnostics ?? null,
       capabilities: value.capabilities,
       view: value.view,
-    });
+    }, { responseMode });
   }
   if (name === 'tasks') {
     const hasCompactArgs = args && (args.detail !== undefined || args.limit !== undefined || args.cursor !== undefined || args.provider !== undefined || args.state !== undefined || args.status !== undefined);
     if (!hasCompactArgs) {
-      return result({ tasks: (await listTasks(root)).map(publicTask) });
+      return result({ tasks: (await listTasks(root)).map(publicTask) }, { responseMode });
     }
     const page = await listTasksPage(root, args);
     // Filter and page before projecting full public receipts; only project sliced results.
     // Provide pagination metadata total/limit as required by contract; preserve detail echo.
     if (page.detail === 'compact') {
       const compactTasks = page.tasks.map((t) => compactTaskCard(t));
-      return result({ tasks: compactTasks, next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit });
+      return result({ tasks: compactTasks, next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
     }
-    return result({ tasks: page.tasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit });
+    return result({ tasks: page.tasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
   }
-  if (name === 'cancel') return result({ task: publicTask(await cancelTask(root, args.task_id)) });
+  if (name === 'cancel') return result({ task: publicTask(await cancelTask(root, args.task_id)) }, { responseMode });
   throw Object.assign(new Error(`Unknown tool: ${name}`), { code: 'unknown_tool' });
 }
-
 function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
@@ -296,11 +310,15 @@ async function handle(message) {
   if (message.method === 'tools/call') {
     const controller = new AbortController();
     if (message.id !== undefined) inflight.set(message.id, controller);
+    const { responseMode, args } = takePresentationArgs(message.params?.arguments ?? {});
     let response;
     try {
-      response = await callTool(message.params?.name, message.params?.arguments ?? {}, { signal: controller.signal });
+      response = await callTool(message.params?.name, args, {
+        signal: controller.signal,
+        responseMode,
+      });
     } catch (error) {
-      response = errorResult(error);
+      response = errorResult(error, { responseMode });
     } finally {
       inflight.delete(message.id);
     }

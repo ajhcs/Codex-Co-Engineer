@@ -7,8 +7,10 @@ import {
   mcpPendingCallReport,
 } from '../../mcp/v3/contract.mjs';
 import { deadlineProjection } from '../../mcp/v3/deadline.mjs';
+import { RESPONSE_MODE_STRUCTURED, buildToolResult } from '../../mcp/v3/response.mjs';
 
 export const BASELINE_VERSION = '3.1.1';
+export const STRUCTURED_TRANSPORT_VERSION = '3.2.0-pr06';
 export const TASK_COUNTS = Object.freeze([1, 20, 54]);
 export const STATUS_TASK_LIMIT = 20;
 export const WAIT_DURATION_MS = 25;
@@ -198,22 +200,14 @@ export function publicPayloads(taskCount) {
 }
 
 /**
- * This mirrors server.mjs's result() envelope in a test-only helper. Keeping
- * the mirror here avoids changing the runtime just to expose a benchmark hook.
+ * Use the production MCP envelope so efficiency measurements track the live
+ * response builder rather than a divergent test mirror.
  */
-export function buildJsonRpcResponse(value, id = 1) {
-  const sanitized = sanitizePublicReceipt(value) ?? {};
-  const safe = JSON.parse(JSON.stringify(sanitized, (_key, nested) => (
-    nested === undefined ? null : nested
-  )));
-  const text = JSON.stringify(safe);
+export function buildJsonRpcResponse(value, id = 1, { responseMode } = {}) {
   return {
     jsonrpc: '2.0',
     id,
-    result: {
-      content: [{ type: 'text', text }],
-      structuredContent: safe,
-    },
+    result: buildToolResult(value, { responseMode }),
   };
 }
 
@@ -221,9 +215,9 @@ function byteLength(value) {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-export function measureResponse(value, id = 1) {
+export function measureResponse(value, id = 1, { responseMode } = {}) {
   const started = process.hrtime.bigint();
-  const response = buildJsonRpcResponse(value, id);
+  const response = buildJsonRpcResponse(value, id, { responseMode });
   const constructionNs = process.hrtime.bigint() - started;
   const contentText = response.result.content[0].text;
   return {
@@ -232,24 +226,26 @@ export function measureResponse(value, id = 1) {
       text_content_bytes: Buffer.byteLength(contentText, 'utf8'),
       structured_content_bytes: byteLength(response.result.structuredContent),
       jsonrpc_bytes: byteLength(response),
-      // Timing is observed for diagnostics, not used as a byte-baseline gate.
+      // Observational only: recorded for diagnostics, not enforced as a gate.
       response_construction_ms: Number(constructionNs) / 1_000_000,
     },
   };
 }
 
-export function measureFixture(taskCount) {
+export function measureFixture(taskCount, { responseMode = RESPONSE_MODE_STRUCTURED } = {}) {
   const payloads = publicPayloads(taskCount);
   const responses = {};
   let responseConstructionMs = 0;
   for (const [name, payload] of Object.entries(payloads)) {
-    const measured = measureResponse(payload);
+    const measured = measureResponse(payload, 1, { responseMode });
     responses[name] = measured.metrics;
     responseConstructionMs += measured.metrics.response_construction_ms;
   }
   return {
     baseline_version: BASELINE_VERSION,
+    structured_transport_version: STRUCTURED_TRANSPORT_VERSION,
     task_count: taskCount,
+    response_mode: responseMode ?? 'legacy',
     responses,
     response_construction_ms: responseConstructionMs,
     // The workload constructs the five public tool responses once, then makes
