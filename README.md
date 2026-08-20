@@ -114,6 +114,25 @@ does not push unsolicited stdio callbacks across assistant turns.
 
 The bundled skill is `control-codex-co-engineer-agents`.
 
+## Efficient coordination for the upcoming 3.2 release
+
+For parallel work, delegate each independent change once, then coordinate the
+result set with one `tasks` wait-any call instead of polling every task. Use
+`status` and `task` compact views for routine decisions; open diagnostics pages
+only when a task needs attention or fails. Wait-any returns bounded task
+snapshots and live event previews; its `progress.detail_hint` points to the
+single-task call when full event detail is needed. Clients that consume
+`structuredContent` can opt into `response_mode: "structured"` to avoid a
+second full receipt in the text fallback. Text-only clients should omit it;
+omission preserves the exact legacy text response. These APIs are part of the
+upcoming, unreleased 3.2 release until the package version is bumped.
+
+The compact single-task projection is capped at 8,192 UTF-8 bytes by the MCP
+server. That is a server payload guarantee, not a measured or claimed hard
+limit in the Codex desktop renderer. See the
+[efficient dogfood workflow](docs/efficient-dogfood.md) for request examples,
+pagination rules, terminal evidence metadata, and Cursor Cloud preflight.
+
 ## Provider matrix
 
 | Provider | Identifier | Transport | Workspace | Local process boundary |
