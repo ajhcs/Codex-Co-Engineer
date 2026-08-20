@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,11 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 function processAlive(pid) {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const stateOffset = stat.lastIndexOf(')') + 2;
+      if (stateOffset > 1 && stat[stateOffset] === 'Z') return false;
+    }
     return true;
   } catch {
     return false;

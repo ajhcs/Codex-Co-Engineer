@@ -281,7 +281,40 @@ async function coEngineerRememberAgentDescendants(child) {
 function coEngineerAgentTreeAlive(child) {
   if (!child?.pid) return false;
   if (isChildProcessRunning(child)) return true;
-  return hasLivePid(child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] ?? new Set());
+  return coEngineerHasLivePid(child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] ?? new Set());
+}
+
+/*
+ * On Linux, a killed detached child can remain as a zombie until its new
+ * parent reaps it. `kill(pid, 0)` still succeeds for that zombie, but it has
+ * no running work or handles left. Treat the process as terminated for
+ * containment waits so a reaper delay cannot consume the close deadline.
+ */
+function coEngineerPidIsZombie(pid) {
+  if (process.platform !== 'linux') return false;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const stateOffset = stat.lastIndexOf(')') + 2;
+    return stateOffset > 1 && stat[stateOffset] === 'Z';
+  } catch {
+    return false;
+  }
+}
+
+function coEngineerHasLivePid(pids) {
+  for (const pid of pids) {
+    if (coEngineerPidIsZombie(pid)) {
+      pids.delete(pid);
+      continue;
+    }
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      pids.delete(pid);
+    }
+  }
+  return false;
 }
 
 async function coEngineerSignalAgentTree(child, signal) {
