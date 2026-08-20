@@ -172,7 +172,12 @@ async function handleRequest(message) {
       pendingPrompts.set(id, { sessionId: params.sessionId, timer: null, hostileTimeout: true });
       return;
     }
-    sessionUpdate(params.sessionId, text.includes('large') ? 'x'.repeat(5000) : 'fake-chunk-1');
+    sessionUpdate(
+      params.sessionId,
+      text.includes('terminal-verdict')
+        ? `${'x'.repeat(5000)}\nVERDICT: ACP PASS`
+        : text.includes('large') ? 'x'.repeat(5000) : 'fake-chunk-1',
+    );
     if (text.includes('large')) sessionUpdate(params.sessionId, 'fake-chunk-2');
     if (text.includes('output-overflow')) {
       for (let index = 0; index < 100; index += 1) {

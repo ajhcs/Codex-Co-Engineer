@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
+import { boundedProviderResult, boundedProviderValue, createProviderResultAccumulator, providerCharCount } from './provider-result.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
@@ -471,23 +472,58 @@ function cliCommand(task, promptFile, prompt) {
   fail('unsupported_provider', `Unsupported CLI fallback provider: ${task.provider}`);
 }
 
-function extractedCliResult(stdout, prompt) {
-  const safe = sanitizeText(stdout, prompt).trim();
-  if (!safe) return null;
-  const lines = safe.split(/\r?\n/u).filter(Boolean);
-  let collected = '';
-  for (const line of lines) {
+function cliJsonCandidate(value) {
+  const candidates = typeof value === 'string'
+    ? [value]
+    : [value?.result, value?.text, value?.message?.content, value?.content?.text, value?.delta?.text];
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0)
+    ?? candidates.find((candidate) => typeof candidate === 'string');
+}
+
+function countCliChunkChars(text, previousHighSurrogate) {
+  let count = providerCharCount(text);
+  if (previousHighSurrogate && text.charCodeAt(0) >= 0xdc00 && text.charCodeAt(0) <= 0xdfff) count -= 1;
+  return count;
+}
+
+export function extractedCliResult(stdout, prompt, { originalChars, sourceTruncated = false } = {}) {
+  const raw = String(stdout ?? '');
+  if (!raw.trim()) return { value: null };
+  const lines = raw.split(/\r?\n/u);
+  while (lines.at(-1) === '') lines.pop();
+  const records = [];
+  for (const [index, line] of lines.entries()) {
     try {
-      const value = JSON.parse(line);
-      const candidates = [value.result, value.text, value.message?.content, value.content?.text, value.delta?.text];
-      for (const candidate of candidates) {
-        if (typeof candidate === 'string') collected = `${collected}${candidate}`.slice(-MAX_EVENT_TEXT);
-      }
+      const candidate = cliJsonCandidate(JSON.parse(line));
+      if (typeof candidate === 'string') records.push({ kind: 'structured', text: candidate });
     } catch {
-      collected = line.slice(-MAX_EVENT_TEXT);
+      // A transport buffer can begin in the middle of a JSONL record. Do not
+      // let that partial prefix displace a later final plaintext verdict.
+      if (!(sourceTruncated && index === 0 && lines.length > 1)) {
+        records.push({ kind: 'plain', text: line });
+      }
     }
   }
-  return (collected || safe).slice(-MAX_EVENT_TEXT);
+  if (records.length > 0) {
+    const structured = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
+    let previousKind = null;
+    records.forEach((record, index) => {
+      if (record.kind === 'plain') {
+        if (previousKind === 'structured') structured.append('\n');
+        structured.append(record.text);
+        if (index < records.length - 1) structured.append('\n');
+      } else {
+        structured.append(record.text);
+      }
+      previousKind = record.kind;
+    });
+    return structured.finish({ sourceTruncated });
+  }
+  return boundedProviderResult(raw.trim(), {
+    sanitize: (text) => sanitizeText(text, prompt),
+    originalChars: originalChars ?? providerCharCount(raw),
+    sourceTruncated,
+  });
 }
 
 export async function runCliFallback({ root, task, prompt, signal } = {}) {
@@ -495,6 +531,9 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
   let child;
   let stdout = '';
   let stderr = '';
+  let stdoutOriginalChars = 0;
+  let stdoutTruncated = false;
+  let stdoutPreviousHighSurrogate = false;
   let timer;
   let stopDeadline;
   let termination;
@@ -520,7 +559,18 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     const closed = new Promise((resolve) => {
       child.once('close', (code, childSignal) => resolve({ code, signal: childSignal }));
     });
-    child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-MAX_CLI_OUTPUT); });
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdoutOriginalChars += countCliChunkChars(text, stdoutPreviousHighSurrogate);
+      stdoutPreviousHighSurrogate = text.length > 0
+        && text.charCodeAt(text.length - 1) >= 0xd800
+        && text.charCodeAt(text.length - 1) <= 0xdbff;
+      stdout = `${stdout}${text}`;
+      if (stdout.length > MAX_CLI_OUTPUT) {
+        stdout = stdout.slice(-MAX_CLI_OUTPUT);
+        stdoutTruncated = true;
+      }
+    });
     child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-MAX_CLI_OUTPUT / 4); });
     cancel = () => {
       termination ??= requestChildTreeTermination(child);
@@ -547,7 +597,11 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     signal?.removeEventListener('abort', cancel);
     if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled.');
     if (timedOut) fail('timeout', 'CLI fallback exceeded its task deadline.');
-    const result = extractedCliResult(stdout, prompt);
+    const bounded = extractedCliResult(stdout, prompt, {
+      originalChars: stdoutOriginalChars,
+      sourceTruncated: stdoutTruncated,
+    });
+    const result = bounded.value;
     if (exit.code !== 0) {
       const detail = sanitizeText(stderr || stdout || `CLI exited ${exit.code ?? exit.signal}.`, prompt).slice(-MAX_EVENT_TEXT);
       fail(authenticationFailure(detail) ? 'needs_login' : 'cli_failed', detail);
@@ -558,6 +612,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     return updateTask(root, task.id, {
       status: 'completed',
       result,
+      ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
       last_event: compact,
       provider_process_group: null,
       provider_process_start_ticks: null,
@@ -693,11 +748,17 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     const flow = parseFlowResult(stdout);
     if (flow.status !== 'completed') fail('acpx_failed', `ACPX flow ended in ${flow.status}.`);
     const rawOutput = flow.outputs?.delegate;
+    const outputCandidates = [rawOutput?.text, rawOutput?.result, rawOutput?.output];
     const outputValue = typeof rawOutput === 'string'
       ? rawOutput
-      : rawOutput?.text ?? rawOutput?.result ?? rawOutput?.output;
-    const output = typeof outputValue === 'string' ? sanitizeText(outputValue, prompt).slice(0, MAX_EVENT_TEXT) : null;
-    const compact = { type: 'text_delta', text: output ?? 'DSH ACP task completed.' };
+      : outputCandidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0)
+        ?? outputCandidates.find((candidate) => typeof candidate === 'string')
+        ?? rawOutput;
+    const bounded = typeof outputValue === 'string'
+      ? boundedProviderResult(outputValue, { sanitize: (text) => sanitizeText(text, prompt) })
+      : boundedProviderValue(outputValue, { sanitize: (text) => sanitizeText(text, prompt) });
+    const output = bounded.value;
+    const compact = { type: 'text_delta', text: typeof output === 'string' ? output : 'DSH ACP task completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed', stop_reason: 'end_turn' });
     return updateTask(root, task.id, {
@@ -705,6 +766,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       stop_reason: 'end_turn',
       last_event: compact,
       result: output,
+      ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
       provider_process_group: null,
       provider_process_start_ticks: null,
       acp_session_id: Object.values(flow.sessionBindings ?? {})[0]?.acpSessionId ?? null,
@@ -818,15 +880,15 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     const cancel = () => turn.cancel({ reason: 'signal' }).catch(() => {});
     controller.signal.addEventListener('abort', cancel, { once: true });
     let lastEvent = null;
-    let output = '';
+    const output = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
     try {
       for await (const event of turn.events) {
+        if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
+          output.append(event.text);
+        }
         const compact = boundedEvent(event, prompt);
         await appendTaskEvent(root, taskId, { type: 'provider', event: compact });
         lastEvent = compact;
-        if (compact.type === 'text_delta' && compact.stream !== 'thought' && typeof compact.text === 'string') {
-          output = `${output}${compact.text}`.slice(-MAX_EVENT_TEXT);
-        }
       }
     } finally {
       controller.signal.removeEventListener('abort', cancel);
@@ -834,11 +896,13 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
 
     const result = await turn.result;
     const status = result.status === 'completed' ? 'completed' : result.status;
+    const bounded = output.finish();
     const terminal = await updateTask(root, taskId, {
       status,
       stop_reason: result.stopReason ?? null,
       last_event: lastEvent,
-      result: output || null,
+      result: bounded.value,
+      ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
       ...(result.status === 'failed' ? { error: publicError(result.error, prompt), fallback_safe: false } : {}),
       finished_at: new Date().toISOString(),
     });
