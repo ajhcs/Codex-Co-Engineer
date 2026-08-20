@@ -17,6 +17,7 @@ import { parseDeadlineAt, remainingDeadlineMs } from './deadline.mjs';
 export const TASK_SCHEMA = 'codex-co-engineer.task.v1';
 export const LAUNCH_RESERVATION_GRACE_MS = 15_000;
 export const MAX_TASK_WAIT_MS = MCP_PENDING_CALL_BUDGET_MS;
+export const MAX_WAIT_ANY_TASKS = 8;
 export const TEXT_DELTA_COALESCE_MS = 400;
 export const TASK_WAIT_WATCH_FALLBACK_MS = 1_000;
 export const MAX_EVENT_READ_BYTES = 64 * 1024;
@@ -336,6 +337,38 @@ export function parseTaskWaitMs(value) {
     throw Object.assign(new Error(`wait_ms must be an integer from 0 to ${MAX_TASK_WAIT_MS}.`), { code: 'invalid_wait_ms' });
   }
   return value;
+}
+
+export function parseTaskIds(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_WAIT_ANY_TASKS) {
+    throw Object.assign(new Error(`task_ids must contain 1-${MAX_WAIT_ANY_TASKS} task IDs.`), { code: 'invalid_task_ids' });
+  }
+  const taskIds = value.map((taskId) => requireTaskId(taskId));
+  if (new Set(taskIds).size !== taskIds.length) {
+    throw Object.assign(new Error('task_ids must not contain duplicates.'), { code: 'duplicate_task_id' });
+  }
+  return taskIds;
+}
+
+export function parseTaskCursors(value, taskIds = []) {
+  if (value === undefined || value === null) return new Map();
+  if (!plainObject(value)) {
+    throw Object.assign(new Error('cursors must be an object keyed by task ID.'), { code: 'invalid_task_cursors' });
+  }
+  if (Object.keys(value).length > MAX_WAIT_ANY_TASKS) {
+    throw Object.assign(new Error(`cursors may contain at most ${MAX_WAIT_ANY_TASKS} task IDs.`), { code: 'invalid_task_cursors' });
+  }
+  const allowed = new Set(taskIds);
+  const cursors = new Map();
+  for (const [taskId, cursor] of Object.entries(value)) {
+    requireTaskId(taskId);
+    if (allowed.size > 0 && !allowed.has(taskId)) {
+      throw Object.assign(new Error('cursors may only reference task_ids in this wait.'), { code: 'invalid_task_cursor_target' });
+    }
+    parseEventCursor(cursor);
+    cursors.set(taskId, cursor);
+  }
+  return cursors;
 }
 
 export function parseWaitUntil(value) {
@@ -858,6 +891,352 @@ export async function waitForTaskProgress(root, taskId, {
   } finally {
     signal?.removeEventListener('abort', onAbort);
     closeTaskWatcher(watcher);
+  }
+}
+
+const WAIT_ANY_ERROR_MESSAGES = Object.freeze({
+  task_not_found: 'The requested task was not found.',
+  task_unavailable: 'The requested task could not be inspected.',
+  invalid_event_cursor: 'The event cursor is invalid for the requested task.',
+});
+
+function publicWaitTargetError(error) {
+  if (error?.code === 'invalid_event_cursor') {
+    return { code: 'invalid_event_cursor', message: WAIT_ANY_ERROR_MESSAGES.invalid_event_cursor };
+  }
+  if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR' || error?.code === 'EACCES') {
+    return { code: 'task_not_found', message: WAIT_ANY_ERROR_MESSAGES.task_not_found };
+  }
+  return { code: 'task_unavailable', message: WAIT_ANY_ERROR_MESSAGES.task_unavailable };
+}
+
+async function readWaitAnyTarget(root, descriptor) {
+  try {
+    const [{ task, paths }, progress] = await Promise.all([
+      readTask(root, descriptor.task_id),
+      readTaskEventProgress(root, descriptor.task_id, { cursor: descriptor.cursor }),
+    ]);
+    return {
+      ...descriptor,
+      task,
+      paths,
+      progress,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...descriptor,
+      task: null,
+      paths: null,
+      progress: null,
+      error: publicWaitTargetError(error),
+    };
+  }
+}
+
+async function refreshWaitAnyTargets(root, targets) {
+  return Promise.all(targets.map(async (target) => {
+    if (target.error?.code === 'task_not_found' && !target.task) return target;
+    const refreshed = await readWaitAnyTarget(root, target);
+    // A short-lived record/read failure should not turn a live wait into a
+    // false terminal result. Retry once per refresh; the shared timer/watch
+    // remains the only source of subsequent retries.
+    if (refreshed.error?.code === 'task_unavailable') {
+      return readWaitAnyTarget(root, target);
+    }
+    return refreshed;
+  }));
+}
+
+function waitAnyProgressSnapshot(target, waitedMs, waitReason, waitUntil, targetReason = null) {
+  if (!target.progress) return null;
+  const reason = targetReason ?? (waitReason === 'timeout' || waitReason === 'transport_budget'
+    ? waitReason
+    : 'current');
+  return {
+    event_cursor: target.progress.event_cursor,
+    last_event: target.progress.last_event ?? target.task?.last_event,
+    new_event_count: target.progress.new_event_count,
+    more_events: Boolean(target.progress.more_events),
+    waited_ms: waitedMs,
+    wait_reason: reason,
+    wait_until: waitUntil,
+  };
+}
+
+function waitAnyTargetReason(target, initial, {
+  now,
+  waitUntil,
+  wakeOnAttention,
+  coalesceFrom,
+  coalesceMs,
+} = {}) {
+  if (target.error) return target.error.code === 'task_not_found' ? 'task_not_found' : null;
+  if (!target.task || !target.progress) return 'target_error';
+  if (waitUntil === 'progress' && target.cursor === null
+    && initial?.progress?.event_cursor !== target.progress.event_cursor) {
+    const coalescingFrom = coalesceFrom?.get?.(target.task_id) ?? null;
+    if (target.progress.text_delta_count === 0
+      || (coalescingFrom != null && now() >= coalescingFrom + coalesceMs)) {
+      return 'progress';
+    }
+  }
+  return waitWakeReason(target.task, target.progress, initial.task, {
+    coalesceFrom: coalesceFrom?.get?.(target.task_id) ?? null,
+    coalesceMs,
+    clock: now,
+    waitUntil,
+    wakeOnAttention,
+    deadlineAt: parseDeadlineAt(target.task.deadline_at),
+    silenceTimeoutMs: Number.isInteger(target.task.silence_timeout_ms)
+      ? target.task.silence_timeout_ms
+      : null,
+    lastActivityAt: lastActivityFrom(target.task, target.progress, initial.started),
+  });
+}
+
+function earliestWaitAnyTimer(targets, {
+  now,
+  waitUntil,
+  deadline,
+  coalesceFrom,
+} = {}) {
+  let remaining = Math.max(0, deadline - now());
+  for (const target of targets) {
+    if (target.error || !target.task || !target.progress) continue;
+    const taskDeadline = parseDeadlineAt(target.task.deadline_at);
+    if (taskDeadline != null) remaining = Math.min(remaining, Math.max(0, taskDeadline - now()));
+    if (waitUntil === 'terminal' && Number.isInteger(target.task.silence_timeout_ms)
+      && target.task.silence_timeout_ms >= PROVIDER_SILENCE_WATCHDOG_MIN_MS) {
+      const activity = lastActivityFrom(target.task, target.progress, now());
+      remaining = Math.min(remaining, Math.max(0, activity + target.task.silence_timeout_ms - now()));
+    }
+    if (waitUntil === 'progress' && coalesceFrom.get(target.task_id) != null) {
+      remaining = Math.min(remaining, Math.max(0, coalesceFrom.get(target.task_id) + TEXT_DELTA_COALESCE_MS - now()));
+    }
+  }
+  return remaining;
+}
+
+function waitAnyResult(targets, {
+  started,
+  now,
+  waitReason,
+  waitUntil,
+  triggeredTaskId = null,
+  targetReasons = new Map(),
+} = {}) {
+  const waitedMs = Math.max(0, now() - started);
+  return {
+    tasks: targets.map((target) => ({
+      task_id: target.task_id,
+      task: target.task,
+      progress: waitAnyProgressSnapshot(
+        target,
+        waitedMs,
+        waitReason,
+        waitUntil,
+        targetReasons.get(target.task_id) ?? null,
+      ),
+      error: target.error,
+    })),
+    wait_reason: waitReason,
+    wait_until: waitUntil,
+    waited_ms: waitedMs,
+    triggered_task_id: triggeredTaskId,
+  };
+}
+
+function waitAnyCandidate(targets, initialById, options) {
+  const targetReasons = new Map();
+  for (const target of targets) {
+    const initial = initialById.get(target.task_id);
+    const reason = waitAnyTargetReason(target, initial, options);
+    if (reason) targetReasons.set(target.task_id, reason);
+  }
+  const candidate = targets.find((target) => targetReasons.has(target.task_id));
+  if (!candidate) return null;
+  return {
+    target: candidate,
+    reason: targetReasons.get(candidate.task_id),
+    targetReasons,
+  };
+}
+
+/**
+ * Wait on several task receipts with one shared deadline and concurrent
+ * filesystem watchers. This is deliberately separate from the single-task
+ * waiter so the legacy `tasks({})` list remains byte-for-byte unchanged.
+ */
+export async function waitForAnyTaskProgress(root, {
+  task_ids,
+  cursors,
+  wait_ms,
+  wait_until,
+  wake_on_needs_attention = true,
+  signal,
+  now = Date.now,
+  watch = defaultWatch,
+  delay = waitDelay,
+  fallback_ms,
+} = {}) {
+  const taskIds = parseTaskIds(task_ids);
+  const cursorMap = parseTaskCursors(cursors, taskIds);
+  const waitUntil = parseWaitUntil(wait_until);
+  const followLiveDeadline = waitUntil === 'terminal' && wait_ms === undefined;
+  const waitMs = followLiveDeadline ? MAX_TASK_WAIT_MS : parseTaskWaitMs(wait_ms);
+  const fallbackMs = Number.isInteger(fallback_ms) && fallback_ms >= 1 && fallback_ms <= MAX_TASK_WAIT_MS
+    ? fallback_ms
+    : (waitUntil === 'terminal' ? TASK_TERMINAL_WATCH_FALLBACK_MS : TASK_WAIT_WATCH_FALLBACK_MS);
+  const started = now();
+  const descriptors = taskIds.map((task_id) => ({ task_id, cursor: cursorMap.get(task_id) ?? null }));
+  let targets = await Promise.all(descriptors.map((descriptor) => readWaitAnyTarget(root, descriptor)));
+  const initialById = new Map(targets.map((target) => [target.task_id, {
+    task: target.task,
+    progress: target.progress,
+    started,
+  }]));
+  const coalesceFrom = new Map();
+  for (const target of targets) {
+    if (target.progress?.text_delta_count > 0 && target.cursor !== null) coalesceFrom.set(target.task_id, started);
+  }
+  const options = {
+    now,
+    waitUntil,
+    wakeOnAttention: wake_on_needs_attention !== false,
+    coalesceFrom,
+    coalesceMs: TEXT_DELTA_COALESCE_MS,
+  };
+  const finish = (waitReason, triggeredTaskId = null, targetReasons = new Map()) => waitAnyResult(targets, {
+    started,
+    now,
+    waitReason,
+    waitUntil,
+    triggeredTaskId,
+    targetReasons,
+  });
+
+  if (waitMs === 0) {
+    const immediate = waitAnyCandidate(targets, initialById, options);
+    if (immediate) return finish(immediate.reason, immediate.target.task_id, immediate.targetReasons);
+    return finish('current');
+  }
+
+  const immediate = waitAnyCandidate(targets, initialById, options);
+  if (immediate) return finish(immediate.reason, immediate.target.task_id, immediate.targetReasons);
+  if (signal?.aborted) return finish('disconnected');
+
+  const deadline = started + waitMs;
+  const gate = createNotifyGate();
+  const watchers = new Map();
+  const rewatchAttempts = new Set();
+  let watchFailed = false;
+  const closeAllWatchers = () => {
+    for (const watcher of watchers.values()) closeTaskWatcher(watcher);
+    watchers.clear();
+  };
+  const armWatcher = (target) => {
+    closeTaskWatcher(watchers.get(target.task_id));
+    watchers.delete(target.task_id);
+    if (target.error || !target.paths) return;
+    try {
+      const watcher = attachTaskWatcher(target.paths.directory, watch, (reason) => gate.notify({
+        reason,
+        task_id: target.task_id,
+      }));
+      if (!watcher || typeof watcher.close !== 'function') {
+        watchFailed = true;
+        return;
+      }
+      watchers.set(target.task_id, watcher);
+    } catch {
+      watchFailed = true;
+    }
+  };
+  const onAbort = () => gate.notify({ reason: 'abort' });
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    for (const target of targets) armWatcher(target);
+    // Re-read after arming all watchers. The concurrent reads close the race
+    // between the initial snapshot and an append/receipt rename.
+    targets = await refreshWaitAnyTargets(root, targets);
+    for (const target of targets) {
+      if (target.progress?.text_delta_count > 0 && coalesceFrom.get(target.task_id) == null) {
+        coalesceFrom.set(target.task_id, now());
+      }
+    }
+    let candidate = waitAnyCandidate(targets, initialById, options);
+    if (candidate) return finish(candidate.reason, candidate.target.task_id, candidate.targetReasons);
+
+    while (now() < deadline) {
+      if (signal?.aborted) return finish('disconnected');
+      const remaining = earliestWaitAnyTimer(targets, {
+        now,
+        waitUntil,
+        deadline,
+        coalesceFrom,
+      });
+      if (remaining <= 0) break;
+      const reason = await raceWait({
+        delay,
+        remainingMs: remaining,
+        fallbackMs: watchFailed ? Math.min(fallbackMs, remaining) : null,
+        coalesceMs: waitUntil === 'progress'
+          ? (() => {
+            const values = [...coalesceFrom.values()];
+            return values.length > 0
+              ? Math.min(...values.map((at) => Math.max(0, at + TEXT_DELTA_COALESCE_MS - now())))
+              : null;
+          })()
+          : null,
+        notifyTake: gate.take,
+        signal,
+      });
+      gate.detachWaiter();
+      const wakeReason = reason?.reason ?? reason;
+      if (wakeReason === 'abort' || signal?.aborted) return finish('disconnected');
+      targets = await refreshWaitAnyTargets(root, targets);
+      for (const target of targets) {
+        if (target.progress?.text_delta_count > 0 && coalesceFrom.get(target.task_id) == null) {
+          coalesceFrom.set(target.task_id, now());
+        }
+      }
+      candidate = waitAnyCandidate(targets, initialById, options);
+      if (candidate) return finish(candidate.reason, candidate.target.task_id, candidate.targetReasons);
+      if (wakeReason === 'watch-error') {
+        const taskId = reason?.task_id;
+        if (taskId && !rewatchAttempts.has(taskId)) {
+          rewatchAttempts.add(taskId);
+          const target = targets.find((entry) => entry.task_id === taskId);
+          if (target) armWatcher(target);
+        } else {
+          watchFailed = true;
+          if (taskId) {
+            closeTaskWatcher(watchers.get(taskId));
+            watchers.delete(taskId);
+          }
+        }
+      }
+      if (reason === 'fallback') watchFailed = true;
+    }
+
+    targets = await refreshWaitAnyTargets(root, targets);
+    for (const target of targets) {
+      if (target.progress?.text_delta_count > 0 && coalesceFrom.get(target.task_id) == null) {
+        coalesceFrom.set(target.task_id, now());
+      }
+    }
+    candidate = waitAnyCandidate(targets, initialById, options);
+    if (candidate) return finish(candidate.reason, candidate.target.task_id, candidate.targetReasons);
+    if (signal?.aborted) return finish('disconnected');
+    if (waitUntil === 'terminal' && waitMs >= MAX_TASK_WAIT_MS
+      && targets.some((target) => target.task && (remainingDeadlineMs(target.task, now()) ?? 0) > 0)) {
+      return finish('transport_budget');
+    }
+    return finish('timeout');
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    closeAllWatchers();
   }
 }
 

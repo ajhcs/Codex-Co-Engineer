@@ -14,7 +14,7 @@ import { COMPACT_VIEW } from './compact-task.mjs';
 import { deadlineProjection } from './deadline.mjs';
 import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
 import { buildToolResult, normalizeResponseMode } from './response.mjs';
-import { listTasks, listTasksPage, stateRoot } from './task-store.mjs';
+import { listTasks, listTasksPage, stateRoot, waitForAnyTaskProgress } from './task-store.mjs';
 import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
@@ -158,7 +158,7 @@ const TOOLS = [
   },
   {
     name: 'tasks',
-    description: `List recent task receipts.${RESPONSE_MODE_HINT}`,
+    description: `List recent task receipts with optional compact keyset pagination and filters. With task_ids, wait concurrently for the first of 1-8 exact tasks to reach progress or terminal (including needs_attention), using optional per-task cursors and one bounded wait; a timeout returns compact current snapshots for every target. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -169,7 +169,76 @@ const TOOLS = [
         state: { type: 'string', description: 'Filter by public state (e.g. running, succeeded, failed, transport_lost, needs_attention).' },
         status: { type: 'string', description: 'Alias for state filter (stored or public status).' },
         response_mode: RESPONSE_MODE_PROPERTY,
+        task_ids: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 8,
+          uniqueItems: true,
+          items: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
+          description: 'Exact task IDs to coordinate. Supply 1-8 IDs for wait-any mode.',
+        },
+        cursors: {
+          type: 'object',
+          maxProperties: 8,
+          propertyNames: { pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
+          additionalProperties: { type: 'string', pattern: '^[0-9]{1,16}$' },
+          description: 'Optional event cursor per task ID. A current cursor suppresses already-delivered progress.',
+        },
+        wait_ms: {
+          type: 'integer',
+          minimum: 0,
+          maximum: MCP_PENDING_CALL_BUDGET_MS,
+          description: `Bounded shared wait from 0 to ${MCP_PENDING_CALL_BUDGET_MS} ms. Omit with wait_until=terminal to follow each recorded deadline up to the advertised MCP pending-call budget.`,
+        },
+        wait_until: {
+          type: 'string',
+          enum: ['progress', 'terminal'],
+          description: 'progress wakes on meaningful progress; terminal wakes on terminal, needs_attention, silence, or deadline.',
+        },
+        wake_on_needs_attention: {
+          type: 'boolean',
+          default: true,
+          description: 'Wake when any target needs a same-session reply or loses transport. Default true.',
+        },
       },
+      allOf: [
+        {
+          if: {
+            anyOf: [
+              { required: ['cursors'] },
+              { required: ['wait_ms'] },
+              { required: ['wait_until'] },
+              { required: ['wake_on_needs_attention'] },
+            ],
+          },
+          then: { required: ['task_ids'] },
+        },
+        {
+          not: {
+            allOf: [
+              {
+                anyOf: [
+                  { required: ['task_ids'] },
+                  { required: ['cursors'] },
+                  { required: ['wait_ms'] },
+                  { required: ['wait_until'] },
+                  { required: ['wake_on_needs_attention'] },
+                ],
+              },
+              {
+                anyOf: [
+                  { required: ['detail'] },
+                  { required: ['limit'] },
+                  { required: ['cursor'] },
+                  { required: ['provider'] },
+                  { required: ['state'] },
+                  { required: ['status'] },
+                ],
+              },
+            ],
+          },
+        },
+      ],
       additionalProperties: false,
     },
   },
@@ -210,6 +279,12 @@ function takePresentationArgs(args = {}) {
     responseMode: normalizeResponseMode(responseModeRaw),
     args: businessArgs,
   };
+}
+
+function publicWaitTask(task, progress) {
+  const receipt = publicTask(task);
+  if (!receipt || !progress?.last_event) return receipt;
+  return { ...receipt, last_event: progress.last_event };
 }
 
 function result(value, { responseMode } = {}) {
@@ -263,8 +338,31 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
     }, { responseMode });
   }
   if (name === 'tasks') {
-    const hasCompactArgs = args && (args.detail !== undefined || args.limit !== undefined || args.cursor !== undefined || args.provider !== undefined || args.state !== undefined || args.status !== undefined);
-    if (!hasCompactArgs) {
+    const hasWaitAnyArgs = args && (args.task_ids !== undefined || args.cursors !== undefined || args.wait_ms !== undefined || args.wait_until !== undefined || args.wake_on_needs_attention !== undefined);
+    const hasListArgs = args && (args.detail !== undefined || args.limit !== undefined || args.cursor !== undefined || args.provider !== undefined || args.state !== undefined || args.status !== undefined);
+    if (hasWaitAnyArgs && hasListArgs) {
+      throw Object.assign(new Error('tasks list options cannot be combined with wait-any options.'), { code: 'invalid_tasks_mode' });
+    }
+    if (hasWaitAnyArgs) {
+      const value = await waitForAnyTaskProgress(root, {
+        ...args,
+        signal,
+      });
+      return result({
+        tasks: value.tasks.map((entry) => ({
+          task_id: entry.task_id,
+          task: publicWaitTask(entry.task, entry.progress),
+          progress: entry.progress,
+          state: entry.task ? publicState(entry.task.status) : null,
+          error: entry.error,
+        })),
+        wait_reason: value.wait_reason,
+        wait_until: value.wait_until,
+        waited_ms: value.waited_ms,
+        triggered_task_id: value.triggered_task_id,
+      }, { responseMode });
+    }
+    if (!hasListArgs) {
       return result({ tasks: (await listTasks(root)).map(publicTask) }, { responseMode });
     }
     const page = await listTasksPage(root, args);

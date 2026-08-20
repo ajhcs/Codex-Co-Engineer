@@ -102,6 +102,7 @@ test('advertises only the thin public tool surface', async () => {
   const tasksTool = values[1].result.tools.find((tool) => tool.name === 'tasks');
   assert.deepEqual(Object.keys(tasksTool.inputSchema.properties), [
     'detail', 'limit', 'cursor', 'provider', 'state', 'status', 'response_mode',
+    'task_ids', 'cursors', 'wait_ms', 'wait_until', 'wake_on_needs_attention',
   ]);
   for (const tool of values[1].result.tools) {
     assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured']);
@@ -127,6 +128,11 @@ test('advertises only the thin public tool surface', async () => {
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
   assert.match(taskTool.description, /view=compact/u);
   assert.deepEqual(taskTool.inputSchema.properties.view.enum, ['summary', 'diagnostics', 'compact']);
+  assert.equal(tasksTool.inputSchema.properties.task_ids.minItems, 1);
+  assert.equal(tasksTool.inputSchema.properties.task_ids.maxItems, 8);
+  assert.equal(tasksTool.inputSchema.properties.wait_ms.maximum, 14400000);
+  assert.deepEqual(tasksTool.inputSchema.properties.wait_until.enum, ['progress', 'terminal']);
+  assert.equal(tasksTool.inputSchema.allOf[0].then.required[0], 'task_ids');
 });
 
 test('task returns a compact live snapshot and can wait for the next event', async () => {
@@ -213,6 +219,88 @@ test('cancelling a pending task wait does not terminate provider work', async ()
     assert.equal(disconnected.result.structuredContent.progress.wait_reason, 'disconnected');
     assert.equal(disconnected.result.structuredContent.task.status, 'running');
     assert.equal(disconnected.result.structuredContent.state, 'running');
+  });
+});
+
+test('tasks wait-any keeps the five-tool catalog and returns safe compact snapshots', async () => {
+  await withServer(async ({ state, request }) => {
+    await createTask({ root: state, prompt: 'one', record: { id: 'server-any-a', status: 'running', provider: 'grok' } });
+    await createTask({
+      root: state,
+      prompt: 'two',
+      record: {
+        id: 'server-any-b',
+        status: 'running',
+        provider: 'grok',
+        last_event: { type: 'status', text: 'stale-task-json-event' },
+      },
+    });
+    const baseline = await request({
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { task_ids: ['server-any-a', 'server-any-b'], wait_ms: 0 } },
+    });
+    const cursors = Object.fromEntries(baseline.result.structuredContent.tasks
+      .map((entry) => [entry.task_id, entry.progress.event_cursor]));
+    const pending = request({
+      jsonrpc: '2.0',
+      id: 12,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: {
+          task_ids: ['server-any-a', 'server-any-b'],
+          cursors,
+          wait_until: 'progress',
+          wait_ms: 1_000,
+        },
+      },
+    });
+    setTimeout(() => appendTaskEvent(state, 'server-any-b', {
+      type: 'provider',
+      event: { type: 'tool_call', text: 'server-any-progress' },
+    }).catch(() => {}), 20);
+    const waited = (await pending).result.structuredContent;
+    assert.equal(waited.wait_reason, 'progress');
+    assert.equal(waited.triggered_task_id, 'server-any-b');
+    assert.equal(waited.tasks.length, 2);
+    assert.equal(waited.tasks.find((entry) => entry.task_id === 'server-any-b').progress.last_event.text, 'server-any-progress');
+    assert.equal(waited.tasks.find((entry) => entry.task_id === 'server-any-b').task.last_event.text, 'server-any-progress');
+    assert.equal(waited.tasks[0].task.agent_argv, undefined);
+
+    const invalidArgs = await request({
+      jsonrpc: '2.0',
+      id: 14,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { wait_ms: 0 } },
+    });
+    assert.equal(invalidArgs.result.isError, true);
+    assert.equal(invalidArgs.result.structuredContent.error.code, 'invalid_task_ids');
+    assert.match(invalidArgs.result.structuredContent.error.message, /task_ids/u);
+
+    const mixedModes = await request({
+      jsonrpc: '2.0',
+      id: 15,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: { task_ids: ['server-any-a'], wait_ms: 0, detail: 'compact' },
+      },
+    });
+    assert.equal(mixedModes.result.isError, true);
+    assert.equal(mixedModes.result.structuredContent.error.code, 'invalid_tasks_mode');
+    assert.match(mixedModes.result.structuredContent.error.message, /cannot be combined/u);
+
+    const missing = await request({
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { task_ids: ['does-not-exist'], wait_ms: 0 } },
+    });
+    const serialized = JSON.stringify(missing);
+    assert.equal(missing.result.structuredContent.wait_reason, 'task_not_found');
+    assert.doesNotMatch(serialized, /ENOENT|\/tmp\/|task\.json/u);
   });
 });
 
