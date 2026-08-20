@@ -12,8 +12,8 @@ import {
 } from './contract.mjs';
 import { COMPACT_VIEW } from './compact-task.mjs';
 import { deadlineProjection } from './deadline.mjs';
-import { sanitizePublicReceipt } from './diagnostics.mjs';
-import { listTasks, stateRoot } from './task-store.mjs';
+import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
+import { listTasks, listTasksPage, stateRoot } from './task-store.mjs';
 import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
@@ -24,7 +24,15 @@ const TOOLS = [
   {
     name: 'status',
     description: 'Show the local Co-Engineer supervisor, provider capabilities, advertised MCP pending-call budget, and recent task state.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        detail: { type: 'string', enum: ['full', 'compact'], description: 'full returns full receipts (default). compact returns redacted compact cards.' },
+        task_limit: { type: 'integer', minimum: 0, maximum: 20, description: 'Maximum tasks to return (0-20). Default 20. Ignored when include_tasks is false.' },
+        include_tasks: { type: 'boolean', description: 'When false, omit recent tasks for readiness-only checks.' },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'delegate',
@@ -137,7 +145,18 @@ const TOOLS = [
   {
     name: 'tasks',
     description: 'List recent task receipts.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        detail: { type: 'string', enum: ['full', 'compact'], description: 'full returns full receipts (default). compact returns redacted compact cards.' },
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Page size (1-20). Default all (or 20 for compact). Values above 20 are invalid.' },
+        cursor: { type: 'string', description: 'Opaque pagination cursor from previous tasks response.' },
+        provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'], description: 'Filter by provider.' },
+        state: { type: 'string', description: 'Filter by public state (e.g. running, succeeded, failed, transport_lost, needs_attention).' },
+        status: { type: 'string', description: 'Alias for state filter (stored or public status).' },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'cancel',
@@ -167,6 +186,10 @@ function publicTask(task) {
   });
 }
 
+function wantsCompact(args) {
+  return args?.detail === 'compact';
+}
+
 function result(value) {
   const sanitized = sanitizePublicReceipt(value) ?? {};
   const safe = JSON.parse(JSON.stringify(sanitized, (_key, nested) => nested === undefined ? null : nested));
@@ -185,7 +208,17 @@ function errorResult(error) {
 async function callTool(name, args = {}, { signal } = {}) {
   const root = stateRoot();
   if (name === 'status') {
-    const value = await supervisorStatus(root);
+    const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined);
+    if (!hasCompact) {
+      const value = await supervisorStatus(root);
+      return result({ ...value, tasks: value.tasks.map(publicTask) });
+    }
+    const value = await supervisorStatus(root, {}, args);
+    // Compact/readiness paths must avoid constructing/projecting omitted full public receipts.
+    // Only project the window; never build full receipts for compact.
+    if (value.detail === 'compact') {
+      return result(value);
+    }
     return result({ ...value, tasks: value.tasks.map(publicTask) });
   }
   if (name === 'delegate') {
@@ -212,7 +245,20 @@ async function callTool(name, args = {}, { signal } = {}) {
       view: value.view,
     });
   }
-  if (name === 'tasks') return result({ tasks: (await listTasks(root)).map(publicTask) });
+  if (name === 'tasks') {
+    const hasCompactArgs = args && (args.detail !== undefined || args.limit !== undefined || args.cursor !== undefined || args.provider !== undefined || args.state !== undefined || args.status !== undefined);
+    if (!hasCompactArgs) {
+      return result({ tasks: (await listTasks(root)).map(publicTask) });
+    }
+    const page = await listTasksPage(root, args);
+    // Filter and page before projecting full public receipts; only project sliced results.
+    // Provide pagination metadata total/limit as required by contract; preserve detail echo.
+    if (page.detail === 'compact') {
+      const compactTasks = page.tasks.map((t) => compactTaskCard(t));
+      return result({ tasks: compactTasks, next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit });
+    }
+    return result({ tasks: page.tasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit });
+  }
   if (name === 'cancel') return result({ task: publicTask(await cancelTask(root, args.task_id)) });
   throw Object.assign(new Error(`Unknown tool: ${name}`), { code: 'unknown_tool' });
 }

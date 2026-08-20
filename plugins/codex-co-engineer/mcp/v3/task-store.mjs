@@ -908,5 +908,208 @@ export async function listTasks(root = stateRoot()) {
       // projected as a valid task.
     }
   }
-  return records.sort((left, right) => right.created_at.localeCompare(left.created_at));
+  return records.sort((left, right) => {
+    const byTime = right.created_at.localeCompare(left.created_at);
+    if (byTime !== 0) return byTime;
+    return right.id.localeCompare(left.id);
+  });
+}
+
+export const STATUS_TASK_LIMIT_MAX = 20;
+export const TASKS_PAGE_LIMIT_MAX = 20;
+export const TASKS_PAGE_LIMIT_MIN = 1;
+
+const VALID_PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
+const VALID_PUBLIC_STATES = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'transport_lost', 'environment_blocked', 'needs_attention', 'accepted', 'starting', 'running', 'cancelling']);
+const VALID_DETAIL = new Set(['full', 'compact']);
+
+function failCompact(code, message) {
+  throw Object.assign(new Error(message), { code });
+}
+
+export function parseDetail(value) {
+  if (value === undefined || value === null) return 'full';
+  if (typeof value !== 'string' || !VALID_DETAIL.has(value)) {
+    failCompact('invalid_detail', 'detail must be full or compact.');
+  }
+  return value;
+}
+
+export function parseStatusTaskLimit(value) {
+  if (value === undefined || value === null) return STATUS_TASK_LIMIT_MAX;
+  if (!Number.isInteger(value) || value < 0 || value > STATUS_TASK_LIMIT_MAX) {
+    failCompact('invalid_task_limit', `task_limit must be an integer from 0 to ${STATUS_TASK_LIMIT_MAX}.`);
+  }
+  return value;
+}
+
+export function parseStatusIncludeTasks(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== 'boolean') failCompact('invalid_include_tasks', 'include_tasks must be a boolean.');
+  return value;
+}
+
+export function parseTasksLimit(value) {
+  if (value === undefined || value === null) return null;
+  if (!Number.isInteger(value) || value < TASKS_PAGE_LIMIT_MIN || value > TASKS_PAGE_LIMIT_MAX) {
+    failCompact('invalid_limit', `limit must be an integer from ${TASKS_PAGE_LIMIT_MIN} to ${TASKS_PAGE_LIMIT_MAX}.`);
+  }
+  return value;
+}
+
+export function parseTasksProvider(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !VALID_PROVIDERS.has(value)) {
+    failCompact('invalid_provider', 'provider must be one of grok, cursor-local, cursor-cloud, dsh.');
+  }
+  return value;
+}
+
+export function parseTasksState(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') {
+    failCompact('invalid_state', 'state must be a valid public state.');
+  }
+  if (!VALID_PUBLIC_STATES.has(value) && !new Set(['completed','failed','timeout','cancelled','environment_blocked','transport_lost','needs_attention','accepted','starting','running','cancelling','succeeded','timed_out']).has(value)) {
+    failCompact('invalid_state', 'state must be a valid public state.');
+  }
+  return value;
+}
+
+// Keyset cursor: opaque base64 of JSON {v, ca, id, p, s, d}
+// Ordered by created_at DESC then id DESC. Cursor binds canonical provider/state/detail.
+function compareTaskToAnchor(task, anchor) {
+  const byTime = task.created_at.localeCompare(anchor.ca);
+  if (byTime !== 0) return byTime;
+  return task.id.localeCompare(anchor.id);
+}
+
+function isAfterAnchor(task, anchor) {
+  // Returns true if task should appear AFTER anchor in DESC order (i.e., smaller key)
+  // DESC: larger created_at first. So after means created_at < anchor.ca OR equal and id < anchor.id
+  if (task.created_at < anchor.ca) return true;
+  if (task.created_at > anchor.ca) return false;
+  return task.id < anchor.id;
+}
+
+export function encodeTasksCursor(anchor) {
+  if (!anchor || typeof anchor !== 'object') failCompact('invalid_cursor', 'cursor payload is invalid.');
+  if (typeof anchor.ca !== 'string' || typeof anchor.id !== 'string') failCompact('invalid_cursor', 'cursor anchor is invalid.');
+  if (!TASK_ID.test(anchor.id)) failCompact('invalid_cursor', 'cursor anchor id is invalid.');
+  // ca must be ISO-like; basic check
+  if (Number.isNaN(Date.parse(anchor.ca))) failCompact('invalid_cursor', 'cursor anchor timestamp is invalid.');
+  const payload = {
+    v: 1,
+    ca: anchor.ca,
+    id: anchor.id,
+    p: anchor.p ?? null,
+    s: anchor.s ?? null,
+    d: anchor.d ?? 'full',
+  };
+  // Validate provider/state/detail canonical
+  if (payload.p !== null && !VALID_PROVIDERS.has(payload.p)) failCompact('invalid_cursor', 'cursor provider is invalid.');
+  if (payload.s !== null && !VALID_PUBLIC_STATES.has(payload.s) && !new Set(['completed','failed','timeout','cancelled','environment_blocked','transport_lost','needs_attention','accepted','starting','running','cancelling','succeeded','timed_out']).has(payload.s)) {
+    failCompact('invalid_cursor', 'cursor state is invalid.');
+  }
+  if (!VALID_DETAIL.has(payload.d)) failCompact('invalid_cursor', 'cursor detail is invalid.');
+  const json = JSON.stringify(payload);
+  if (json.length > 1024) failCompact('invalid_cursor', 'cursor is too long.');
+  return Buffer.from(json, 'utf8').toString('base64');
+}
+
+export function decodeTasksCursor(cursor) {
+  if (cursor === undefined || cursor === null || cursor === '') return null;
+  if (typeof cursor !== 'string') failCompact('invalid_cursor', 'cursor must be an opaque base64 string.');
+  if (cursor.length > 2048) failCompact('invalid_cursor', 'cursor is too long.');
+  let json;
+  try {
+    json = Buffer.from(cursor, 'base64').toString('utf8');
+  } catch {
+    failCompact('invalid_cursor', 'cursor must be an opaque base64 string.');
+  }
+  // Canonical check: re-encode must match
+  let payload;
+  try {
+    payload = JSON.parse(json);
+  } catch {
+    failCompact('invalid_cursor', 'cursor must be an opaque base64 pagination cursor.');
+  }
+  if (!payload || typeof payload !== 'object' || payload.v !== 1 || typeof payload.ca !== 'string' || typeof payload.id !== 'string') {
+    failCompact('invalid_cursor', 'cursor must be an opaque base64 pagination cursor.');
+  }
+  if (!TASK_ID.test(payload.id)) failCompact('invalid_cursor', 'cursor anchor id is invalid.');
+  if (Number.isNaN(Date.parse(payload.ca))) failCompact('invalid_cursor', 'cursor anchor timestamp is invalid.');
+  if (payload.p !== null && payload.p !== undefined && !VALID_PROVIDERS.has(payload.p)) failCompact('invalid_cursor', 'cursor provider is invalid.');
+  if (payload.s !== null && payload.s !== undefined && payload.s !== null && !VALID_PUBLIC_STATES.has(payload.s) && !new Set(['completed','failed','timeout','cancelled','environment_blocked','transport_lost','needs_attention','accepted','starting','running','cancelling','succeeded','timed_out']).has(payload.s)) {
+    failCompact('invalid_cursor', 'cursor state is invalid.');
+  }
+  if (!VALID_DETAIL.has(payload.d)) failCompact('invalid_cursor', 'cursor detail is invalid.');
+  // Canonical re-encode check
+  const canonicalPayload = { v: 1, ca: payload.ca, id: payload.id, p: payload.p ?? null, s: payload.s ?? null, d: payload.d };
+  const canonicalJson = JSON.stringify(canonicalPayload);
+  const canonical = Buffer.from(canonicalJson, 'utf8').toString('base64');
+  if (canonical !== cursor) {
+    failCompact('invalid_cursor', 'cursor must be a canonical opaque cursor.');
+  }
+  return canonicalPayload;
+}
+
+// Legacy offset support removed: only keyset cursors are valid.
+
+export async function listTasksPage(root = stateRoot(), options = {}) {
+  const detail = parseDetail(options.detail);
+  const limit = parseTasksLimit(options.limit);
+  const provider = parseTasksProvider(options.provider);
+  const stateFilter = parseTasksState(options.state ?? options.status);
+  const effectiveLimit = limit ?? (detail === 'compact' ? 20 : null);
+  // Decode and validate cursor binding filters
+  let anchor = decodeTasksCursor(options.cursor ?? null);
+  if (anchor) {
+    const anchorProvider = anchor.p ?? null;
+    const anchorState = anchor.s ?? null;
+    const anchorDetail = anchor.d ?? 'full';
+    if ((anchorProvider ?? null) !== (provider ?? null) || (anchorState ?? null) !== (stateFilter ?? null) || anchorDetail !== detail) {
+      failCompact('invalid_cursor', 'cursor does not match requested filters.');
+    }
+  }
+  let tasks = await listTasks(root);
+  if (provider) tasks = tasks.filter((t) => t.provider === provider);
+  if (stateFilter) {
+    const { publicState: ps } = await import('./contract.mjs');
+    tasks = tasks.filter((t) => ps(t.status) === stateFilter || t.status === stateFilter);
+  }
+  const total = tasks.length;
+  // Apply keyset pagination
+  let remaining = tasks;
+  if (anchor) {
+    remaining = tasks.filter((t) => isAfterAnchor(t, anchor));
+  }
+  let sliced;
+  if (effectiveLimit == null) {
+    sliced = remaining;
+  } else {
+    sliced = remaining.slice(0, effectiveLimit);
+  }
+  const hasMore = sliced.length < remaining.length;
+  let next_cursor = null;
+  if (hasMore && sliced.length > 0) {
+    const last = sliced[sliced.length - 1];
+    next_cursor = encodeTasksCursor({ ca: last.created_at, id: last.id, p: provider ?? null, s: stateFilter ?? null, d: detail });
+  } else if (effectiveLimit != null && remaining.length > sliced.length) {
+    const last = sliced[sliced.length - 1];
+    if (last) next_cursor = encodeTasksCursor({ ca: last.created_at, id: last.id, p: provider ?? null, s: stateFilter ?? null, d: detail });
+  }
+  // If not hasMore, next_cursor remains null
+  return {
+    tasks: sliced,
+    next_cursor,
+    has_more: hasMore,
+    total,
+    limit: effectiveLimit,
+    detail,
+  };
+}
+
+export async function listTasksFiltered(root = stateRoot(), options = {}) {
+  return listTasksPage(root, options);
 }
