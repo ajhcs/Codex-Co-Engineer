@@ -23,7 +23,7 @@ The MCP server exposes five tools:
 | `status` | Supervisor health, provider readiness, and recent task state |
 | `delegate` | Start a review or implementation task |
 | `task` | Inspect one task receipt, compact live progress, and optional wait |
-| `tasks` | List recent task receipts |
+| `tasks` | List or keyset-page recent receipts, or wait on 1–8 exact tasks |
 | `cancel` | Stop one owned local process group or Cursor Cloud run |
 
 `delegate` requires a stable `task_id`, a provider, an absolute Git worktree
@@ -50,6 +50,40 @@ page. `reply` delivers a same-session answer exactly once where the
 provider supports it. Deadline extensions require `extend_reason`. The
 five-tool API is unchanged; unsolicited stdio callbacks across assistant
 turns are not available.
+
+### Efficient workflow for the upcoming 3.2 release
+
+The upcoming, unreleased 3.2 coordination path keeps the same five tools and
+the no-argument `tasks` behavior:
+
+- Call `status` with `detail: "compact"`, `task_limit` from 0 through 20, or
+  `include_tasks: false` for a readiness-only check.
+- Inspect routine progress with `task` `view: "compact"`. Its structured JSON
+  is capped at 8,192 UTF-8 bytes. Use cursor-paged `view: "diagnostics"` only
+  for attention and failure evidence.
+- List with `tasks` `detail: "compact"`, a `limit` from 1 through 20, and the
+  returned opaque `next_cursor`. Provider and state filters are bound into the
+  keyset cursor. Full detail remains available explicitly.
+- Coordinate 1 through 8 exact task IDs with one `tasks` wait-any call. Supply
+  per-task event `cursors` when continuing a wait; use one shared `wait_ms` and
+  `wait_until` instead of one polling loop per task. Wait-any options cannot be
+  mixed with list filters or pagination options. Its task snapshots and live
+  event previews are bounded; when present, `progress.detail_hint` directs the
+  caller to `task` for the target's full live event detail.
+- Add `response_mode: "structured"` when the client reads authoritative
+  `structuredContent`. The text content becomes a bounded fallback. If the
+  property is omitted, `content[0].text` remains the exact full JSON
+  serialization of `structuredContent` for legacy clients.
+
+Terminal provider results are redacted and bounded, including values returned
+as nested objects. When evidence is clipped, the receipt reports
+`result_truncated` and reports `result_original_chars` when the source size is
+known. These fields describe Unicode code points; structured transport limits
+are UTF-8 bytes. The 8,192-byte compact cap is enforced by the MCP server and
+is not a measured hard limit of the Codex desktop renderer.
+
+For an end-to-end pattern, see the repository's
+[efficient dogfood guide](../../docs/efficient-dogfood.md).
 
 ## Provider matrix
 

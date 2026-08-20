@@ -7,7 +7,8 @@ description: Delegate review and implementation work to Grok, Cursor Local, Curs
 
 Use the five MCP tools for delegation and lifecycle control.
 
-1. Call `status` when provider or supervisor readiness is unknown. Require
+1. Call `status` when provider or supervisor readiness is unknown. Prefer
+   `detail: "compact", include_tasks: false` for a readiness-only check. Require
    `local_boundary.ready: true` before local dispatch; local provider readiness
    is forced false when the boundary is unavailable.
 2. Local dispatch requires Linux, a working `systemd --user` manager,
@@ -50,23 +51,29 @@ Use the five MCP tools for delegation and lifecycle control.
    reachability before retrying.
 8. Set `create_pr` only for Cursor Cloud. Local tasks reject it; Codex
    decides whether local commits justify a PR after inspecting the handoff.
-9. Watch with `task`. A bare `task_id` returns the current receipt plus a
-   compact `progress` snapshot, normalized `state`, and diagnostic envelope.
-   For a durable low-token wait, pass `wait_until: "terminal"` and the
-   previous `event_cursor`. Optional `wait_ms` caps one pending MCP call;
-   omit it to wait until the recorded deadline, bounded by the advertised
-   pending-call budget. The call returns on success, failure, timeout,
-   cancellation, transport loss, environment block, needs_attention, silence,
-   a corrupt/resource-limit alert, or the advertised MCP pending-call budget.
-   Routine text deltas do not wake Codex. Disconnecting the waiter does not
-   stop provider work. Use `view: "diagnostics"` only after an alert; it is
-   side-effect free and never waits. Deliver a same-session answer with
-   `reply: { session_id, question_id, response }` exactly once when the
-   provider capability allows it; otherwise the error is explicit. Never
-   replay an active or prompt-dispatched task. Unsolicited stdio callbacks
-   across assistant turns are not available.
-10. Use `cancel` for explicit cancellation or verified orphan recovery.
-11. Inspect commits, handoff, and receipts before Codex merges anything.
+9. Coordinate without polling:
+   - For one task, call `task` with `view: "compact"`. For a durable wait, add
+     `wait_until: "terminal"` and the previous `event_cursor`. Optional
+     `wait_ms` caps the call; omission follows the recorded deadline within the
+     advertised pending-call budget.
+   - For 2-8 independent tasks, call `tasks` once with `task_ids`, one shared
+     `wait_ms`/`wait_until`, and the returned event `cursors` keyed by task ID.
+     Do not mix wait-any properties with list filters or pagination properties;
+     `cursor` is a list cursor, while `cursors` belongs to wait-any. Wait-any
+     task snapshots and event previews are bounded; follow
+     `progress.detail_hint` to the single-task call for full event detail.
+   - Routine text does not wake terminal waits, and disconnecting a waiter does
+     not stop provider work. Never replay an active or prompt-dispatched task.
+     Unsolicited stdio callbacks across assistant turns are not available.
+   - Inspect `view: "diagnostics"` only for needs-attention, failure, or a task
+     that appears stuck. It is side-effect free and never waits. Deliver a
+     same-session `reply` exactly once only when the capability allows it.
+10. Omit `response_mode` by default. Set `response_mode: "structured"` only
+    when the calling client consumes authoritative `structuredContent`; a
+    text-only client would receive only the bounded fallback. Omission retains
+    the exact legacy full JSON text response.
+11. Use `cancel` for explicit cancellation or verified orphan recovery.
+12. Inspect commits, handoff, and receipts before Codex merges anything.
 
 Grok and Cursor Local use persistent ACP sessions. DSH uses the official rc.7
 ACP composition through ACPX. Cursor Cloud uses the official Cursor SDK. A
