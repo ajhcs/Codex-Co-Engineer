@@ -20,6 +20,8 @@ import {
   taskPaths,
 } from './task-store.mjs';
 
+export const MAX_DIAGNOSTIC_PAGE_EVENTS = 100;
+
 const REDACTED = '[REDACTED]';
 const OVERSIZE_EVENT_SCAN_BYTES = 4 * 1024;
 const LAST_ACTIVITY_CHUNK_BYTES = 16 * 1024;
@@ -312,10 +314,75 @@ async function readPagedEvents(eventsPath, cursor, maxBytes) {
       }
       return { events: [], event_cursor: String(requested), more_events: false, bytes: size };
     }
-    const complete = slice.subarray(0, lastNewline + 1).toString('utf8');
-    const consumed = requested + lastNewline + 1;
+    const completeSlice = slice.subarray(0, lastNewline + 1);
+    // Bound by both byte budget and public event-count cap before finalizing cursor.
+    // Scan completeSlice for newlines and enforce MAX_DIAGNOSTIC_PAGE_EVENTS.
+    let eventCount = 0;
+    let lineStart = 0;
+    let truncatedByCount = false;
+    let truncatedOffset = -1;
+    for (let index = 0; index < completeSlice.length; index += 1) {
+      if (completeSlice[index] === 0x0a) {
+        const lineBuf = completeSlice.subarray(lineStart, index);
+        const lineText = lineBuf.toString('utf8');
+        if (lineText) eventCount += 1;
+        else {
+          // Empty lines produce no event but still advance cursor; do not count toward cap.
+          lineStart = index + 1;
+          continue;
+        }
+        if (eventCount === MAX_DIAGNOSTIC_PAGE_EVENTS) {
+          // Check if more complete lines remain beyond this newline within completeSlice
+          if (index < completeSlice.length - 1) {
+            truncatedByCount = true;
+            truncatedOffset = index;
+          }
+          break;
+        }
+        lineStart = index + 1;
+      }
+    }
+    if (truncatedByCount) {
+      const consumed = requested + truncatedOffset + 1;
+      const effectiveText = completeSlice.subarray(0, truncatedOffset + 1).toString('utf8');
+      return {
+        events: parseEventLines(effectiveText),
+        event_cursor: String(consumed),
+        more_events: consumed < size,
+        bytes: size,
+      };
+    }
+    const complete = completeSlice.toString('utf8');
+    const consumed = requested + completeSlice.length;
+    const events = parseEventLines(complete);
+    // Defensive: if completeSlice somehow still yields > cap due to empty-line handling, slice again.
+    if (events.length > MAX_DIAGNOSTIC_PAGE_EVENTS) {
+      // Find byte offset of MAX-th event line to keep cursor accurate.
+      let countForCursor = 0;
+      let cursorOffset = 0;
+      let scanStart = 0;
+      for (let index = 0; index < completeSlice.length; index += 1) {
+        if (completeSlice[index] === 0x0a) {
+          const lineText = completeSlice.subarray(scanStart, index).toString('utf8');
+          if (lineText) countForCursor += 1;
+          scanStart = index + 1;
+          if (countForCursor === MAX_DIAGNOSTIC_PAGE_EVENTS) {
+            cursorOffset = index + 1;
+            break;
+          }
+        }
+      }
+      const consumed2 = requested + cursorOffset;
+      const effectiveText2 = completeSlice.subarray(0, cursorOffset).toString('utf8');
+      return {
+        events: parseEventLines(effectiveText2),
+        event_cursor: String(consumed2),
+        more_events: consumed2 < size,
+        bytes: size,
+      };
+    }
     return {
-      events: parseEventLines(complete),
+      events,
       event_cursor: String(consumed),
       more_events: consumed < size,
       bytes: size,
