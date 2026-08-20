@@ -30,11 +30,19 @@ function clipText(value, maxChars = 240) {
 
 function taskPreview(task) {
   if (!task || typeof task !== 'object') return null;
+  // Wait-any entries wrap the compact task snapshot so the outer envelope can
+  // retain its task_id, fresh progress, wake state, and per-target error.
+  const wrappedTask = task.task && typeof task.task === 'object' ? task.task : null;
+  const source = wrappedTask ?? task;
   return {
-    id: typeof task.id === 'string' ? task.id : null,
-    status: typeof task.status === 'string' ? task.status : null,
-    state: typeof task.state === 'string' ? task.state : null,
-    provider: typeof task.provider === 'string' ? task.provider : null,
+    id: typeof task.task_id === 'string'
+      ? task.task_id
+      : (typeof source.id === 'string' ? source.id : (typeof source.task_id === 'string' ? source.task_id : null)),
+    status: typeof source.status === 'string' ? source.status : null,
+    state: typeof task.state === 'string'
+      ? task.state
+      : (typeof source.state === 'string' ? source.state : null),
+    provider: typeof source.provider === 'string' ? source.provider : null,
   };
 }
 

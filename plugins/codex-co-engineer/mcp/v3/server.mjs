@@ -10,7 +10,13 @@ import {
   VERSION,
   publicState,
 } from './contract.mjs';
-import { COMPACT_VIEW } from './compact-task.mjs';
+import {
+  COMPACT_VIEW,
+  WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
+  enforceWaitAnyResponseBudget,
+  projectCompactTask,
+  projectWaitAnyProgress,
+} from './compact-task.mjs';
 import { deadlineProjection } from './deadline.mjs';
 import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
 import { buildToolResult, normalizeResponseMode } from './response.mjs';
@@ -158,7 +164,7 @@ const TOOLS = [
   },
   {
     name: 'tasks',
-    description: `List recent task receipts with optional compact keyset pagination and filters. With task_ids, wait concurrently for the first of 1-8 exact tasks to reach progress or terminal (including needs_attention), using optional per-task cursors and one bounded wait; a timeout returns compact current snapshots for every target. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
+    description: `List recent task receipts with optional compact keyset pagination and filters. With task_ids, wait concurrently for the first of 1-8 exact tasks to reach progress or terminal (including needs_attention), using optional per-task cursors and one bounded wait; a timeout returns compact current snapshots for every target. Wait-any task snapshots and live event previews are individually bounded; call task with a target ID for full event detail. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -281,12 +287,6 @@ function takePresentationArgs(args = {}) {
   };
 }
 
-function publicWaitTask(task, progress) {
-  const receipt = publicTask(task);
-  if (!receipt || !progress?.last_event) return receipt;
-  return { ...receipt, last_event: progress.last_event };
-}
-
 function result(value, { responseMode } = {}) {
   return buildToolResult(value, { responseMode });
 }
@@ -348,11 +348,18 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
         ...args,
         signal,
       });
-      return result({
+      const waitAny = {
         tasks: value.tasks.map((entry) => ({
           task_id: entry.task_id,
-          task: publicWaitTask(entry.task, entry.progress),
-          progress: entry.progress,
+          // Wait-any can return up to eight receipts at once. Keep the fresh
+          // event stream in the separate progress envelope, while each task
+          // is a bounded coordination projection instead of a full receipt.
+          task: entry.task ? projectCompactTask({
+            task: entry.task,
+            progress: entry.progress,
+            maxBytes: WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
+          }) : null,
+          progress: projectWaitAnyProgress(entry.progress),
           state: entry.task ? publicState(entry.task.status) : null,
           error: entry.error,
         })),
@@ -360,7 +367,8 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
         wait_until: value.wait_until,
         waited_ms: value.waited_ms,
         triggered_task_id: value.triggered_task_id,
-      }, { responseMode });
+      };
+      return result(enforceWaitAnyResponseBudget(waitAny), { responseMode });
     }
     if (!hasListArgs) {
       return result({ tasks: (await listTasks(root)).map(publicTask) }, { responseMode });

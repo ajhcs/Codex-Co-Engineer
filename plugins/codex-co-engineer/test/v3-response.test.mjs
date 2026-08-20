@@ -60,6 +60,23 @@ test('summarizeStructuredContent is deterministic for each public tool kind', ()
   }).kind, 'error');
 });
 
+test('summarizeStructuredContent previews wait-any wrapper entries', () => {
+  assert.deepEqual(summarizeStructuredContent({
+    tasks: [{
+      task_id: 'wait-any-1',
+      task: { status: 'running', state: 'running', provider: 'grok' },
+      progress: { last_event: { text: 'fresh progress' } },
+      state: 'running',
+      error: null,
+    }],
+  }), {
+    kind: 'tasks',
+    task_count: 1,
+    tasks: [{ id: 'wait-any-1', status: 'running', state: 'running', provider: 'grok' }],
+    tasks_omitted: 0,
+  });
+});
+
 test('buildToolResult default preserves full 3.1.1 text duplication', () => {
   const value = {
     task: { id: 'keep-me', status: 'running', state: 'running', provider: 'grok', prompt_dispatched: true },
