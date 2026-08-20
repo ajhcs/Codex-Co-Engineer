@@ -5,14 +5,14 @@
 [![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Codex-Co-Engineer 3.1.1** lets Codex delegate real review and
+**Codex-Co-Engineer 3.2.0** lets Codex delegate real review and
 implementation work to authenticated peer coding agents — Grok Build,
 Cursor Local, Cursor Cloud, and DeepSeek Harness (DSH) — then wait for a
 durable receipt instead of polling routine text.
 
 Codex stays the chief engineer, reviewer, and merge authority. The
 stable machine identifier is `codex-co-engineer`. In-repo release notes:
-[docs/releases/v3.1.1.md](docs/releases/v3.1.1.md).
+[docs/releases/v3.2.0.md](docs/releases/v3.2.0.md).
 
 ![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
 
@@ -105,16 +105,16 @@ Use Codex-Co-Engineer when you want Codex to:
 Do not use it as a security sandbox, a credential broker, or a replacement for
 the provider's own login and approval flow.
 
-Version 3.1.1 exposes five tools: `status`, `delegate`, `task`, `tasks`,
+Version 3.2.0 exposes five tools: `status`, `delegate`, `task`, `tasks`,
 and `cancel`. `delegate` records `expected_duration_ms` or `timeout_ms`
 and a 20% deadline margin. `task` can wait with `wait_until: "terminal"`
-until the recorded deadline, inspect summary/diagnostics views, extend a
-deadline with an explicit reason, and deliver a same-session reply. It
-does not push unsolicited stdio callbacks across assistant turns.
+until the recorded deadline, inspect summary/compact/diagnostics views,
+extend a deadline with an explicit reason, and deliver a same-session reply.
+It does not push unsolicited stdio callbacks across assistant turns.
 
 The bundled skill is `control-codex-co-engineer-agents`.
 
-## Efficient coordination for the upcoming 3.2 release
+## Efficient coordination
 
 For parallel work, delegate each independent change once, then coordinate the
 result set with one `tasks` wait-any call instead of polling every task. Use
@@ -124,8 +124,7 @@ snapshots and live event previews; its `progress.detail_hint` points to the
 single-task call when full event detail is needed. Clients that consume
 `structuredContent` can opt into `response_mode: "structured"` to avoid a
 second full receipt in the text fallback. Text-only clients should omit it;
-omission preserves the exact legacy text response. These APIs are part of the
-upcoming, unreleased 3.2 release until the package version is bumped.
+omission preserves the exact 3.1.1-compatible legacy text response.
 
 The compact single-task projection is capped at 8,192 UTF-8 bytes by the MCP
 server. That is a server payload guarantee, not a measured or claimed hard
@@ -323,7 +322,7 @@ Node 24. GitHub Actions is a credential-free mirror; live Grok, Cursor,
 Cursor Cloud, and DSH acceptance is recorded separately because CI must not
 send repository content to model providers.
 
-GitHub-ready 3.1.1 notes live in [docs/releases/v3.1.1.md](docs/releases/v3.1.1.md).
+GitHub-ready 3.2.0 notes live in [docs/releases/v3.2.0.md](docs/releases/v3.2.0.md).
 This repository does not create the GitHub Release, tag, or remote from that
 file.
 

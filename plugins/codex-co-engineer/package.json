@@ -1,6 +1,6 @@
 {
   "name": "codex-co-engineer",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "private": false,
   "description": "Codex-Co-Engineer: ACP-first delegation to Grok, Cursor, Cursor Cloud, and DeepSeek Harness.",
   "license": "MIT",

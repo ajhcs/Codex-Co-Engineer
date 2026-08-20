@@ -92,7 +92,7 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.equal(values[0].result.serverInfo.name, 'codex-co-engineer');
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
-  assert.equal(values[0].result.serverInfo.version, '3.1.1');
+  assert.equal(values[0].result.serverInfo.version, '3.2.0');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
   const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
   assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
