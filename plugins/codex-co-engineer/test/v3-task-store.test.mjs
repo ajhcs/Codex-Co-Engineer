@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, watch as watchDirectory } from 'node:fs';
-import { appendFile, mkdtemp, open, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -652,4 +652,126 @@ test('cursor catch-up stays on line boundaries and rejects unsafe offsets', asyn
     (error) => error.code === 'invalid_event_cursor',
   );
   assert.throws(() => parseEventCursor('9007199254740993'), (error) => error.code === 'invalid_event_cursor');
+});
+
+test('explicit cursorless progress wait starts from the current event-log tail', async () => {
+  const root = await temporaryRoot();
+  try {
+    await createTask({
+      root,
+      prompt: 'cursorless wait',
+      record: { id: 'wait-cursorless', status: 'running', provider: 'grok' },
+    });
+    await appendTaskEvent(root, 'wait-cursorless', {
+      type: 'provider',
+      event: { type: 'tool_call', title: 'read', text: 'historical' },
+    });
+
+    const omitted = await waitForTaskProgress(root, 'wait-cursorless', {});
+    assert.equal(omitted.progress.wait_reason, 'current');
+    assert.equal(omitted.progress.last_event.text, 'historical');
+    assert.ok(omitted.progress.waited_ms < 50);
+
+    const zero = await waitForTaskProgress(root, 'wait-cursorless', { wait_ms: 0 });
+    assert.equal(zero.progress.wait_reason, 'current');
+    assert.equal(zero.progress.last_event.text, 'historical');
+    assert.ok(zero.progress.waited_ms < 50);
+    for (const key of ['event_cursor', 'last_event', 'new_event_count', 'more_events', 'waited_ms', 'wait_reason']) {
+      assert.ok(Object.hasOwn(zero.progress, key));
+    }
+
+    let settled = false;
+    const { watch, state } = createMockWatch();
+    const pending = waitForTaskProgress(root, 'wait-cursorless', {
+      wait_until: 'progress',
+      wait_ms: 1_000,
+      watch,
+    }).then((value) => {
+      settled = true;
+      return value;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(settled, false);
+
+    await appendTaskEvent(root, 'wait-cursorless', {
+      type: 'provider',
+      event: { type: 'tool_call', title: 'edit', text: 'fresh' },
+    });
+    state.listener('change', 'events.jsonl');
+    const woke = await pending;
+    assert.equal(woke.progress.wait_reason, 'progress');
+    assert.equal(woke.progress.last_event.text, 'fresh');
+    assert.ok(woke.progress.waited_ms >= 40);
+    assert.ok(woke.progress.waited_ms < 400);
+    assert.equal(state.closed, state.opened);
+
+    const timedOut = await waitForTaskProgress(root, 'wait-cursorless', {
+      wait_until: 'progress',
+      wait_ms: 40,
+      watch: createMockWatch().watch,
+    });
+    assert.equal(timedOut.progress.wait_reason, 'timeout');
+    assert.ok(timedOut.progress.waited_ms >= 40);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cursorless progress wait still wakes immediately on terminal, attention, and abort', async () => {
+  const root = await temporaryRoot();
+  try {
+    await createTask({
+      root,
+      prompt: 'already done',
+      record: { id: 'wait-done', status: 'completed', provider: 'grok', finished_at: new Date().toISOString() },
+    });
+    await appendTaskEvent(root, 'wait-done', {
+      type: 'provider',
+      event: { type: 'tool_call', title: 'read', text: 'historical' },
+    });
+    const done = await waitForTaskProgress(root, 'wait-done', { wait_until: 'progress', wait_ms: 1_000 });
+    assert.equal(done.progress.wait_reason, 'terminal');
+    assert.ok(done.progress.waited_ms < 50);
+
+    await createTask({
+      root,
+      prompt: 'needs a reply',
+      record: {
+        id: 'wait-attn',
+        status: 'needs_attention',
+        provider: 'grok',
+        attention: { session_id: 'sess-1', question_id: 'q-1' },
+      },
+    });
+    await appendTaskEvent(root, 'wait-attn', { type: 'needs_attention', question_id: 'q-1' });
+    const attention = await waitForTaskProgress(root, 'wait-attn', { wait_until: 'progress', wait_ms: 1_000 });
+    assert.equal(attention.progress.wait_reason, 'attention');
+    assert.ok(attention.progress.waited_ms < 50);
+
+    await createTask({
+      root,
+      prompt: 'abort me',
+      record: { id: 'wait-abort', status: 'running', provider: 'grok' },
+    });
+    await appendTaskEvent(root, 'wait-abort', {
+      type: 'provider',
+      event: { type: 'tool_call', title: 'read', text: 'historical' },
+    });
+    const { watch, state } = createMockWatch();
+    const controller = new AbortController();
+    const pending = waitForTaskProgress(root, 'wait-abort', {
+      wait_until: 'progress',
+      wait_ms: 2_000,
+      watch,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    controller.abort();
+    const aborted = await pending;
+    assert.equal(aborted.progress.wait_reason, 'disconnected');
+    assert.ok(aborted.progress.waited_ms < 200);
+    assert.equal(state.closed, state.opened);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

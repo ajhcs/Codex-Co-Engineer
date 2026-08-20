@@ -102,6 +102,47 @@ test('terminal wait ignores text deltas and wakes on success, failure, timeout, 
   }
 });
 
+test('cursorless terminal wait ignores historical progress and still waits for terminal', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-durable-cursorless-term-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'historical then terminal',
+      record: { id: 'term-cursorless', status: 'running', provider: 'grok' },
+    });
+    await appendTaskEvent(root, 'term-cursorless', {
+      type: 'provider',
+      event: { type: 'tool_call', title: 'read', text: 'historical' },
+    });
+    let settled = false;
+    const pending = waitForTaskProgress(root, 'term-cursorless', {
+      wait_until: 'terminal',
+      wait_ms: 1_000,
+    }).then((value) => {
+      settled = true;
+      return value;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(settled, false);
+    await appendTaskEvent(root, 'term-cursorless', {
+      type: 'provider',
+      event: { type: 'text_delta', text: 'still-running' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false);
+    await updateTask(root, 'term-cursorless', {
+      status: 'completed',
+      finished_at: new Date().toISOString(),
+    });
+    const woke = await pending;
+    assert.equal(woke.progress.wait_reason, 'terminal');
+    assert.equal(woke.task.status, 'completed');
+    assert.ok(woke.progress.waited_ms >= 40);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('needs_attention, silence, deadline, and disconnect wake without owning the worker', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-durable-wake-'));
   try {

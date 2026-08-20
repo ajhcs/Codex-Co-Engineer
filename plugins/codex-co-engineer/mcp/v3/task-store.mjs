@@ -722,6 +722,7 @@ export async function waitForTaskProgress(root, taskId, {
     },
   });
   const requestedCursor = parseEventCursor(cursor);
+  let waitCursor = cursor;
   const evaluate = (task, progress, coalesceFrom) => waitWakeReason(task, progress, initialTask, {
     coalesceFrom,
     coalesceMs,
@@ -745,8 +746,9 @@ export async function waitForTaskProgress(root, taskId, {
     if (requestedCursor !== null && initialProgress.more_events && initialProgress.new_event_count > 0) {
       return snapshot(initialTask, initialProgress, 'progress');
     }
-    if (requestedCursor === null && initialProgress.last_event) {
-      return snapshot(initialTask, initialProgress, 'current');
+    if (requestedCursor === null) {
+      // Explicit wait_ms>0 with no cursor waits for events newer than the current tail.
+      waitCursor = initialProgress.event_cursor;
     }
   }
   if (signal?.aborted) {
@@ -784,7 +786,7 @@ export async function waitForTaskProgress(root, taskId, {
     // Snapshot after arming the watcher so an append/rename that raced the
     // first read cannot be lost if inotify also missed it.
     let currentTask = (await readTask(root, taskId)).task;
-    let currentProgress = await readTaskEventProgress(root, taskId, { cursor });
+    let currentProgress = await readTaskEventProgress(root, taskId, { cursor: waitCursor });
     if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
     const initialLiveDeadline = parseDeadlineAt(currentTask.deadline_at);
     if (initialLiveDeadline != null) deadlineAt = initialLiveDeadline;
@@ -820,7 +822,7 @@ export async function waitForTaskProgress(root, taskId, {
         return snapshot(currentTask, currentProgress, 'disconnected');
       }
       currentTask = (await readTask(root, taskId)).task;
-      currentProgress = await readTaskEventProgress(root, taskId, { cursor });
+      currentProgress = await readTaskEventProgress(root, taskId, { cursor: waitCursor });
       if (currentProgress.text_delta_count > 0 && coalesceFrom == null) coalesceFrom = now();
       const parsedDeadline = parseDeadlineAt(currentTask.deadline_at);
       if (parsedDeadline != null) deadlineAt = parsedDeadline;
@@ -840,7 +842,7 @@ export async function waitForTaskProgress(root, taskId, {
     }
 
     const finalTask = (await readTask(root, taskId)).task;
-    const finalProgress = await readTaskEventProgress(root, taskId, { cursor });
+    const finalProgress = await readTaskEventProgress(root, taskId, { cursor: waitCursor });
     const finalDeadline = parseDeadlineAt(finalTask.deadline_at);
     if (finalDeadline != null) deadlineAt = finalDeadline;
     const finalWake = evaluate(finalTask, finalProgress, coalesceFrom);
