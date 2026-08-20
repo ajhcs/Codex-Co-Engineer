@@ -27,13 +27,13 @@ const TOOLS = [
   },
   {
     name: 'delegate',
-    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.',
+    description: 'Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.',
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
         provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
-        repo: { type: 'string', description: 'Absolute Git worktree root.' },
+        repo: { type: 'string', description: 'Required property named repo: absolute path to the Git worktree (for example, /absolute/path/to/git-worktree). Do not rename this property to git_root or repository.' },
         prompt: { type: 'string', minLength: 1, maxLength: 262144 },
         role: { type: 'string', enum: ['review', 'implement'], default: 'implement' },
         workspace_mode: { type: 'string', enum: ['managed', 'direct'], default: 'managed' },
@@ -56,7 +56,7 @@ const TOOLS = [
           description: 'Optional provider-silence watchdog. A terminal wait wakes if no durable activity arrives within this window.',
         },
         create_pr: { type: 'boolean', default: false, description: 'Cursor Cloud only.' },
-        starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable Cursor Cloud commit SHA.' },
+        starting_ref: { type: 'string', pattern: '^[a-fA-F0-9]{40}$', description: 'Optional immutable commit SHA for Cursor Cloud only; it does not replace the required repo property.' },
       },
       required: ['task_id', 'provider', 'repo', 'prompt'],
       anyOf: [

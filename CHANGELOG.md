@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-08-20
+
+### Fixed
+
+- **Unambiguous delegation argument.** The control skill, tool schema, READMEs,
+  and release guidance now name the required repository argument explicitly as
+  `repo` and show the literal shape
+  `"repo": "/absolute/path/to/git-worktree"`. This prevents callers from
+  translating the earlier prose "absolute Git root" into the unsupported
+  `git_root` property and failing validation before a receipt is created.
+- **Cursor Cloud argument boundary.** Documentation now distinguishes the
+  always-required local checkout property `repo` from the separate Cursor
+  Cloud-only `starting_ref` immutable commit SHA.
+
+### Documentation
+
+- Added 3.1.1 GitHub Release notes and regression checks covering the public
+  skill, MCP schema, examples, marketplace version, and release metadata.
+
 ## [3.1.0] - 2026-08-19
 
 Wait for delegated work until it reaches a terminal or needs-attention

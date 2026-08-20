@@ -5,14 +5,14 @@
 [![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Codex-Co-Engineer 3.1.0** lets Codex delegate real review and
+**Codex-Co-Engineer 3.1.1** lets Codex delegate real review and
 implementation work to authenticated peer coding agents — Grok Build,
 Cursor Local, Cursor Cloud, and DeepSeek Harness (DSH) — then wait for a
 durable receipt instead of polling routine text.
 
 Codex stays the chief engineer, reviewer, and merge authority. The
 stable machine identifier is `codex-co-engineer`. In-repo release notes:
-[docs/releases/v3.1.0.md](docs/releases/v3.1.0.md).
+[docs/releases/v3.1.1.md](docs/releases/v3.1.1.md).
 
 ![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
 
@@ -85,6 +85,12 @@ delegate and wait:
 
 Inspect the receipt before Codex pushes, opens a PR, or merges.
 
+The repository argument is the literal MCP property `repo`. Always send it as
+`"repo": "/absolute/path/to/git-worktree"`; `git_root`, `repository`, and
+other aliases are unknown properties and fail schema validation. Cursor Cloud
+also requires `repo` for the clean local checkout. Its pushed immutable commit
+SHA is a separate, Cursor Cloud-only `starting_ref` property.
+
 ## What Codex-Co-Engineer is for
 
 Use Codex-Co-Engineer when you want Codex to:
@@ -99,7 +105,7 @@ Use Codex-Co-Engineer when you want Codex to:
 Do not use it as a security sandbox, a credential broker, or a replacement for
 the provider's own login and approval flow.
 
-Version 3.1.0 exposes five tools: `status`, `delegate`, `task`, `tasks`,
+Version 3.1.1 exposes five tools: `status`, `delegate`, `task`, `tasks`,
 and `cancel`. `delegate` records `expected_duration_ms` or `timeout_ms`
 and a 20% deadline margin. `task` can wait with `wait_until: "terminal"`
 until the recorded deadline, inspect summary/diagnostics views, extend a
@@ -298,7 +304,7 @@ Node 24. GitHub Actions is a credential-free mirror; live Grok, Cursor,
 Cursor Cloud, and DSH acceptance is recorded separately because CI must not
 send repository content to model providers.
 
-GitHub-ready 3.1.0 notes live in [docs/releases/v3.1.0.md](docs/releases/v3.1.0.md).
+GitHub-ready 3.1.1 notes live in [docs/releases/v3.1.1.md](docs/releases/v3.1.1.md).
 This repository does not create the GitHub Release, tag, or remote from that
 file.
 

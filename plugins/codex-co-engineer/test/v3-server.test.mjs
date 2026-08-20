@@ -85,7 +85,7 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.equal(values[0].result.serverInfo.name, 'codex-co-engineer');
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
-  assert.equal(values[0].result.serverInfo.version, '3.1.0');
+  assert.equal(values[0].result.serverInfo.version, '3.1.1');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
@@ -95,6 +95,14 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 14400000);
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
+  assert.match(delegateTool.description, /property named repo/u);
+  assert.deepEqual(delegateTool.inputSchema.required, ['task_id', 'provider', 'repo', 'prompt']);
+  assert.match(delegateTool.inputSchema.properties.repo.description, /Required property named repo/u);
+  assert.match(delegateTool.inputSchema.properties.repo.description, /\/absolute\/path\/to\/git-worktree/u);
+  assert.match(delegateTool.inputSchema.properties.repo.description, /Do not rename this property to git_root/u);
+  assert.match(delegateTool.inputSchema.properties.starting_ref.description, /Cursor Cloud only/u);
+  assert.match(delegateTool.inputSchema.properties.starting_ref.description, /does not replace the required repo/u);
+  assert.equal(Object.hasOwn(delegateTool.inputSchema.properties, 'git_root'), false);
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'expected_duration_ms'));
   assert.equal(delegateTool.inputSchema.properties.expected_duration_ms.maximum, 86400000);
   assert.equal(delegateTool.inputSchema.properties.timeout_ms.maximum, 103680000);

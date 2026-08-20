@@ -12,7 +12,7 @@ coding agents:
 Codex remains the chief engineer, reviewer, and merge authority. Providers
 retain their normal shell, coding, and dependency-installation capabilities.
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-This release is 3.1.0.
+This release is 3.1.1.
 
 ## Tools
 
@@ -26,10 +26,17 @@ The MCP server exposes five tools:
 | `tasks` | List recent task receipts |
 | `cancel` | Stop one owned local process group or Cursor Cloud run |
 
-`delegate` requires a stable `task_id`, a provider, an absolute Git
-repository root, a prompt, and `expected_duration_ms` or a
+`delegate` requires a stable `task_id`, a provider, an absolute Git worktree
+path in the property named `repo`, a prompt, and `expected_duration_ms` or a
 backwards-compatible `timeout_ms`. Providers are `grok`, `cursor-local`,
 `cursor-cloud`, and `dsh`; roles are `review` and `implement`.
+
+The argument name is part of the MCP contract: send
+`"repo": "/absolute/path/to/git-worktree"`. Do not substitute `git_root`,
+`repository`, or another alias; unknown properties fail schema validation.
+Cursor Cloud also requires `repo` for the clean local checkout, while its
+pushed immutable commit SHA belongs separately in the Cursor Cloud-only
+`starting_ref` property.
 
 `task` always returns a compact `progress` snapshot (`event_cursor`,
 `last_event`, `new_event_count`, `more_events`, `waited_ms`,
@@ -219,7 +226,7 @@ Local review:
   "task_id": "review-auth-1",
   "provider": "grok",
   "role": "review",
-  "repo": "/absolute/path/to/repository",
+  "repo": "/absolute/path/to/git-worktree",
   "workspace_mode": "managed",
   "prompt": "Review authentication changes and report actionable findings.",
   "expected_duration_ms": 600000

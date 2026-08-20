@@ -13,7 +13,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.1.0');
+  assert.equal(manifest.version, '3.1.1');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.composerIcon, './assets/icon.svg');
@@ -27,7 +27,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.1.0');
+  assert.equal(packageJson.version, '3.1.1');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),
@@ -37,6 +37,10 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   assert.match(skill, /wait_ms/u);
   assert.match(skill, /event_cursor/u);
   assert.match(skill, /Unsolicited stdio\s+callbacks/u);
+  assert.match(skill, /property named `repo`/u);
+  assert.match(skill, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
+  assert.match(skill, /Do not rename `repo` to `git_root`/u);
+  assert.match(skill, /Cursor Cloud-only `starting_ref`/u);
 
   const icon = await readFile(path.join(ROOT, 'assets', 'icon.svg'), 'utf8');
   assert.match(icon, /aria-label="Co-Engineer"/);
@@ -45,7 +49,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   assert.deepEqual([...logo.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
 });
 
-test('visitor README leads with 3.1.0 product shot and copy/paste install', async () => {
+test('visitor README leads with the product shot and copy/paste install', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const productShot = 'docs/assets/codex-co-engineer-3.1.0.jpg';
   const flowShot = 'docs/assets/codex-co-engineer-3.1.0.svg';
@@ -60,10 +64,12 @@ test('visitor README leads with 3.1.0 product shot and copy/paste install', asyn
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup:check/u);
   assert.match(readme, /wait_until": "terminal"/u);
-  assert.match(readme, /docs\/releases\/v3\.1\.0\.md/u);
+  assert.match(readme, /property `repo`/u);
+  assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
+  assert.match(readme, /docs\/releases\/v3\.1\.1\.md/u);
 });
 
-test('repository marketplace catalogs Codex-Co-Engineer 3.1.0', async () => {
+test('repository marketplace catalogs Codex-Co-Engineer 3.1.1', async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
@@ -71,10 +77,13 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.1.0', async () => {
   assert.equal(marketplace.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(marketplace.plugins.length, 1);
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
+  assert.equal(marketplace.plugins[0].version, '3.1.1');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
 
-  const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.1.0.md'), 'utf8');
-  assert.match(notes, /Codex-Co-Engineer 3\.1\.0/u);
+  const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.1.1.md'), 'utf8');
+  assert.match(notes, /Codex-Co-Engineer 3\.1\.1/u);
   assert.match(notes, /codex plugin add codex-co-engineer@codex-co-engineer/u);
+  assert.match(notes, /property name `repo` exactly/u);
+  assert.match(notes, /Cursor Cloud-only `starting_ref`/u);
   assert.match(notes, /This file is the publication source/u);
 });

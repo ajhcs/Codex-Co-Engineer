@@ -17,6 +17,7 @@ const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/release.md',
   'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/releases/v3.1.0.md',
+  'docs/releases/v3.1.1.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',
@@ -55,10 +56,10 @@ if (manifest.name !== 'codex-co-engineer' || packageJson.name !== 'codex-co-engi
   fail('Plugin manifest and package must use the codex-co-engineer identifier.');
 }
 const contractText = await text(`${PLUGIN}/mcp/v3/contract.mjs`);
-if (manifest.version !== '3.1.0' || packageJson.version !== '3.1.0'
-  || !contractText.includes("VERSION = '3.1.0'")
+if (manifest.version !== '3.1.1' || packageJson.version !== '3.1.1'
+  || !contractText.includes("VERSION = '3.1.1'")
   || !serverText.includes('version: VERSION')) {
-  fail('Plugin manifest, package, contract, and MCP server must all be version 3.1.0.');
+  fail('Plugin manifest, package, contract, and MCP server must all be version 3.1.1.');
 }
 if (manifest.interface?.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
 if (manifest.interface?.developerName !== 'Codex-Co-Engineer') fail('Public developer name mismatch.');
@@ -70,7 +71,19 @@ if (!/^name: control-codex-co-engineer-agents$/mu.test(skillText)) {
   fail('Skill name must be the lowercase control-codex-co-engineer-agents identifier.');
 }
 const changelog = await text('CHANGELOG.md');
-if (!changelog.includes('## [3.1.0]')) fail('CHANGELOG.md must record the 3.1.0 release.');
+if (!changelog.includes('## [3.1.1]')) fail('CHANGELOG.md must record the 3.1.1 release.');
+const marketplace = await json('.agents/plugins/marketplace.json');
+if (marketplace.plugins?.[0]?.version !== '3.1.1') fail('Marketplace must catalog version 3.1.1.');
+if (!skillText.includes('property named `repo`')
+  || !skillText.includes('"repo": "/absolute/path/to/git-worktree"')
+  || !skillText.includes('Do not rename `repo` to `git_root`')) {
+  fail('Control skill must pin the literal delegate repo argument contract.');
+}
+if (!serverText.includes('Required property named repo')
+  || !serverText.includes('Do not rename this property to git_root')
+  || !serverText.includes('does not replace the required repo property')) {
+  fail('MCP delegate schema must pin repo and distinguish Cursor Cloud starting_ref.');
+}
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') fail('Unexpected test script.');
 if (JSON.stringify(packageJson.files) !== JSON.stringify([
   '.codex-plugin', '.mcp.json', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
@@ -204,4 +217,4 @@ for (const relative of tracked) {
   }
 }
 
-process.stdout.write('Codex-Co-Engineer 3.1.0 release validation passed.\n');
+process.stdout.write('Codex-Co-Engineer 3.1.1 release validation passed.\n');

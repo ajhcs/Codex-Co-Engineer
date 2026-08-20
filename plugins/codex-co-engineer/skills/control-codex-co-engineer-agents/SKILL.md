@@ -15,8 +15,22 @@ Use the five MCP tools for delegation and lifecycle control.
    CLI/worktree dependencies; `status`, dispatch preflight, and release/live
    acceptance validate the boundary from their actual MCP environment.
 3. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh`.
-4. Call `delegate` with a stable task ID, absolute Git root, a clear prompt,
-   and `expected_duration_ms` or a backwards-compatible `timeout_ms`. The
+4. Call `delegate` with a stable task ID, the absolute Git worktree path in
+   the property named `repo`, a clear prompt, and `expected_duration_ms` or a
+   backwards-compatible `timeout_ms`. The argument shape is literal:
+
+   ```json
+   {
+     "task_id": "review-auth-refactor",
+     "provider": "grok",
+     "repo": "/absolute/path/to/git-worktree",
+     "prompt": "Review the current branch.",
+     "expected_duration_ms": 600000
+   }
+   ```
+
+   Do not rename `repo` to `git_root`, `repository`, or a prose description
+   such as "Git root"; MCP schema validation rejects unknown properties. The
    recorded deadline is `ceil(expected_duration_ms * 1.20)` unless
    `timeout_ms` is an explicit override of at least that margin. Do not
    silently roll the deadline; extend it only with
@@ -26,8 +40,10 @@ Use the five MCP tools for delegation and lifecycle control.
 6. For local tasks, use `workspace_mode: "managed"` by default. Use
    `workspace_mode: "direct"` only when direct mutation of the supplied
    checkout is intentional.
-7. For Cursor Cloud, provide a provider-accessible origin and an exact
-   immutable commit SHA in `starting_ref` that is already pushed.
+7. For Cursor Cloud, `repo` is still required and identifies the local clean
+   checkout whose origin is sent to the provider. In addition, provide an
+   exact immutable commit SHA in the Cursor Cloud-only `starting_ref`
+   property; it must already be pushed to that provider-accessible origin.
    Before final acceptance, make a feature-branch SHA provider-visible through
    an open draft PR or the default branch. Treat an HTTP 400 for an otherwise
    valid SHA as a visibility failure; surface it in the receipt and fix

@@ -41,8 +41,10 @@ After the provider-free gate passes:
    spawn because ACPX has no authoritative prompt-sent acknowledgement; those
    tasks are never replayed. Verify terminal receipts, zero active tasks, clean
    direct-mode caller checkouts, and retained managed-worktree handoffs.
-6. For Cursor Cloud, use a clean checkout with a provider-accessible origin
-   and an exact immutable `starting_ref` commit SHA that is already pushed.
+6. For Cursor Cloud, send the clean checkout's absolute path in the required
+   property `repo` and use a provider-accessible origin. Also send an exact
+   immutable commit SHA that is already pushed in the separate Cursor
+   Cloud-only `starting_ref` property.
    An exact SHA reachable only from a feature branch can remain invisible to
    Cursor until an open PR or default-branch reachability makes it
    provider-visible. Create the draft PR before final Cloud acceptance (or
@@ -86,7 +88,7 @@ opened. Never create an empty PR.
 
 ## GitHub Release notes
 
-The 3.1.0 GitHub Release body is
-[releases/v3.1.0.md](releases/v3.1.0.md). Keep that file in the
+The 3.1.1 GitHub Release body is
+[releases/v3.1.1.md](releases/v3.1.1.md). Keep that file in the
 repository even when GitHub Releases is empty. Documentation work must
 not tag, push, or publish the GitHub Release.

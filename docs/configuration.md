@@ -62,7 +62,10 @@ tests a server launched with only the MCP manifest's allowlisted environment.
 ## Task inputs
 
 Repository paths, prompts, roles, deadlines, and workspace/PR intent are
-inputs to `delegate`; they are not global policy. Pass
+inputs to `delegate`; they are not global policy. The absolute Git worktree
+path must be passed in the property named `repo`, for example
+`"repo": "/absolute/path/to/git-worktree"`. Do not rename it to `git_root`
+or `repository`; the strict MCP schema rejects unknown properties. Pass
 `expected_duration_ms` or a backwards-compatible `timeout_ms` so the
 recorded deadline is `ceil(expected_duration_ms * 1.20)` unless an
 explicit `timeout_ms` of at least that margin is supplied. `task` accepts `wait_until`
@@ -82,9 +85,11 @@ is intentional. Direct mode does not create a disposable worktree.
 
 ### Cursor Cloud
 
-Cursor Cloud requires a provider-accessible Git origin and an exact immutable
-commit SHA in `starting_ref`. The SHA must already be pushed; a local branch
-name or unpushed work is not an acceptable cloud starting point.
+Cursor Cloud still requires `repo`, identifying the clean local checkout with
+a provider-accessible Git origin. It additionally requires an exact immutable
+commit SHA in the separate Cursor Cloud-only `starting_ref` property. The SHA
+must already be pushed; a local branch name or unpushed work is not an
+acceptable cloud starting point.
 An exact SHA reachable only from a feature branch can remain invisible to
 Cursor until the branch is provider-visible through an open pull request or
 the default branch. Create the draft PR (or make the commit reachable from
