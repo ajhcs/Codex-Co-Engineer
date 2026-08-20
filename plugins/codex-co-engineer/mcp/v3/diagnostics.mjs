@@ -67,9 +67,12 @@ export function parseMaxBytes(value) {
   return value;
 }
 
-export function redactDiagnosticText(value) {
+export function redactDiagnosticText(value, options = {}) {
   let text = String(value ?? '');
   for (const pattern of TOKEN_PATTERNS) text = text.replace(pattern, REDACTED);
+  // clipHead:false redacts the full string so callers can take a UTF-8-safe tail
+  // without cutting through a credential. Default remains a 4096-char head clip.
+  if (options?.clipHead === false) return text;
   return text.slice(0, 4_096);
 }
 

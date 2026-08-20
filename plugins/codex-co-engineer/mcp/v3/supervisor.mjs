@@ -13,6 +13,7 @@ import {
   providerCapabilities,
   publicState,
 } from './contract.mjs';
+import { COMPACT_VIEW, projectCompactTask, resolveTaskView } from './compact-task.mjs';
 import { deadlineReached, nextDeadlineExtension, resolveTaskDeadline } from './deadline.mjs';
 import { compactSummary, diagnosticEnvelope, readTaskDiagnostics } from './diagnostics.mjs';
 import { submitReply } from './mailbox.mjs';
@@ -798,7 +799,7 @@ export async function taskStatus(root, taskId, options = {}) {
   const { task: initialTask } = await readTask(root, taskId);
   const runtime = taskRuntime(await readRuntimeRecord(root, taskId), initialTask);
   await reconcileInactiveTask(root, initialTask, runtime);
-  const view = options.view === 'diagnostics' ? 'diagnostics' : 'summary';
+  const view = resolveTaskView(options.view);
   const waited = await waitForTaskProgress(root, taskId, {
     cursor: options.cursor,
     wait_ms: view === 'diagnostics' ? 0 : options.wait_ms,
@@ -820,6 +821,14 @@ export async function taskStatus(root, taskId, options = {}) {
     last_event: progress.last_event,
     event_cursor: progress.event_cursor,
   };
+  if (view === COMPACT_VIEW) {
+    return projectCompactTask({
+      task,
+      progress,
+      runtime: latestRuntime,
+      extras,
+    });
+  }
   const result = {
     task,
     runtime: latestRuntime,
