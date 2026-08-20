@@ -112,6 +112,8 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
+  assert.match(taskTool.description, /view=compact/u);
+  assert.deepEqual(taskTool.inputSchema.properties.view.enum, ['summary', 'diagnostics', 'compact']);
 });
 
 test('task returns a compact live snapshot and can wait for the next event', async () => {
@@ -270,6 +272,21 @@ test('public MCP receipts redact secrets from result, errors, handoff, and event
         assert.equal(response.result.structuredContent.task.prompt_dispatched, true);
         assert.equal(Object.hasOwn(response.result.structuredContent.task, 'prompt'), false);
       }
+    }
+    const compact = await request({
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'tools/call',
+      params: { name: 'task', arguments: { task_id: 'server-secrets', view: 'compact' } },
+    });
+    const compactBody = compact.result.structuredContent;
+    assert.equal(compactBody.view, 'compact');
+    assert.equal(Object.hasOwn(compactBody, 'task'), false);
+    assert.equal(Object.hasOwn(compactBody, 'runtime'), false);
+    assert.equal(compactBody.prompt_dispatched, true);
+    const compactText = JSON.stringify(compact);
+    for (const secret of [...secrets, 'sk-prompt-secret-1234567890']) {
+      assert.doesNotMatch(compactText, new RegExp(secret, 'u'), `compact leaked ${secret}`);
     }
   });
 });

@@ -80,6 +80,20 @@ test('alerts are descriptive envelopes and never a bare ERROR string', async () 
   }
 });
 
+test('redactDiagnosticText keeps a 4096-char head clip by default and can skip it', () => {
+  const body = `${'h'.repeat(5_000)}TAIL-KEEP`;
+  const clipped = redactDiagnosticText(body);
+  assert.equal(clipped.length, 4_096);
+  assert.equal(clipped.includes('TAIL-KEEP'), false);
+  const full = redactDiagnosticText(body, { clipHead: false });
+  assert.equal(full.endsWith('TAIL-KEEP'), true);
+  assert.equal(full.length, body.length);
+  assert.equal(
+    redactDiagnosticText(`prefix sk-live-secret-1234567890 ${'t'.repeat(5_000)}TAIL`, { clipHead: false }).includes('sk-live-secret-1234567890'),
+    false,
+  );
+});
+
 test('diagnostics paging is bounded, cursor-stable, and redacts secrets', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-diag-page-'));
   try {
@@ -110,6 +124,7 @@ test('diagnostics paging is bounded, cursor-stable, and redacts secrets', async 
     });
     assert.ok(Number(second.event_cursor) >= Number(first.event_cursor));
     assert.equal(redactDiagnosticText('token sk-live-secret-1234567890'), 'token [REDACTED]');
+    assert.equal(redactDiagnosticText('token sk-live-secret-1234567890', { clipHead: false }), 'token [REDACTED]');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -10,6 +10,7 @@ import {
   VERSION,
   publicState,
 } from './contract.mjs';
+import { COMPACT_VIEW } from './compact-task.mjs';
 import { deadlineProjection } from './deadline.mjs';
 import { sanitizePublicReceipt } from './diagnostics.mjs';
 import { listTasks, stateRoot } from './task-store.mjs';
@@ -68,7 +69,7 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: 'Inspect one task. view=summary is the default compact receipt plus diagnostic envelope and event_cursor. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.',
+    description: 'Inspect one task. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -91,8 +92,8 @@ const TOOLS = [
         },
         view: {
           type: 'string',
-          enum: ['summary', 'diagnostics'],
-          description: 'summary is compact coordination. diagnostics is a bounded, redacted, cursor-paged evidence page and never waits.',
+          enum: ['summary', 'diagnostics', 'compact'],
+          description: 'summary is the default receipt plus diagnostic envelope. compact is a bounded coordination payload without full task or runtime bodies. diagnostics is a bounded, redacted, cursor-paged evidence page and never waits.',
         },
         cursor: {
           type: 'string',
@@ -198,6 +199,7 @@ async function callTool(name, args = {}, { signal } = {}) {
   }
   if (name === 'task') {
     const value = await inspectTask(root, args, { signal });
+    if (value?.view === COMPACT_VIEW) return result(value);
     return result({
       task: publicTask(value.task),
       runtime: value.runtime,
