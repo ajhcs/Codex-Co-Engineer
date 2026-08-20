@@ -1,4 +1,4 @@
-export const VERSION = '3.1.1';
+export const VERSION = '3.2.0';
 export const DURATION_MARGIN = 1.20;
 export const MIN_DURATION_MS = 1_000;
 export const MAX_EXPECTED_DURATION_MS = 86_400_000;

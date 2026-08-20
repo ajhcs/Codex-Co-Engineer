@@ -12,7 +12,7 @@ coding agents:
 Codex remains the chief engineer, reviewer, and merge authority. Providers
 retain their normal shell, coding, and dependency-installation capabilities.
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-This release is 3.1.1.
+This release is 3.2.0.
 
 ## Tools
 
@@ -51,10 +51,10 @@ provider supports it. Deadline extensions require `extend_reason`. The
 five-tool API is unchanged; unsolicited stdio callbacks across assistant
 turns are not available.
 
-### Efficient workflow for the upcoming 3.2 release
+### Efficient workflow
 
-The upcoming, unreleased 3.2 coordination path keeps the same five tools and
-the no-argument `tasks` behavior:
+The 3.2.0 coordination path keeps the same five tools and the no-argument
+`tasks` behavior:
 
 - Call `status` with `detail: "compact"`, `task_limit` from 0 through 20, or
   `include_tasks: false` for a readiness-only check.

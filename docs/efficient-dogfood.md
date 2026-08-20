@@ -1,7 +1,7 @@
 # Efficient Codex-Co-Engineer dogfood workflow
 
-This workflow for the upcoming, unreleased 3.2 release minimizes coordination
-calls and repeated receipt content without weakening Codex's review and merge
+This workflow for Codex-Co-Engineer 3.2.0 minimizes coordination calls and
+repeated receipt content without weakening Codex's review and merge
 authority. The core pattern is:
 
 ```text

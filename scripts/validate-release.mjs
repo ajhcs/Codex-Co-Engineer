@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
+const RELEASE_VERSION = '3.2.0';
 
 function fail(message) { throw new Error(message); }
 const absolute = (relative) => path.join(ROOT, relative);
@@ -17,7 +18,7 @@ const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/release.md',
   'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/releases/v3.1.0.md',
-  'docs/releases/v3.1.1.md',
+  'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',
@@ -29,6 +30,8 @@ const required = [
   `${PLUGIN}/mcp/v3/diagnostics.mjs`, `${PLUGIN}/mcp/v3/mailbox.mjs`,
   `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`, `${PLUGIN}/mcp/v3/single-turn.flow.mjs`,
   `${PLUGIN}/mcp/v3/process-boundary.mjs`,
+  `${PLUGIN}/mcp/v3/compact-task.mjs`, `${PLUGIN}/mcp/v3/provider-result.mjs`,
+  `${PLUGIN}/mcp/v3/response.mjs`,
   `${PLUGIN}/assets/acpx-runtime.mjs`, `${PLUGIN}/assets/acpx-runtime.manifest.json`,
   `${PLUGIN}/assets/acpx-third-party-notices.md`,
   `${PLUGIN}/vendor/dsh-acp-demo/LICENSE`, `${PLUGIN}/vendor/dsh-acp-demo/PROVENANCE.json`,
@@ -56,10 +59,10 @@ if (manifest.name !== 'codex-co-engineer' || packageJson.name !== 'codex-co-engi
   fail('Plugin manifest and package must use the codex-co-engineer identifier.');
 }
 const contractText = await text(`${PLUGIN}/mcp/v3/contract.mjs`);
-if (manifest.version !== '3.1.1' || packageJson.version !== '3.1.1'
-  || !contractText.includes("VERSION = '3.1.1'")
+if (manifest.version !== RELEASE_VERSION || packageJson.version !== RELEASE_VERSION
+  || !contractText.includes(`VERSION = '${RELEASE_VERSION}'`)
   || !serverText.includes('version: VERSION')) {
-  fail('Plugin manifest, package, contract, and MCP server must all be version 3.1.1.');
+  fail(`Plugin manifest, package, contract, and MCP server must all be version ${RELEASE_VERSION}.`);
 }
 if (manifest.interface?.displayName !== 'Codex-Co-Engineer') fail('Public display name mismatch.');
 if (manifest.interface?.developerName !== 'Codex-Co-Engineer') fail('Public developer name mismatch.');
@@ -71,9 +74,9 @@ if (!/^name: control-codex-co-engineer-agents$/mu.test(skillText)) {
   fail('Skill name must be the lowercase control-codex-co-engineer-agents identifier.');
 }
 const changelog = await text('CHANGELOG.md');
-if (!changelog.includes('## [3.1.1]')) fail('CHANGELOG.md must record the 3.1.1 release.');
+if (!changelog.includes(`## [${RELEASE_VERSION}]`)) fail(`CHANGELOG.md must record the ${RELEASE_VERSION} release.`);
 const marketplace = await json('.agents/plugins/marketplace.json');
-if (marketplace.plugins?.[0]?.version !== '3.1.1') fail('Marketplace must catalog version 3.1.1.');
+if (marketplace.plugins?.[0]?.version !== RELEASE_VERSION) fail(`Marketplace must catalog version ${RELEASE_VERSION}.`);
 if (!skillText.includes('property named `repo`')
   || !skillText.includes('"repo": "/absolute/path/to/git-worktree"')
   || !skillText.includes('Do not rename `repo` to `git_root`')) {
@@ -109,6 +112,23 @@ if (!serverText.includes('wait_ms') || !serverText.includes('event_cursor') || !
 }
 if (!serverText.includes('wait_until') || !serverText.includes('expected_duration_ms') || !serverText.includes('diagnostics')) {
   fail('task/delegate must advertise durable terminal waits, expected duration, and diagnostics.');
+}
+if (!serverText.includes('response_mode')
+  || !serverText.includes("enum: ['structured']")
+  || !serverText.includes("enum: ['summary', 'diagnostics', 'compact']")
+  || !serverText.includes('task_ids')
+  || !serverText.includes('cursors')) {
+  fail('3.2 public contract must advertise structured response_mode, compact task view, and wait-any task_ids/cursors.');
+}
+const compactTaskText = await text(`${PLUGIN}/mcp/v3/compact-task.mjs`);
+if (!compactTaskText.includes('WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX')
+  || !compactTaskText.includes('projectWaitAnyProgress')
+  || !compactTaskText.includes('enforceWaitAnyResponseBudget')) {
+  fail('compact-task.mjs must export the bounded wait-any projection contract.');
+}
+const taskStoreText = await text(`${PLUGIN}/mcp/v3/task-store.mjs`);
+if (!taskStoreText.includes('waitAnyResult') || !taskStoreText.includes('waitAnyCandidate')) {
+  fail('task-store.mjs must retain wait-any runtime coordination.');
 }
 const mcpEntries = await readdir(absolute(`${PLUGIN}/mcp`));
 if (JSON.stringify(mcpEntries) !== JSON.stringify(['v3'])) fail('Legacy MCP modules remain packaged.');
@@ -217,4 +237,4 @@ for (const relative of tracked) {
   }
 }
 
-process.stdout.write('Codex-Co-Engineer 3.1.1 release validation passed.\n');
+process.stdout.write(`Codex-Co-Engineer ${RELEASE_VERSION} release validation passed.\n`);

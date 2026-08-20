@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-08-20
+
+Measured coordination efficiency on the same five-tool catalog. Compact views,
+list pagination, opt-in structured transport, bounded terminal evidence,
+managed-workspace and Cursor Cloud preflight hardening, and wait-any semantics
+land without changing the 3.1.1 default omitted-mode response shapes.
+
+### Added
+
+- **Compact task and list projections.** `task` `view: "compact"` returns a
+  bounded coordination payload (8,192 UTF-8 bytes server cap). `status` and
+  `tasks` accept `detail: "compact"` with bounded limits and opaque keyset
+  pagination. Measured full JSON-RPC sizes with text duplication stay within
+  readiness-only ≤8,192, compact status (20 cards) ≤24,576, and compact tasks
+  page (20 cards) ≤32,768.
+- **Wait-any on `tasks`.** Coordinate 1–8 exact `task_ids` with one shared
+  `wait_ms` / `wait_until`. Returns bounded per-target snapshots and live event
+  previews; `progress.detail_hint` points callers to single-task `task` for
+  full event detail. Aggregate structured wait-any responses stay within a
+  72 KiB cap.
+- **Opt-in structured transport.** All five tools accept
+  `response_mode: "structured"` for a bounded text fallback while
+  `structuredContent` remains authoritative. Omitting the property preserves
+  the exact 3.1.1 full-text duplication contract. Structured opt-in reduces
+  aggregate JSON-RPC bytes by at least 30% versus the immutable 3.1.1
+  duplication baseline in the efficiency harness.
+- **Bounded, redacted terminal evidence.** Provider terminal results are
+  secret-redacted and size-bounded, including nested objects. Clipped evidence
+  reports `result_truncated` and `result_original_chars` when the source size
+  is known (Unicode code points).
+- **Managed workspace and Cursor Cloud preflight.** Managed local writers
+  verify worktree identity before launch. Cursor Cloud preflight hardens
+  provider-visible origin checks and fails closed on credential-bearing or
+  unsupported origins.
+- **Efficient dogfood workflow** in `docs/efficient-dogfood.md` with neutral
+  example paths.
+
+### Documentation
+
+- Bumped package, plugin, marketplace, contract, and preflight surfaces to
+  3.2.0. Added GitHub Release notes and release-validator inventory for new
+  production modules (`compact-task.mjs`, `provider-result.mjs`,
+  `response.mjs`) plus wait-any runtime checks.
+
 ## [3.1.1] - 2026-08-20
 
 ### Fixed

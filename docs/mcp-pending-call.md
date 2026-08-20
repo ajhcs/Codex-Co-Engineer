@@ -1,6 +1,6 @@
 # MCP pending-call budget
 
-Codex-Co-Engineer 3.1.1 advertises a 4-hour pending MCP tool-call budget so a
+Codex-Co-Engineer 3.2.0 advertises a 4-hour pending MCP tool-call budget so a
 `task(wait_until="terminal")` call can cover a multi-hour delegated job
 without once-per-minute model wakeups. This is a plugin setting, not a
 measured Codex Desktop hard limit.
@@ -31,7 +31,7 @@ time plus whether the MCP server returned before the requested wait.
 
 ## Real-host acceptance procedure
 
-Run these on the Codex Desktop host that will ship, with the 3.1.1 plugin
+Run these on the Codex Desktop host that will ship, with the 3.2.0 plugin
 installed and a Linux systemd/cgroup-ready environment. Do not run them in
 CI.
 
