@@ -1,0 +1,91 @@
+{
+  "baseline_version": "3.1.1",
+  "task_counts": [1, 20, 54],
+  "call_count": 6,
+  "wait_call_count": 1,
+  "wait_duration_ms": 25,
+  "wait_reason": "timeout",
+  "responses": {
+    "1": {
+      "status": {
+        "text_content_bytes": 3033,
+        "structured_content_bytes": 3033,
+        "jsonrpc_bytes": 6438
+      },
+      "delegate": {
+        "text_content_bytes": 1041,
+        "structured_content_bytes": 1041,
+        "jsonrpc_bytes": 2302
+      },
+      "task": {
+        "text_content_bytes": 4238,
+        "structured_content_bytes": 4238,
+        "jsonrpc_bytes": 9050
+      },
+      "tasks": {
+        "text_content_bytes": 827,
+        "structured_content_bytes": 827,
+        "jsonrpc_bytes": 1848
+      },
+      "cancel": {
+        "text_content_bytes": 824,
+        "structured_content_bytes": 824,
+        "jsonrpc_bytes": 1842
+      }
+    },
+    "20": {
+      "status": {
+        "text_content_bytes": 63762,
+        "structured_content_bytes": 63762,
+        "jsonrpc_bytes": 131171
+      },
+      "delegate": {
+        "text_content_bytes": 1041,
+        "structured_content_bytes": 1041,
+        "jsonrpc_bytes": 2302
+      },
+      "task": {
+        "text_content_bytes": 4238,
+        "structured_content_bytes": 4238,
+        "jsonrpc_bytes": 9050
+      },
+      "tasks": {
+        "text_content_bytes": 61555,
+        "structured_content_bytes": 61555,
+        "jsonrpc_bytes": 126579
+      },
+      "cancel": {
+        "text_content_bytes": 824,
+        "structured_content_bytes": 824,
+        "jsonrpc_bytes": 1842
+      }
+    },
+    "54": {
+      "status": {
+        "text_content_bytes": 63762,
+        "structured_content_bytes": 63762,
+        "jsonrpc_bytes": 131171
+      },
+      "delegate": {
+        "text_content_bytes": 1041,
+        "structured_content_bytes": 1041,
+        "jsonrpc_bytes": 2302
+      },
+      "task": {
+        "text_content_bytes": 4238,
+        "structured_content_bytes": 4238,
+        "jsonrpc_bytes": 9050
+      },
+      "tasks": {
+        "text_content_bytes": 174795,
+        "structured_content_bytes": 174795,
+        "jsonrpc_bytes": 359060
+      },
+      "cancel": {
+        "text_content_bytes": 824,
+        "structured_content_bytes": 824,
+        "jsonrpc_bytes": 1842
+      }
+    }
+  }
+}
