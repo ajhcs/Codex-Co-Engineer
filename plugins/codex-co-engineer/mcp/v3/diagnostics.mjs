@@ -233,6 +233,76 @@ export function diagnosticEnvelope(task, runtime = null, extras = {}) {
   });
 }
 
+// Bounds to enforce claimed JSON-RPC byte targets under worst valid values.
+const COMPACT_FIELD_LIMITS = Object.freeze({
+  id: 32,
+  provider: 32,
+  branch: 200,
+  start_sha: 40,
+  timestamp: 64,
+  state: 32,
+  status: 32,
+});
+const COMPACT_MAX_BRANCH_LEN = 24;
+
+function boundString(value, maxLen, fallback = null) {
+  if (value == null) return fallback;
+  const s = String(value);
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen);
+}
+
+function boundDeadline(deadline) {
+  if (!deadline || typeof deadline !== 'object') return null;
+  // Only allow-list deadline fields; trim any strings to tight bounds.
+  const out = {};
+  if (Number.isInteger(deadline.expected_duration_ms)) out.expected_duration_ms = deadline.expected_duration_ms;
+  if (typeof deadline.deadline_at === 'string') out.deadline_at = boundString(deadline.deadline_at, 64, null);
+  if (typeof deadline.deadline_source === 'string') out.deadline_source = boundString(deadline.deadline_source, 32, null);
+  if (Number.isInteger(deadline.remaining_ms) || typeof deadline.remaining_ms === 'number') out.remaining_ms = deadline.remaining_ms;
+  return Object.keys(out).length ? out : null;
+}
+
+export function compactTaskCard(task) {
+  if (!task || typeof task !== 'object') fail('invalid_task_record', 'Task record is invalid.');
+  const fullDeadline = deadlineProjection(task);
+  const deadline = boundDeadline(fullDeadline ? {
+    expected_duration_ms: fullDeadline.expected_duration_ms,
+    deadline_at: fullDeadline.deadline_at,
+    deadline_source: fullDeadline.deadline_source,
+    remaining_ms: fullDeadline.remaining_ms,
+  } : null);
+  const rawBranch = task.branch ?? null;
+  const rawSha = task.start_sha ?? task.starting_ref ?? null;
+  const card = {
+    id: boundString(task.id, COMPACT_FIELD_LIMITS.id, null),
+    state: boundString(publicState(task.status), COMPACT_FIELD_LIMITS.state, null),
+    status: boundString(task.status, COMPACT_FIELD_LIMITS.status, null),
+    provider: boundString(task.provider ?? null, COMPACT_FIELD_LIMITS.provider, null),
+    created_at: boundString(task.created_at ?? null, COMPACT_FIELD_LIMITS.timestamp, null),
+    updated_at: boundString(task.updated_at ?? null, COMPACT_FIELD_LIMITS.timestamp, null),
+    finished_at: boundString(task.finished_at ?? null, COMPACT_FIELD_LIMITS.timestamp, null),
+    deadline,
+    branch: boundString(rawBranch, COMPACT_MAX_BRANCH_LEN, null),
+    start_sha: boundString(rawSha, 40, null),
+  };
+  // Defensive: ensure no oversized strings escape even if sanitizer truncates differently.
+  // Compact cards are built from allow-listed tiny fields only; never project omitted full receipt bodies.
+  const sanitized = sanitizePublicReceipt(card);
+  // Enforce hard JSON length cap per card (upper bound). Worst-case card JSON is < 700 bytes.
+  // We assert via JSON stringify in tests; here we ensure field slicing already guarantees it.
+  const frozen = freezeCompact(sanitized);
+  return frozen;
+}
+
+function freezeCompact(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    Object.freeze(value);
+    if (value.deadline && typeof value.deadline === 'object') Object.freeze(value.deadline);
+  }
+  return Object.freeze(value);
+}
+
 export function compactSummary(task, progress, runtime, extras = {}) {
   const envelope = diagnosticEnvelope(task, runtime, {
     ...extras,

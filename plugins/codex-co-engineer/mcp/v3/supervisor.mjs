@@ -15,7 +15,7 @@ import {
 } from './contract.mjs';
 import { COMPACT_VIEW, projectCompactTask, resolveTaskView } from './compact-task.mjs';
 import { deadlineReached, nextDeadlineExtension, resolveTaskDeadline } from './deadline.mjs';
-import { compactSummary, diagnosticEnvelope, readTaskDiagnostics } from './diagnostics.mjs';
+import { compactSummary, compactTaskCard, diagnosticEnvelope, readTaskDiagnostics } from './diagnostics.mjs';
 import { submitReply } from './mailbox.mjs';
 import {
   appendTaskEvent,
@@ -24,6 +24,9 @@ import {
   createTask,
   launchReservationActive,
   listTasks,
+  listTasksPage,
+  parseStatusIncludeTasks,
+  parseStatusTaskLimit,
   projectLiveLastEvent,
   readRuntimeRecord,
   readTask,
@@ -863,13 +866,75 @@ export async function inspectTask(root, args = {}, options = {}) {
   return taskStatus(root, args.task_id, { ...args, ...options });
 }
 
-export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
-  const tasks = await listTasks(root);
-  for (let index = 0; index < tasks.length; index += 1) {
-    const task = tasks[index];
+export async function supervisorStatus(root = stateRoot(), dependencies = {}, options = {}) {
+  // Allow calling as supervisorStatus(root, opts) for backward compat in tests.
+  const hasDepsShape = dependencies && typeof dependencies === 'object' && ('probeBoundary' in dependencies || 'readProviderReadiness' in dependencies);
+  const looksLikeOpts = dependencies && typeof dependencies === 'object' && ('detail' in dependencies || 'task_limit' in dependencies || 'include_tasks' in dependencies || 'taskLimit' in dependencies || 'includeTasks' in dependencies);
+  if (!hasDepsShape && looksLikeOpts) {
+    options = dependencies;
+    dependencies = {};
+  }
+  const hasOptions = options && typeof options === 'object' && (options.detail !== undefined || options.task_limit !== undefined || options.taskLimit !== undefined || options.include_tasks !== undefined || options.includeTasks !== undefined);
+  // Legacy no-arg path: must preserve exact 3.2 shape and reconcile ALL tasks before slicing (active/task values are durable truth).
+  if (!hasOptions) {
+    const tasksAll = await listTasks(root);
+    for (let index = 0; index < tasksAll.length; index += 1) {
+      const task = tasksAll[index];
+      if (!ACTIVE.has(task.status)) continue;
+      const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
+      tasksAll[index] = await reconcileInactiveTask(root, task, runtime);
+    }
+    const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
+    const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
+    for (const provider of ['grok', 'cursor-local', 'dsh']) {
+      if (!boundary.ready) readiness[provider] = {
+        ...readiness[provider],
+        ready: false,
+        reason: boundary.reason ?? 'local_boundary_unavailable',
+      };
+    }
+    return {
+      version: VERSION,
+      healthy: boundary.ready,
+      active: tasksAll.filter((task) => ACTIVE.has(task.status)).length,
+      providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
+      capabilities: {
+        grok: providerCapabilities('grok'),
+        'cursor-local': providerCapabilities('cursor-local'),
+        dsh: providerCapabilities('dsh'),
+        'cursor-cloud': providerCapabilities('cursor-cloud'),
+      },
+      mcp_pending_call: mcpPendingCallReport(),
+      local_boundary: boundary,
+      readiness,
+      tasks: await Promise.all(tasksAll.slice(0, 20).map((task) => projectLiveLastEvent(root, task))),
+    };
+  }
+  const detail = options.detail ?? 'full';
+  if (detail !== 'full' && detail !== 'compact') {
+    throw Object.assign(new Error('detail must be full or compact.'), { code: 'invalid_detail' });
+  }
+  const includeTasksRaw = options.include_tasks !== undefined ? options.include_tasks : options.includeTasks;
+  const includeTasks = parseStatusIncludeTasks(includeTasksRaw);
+  const taskLimitRaw = options.task_limit !== undefined ? options.task_limit : options.taskLimit;
+  let taskLimit;
+  if (includeTasks) {
+    taskLimit = taskLimitRaw !== undefined ? parseStatusTaskLimit(taskLimitRaw) : 20;
+  } else {
+    // Deterministic semantics: when include_tasks is false, task_limit is validated if provided but ignored (forced to 0).
+    // Documented in tool description: "Ignored when include_tasks is false." Validation ensures caller typos are surfaced.
+    if (taskLimitRaw !== undefined) parseStatusTaskLimit(taskLimitRaw);
+    taskLimit = 0;
+  }
+  // Preserve reconciliation semantics: reconcile ALL tasks before slicing. Slice is presentation-only.
+  // This ensures legacy active/reconciled values are not skewed by the limit window.
+  const allTasks = await listTasks(root);
+  const totalTasks = allTasks.length;
+  for (let index = 0; index < allTasks.length; index += 1) {
+    const task = allTasks[index];
     if (!ACTIVE.has(task.status)) continue;
     const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
-    tasks[index] = await reconcileInactiveTask(root, task, runtime);
+    allTasks[index] = await reconcileInactiveTask(root, task, runtime);
   }
   const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
   const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
@@ -880,10 +945,20 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
       reason: boundary.reason ?? 'local_boundary_unavailable',
     };
   }
-  return {
+  const totalActive = allTasks.filter((task) => ACTIVE.has(task.status)).length;
+  let windowTasks = [];
+  if (includeTasks && taskLimit > 0) {
+    windowTasks = allTasks.slice(0, taskLimit);
+    // Compact/readiness paths avoid constructing/projecting omitted full public receipts.
+    // Full detail projects live last_event (event-log I/O); compact skips that overlay.
+    if (detail === 'full') {
+      windowTasks = await Promise.all(windowTasks.map((task) => projectLiveLastEvent(root, task)));
+    }
+  }
+  const result = {
     version: VERSION,
     healthy: boundary.ready,
-    active: tasks.filter((task) => ACTIVE.has(task.status)).length,
+    active: totalActive,
     providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
     capabilities: {
       grok: providerCapabilities('grok'),
@@ -894,6 +969,14 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}) {
     mcp_pending_call: mcpPendingCallReport(),
     local_boundary: boundary,
     readiness,
-    tasks: await Promise.all(tasks.slice(0, 20).map((task) => projectLiveLastEvent(root, task))),
+    detail,
+    task_count: totalTasks,
+    returned_tasks: windowTasks.length,
+    task_limit: taskLimit,
+    include_tasks: includeTasks,
+    total: totalTasks,
+    limit: taskLimit,
+    tasks: detail === 'compact' ? windowTasks.map((t) => compactTaskCard(t)) : windowTasks,
   };
+  return result;
 }
