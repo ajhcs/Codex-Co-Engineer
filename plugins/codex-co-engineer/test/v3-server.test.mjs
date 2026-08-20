@@ -8,6 +8,13 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { readFileSync } from 'node:fs';
+import {
+  WAIT_ANY_PROGRESS_DETAIL_HINT,
+  WAIT_ANY_PROGRESS_EVENT_BYTES_MAX,
+  WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX,
+  WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX,
+  WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
+} from '../mcp/v3/compact-task.mjs';
 import { appendTaskEvent, createTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
 
 function currentRuntime() {
@@ -265,9 +272,18 @@ test('tasks wait-any keeps the five-tool catalog and returns safe compact snapsh
     assert.equal(waited.wait_reason, 'progress');
     assert.equal(waited.triggered_task_id, 'server-any-b');
     assert.equal(waited.tasks.length, 2);
-    assert.equal(waited.tasks.find((entry) => entry.task_id === 'server-any-b').progress.last_event.text, 'server-any-progress');
-    assert.equal(waited.tasks.find((entry) => entry.task_id === 'server-any-b').task.last_event.text, 'server-any-progress');
-    assert.equal(waited.tasks[0].task.agent_argv, undefined);
+    const updated = waited.tasks.find((entry) => entry.task_id === 'server-any-b');
+    assert.equal(updated.progress.last_event.text, 'server-any-progress');
+    assert.equal(updated.task.view, 'compact');
+    assert.equal(updated.task.task_id, 'server-any-b');
+    assert.equal(updated.task.last_event, undefined);
+    assert.equal(updated.task.id, undefined);
+    assert.equal(updated.task.agent_argv, undefined);
+    assert.equal(updated.progress.detail_hint, WAIT_ANY_PROGRESS_DETAIL_HINT);
+    assert.doesNotMatch(JSON.stringify(updated.task), /stale-task-json-event|server-any-progress/u);
+    assert.ok(Buffer.byteLength(JSON.stringify(updated.task), 'utf8') <= WAIT_ANY_TASK_STRUCTURED_BYTES_MAX);
+    assert.ok(Buffer.byteLength(JSON.stringify(updated.progress.last_event), 'utf8') <= WAIT_ANY_PROGRESS_EVENT_BYTES_MAX);
+    assert.ok(Buffer.byteLength(JSON.stringify(updated.progress), 'utf8') <= WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX);
 
     const invalidArgs = await request({
       jsonrpc: '2.0',
@@ -301,6 +317,68 @@ test('tasks wait-any keeps the five-tool catalog and returns safe compact snapsh
     const serialized = JSON.stringify(missing);
     assert.equal(missing.result.structuredContent.wait_reason, 'task_not_found');
     assert.doesNotMatch(serialized, /ENOENT|\/tmp\/|task\.json/u);
+  });
+});
+
+test('wait-any bounds eight live events, compact snapshots, and the canonical response', async () => {
+  await withServer(async ({ state, request }) => {
+    const taskIds = Array.from({ length: 8 }, (_, index) => `server-any-live-${index}`);
+    const eventSecret = 'sk-event-secret-1234567890';
+    const eventText = `${'A'.repeat(3_800)} ${eventSecret} LIVE-END`;
+    for (const [index, id] of taskIds.entries()) {
+      await createTask({
+        root: state,
+        prompt: `live wait-any task ${index}`,
+        record: {
+          id,
+          status: 'running',
+          provider: 'grok',
+          agent_argv: ['grok', '--private-arg'],
+        },
+      });
+      await appendTaskEvent(state, id, {
+        type: 'provider',
+        event: {
+          type: 'tool_call',
+          at: new Date().toISOString(),
+          state: 'running',
+          status: 'running',
+          reason: 'live event includes a bounded diagnostic preview',
+          text: eventText,
+          apiKey: eventSecret,
+        },
+      });
+    }
+
+    const response = await request({
+      jsonrpc: '2.0',
+      id: 16,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: { task_ids: taskIds, wait_until: 'progress', wait_ms: 0, response_mode: 'structured' },
+      },
+    });
+    const value = response.result.structuredContent;
+    assert.equal(value.tasks.length, 8);
+    for (const entry of value.tasks) {
+      assert.equal(entry.task.view, 'compact');
+      assert.equal(entry.task.task_id, entry.task_id);
+      assert.equal(entry.progress.detail_hint, WAIT_ANY_PROGRESS_DETAIL_HINT);
+      assert.equal(entry.progress.last_event.type, 'tool_call');
+      assert.equal(entry.progress.last_event.state, 'running');
+      assert.equal(entry.progress.last_event.status, 'running');
+      assert.equal(entry.progress.last_event.text.endsWith('LIVE-END'), true);
+      assert.match(entry.progress.last_event.text, /\[REDACTED\]/u);
+      assert.ok(Buffer.byteLength(JSON.stringify(entry.task), 'utf8') <= WAIT_ANY_TASK_STRUCTURED_BYTES_MAX);
+      assert.ok(Buffer.byteLength(JSON.stringify(entry.progress.last_event), 'utf8') <= WAIT_ANY_PROGRESS_EVENT_BYTES_MAX);
+      assert.ok(Buffer.byteLength(JSON.stringify(entry.progress), 'utf8') <= WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX);
+      assert.doesNotMatch(JSON.stringify(entry.task), /private-arg|"prompt"|source_repo|worktree_path|agent_argv/u);
+    }
+    const aggregateBytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
+    assert.ok(aggregateBytes <= WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX, `wait-any aggregate was ${aggregateBytes} bytes`);
+    assert.doesNotMatch(JSON.stringify(response), new RegExp(eventSecret, 'u'));
+    assert.doesNotMatch(JSON.stringify(response), /apiKey|private-arg/u);
   });
 });
 

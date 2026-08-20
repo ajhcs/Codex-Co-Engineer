@@ -7,8 +7,13 @@ import test from 'node:test';
 import {
   COMPACT_STRUCTURED_BYTES_MAX,
   COMPACT_VIEW,
+  WAIT_ANY_PROGRESS_EVENT_BYTES_MAX,
+  WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX,
+  WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
   compactStructuredBytes,
   projectCompactTask,
+  projectWaitAnyProgress,
+  projectWaitAnyProgressEvent,
   resolveTaskView,
   tailText,
   utf8Head,
@@ -229,6 +234,40 @@ test('compact projection covers running, completed, and failed fixture tasks und
     });
   }
   process.stdout.write(`${JSON.stringify({ compact_fixture_measurements: measurements })}\n`);
+});
+
+test('wait-any projections use smaller task and live-event caps without changing single-task defaults', () => {
+  const task = representativeFixtureTasks().running;
+  const progress = fixtureProgress(task);
+  const singleTask = projectCompactTask({ task, progress });
+  const waitAnyTask = projectCompactTask({
+    task,
+    progress,
+    maxBytes: WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
+  });
+  assert.ok(compactStructuredBytes(singleTask) <= COMPACT_STRUCTURED_BYTES_MAX);
+  assert.ok(compactStructuredBytes(waitAnyTask) <= WAIT_ANY_TASK_STRUCTURED_BYTES_MAX);
+
+  const event = projectWaitAnyProgressEvent({
+    type: 'tool_call',
+    at: '2026-08-20T00:00:00.000Z',
+    state: 'running',
+    status: 'running',
+    reason: 'R'.repeat(500),
+    text: `${'H'.repeat(4_000)} sk-event-secret-1234567890 LIVE-END`,
+    authorization: 'Bearer sk-authorization-secret-1234567890',
+  });
+  assert.ok(compactStructuredBytes(event) <= WAIT_ANY_PROGRESS_EVENT_BYTES_MAX);
+  assert.equal(event.type, 'tool_call');
+  assert.equal(event.text.endsWith('LIVE-END'), true);
+  assert.match(event.text, /\[REDACTED\]/u);
+  assert.doesNotMatch(JSON.stringify(event), /sk-event-secret|authorization|sk-authorization/u);
+
+  const waitAnyProgress = projectWaitAnyProgress({
+    ...progress,
+    last_event: event,
+  });
+  assert.ok(compactStructuredBytes(waitAnyProgress) <= WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX);
 });
 
 test('compact structured JSON stays at or under 8192 bytes across PR1 fixture counts', () => {

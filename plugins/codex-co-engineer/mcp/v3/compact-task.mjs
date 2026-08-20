@@ -11,11 +11,23 @@ export const COMPACT_VIEW = 'compact';
 export const DEFAULT_TASK_VIEW = 'summary';
 export const TASK_VIEWS = Object.freeze(['summary', 'diagnostics', 'compact']);
 export const COMPACT_STRUCTURED_BYTES_MAX = 8_192;
+/** Smaller per-task cap used when up to eight compact tasks share one wait-any response. */
+export const WAIT_ANY_TASK_STRUCTURED_BYTES_MAX = 7_168;
+/** Maximum serialized size of one live event retained in wait-any progress. */
+export const WAIT_ANY_PROGRESS_EVENT_BYTES_MAX = 768;
+/** Maximum serialized size of one wait-any progress envelope. */
+export const WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX = 1_024;
+/** Enforced aggregate structured-content cap for an eight-target wait-any response. */
+export const WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX = 72 * 1024;
+export const WAIT_ANY_PROGRESS_DETAIL_HINT = 'Call task with this task_id for full live event detail.';
 const COMPACT_RESULT_PREVIEW_BYTES = 1_536;
 const COMPACT_SUMMARY_PREVIEW_BYTES = 512;
 const COMPACT_HANDOFF_TEXT_BYTES = 256;
 const COMPACT_ID_BYTES = 80;
 const COMPACT_SCALAR_BYTES = 64;
+const WAIT_ANY_EVENT_SCALAR_BYTES = 48;
+const WAIT_ANY_EVENT_REASON_BYTES = 96;
+const WAIT_ANY_EVENT_TEXT_BYTES = 320;
 const COMPACT_CHECK_LIMIT = 8;
 const COMPACT_EXTENSION_LIMIT = 4;
 const ELLIPSIS = '…';
@@ -217,8 +229,8 @@ function compactHandoffPreview(handoff) {
   return Object.keys(preview).length > 0 ? preview : null;
 }
 
-function withinBudget(value) {
-  return byteLength(value) <= COMPACT_STRUCTURED_BYTES_MAX;
+function withinBudget(value, maxBytes = COMPACT_STRUCTURED_BYTES_MAX) {
+  return byteLength(value) <= maxBytes;
 }
 
 function boundDeepStringsInPlace(value, maxBytes, depth = 0) {
@@ -328,9 +340,9 @@ function lastResortEnvelope(payload) {
   };
 }
 
-function shrinkEssentialToBudget(payload) {
+function shrinkEssentialToBudget(payload, maxBytes) {
   const essential = essentialCompactEnvelope(payload);
-  if (withinBudget(essential)) return essential;
+  if (withinBudget(essential, maxBytes)) return essential;
   // Halve a nonnegative budget and stop at zero so the loop always progresses.
   let budget = COMPACT_SUMMARY_PREVIEW_BYTES;
   while (true) {
@@ -343,7 +355,7 @@ function shrinkEssentialToBudget(payload) {
         Math.min(budget, COMPACT_HANDOFF_TEXT_BYTES),
       );
     }
-    if (withinBudget(essential)) return essential;
+    if (withinBudget(essential, maxBytes)) return essential;
     if (budget === 0) break;
     const nextBudget = Math.floor(budget / 2);
     budget = nextBudget < budget ? nextBudget : 0;
@@ -351,58 +363,132 @@ function shrinkEssentialToBudget(payload) {
   essential.summary.message = ELLIPSIS;
   essential.summary.suggested_action = ELLIPSIS;
   boundDeepStringsInPlace(essential, COMPACT_SCALAR_BYTES);
-  if (withinBudget(essential)) return essential;
+  if (withinBudget(essential, maxBytes)) return essential;
   return lastResortEnvelope(payload);
 }
 
-function enforceCompactBudget(payload) {
+function enforceCompactBudget(payload, maxBytes) {
   const safe = cloneJson(payload);
-  if (withinBudget(safe)) return safe;
+  if (withinBudget(safe, maxBytes)) return safe;
 
   if (plainObject(safe.result) && typeof safe.result.output === 'string') {
-    const overflow = byteLength(safe) - COMPACT_STRUCTURED_BYTES_MAX;
+    const overflow = byteLength(safe) - maxBytes;
     const nextBytes = Math.max(0, Buffer.byteLength(safe.result.output, 'utf8') - overflow - Buffer.byteLength(ELLIPSIS, 'utf8'));
     safe.result.output = tailText(safe.result.output, nextBytes);
-    if (withinBudget(safe)) return safe;
+    if (withinBudget(safe, maxBytes)) return safe;
     delete safe.result.output;
     if (Object.keys(safe.result).length === 0) delete safe.result;
-    if (withinBudget(safe)) return safe;
+    if (withinBudget(safe, maxBytes)) return safe;
   }
   if (safe.result !== undefined) {
     delete safe.result;
-    if (withinBudget(safe)) return safe;
+    if (withinBudget(safe, maxBytes)) return safe;
   }
   if (safe.handoff !== undefined) {
     delete safe.handoff;
-    if (withinBudget(safe)) return safe;
+    if (withinBudget(safe, maxBytes)) return safe;
   }
   if (plainObject(safe.deadline) && Array.isArray(safe.deadline.extensions) && safe.deadline.extensions.length > 0) {
     safe.deadline.extensions = [];
-    if (withinBudget(safe)) return safe;
+    if (withinBudget(safe, maxBytes)) return safe;
   }
   if (plainObject(safe.summary)) {
     if (typeof safe.summary.message === 'string') {
       safe.summary.message = tailText(safe.summary.message, COMPACT_SUMMARY_PREVIEW_BYTES);
-      if (withinBudget(safe)) return safe;
+      if (withinBudget(safe, maxBytes)) return safe;
     }
     if (typeof safe.summary.suggested_action === 'string') {
       safe.summary.suggested_action = tailText(safe.summary.suggested_action, COMPACT_HANDOFF_TEXT_BYTES);
-      if (withinBudget(safe)) return safe;
+      if (withinBudget(safe, maxBytes)) return safe;
     }
   }
   boundDeepStringsInPlace(safe, COMPACT_HANDOFF_TEXT_BYTES);
-  if (withinBudget(safe)) return safe;
+  if (withinBudget(safe, maxBytes)) return safe;
   for (const key of ['deadline', 'branch', 'start_sha', 'workspace_kind']) {
     if (safe[key] !== undefined) {
       delete safe[key];
-      if (withinBudget(safe)) return safe;
+      if (withinBudget(safe, maxBytes)) return safe;
     }
   }
-  return shrinkEssentialToBudget(safe);
+  return shrinkEssentialToBudget(safe, maxBytes);
 }
 
-export function projectCompactTask({ task, progress = null, runtime = null, extras = {} } = {}) {
+function resolveCompactMaxBytes(maxBytes) {
+  const resolved = maxBytes ?? COMPACT_STRUCTURED_BYTES_MAX;
+  if (!Number.isInteger(resolved) || resolved < 1_024 || resolved > COMPACT_STRUCTURED_BYTES_MAX) {
+    fail('invalid_compact_max_bytes', `compact maxBytes must be an integer from 1024 to ${COMPACT_STRUCTURED_BYTES_MAX}.`);
+  }
+  return resolved;
+}
+
+/**
+ * Project one live event into the small coordination envelope used by
+ * wait-any. The single-task task view remains the path for full event detail.
+ */
+export function projectWaitAnyProgressEvent(event) {
+  if (!plainObject(event)) return null;
+  const compact = {};
+  for (const key of ['type', 'at', 'state', 'status']) {
+    if (typeof event[key] === 'string') compact[key] = tailText(event[key], WAIT_ANY_EVENT_SCALAR_BYTES);
+  }
+  if (typeof event.reason === 'string') compact.reason = tailText(event.reason, WAIT_ANY_EVENT_REASON_BYTES);
+  const text = typeof event.text === 'string'
+    ? event.text
+    : (typeof event.message === 'string' ? event.message : null);
+  if (text !== null) compact.text = tailText(text, WAIT_ANY_EVENT_TEXT_BYTES);
+  const sanitized = sanitizePublicReceipt(compact) ?? {};
+  if (withinBudget(sanitized, WAIT_ANY_PROGRESS_EVENT_BYTES_MAX)) return sanitized;
+  // The allow-listed fields above are already bounded. Keep a deterministic
+  // fail-closed fallback if future additions accidentally exceed the cap.
+  const fallback = {
+    ...(typeof compact.type === 'string' ? { type: compact.type } : { type: 'progress' }),
+    ...(typeof compact.at === 'string' ? { at: compact.at } : {}),
+    ...(typeof compact.text === 'string' ? { text: tailText(compact.text, 256) } : {}),
+  };
+  if (withinBudget(fallback, WAIT_ANY_PROGRESS_EVENT_BYTES_MAX)) return fallback;
+  return { type: 'progress', text: ELLIPSIS };
+}
+
+/** Project and enforce the bounded wait-any progress envelope. */
+export function projectWaitAnyProgress(progress) {
+  if (!plainObject(progress)) return null;
+  const event = projectWaitAnyProgressEvent(progress.last_event);
+  const projected = {
+    event_cursor: typeof progress.event_cursor === 'string' ? progress.event_cursor : null,
+    last_event: event,
+    new_event_count: Number.isFinite(progress.new_event_count) ? progress.new_event_count : 0,
+    more_events: progress.more_events === true,
+    waited_ms: Number.isFinite(progress.waited_ms) ? progress.waited_ms : 0,
+    wait_reason: typeof progress.wait_reason === 'string' ? progress.wait_reason : null,
+    wait_until: typeof progress.wait_until === 'string' ? progress.wait_until : null,
+    ...(event ? { detail_hint: WAIT_ANY_PROGRESS_DETAIL_HINT } : {}),
+  };
+  const sanitized = sanitizePublicReceipt(projected) ?? {};
+  if (withinBudget(sanitized, WAIT_ANY_PROGRESS_STRUCTURED_BYTES_MAX)) return sanitized;
+  // A future progress field must never turn one target into an unbounded
+  // aggregate response; retain wake metadata and the compact event only.
+  return {
+    event_cursor: projected.event_cursor,
+    last_event: event,
+    new_event_count: projected.new_event_count,
+    more_events: projected.more_events,
+    waited_ms: projected.waited_ms,
+    wait_reason: projected.wait_reason,
+    wait_until: projected.wait_until,
+    ...(event ? { detail_hint: WAIT_ANY_PROGRESS_DETAIL_HINT } : {}),
+  };
+}
+
+/** Fail closed if the eight-target aggregate would exceed its documented cap. */
+export function enforceWaitAnyResponseBudget(value) {
+  const sanitized = sanitizePublicReceipt(value) ?? {};
+  if (withinBudget(sanitized, WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX)) return sanitized;
+  fail('wait_any_response_too_large', `wait-any structured response exceeds ${WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX} bytes.`);
+}
+
+export function projectCompactTask({ task, progress = null, runtime = null, extras = {}, maxBytes } = {}) {
   if (!task || typeof task !== 'object') fail('invalid_task_record', 'Task record is invalid.');
+  const compactMaxBytes = resolveCompactMaxBytes(maxBytes);
   const extraFields = plainObject(extras) ? extras : {};
   const lastEvent = extraFields.last_event ?? progress?.last_event ?? task.last_event ?? null;
   const summaryExtras = {
@@ -441,7 +527,7 @@ export function projectCompactTask({ task, progress = null, runtime = null, extr
   }
   // Sanitize first so budget enforcement measures the returned bytes, then
   // shrink in a fixed order. The essential envelope is the last-resort cap.
-  return Object.freeze(enforceCompactBudget(sanitizePublicReceipt(payload)));
+  return Object.freeze(enforceCompactBudget(sanitizePublicReceipt(payload), compactMaxBytes));
 }
 
 export function compactStructuredBytes(value) {
