@@ -68,13 +68,27 @@ path must be passed in the property named `repo`, for example
 or `repository`; the strict MCP schema rejects unknown properties. Pass
 `expected_duration_ms` or a backwards-compatible `timeout_ms` so the
 recorded deadline is `ceil(expected_duration_ms * 1.20)` unless an
-explicit `timeout_ms` of at least that margin is supplied. `task` accepts `wait_until`
-(`progress` or `terminal`), optional `wait_ms` (0-14400000), `cursor`,
-`view` (`summary` or `diagnostics`), audited deadline extension fields,
-and a same-session `reply` object. Terminal waits are event-driven and do
-not wake on routine text. Diagnostics are side-effect-free and redacted.
-It does not stream raw events or emit unsolicited stdio callbacks across
-assistant turns. See [MCP pending-call budget](mcp-pending-call.md).
+explicit `timeout_ms` of at least that margin is supplied.
+
+For routine coordination, use `task` with `view: "compact"`, or `status` and
+`tasks` with `detail: "compact"`. Compact status/task pages preserve each full
+task ID so the returned key can be passed unchanged to `task`, `cancel`, or a
+wait-any call. `status` accepts `include_tasks` and `task_limit`; `tasks`
+accepts a bounded `limit`, opaque keyset `cursor`, and provider/state filters.
+To wait for the first change among 1–8 exact tasks, pass `task_ids`, optional
+per-task `cursors`, and one shared `wait_ms` / `wait_until` to `tasks`. Do not
+mix wait-any fields with list pagination or filters.
+
+`task` accepts `wait_until` (`progress` or `terminal`), optional `wait_ms`
+(0-14400000), `cursor`, `view` (`summary`, `diagnostics`, or `compact`),
+audited deadline extension fields, and a same-session `reply` object. Terminal
+waits are event-driven and do not wake on routine text. Diagnostics are
+side-effect-free and redacted. Clients that actually consume
+`structuredContent` may opt into `response_mode: "structured"` on any tool;
+otherwise omit it to preserve the default compatible text receipt. The server
+does not stream raw events or emit unsolicited stdio callbacks across
+assistant turns. See [MCP pending-call budget](mcp-pending-call.md) and the
+[efficient dogfood workflow](efficient-dogfood.md).
 
 ### Local providers
 

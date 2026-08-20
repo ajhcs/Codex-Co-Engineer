@@ -14,7 +14,9 @@ land without changing the 3.1.1 default omitted-mode response shapes.
 - **Compact task and list projections.** `task` `view: "compact"` returns a
   bounded coordination payload (8,192 UTF-8 bytes server cap). `status` and
   `tasks` accept `detail: "compact"` with bounded limits and opaque keyset
-  pagination. Measured full JSON-RPC sizes with text duplication stay within
+  pagination. Compact cards preserve the complete valid task ID as a reusable
+  coordination key while returning only normalized state and essential timing
+  evidence. Measured full JSON-RPC sizes with text duplication stay within
   readiness-only ≤8,192, compact status (20 cards) ≤24,576, and compact tasks
   page (20 cards) ≤32,768.
 - **Wait-any on `tasks`.** Coordinate 1–8 exact `task_ids` with one shared
