@@ -5,26 +5,85 @@
 [![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Codex-Co-Engineer** is an open-source [Model Context Protocol
-(MCP)](https://modelcontextprotocol.io/) supervisor for multi-agent software
-engineering. It lets Codex delegate real review and implementation work to
-authenticated AI coding agents, including Grok Build, Cursor Local, Cursor
-Cloud, and DeepSeek Harness (DSH).
+**Codex-Co-Engineer 3.1.0** lets Codex delegate real review and
+implementation work to authenticated peer coding agents — Grok Build,
+Cursor Local, Cursor Cloud, and DeepSeek Harness (DSH) — then wait for a
+durable receipt instead of polling routine text.
 
-Codex stays the chief engineer, reviewer, and merge authority. The peers keep
-their normal coding capabilities, persistent logins, shell access, and
-dependency installation. Codex-Co-Engineer adds lifecycle tracking, optional
-local worktree isolation, bounded cancellation, and inspectable receipts. It
-is not another sandbox or policy engine.
+Codex stays the chief engineer, reviewer, and merge authority. The
+stable machine identifier is `codex-co-engineer`. In-repo release notes:
+[docs/releases/v3.1.0.md](docs/releases/v3.1.0.md).
 
-The stable machine identifier is `codex-co-engineer`. The bundled skill is
-`control-codex-co-engineer-agents`. Version 3.1.0 exposes five tools:
-`status`, `delegate`, `task`, `tasks`, and `cancel`. `delegate` records
-`expected_duration_ms` or `timeout_ms` and a 20% deadline margin. `task` can wait with
-`wait_until: "terminal"` until the recorded deadline, inspect
-summary/diagnostics views, extend a deadline with an explicit reason, and
-deliver a same-session reply. It does not push unsolicited stdio callbacks
-across assistant turns.
+![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
+
+![Codex-Co-Engineer 3.1.0 delegates to Grok, Cursor, and DSH, then waits for a terminal receipt](docs/assets/codex-co-engineer-3.1.0.svg)
+
+## First 60 seconds
+
+### 1. Copy, paste, install
+
+Requires Node.js 24+, Git, and Codex CLI. Local providers also need
+Linux `systemd --user`, `systemd-run` 244 or newer, unified cgroup v2,
+and `worktree-bootstrap` on `PATH`.
+
+```bash
+git clone https://github.com/ajhcs/Codex-Co-Engineer.git
+cd Codex-Co-Engineer
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer
+npm --prefix plugins/codex-co-engineer run setup
+npm --prefix plugins/codex-co-engineer run setup:check
+```
+
+`npm run setup` installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and
+the cohesive DSH `0.1.0-rc.7` composition. It does not log you into
+Grok, Cursor Local, or Cursor Cloud. `setup:check` verifies those pinned
+packages plus `worktree-bootstrap`. Start a **new** Codex session after
+the plugin add.
+
+### 2. Sign in once (only the providers you will use)
+
+```bash
+grok login
+cursor-agent login
+plugins/codex-co-engineer/bin/set-model-api-key
+```
+
+Cursor Cloud uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the
+owner-only `~/.config/cursor-cloud-control/api-key`. DSH uses
+`MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or
+`~/.config/codex-co-engineer/model-api-key`. Never put credentials in
+MCP arguments or prompts.
+
+### 3. First run
+
+In the new Codex session:
+
+> Show Codex-Co-Engineer status.
+
+Local providers are ready only when `local_boundary.ready` is true. Then
+delegate and wait:
+
+```json
+{
+  "task_id": "review-auth-refactor",
+  "provider": "grok",
+  "repo": "/absolute/path/to/git-worktree",
+  "role": "review",
+  "workspace_mode": "managed",
+  "prompt": "Review the current branch and report concrete correctness risks.",
+  "expected_duration_ms": 600000
+}
+```
+
+```json
+{
+  "task_id": "review-auth-refactor",
+  "wait_until": "terminal"
+}
+```
+
+Inspect the receipt before Codex pushes, opens a PR, or merges.
 
 ## What Codex-Co-Engineer is for
 
@@ -40,6 +99,15 @@ Use Codex-Co-Engineer when you want Codex to:
 Do not use it as a security sandbox, a credential broker, or a replacement for
 the provider's own login and approval flow.
 
+Version 3.1.0 exposes five tools: `status`, `delegate`, `task`, `tasks`,
+and `cancel`. `delegate` records `expected_duration_ms` or `timeout_ms`
+and a 20% deadline margin. `task` can wait with `wait_until: "terminal"`
+until the recorded deadline, inspect summary/diagnostics views, extend a
+deadline with an explicit reason, and deliver a same-session reply. It
+does not push unsolicited stdio callbacks across assistant turns.
+
+The bundled skill is `control-codex-co-engineer-agents`.
+
 ## Provider matrix
 
 | Provider | Identifier | Transport | Workspace | Local process boundary |
@@ -53,56 +121,6 @@ Roles are `review` and `implement`. An accepted prompt is never replayed
 through another transport. ACPX does not provide an authoritative prompt-sent
 acknowledgement, so a DSH task is marked `dispatch_uncertain` as soon as ACPX
 spawns and is never replayed through CLI.
-
-## Install
-
-Requirements:
-
-- Node.js 24 or newer. The release gate is intentionally pinned to Node 24.
-- Git and the `worktree-bootstrap` CLI/skill for managed local workspaces.
-- Linux with a working `systemd --user` manager, `systemd-run` 244 or newer,
-  and a unified cgroup v2 hierarchy for local providers.
-- Authenticated Grok Build and Cursor Local CLIs.
-- A Cursor Cloud API key in its normal owner-only configuration file.
-- The DSH/Muse model credential in its normal owner-only configuration file.
-
-Install the plugin through Codex, then run its one-time setup from the
-installed plugin package directory—the directory containing `package.json`
-and `bin/setup.mjs`. In this source checkout that directory is:
-
-```bash
-cd plugins/codex-co-engineer
-npm run setup
-npm run setup:check
-```
-
-For a Codex-managed installation, use the package path reported by Codex or
-its plugin manager instead of assuming it is relative to the current project.
-
-Setup installs the pinned ACPX, Cursor SDK, and cohesive DSH rc.7
-composition, creates owner-only DSH configuration/session directories, and
-does not perform provider login. Authenticate providers once through their
-normal flows; their sessions persist across Codex tasks:
-
-```bash
-grok login
-cursor-agent login
-bin/set-model-api-key
-```
-
-`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
-and `worktree-bootstrap` dependency. It does not install or authenticate Grok
-or Cursor Local or validate the Cursor Cloud key. Call `status` after setup:
-its `local_boundary` result verifies the Linux systemd/cgroup prerequisite in
-the MCP process's actual environment, and local providers are reported
-unavailable when that boundary is unavailable. The release gate also launches
-the MCP through the manifest's exact environment allowlist before accepting a
-local-provider release.
-
-Cursor Cloud uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the existing
-owner-only `~/.config/cursor-cloud-control/api-key`. The DSH key defaults to
-the owner-only `~/.config/codex-co-engineer/model-api-key`. Never put
-credentials in MCP arguments or prompts.
 
 ## Safety and workspace model
 
@@ -247,8 +265,11 @@ actual MCP server process, then confirm the plugin `.mcp.json` allowlist
 forwards `HOME`, `PATH`, `XDG_*`, and `DBUS_SESSION_BUS_ADDRESS`.
 
 **Where is the installed plugin?**
-Use the package path reported by Codex or its plugin manager. In this
-repository the source package is `plugins/codex-co-engineer`.
+After `codex plugin add codex-co-engineer@codex-co-engineer`, Codex reports
+the cached install path. The source package in this repository is
+`plugins/codex-co-engineer`. Run `npm run setup` from that source package
+(or with `npm --prefix plugins/codex-co-engineer`) rather than guessing a
+cache path.
 
 **A managed worktree appeared without a receipt.**
 Do not guess or delete it. Inspect `git worktree list` and
@@ -276,6 +297,10 @@ The authoritative release gate runs against one exact local candidate using
 Node 24. GitHub Actions is a credential-free mirror; live Grok, Cursor,
 Cursor Cloud, and DSH acceptance is recorded separately because CI must not
 send repository content to model providers.
+
+GitHub-ready 3.1.0 notes live in [docs/releases/v3.1.0.md](docs/releases/v3.1.0.md).
+This repository does not create the GitHub Release, tag, or remote from that
+file.
 
 The older `cursor-cloud-control` package remains in this repository as a
 compatibility plugin for existing installations. New installations need only

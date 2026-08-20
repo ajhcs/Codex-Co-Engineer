@@ -25,18 +25,18 @@ The default DSH configuration is
 `~/.config/codex-co-engineer/model-api-key`. Cursor Cloud also recognizes
 the existing owner-only `~/.config/cursor-cloud-control/api-key`.
 
-Run the following from the installed plugin package directory—the directory
-containing `package.json` and `bin/setup.mjs`:
+The visitor install is clone-first. From a repository checkout:
 
 ```bash
-npm run setup
-npm run setup:check
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer
+npm --prefix plugins/codex-co-engineer run setup
+npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-In a source checkout, that directory is
-`plugins/codex-co-engineer`. For a Codex-managed installation, use the
-package path reported by Codex or its plugin manager instead of assuming a
-project-relative path.
+The same setup scripts also run from `plugins/codex-co-engineer` as
+`npm run setup` and `npm run setup:check`. See the [repository
+README](../README.md) for the first-run flow.
 
 The package supports Node.js 24 and newer. The exact release gate is pinned
 to Node.js 24 so release receipts are reproducible.

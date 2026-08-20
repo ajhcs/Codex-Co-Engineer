@@ -16,7 +16,9 @@ const json = async (relative) => JSON.parse(await text(relative));
 const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/release.md',
-  'docs/future-work.md', 'docs/mcp-pending-call.md', 'scripts/mcp-pending-call-probe.mjs',
+  'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/releases/v3.1.0.md',
+  'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
+  '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',
   `${PLUGIN}/.codex-plugin/plugin.json`, `${PLUGIN}/.mcp.json`, `${PLUGIN}/package.json`,
   `${PLUGIN}/README.md`, `${PLUGIN}/bin/setup.mjs`,

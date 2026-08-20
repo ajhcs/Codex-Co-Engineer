@@ -116,6 +116,10 @@ inspect; Codex may push and open a PR only after verifying real commits.
 
 ## Install and authentication
 
+Fresh-visitor install (clone, then Codex plugin, then setup) is documented
+in the [repository README](../../README.md). The commands below are the
+package-local scripts from this directory.
+
 Requirements:
 
 - Node.js 24 or newer (the release gate is pinned to Node 24)
@@ -127,8 +131,8 @@ Requirements:
 - a Cursor Cloud API key
 - a Muse/Meta model API key for DSH
 
-From the installed plugin package directory—the directory containing
-`package.json` and `bin/setup.mjs`:
+From this package directory—the directory containing `package.json` and
+`bin/setup.mjs`:
 
 ```bash
 npm run setup
@@ -136,9 +140,12 @@ npm run setup:check
 npm test
 ```
 
-In a source checkout, that directory is `plugins/codex-co-engineer`. For a
-Codex-managed installation, use the package path reported by Codex or its
-plugin manager instead of assuming a project-relative path.
+From a repository clone, the same scripts are:
+
+```bash
+npm --prefix plugins/codex-co-engineer run setup
+npm --prefix plugins/codex-co-engineer run setup:check
+```
 
 Setup installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and the cohesive
 official DSH `0.1.0-rc.7` composition. It writes a key-free DSH ACP
@@ -267,8 +274,10 @@ Linux `systemd --user`, `systemd-run` 244+, and unified cgroup v2 are visible
 to that process.
 
 **Where should I run setup?**
-From the installed plugin directory that contains `package.json` and
-`bin/setup.mjs`. In this repository that path is `plugins/codex-co-engineer`.
+From this package directory (`plugins/codex-co-engineer` in a clone), or
+with `npm --prefix plugins/codex-co-engineer run setup` from the
+repository root. See the repository README for the copy/paste Codex
+plugin install.
 
 **A managed worktree appeared without a receipt.**
 Do not guess or delete it. Inspect `git worktree list` and

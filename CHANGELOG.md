@@ -85,6 +85,15 @@ earlier, reconnect from `event_cursor`.
 - **15-second watcher fallback.** Watcher failure during a terminal wait
   uses a 15-second local fallback rather than rapid polling.
 
+### Documentation
+
+- Copy/paste-first clone, Codex plugin, setup, and first-run flow for a
+  fresh visitor. The repository marketplace catalog is
+  `.agents/plugins/marketplace.json`.
+- Product shot and a maintainable SVG of delegate / wait / terminal
+  receipt. GitHub-ready release notes live in
+  `docs/releases/v3.1.0.md`.
+
 ## [3.0.2] - 2026-08-19
 
 ### Fixed

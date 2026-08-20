@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-label="Codex-Co-Engineer 3.1.0: Codex delegates to Grok, Cursor, and DSH, then waits for a terminal receipt">
+  <rect width="1280" height="720" fill="#0B0F14"/>
+  <rect x="36" y="28" width="1208" height="664" rx="22" fill="#121821" stroke="#2A3440" stroke-width="2"/>
+  <circle cx="72" cy="64" r="7" fill="#FF6B6B"/>
+  <circle cx="96" cy="64" r="7" fill="#F5C15A"/>
+  <circle cx="120" cy="64" r="7" fill="#3DDC97"/>
+  <text x="156" y="70" fill="#E7ECF1" font-family="ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="700">Codex-Co-Engineer</text>
+  <rect x="392" y="48" width="78" height="28" rx="14" fill="#1E2833"/>
+  <text x="431" y="68" text-anchor="middle" fill="#F5C15A" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700">3.1.0</text>
+  <text x="1220" y="70" text-anchor="end" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">Codex remains merge authority</text>
+
+  <text x="64" y="126" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18">Delegate real review or implementation, then wait for a durable receipt.</text>
+
+  <rect x="64" y="156" width="360" height="480" rx="16" fill="#0B0F14" stroke="#2A3440"/>
+  <text x="88" y="196" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" letter-spacing="1">1  DELEGATE</text>
+  <text x="88" y="236" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">task_id  review-auth-refactor</text>
+  <text x="88" y="268" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">role     review</text>
+  <text x="88" y="300" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">workspace managed</text>
+  <text x="88" y="348" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">Peers</text>
+  <rect x="88" y="368" width="92" height="36" rx="18" fill="#2A1A12" stroke="#FF8A4C"/>
+  <text x="134" y="392" text-anchor="middle" fill="#FFB087" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="700">Grok</text>
+  <rect x="190" y="368" width="100" height="36" rx="18" fill="#171A2A" stroke="#8B93FF"/>
+  <text x="240" y="392" text-anchor="middle" fill="#C5C9FF" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="700">Cursor</text>
+  <rect x="300" y="368" width="84" height="36" rx="18" fill="#10241C" stroke="#3DDC97"/>
+  <text x="342" y="392" text-anchor="middle" fill="#7EF0B8" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="700">DSH</text>
+  <text x="88" y="448" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">Deadline</text>
+  <text x="88" y="480" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">expected_duration_ms  600000</text>
+  <text x="88" y="510" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">Recorded deadline adds a 20% margin.</text>
+  <text x="88" y="590" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">one task, one worktree, one writer</text>
+
+  <rect x="460" y="156" width="360" height="480" rx="16" fill="#0B0F14" stroke="#2A3440"/>
+  <text x="484" y="196" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" letter-spacing="1">2  DURABLE WAIT</text>
+  <text x="484" y="236" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">task</text>
+  <text x="484" y="268" fill="#F5C15A" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">wait_until  "terminal"</text>
+  <text x="484" y="316" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">Routine text deltas do not wake Codex.</text>
+  <rect x="484" y="348" width="312" height="10" rx="5" fill="#1E2833"/>
+  <rect x="484" y="348" width="220" height="10" rx="5" fill="#F5C15A"/>
+  <text x="484" y="396" fill="#E7ECF1" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">Waiting for success, failure,</text>
+  <text x="484" y="422" fill="#E7ECF1" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">timeout, cancel, or attention.</text>
+  <text x="484" y="468" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">Disconnecting the waiter does not</text>
+  <text x="484" y="492" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">stop the owned provider work.</text>
+  <text x="484" y="590" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">Reconnect from event_cursor</text>
+
+  <rect x="856" y="156" width="360" height="480" rx="16" fill="#0B0F14" stroke="#3DDC97"/>
+  <text x="880" y="196" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" letter-spacing="1">3  TERMINAL RECEIPT</text>
+  <rect x="880" y="220" width="132" height="34" rx="17" fill="#10241C" stroke="#3DDC97"/>
+  <text x="946" y="243" text-anchor="middle" fill="#7EF0B8" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">succeeded</text>
+  <text x="880" y="292" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">state         succeeded</text>
+  <text x="880" y="324" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">provider      grok</text>
+  <text x="880" y="356" fill="#E7ECF1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">wait_reason   terminal</text>
+  <text x="880" y="404" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">Inspect commits and handoff</text>
+  <text x="880" y="430" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">before Codex pushes or merges.</text>
+  <text x="880" y="476" fill="#E7ECF1" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">No secrets in receipts.</text>
+  <text x="880" y="590" fill="#8B98A5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">status, delegate, task, tasks, cancel</text>
+</svg>

@@ -5,7 +5,10 @@ docs/research/
 # Codex and local orchestration state.
 .codex/*
 !.codex/release-gate.toml
-.agents/
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
 .serena/
 .claude/
 .cursor/

@@ -83,3 +83,10 @@ Open the release PR only after the local gate, CI, package/privacy review, and
 independent provider review pass. `create_pr` is Cloud-only; local workers
 return commits and handoff evidence for Codex to decide whether a PR should be
 opened. Never create an empty PR.
+
+## GitHub Release notes
+
+The 3.1.0 GitHub Release body is
+[releases/v3.1.0.md](releases/v3.1.0.md). Keep that file in the
+repository even when GitHub Releases is empty. Documentation work must
+not tag, push, or publish the GitHub Release.
