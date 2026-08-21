@@ -13,6 +13,14 @@
   deltas may be composed into one run-owned, single-parent,
   non-authoritative candidate; required writer lanes block a complete
   candidate when rejected or unresolved.
+- **Codex and worker authority threat model.** Records that selected
+  providers receive the full repository, including accidentally committed
+  secrets, while platform-protected credentials, refs, and control tokens
+  stay excluded; that cgroups are lifecycle control rather than a sandbox;
+  that raw evidence is owner-only/local and sanitized bounded evidence is
+  model-facing; that verification may execute only the trusted policy
+  catalog; and that cleanup is manual and proof-bound, with no automatic
+  GC.
 
 ## [3.2.1] - 2026-08-21
 

@@ -22,6 +22,25 @@ Include the affected version, impact, a minimal reproduction, and the
 smallest safe log excerpt. Never attach credentials, full prompts, private
 repository contents, or unredacted provider payloads.
 
+## Codex and worker authority
+
+Codex is the only final acceptance and integration authority. Selected
+provider workers are trusted peer coding agents for one assigned lane; they
+are not merge authorities. Selecting a provider authorizes that provider to
+receive the task prompt and the **full repository** reachable from the
+assigned workspace, including files accidentally committed there.
+Platform-protected credentials, protected refs, and control tokens remain
+excluded from provider payloads.
+
+Cgroups are lifecycle control, not a sandbox. Raw evidence is owner-only
+and local; sanitized bounded evidence is the model-facing projection. The
+trusted verification policy is the only executable command catalog for
+verification lanes. Manual run cleanup is proof-bound; there is no
+automatic garbage collection.
+
+The 3.3.0 authority split and honest threat model are
+[docs/threat-model.md](docs/threat-model.md).
+
 ## Trust and execution boundary
 
 - Selecting a provider authorizes that provider to receive the task prompt and
