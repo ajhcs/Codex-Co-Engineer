@@ -38,6 +38,9 @@ Use the five MCP tools for delegation and lifecycle control.
    `extend_expected_duration_ms` and `extend_reason` before expiry, and only
    when the new deadline is strictly later.
 5. Use `role: "review"` for analysis and `role: "implement"` for changes.
+   DSH defaults to Muse Spark 1.2 Contributor. For the optional OpenRouter Ox
+   Alpha route, keep `provider: "dsh"` and add
+   `dsh_model: "stealth/ox-alpha"`. Never send its API key in the task.
 6. For local tasks, use `workspace_mode: "managed"` by default. Use
    `workspace_mode: "direct"` only when direct mutation of the supplied
    checkout is intentional.
@@ -80,6 +83,8 @@ ACP composition through ACPX. Cursor Cloud uses the official Cursor SDK. A
 local CLI fallback is allowed only when ACP fails before prompt dispatch. ACPX
 does not provide an authoritative prompt-sent acknowledgement; after ACPX
 spawns, DSH receipts say `dispatch_uncertain` and never fall back to CLI.
+Explicit Ox Alpha tasks also fail closed before dispatch if ACPX cannot start,
+because the DSH CLI fallback cannot prove that it preserves the selected model.
 
 The manager-owned transient systemd user service used for local workers sets
 `KillMode=control-group` only so cancellation reaches detached descendants and

@@ -679,6 +679,35 @@ test('compact projection stays within 8192 bytes for maximal messages, actions, 
   })}\n`);
 });
 
+test('last-resort compact envelopes retain explicit DSH model identity', () => {
+  const compact = projectCompactTask({
+    task: {
+      id: 'compact-dsh-last-resort',
+      status: 'failed',
+      provider: 'dsh',
+      dsh_model: 'stealth/ox-alpha',
+      role: 'implement',
+      prompt_dispatched: true,
+      created_at: '2026-08-20T00:00:00.000Z',
+      updated_at: '2026-08-20T00:00:00.000Z',
+      started_at: '2026-08-20T00:00:01.000Z',
+      finished_at: '2026-08-20T00:02:00.000Z',
+      error: {
+        code: `provider_failure_${'e'.repeat(2_000)}`,
+        message: `${'m'.repeat(16_000)} VERDICT-TAIL`,
+      },
+      suggested_action: 'a'.repeat(16_000),
+      acp_session_id: `session-${'s'.repeat(4_000)}`,
+    },
+    progress: fixtureProgress({ status: 'failed' }),
+    maxBytes: 1_024,
+  });
+  assert.equal(compact.provider, 'dsh');
+  assert.equal(compact.dsh_model, 'stealth/ox-alpha');
+  assert.equal(compact.created_at, undefined);
+  assert.ok(compactStructuredBytes(compact) <= 1_024);
+});
+
 test('compact result preview sanitizes arrays and nested objects before serializing short credential keys', () => {
   const leaked = [
     'short-api-key',

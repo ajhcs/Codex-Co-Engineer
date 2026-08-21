@@ -13,7 +13,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.2.0');
+  assert.equal(manifest.version, '3.2.1');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.composerIcon, './assets/icon.svg');
@@ -27,7 +27,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.2.0');
+  assert.equal(packageJson.version, '3.2.1');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),
@@ -66,11 +66,11 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.match(readme, /wait_until": "terminal"/u);
   assert.match(readme, /property `repo`/u);
   assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
-  assert.match(readme, /docs\/releases\/v3\.2\.0\.md/u);
+  assert.match(readme, /docs\/releases\/v3\.2\.1\.md/u);
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
 });
 
-test('repository marketplace catalogs Codex-Co-Engineer 3.2.0', async () => {
+test('repository marketplace catalogs Codex-Co-Engineer 3.2.1', async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
@@ -78,14 +78,13 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.2.0', async () => {
   assert.equal(marketplace.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(marketplace.plugins.length, 1);
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
-  assert.equal(marketplace.plugins[0].version, '3.2.0');
+  assert.equal(marketplace.plugins[0].version, '3.2.1');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
 
-  const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.2.0.md'), 'utf8');
-  assert.match(notes, /Codex-Co-Engineer 3\.2\.0/u);
-  assert.match(notes, /codex plugin add codex-co-engineer@codex-co-engineer/u);
+  const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.2.1.md'), 'utf8');
+  assert.match(notes, /Codex-Co-Engineer 3\.2\.1/u);
+  assert.match(notes, /"dsh_model": "stealth\/ox-alpha"/u);
   assert.match(notes, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
-  assert.match(notes, /This file is the publication source/u);
-  assert.match(notes, /release-gate run --repo "\$PWD" \\\n  --receipt \/tmp\/codex-co-engineer-v3\.2\.0-release-gate\.json/u);
+  assert.match(notes, /gh release create v3\.2\.1/u);
   assert.match(notes, /EXACT_REVIEWED_MAIN_SHA/u);
 });

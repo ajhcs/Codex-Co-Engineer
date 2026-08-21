@@ -29,6 +29,7 @@ const MAX_EVENT_DEPTH = 6;
 const MAX_EVENT_KEYS = 64;
 const MAX_EVENT_ITEMS = 64;
 const MAX_CLI_OUTPUT = 1024 * 1024;
+const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
 
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
@@ -413,6 +414,12 @@ function fallbackStartAllowed(task) {
     && task.dispatch_uncertain !== true;
 }
 
+function cliFallbackMatchesTask(task) {
+  return task?.provider !== 'dsh'
+    || task.dsh_model == null
+    || task.dsh_model === DEFAULT_DSH_MODEL;
+}
+
 function rejectFallbackStart(task) {
   if (fallbackStartAllowed(task)) return;
   fail(task?.status === 'cancelling' || task?.status === 'cancelled' ? 'cancelled' : 'transport_lost',
@@ -422,12 +429,15 @@ function rejectFallbackStart(task) {
 async function fallbackToCliIfSafe({ root, task, prompt, signal, error }) {
   const failure = publicError(error, prompt);
   const current = (await readTask(root, task.id)).task;
-  if (!fallbackStartAllowed(current)) return null;
+  if (!fallbackStartAllowed(current) || !cliFallbackMatchesTask(task) || !cliFallbackMatchesTask(current)) {
+    return null;
+  }
   const fallbackTask = await updateTask(root, task.id, (latest) => (
-    fallbackStartAllowed(latest)
+    fallbackStartAllowed(latest) && cliFallbackMatchesTask(latest)
       ? { status: 'starting', fallback_from: 'acp', acp_error: failure }
       : latest
   ));
+  if (!cliFallbackMatchesTask(fallbackTask) || fallbackTask.fallback_from !== 'acp') return null;
   rejectFallbackStart(fallbackTask);
   await appendTaskEvent(root, task.id, {
     type: 'transport',
@@ -763,6 +773,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed', stop_reason: 'end_turn' });
     return updateTask(root, task.id, {
       status: 'completed',
+      error: null,
       stop_reason: 'end_turn',
       last_event: compact,
       result: output,
@@ -786,7 +797,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       error: failure,
       provider_process_group: null,
       provider_process_start_ticks: null,
-      fallback_safe: fallbackStartAllowed(current),
+      fallback_safe: fallbackStartAllowed(current) && cliFallbackMatchesTask(current) && cliFallbackMatchesTask(task),
       finished_at: new Date().toISOString(),
     }).catch(() => {});
     throw error;

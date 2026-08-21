@@ -16,13 +16,18 @@ configuration; it never performs login on the user's behalf.
 | `CODEX_CO_ENGINEER_ACPX_COMMAND` | ACPX executable used for DSH. Defaults to `acpx`. |
 | `CODEX_CO_ENGINEER_DSH_ACP_COMMAND` | DSH ACP adapter executable. Defaults to `dsh-acp-demo`. |
 | `CODEX_CO_ENGINEER_DSH_ACP_CONFIG` | Absolute DSH ACP YAML path. |
+| `CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG` | Absolute Ox Alpha DSH ACP YAML path. |
 | `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Owner-only Muse/DSH model key file. |
+| `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE` | Owner-only OpenRouter key file for Ox Alpha. |
 | `CURSOR_API_KEY_FILE` | Owner-only Cursor Cloud API key file. |
-| `MODEL_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` | Optional process-level provider credentials. |
+| `MODEL_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` | Optional process-level provider credentials. |
 
 The default DSH configuration is
 `~/.config/codex-co-engineer/dsh-acp.yml`; its model key defaults to
-`~/.config/codex-co-engineer/model-api-key`. Cursor Cloud also recognizes
+`~/.config/codex-co-engineer/model-api-key`. Setup also creates the optional
+Ox Alpha configuration at
+`~/.config/codex-co-engineer/dsh-acp-ox-alpha.yml`; its OpenRouter key defaults
+to `~/.config/codex-co-engineer/openrouter-api-key`. Cursor Cloud also recognizes
 the existing owner-only `~/.config/cursor-cloud-control/api-key`.
 
 The visitor install is clone-first. From a repository checkout:
@@ -70,6 +75,28 @@ or `repository`; the strict MCP schema rejects unknown properties. Pass
 recorded deadline is `ceil(expected_duration_ms * 1.20)` unless an
 explicit `timeout_ms` of at least that margin is supplied.
 
+DSH uses Muse Spark 1.2 Contributor when `dsh_model` is omitted. To select Ox
+Alpha for one task, keep `provider: "dsh"` and add
+`dsh_model: "stealth/ox-alpha"`. The field is rejected for other providers and
+unknown model values fail before workspace creation or prompt dispatch:
+
+```json
+{
+  "task_id": "ox-review",
+  "provider": "dsh",
+  "dsh_model": "stealth/ox-alpha",
+  "repo": "/absolute/path/to/git-worktree",
+  "prompt": "Review the current branch.",
+  "expected_duration_ms": 600000
+}
+```
+
+The bundled Ox profile follows OpenRouter's model metadata: a 1,048,576-token
+context, a 131,072-token output ceiling, mandatory reasoning at `max`, and the
+provider's native temperature `1` / top-p `0.95` defaults. DSH ACP supports
+text and raster-image prompts, so the profile does not over-advertise the
+model's separate video input capability.
+
 For routine coordination, use `task` with `view: "compact"`, or `status` and
 `tasks` with `detail: "compact"`. Compact status/task pages preserve each full
 task ID so the returned key can be passed unchanged to `task`, `cancel`, or a
@@ -116,8 +143,9 @@ before deciding whether to push or open a PR.
 
 ## Authentication
 
-Authenticate Grok and Cursor Local with their normal CLIs. DSH uses the
-owner-only model key, and Cursor Cloud uses its normal API key. Credentials
+Authenticate Grok and Cursor Local with their normal CLIs. DSH Muse uses the
+owner-only model key, DSH Ox Alpha uses the separate owner-only OpenRouter key,
+and Cursor Cloud uses its normal API key. Credentials
 must not be placed in MCP arguments, prompts, receipts, fixtures, or Git.
 Provider login state persists in the provider's normal user configuration
 between Codex tasks.

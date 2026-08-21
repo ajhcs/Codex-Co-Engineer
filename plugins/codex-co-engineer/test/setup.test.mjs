@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -52,6 +52,19 @@ async function loadNpmSemver() {
   } catch {
     // Keep the Node-bundled npm candidate.
   }
+  try {
+    const { stdout } = await run('sh', ['-c', 'command -v npm'], { encoding: 'utf8' });
+    const npmBin = stdout.trim();
+    if (npmBin) {
+      const resolved = await realpath(npmBin).catch(() => npmBin);
+      // npm-cli.js lives at .../node_modules/npm/bin/npm-cli.js
+      candidates.push(path.resolve(path.dirname(resolved), '..', 'node_modules', 'semver'));
+      // Unresolved bin shims live at .../bin/npm beside .../lib/node_modules/npm
+      candidates.push(path.resolve(path.dirname(npmBin), '..', 'lib', 'node_modules', 'npm', 'node_modules', 'semver'));
+    }
+  } catch {
+    // Optional PATH-based npm discovery.
+  }
   for (const candidate of candidates) {
     try {
       return require(candidate);
@@ -86,6 +99,7 @@ async function fixture({ includeWorktree = true, versions, configMode = 0o600, r
   const stateHome = path.join(root, 'state');
   const globalRoot = path.join(root, 'global');
   const configFile = path.join(root, 'custom', 'dsh-acp.yml');
+  const oxConfigFile = path.join(root, 'custom', 'dsh-acp-ox-alpha.yml');
   const persistenceRoot = path.join(stateHome, 'codex-co-engineer', 'dsh-sessions');
   await mkdir(bin, { recursive: true, mode: 0o700 });
   await mkdir(home, { recursive: true, mode: 0o700 });
@@ -104,6 +118,7 @@ async function fixture({ includeWorktree = true, versions, configMode = 0o600, r
     await executable(path.join(bin, 'worktree-bootstrap'), '#!/bin/sh\nprintf \'%s\\n\' \'worktree-override\'\n');
   }
   const installArgsFile = path.join(root, 'npm-install.args');
+  const setupOutputFile = path.join(root, 'setup-output.txt');
   await executable(path.join(bin, 'npm'), `#!/bin/sh
 if [ "$1" = "root" ] && [ "$2" = "--global" ]; then
   printf '%s\\n' '${globalRoot}'
@@ -140,11 +155,38 @@ fi
     "- id: acp-agent",
     "  name: '@deepseek-ai/dsh-acp-demo'",
     '  config:',
+    '    provider: meta',
     '    model: muse-spark-1.2-contributor',
     '    apiKeyEnv: MODEL_API_KEY',
     '',
   ].join('\n'), { encoding: 'utf8', mode: configMode });
   await chmod(configFile, configMode);
+  await writeFile(oxConfigFile, [
+    '- id: llm-pi-ai',
+    "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+    '  config:',
+    '    providers:',
+    '      openrouter:',
+    '        apiKeyEnv: OPENROUTER_API_KEY',
+    '        api: openai-completions',
+    '        baseURL: https://openrouter.ai/api/v1',
+    '        reasoning: max',
+    '        models:',
+    '          - id: stealth/ox-alpha',
+    '            contextWindow: 1048576',
+    '            maxTokens: 131072',
+    '            reasoningEfforts:',
+    '              low: low',
+    '              high: high',
+    '              max: max',
+    '- id: acp-agent',
+    "  name: '@deepseek-ai/dsh-acp-demo'",
+    '  config:',
+    '    provider: openrouter',
+    '    model: stealth/ox-alpha',
+    '',
+  ].join('\n'), { encoding: 'utf8', mode: configMode });
+  await chmod(oxConfigFile, configMode);
 
   const environment = {
     ...process.env,
@@ -156,8 +198,11 @@ fi
     CODEX_CO_ENGINEER_ACPX_COMMAND: path.join(bin, 'acpx'),
     CODEX_CO_ENGINEER_DSH_ACP_COMMAND: path.join(bin, 'dsh-acp-demo'),
     CODEX_CO_ENGINEER_DSH_ACP_CONFIG: configFile,
+    CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG: oxConfigFile,
+    CODEX_CO_ENGINEER_NPM_GLOBAL_ROOT: globalRoot,
+    CODEX_CO_ENGINEER_SETUP_OUTPUT_FILE: setupOutputFile,
   };
-  return { root, bin, configFile, environment, persistenceRoot, installArgsFile };
+  return { root, bin, configFile, oxConfigFile, environment, persistenceRoot, installArgsFile, setupOutputFile };
 }
 
 async function runCheck(environment) {
@@ -170,14 +215,18 @@ async function runCheck(environment) {
       maxBuffer: 2 * 1024 * 1024,
     });
   } catch (error) {
-    if (!error.stdout?.trim()) throw new Error(`${error.message}\n${error.stderr ?? ''}`);
+    const output = error.stdout?.trim()
+      ? error.stdout
+      : await readFile(environment.CODEX_CO_ENGINEER_SETUP_OUTPUT_FILE, 'utf8').catch(() => '');
+    if (!output.trim()) throw new Error(`${error.message}\n${error.stderr ?? ''}`);
     return {
       code: typeof error.code === 'number' ? error.code : 1,
-      value: JSON.parse(error.stdout),
+      value: JSON.parse(output),
     };
   }
-  if (!child.stdout?.trim()) throw new Error(`setup returned no JSON\n${JSON.stringify(child)}`);
-  return { code: 0, value: JSON.parse(child.stdout) };
+  const output = child.stdout?.trim() ? child.stdout : await readFile(environment.CODEX_CO_ENGINEER_SETUP_OUTPUT_FILE, 'utf8');
+  if (!output?.trim()) throw new Error(`setup returned no JSON\n${JSON.stringify(child)}`);
+  return { code: 0, value: JSON.parse(output) };
 }
 
 test('setup check honors command and config overrides and verifies worktree-bootstrap', async () => {
@@ -191,6 +240,9 @@ test('setup check honors command and config overrides and verifies worktree-boot
     assert.equal(result.value.worktreeBootstrap.output, 'worktree-override');
     assert.equal(result.value.config.path, value.configFile);
     assert.equal(result.value.config.ok, true);
+    assert.equal(result.value.oxConfig.path, value.oxConfigFile);
+    assert.equal(result.value.oxConfig.ok, true);
+    assert.equal(result.value.oxConfig.model, 'stealth/ox-alpha');
     assert.equal(result.value.persistence.path, value.persistenceRoot);
     assert.equal(result.value.persistence.ok, true);
     assert.equal(result.value.packages.ok, true);
@@ -206,6 +258,7 @@ test('setup check fails closed when worktree-bootstrap is unavailable', async ()
     assert.equal(result.code, 1);
     assert.equal(result.value.worktreeBootstrap.ok, false);
     assert.equal(result.value.config.ok, true);
+    assert.equal(result.value.oxConfig.ok, true);
     assert.equal(result.value.packages.ok, true);
   } finally {
     await rm(value.root, { recursive: true, force: true });
@@ -219,6 +272,7 @@ test('setup check preserves exact package versions and owner-only config validat
     assert.equal(result.code, 1);
     assert.equal(result.value.packages.ok, false);
     assert.equal(result.value.config.ok, false);
+    assert.equal(result.value.oxConfig.ok, false);
     assert.equal(result.value.persistence.ok, true);
   } finally {
     await rm(value.root, { recursive: true, force: true });
@@ -259,6 +313,8 @@ test('setup check rejects a later dsh-acp prerelease', async () => {
 test('setup install pins the exact DSH rc.7 composition', async () => {
   const value = await fixture({ recordInstall: true });
   try {
+    await rm(value.configFile);
+    await rm(value.oxConfigFile);
     const child = await run(process.execPath, [SETUP], {
       cwd: path.dirname(SETUP),
       env: value.environment,
@@ -278,7 +334,21 @@ test('setup install pins the exact DSH rc.7 composition', async () => {
       assert.ok(args.includes(`${name}@${DSH_RC7}`), `setup must explicitly install ${name}@${DSH_RC7}`);
     }
     assert.ok(args.at(-1)?.endsWith('fake.tgz'));
-    assert.match(child.stdout, /Installed Co-Engineer agent dependencies/u);
+    const museConfig = await readFile(value.configFile, 'utf8');
+    assert.match(museConfig, /provider: meta/u);
+    assert.match(museConfig, /model: muse-spark-1\.2-contributor/u);
+    assert.match(museConfig, /apiKeyEnv: MODEL_API_KEY/u);
+    assert.doesNotMatch(museConfig, /openrouter|OPENROUTER_API_KEY|stealth\/ox-alpha/u);
+    const oxConfig = await readFile(value.oxConfigFile, 'utf8');
+    assert.match(oxConfig, /provider: openrouter/u);
+    assert.match(oxConfig, /model: stealth\/ox-alpha/u);
+    assert.match(oxConfig, /apiKeyEnv: OPENROUTER_API_KEY/u);
+    assert.match(oxConfig, /baseURL: https:\/\/openrouter\.ai\/api\/v1/u);
+    assert.match(oxConfig, /reasoning: max/u);
+    assert.match(oxConfig, /reasoningEfforts:\n\s+low: low\n\s+high: high\n\s+max: max/u);
+    assert.doesNotMatch(oxConfig, /api\.meta\.ai|MODEL_API_KEY|muse-spark-1\.2-contributor/u);
+    const setupOutput = child.stdout?.trim() ? child.stdout : await readFile(value.setupOutputFile, 'utf8');
+    assert.match(setupOutput, /Installed Co-Engineer agent dependencies/u);
   } finally {
     await rm(value.root, { recursive: true, force: true });
   }

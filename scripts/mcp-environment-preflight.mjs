@@ -64,7 +64,7 @@ try {
     })}\n`);
   });
   const status = response.result?.structuredContent;
-  assert.equal(status?.version, '3.2.0');
+  assert.equal(status?.version, '3.2.1');
   assert.equal(status?.healthy, true, JSON.stringify(status?.local_boundary));
   assert.equal(status?.local_boundary?.ready, true, JSON.stringify(status?.local_boundary));
   assert.equal(status?.local_boundary?.boundary, 'systemd-user-service-cgroup');

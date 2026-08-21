@@ -92,7 +92,7 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.equal(values[0].result.serverInfo.name, 'codex-co-engineer');
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
-  assert.equal(values[0].result.serverInfo.version, '3.2.0');
+  assert.equal(values[0].result.serverInfo.version, '3.2.1');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
   const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
   assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
@@ -123,6 +123,11 @@ test('advertises only the thin public tool surface', async () => {
   assert.match(delegateTool.inputSchema.properties.repo.description, /Do not rename this property to git_root/u);
   assert.match(delegateTool.inputSchema.properties.starting_ref.description, /Cursor Cloud only/u);
   assert.match(delegateTool.inputSchema.properties.starting_ref.description, /does not replace the required repo/u);
+  assert.deepEqual(delegateTool.inputSchema.properties.dsh_model.enum, [
+    'muse-spark-1.2-contributor',
+    'stealth/ox-alpha',
+  ]);
+  assert.match(delegateTool.inputSchema.properties.dsh_model.description, /DSH only/u);
   assert.equal(Object.hasOwn(delegateTool.inputSchema.properties, 'git_root'), false);
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'expected_duration_ms'));
   assert.equal(delegateTool.inputSchema.properties.expected_duration_ms.maximum, 86400000);

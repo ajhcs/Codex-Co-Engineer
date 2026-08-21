@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-08-21
+
+Optional Ox Alpha support for DSH without changing the default Muse route or
+the five-tool MCP catalog.
+
+### Added
+
+- **Per-task DSH model selection.** `delegate` accepts
+  `dsh_model: "stealth/ox-alpha"` only when `provider` is `dsh`; omission keeps
+  Muse Spark 1.2 Contributor. The selected model is retained in task, compact,
+  and diagnostic receipts.
+- **Separate OpenRouter configuration and credential.** Setup creates an
+  owner-only Ox Alpha ACP configuration and reads its key from
+  `OPENROUTER_API_KEY` or a separate owner-only key file. Muse credentials and
+  configuration remain unchanged.
+- **Model-metadata-aligned Ox defaults.** The generated DSH route uses
+  OpenRouter's 1,048,576-token context, 131,072-token output ceiling,
+  mandatory `max` reasoning, and native temperature/top-p defaults.
+
+### Fixed
+
+- Reject unknown DSH models and DSH-only model selection before creating a
+  workspace or dispatching a prompt. Ox Alpha retains DSH's ACPX
+  `dispatch_uncertain` and no-replay behavior.
+- Fail explicit Ox Alpha tasks closed if ACPX cannot start instead of using the
+  model-blind DSH CLI fallback.
+
 ## [3.2.0] - 2026-08-20
 
 Measured coordination efficiency on the same five-tool catalog. Compact views,

@@ -9,7 +9,7 @@ import { compactTaskCard } from '../plugins/codex-co-engineer/mcp/v3/diagnostics
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
-const RELEASE_VERSION = '3.2.0';
+const RELEASE_VERSION = '3.2.1';
 
 function fail(message) { throw new Error(message); }
 const absolute = (relative) => path.join(ROOT, relative);
@@ -20,7 +20,7 @@ const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/efficient-dogfood.md', 'docs/release.md',
   'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/releases/v3.1.0.md',
-  'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md',
+  'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md', 'docs/releases/v3.2.1.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',
@@ -101,6 +101,8 @@ if (server?.command !== 'node'
 for (const variable of [
   'HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
   'DBUS_SESSION_BUS_ADDRESS', 'CODEX_CO_ENGINEER_STATE_DIR',
+  'OPENROUTER_API_KEY', 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+  'CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG',
 ]) {
   if (!server.env_vars?.includes(variable)) fail(`MCP environment allowlist is missing ${variable}.`);
 }
@@ -114,6 +116,9 @@ if (!serverText.includes('wait_ms') || !serverText.includes('event_cursor') || !
 }
 if (!serverText.includes('wait_until') || !serverText.includes('expected_duration_ms') || !serverText.includes('diagnostics')) {
   fail('task/delegate must advertise durable terminal waits, expected duration, and diagnostics.');
+}
+if (!serverText.includes('dsh_model') || !serverText.includes('stealth/ox-alpha')) {
+  fail('3.2.1 public contract must advertise the optional Ox Alpha DSH model selector.');
 }
 if (!serverText.includes('response_mode')
   || !serverText.includes("enum: ['structured']")

@@ -5,7 +5,7 @@ The authoritative gate runs once against one exact clean local candidate:
 ```sh
 release-gate plan --repo "$PWD"
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.2.0-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.2.1-release-gate.json
 ```
 
 The package supports Node.js 24 and newer. The release gate is intentionally
@@ -34,9 +34,10 @@ After the provider-free gate passes:
    `KillMode=control-group` solely for descendant cleanup and to survive the
    launching client; it is not a sandbox or capability restriction.
 3. Verify persistent normal authentication for Grok and Cursor Local, the
-   owner-only DSH model key, and the owner-only Cursor Cloud API key.
+   owner-only DSH Muse key, the separate owner-only OpenRouter key for Ox
+   Alpha, and the owner-only Cursor Cloud API key.
 4. Run one bounded opt-in acceptance task through Grok, Cursor Local, Cursor
-   Cloud, and DSH.
+   Cloud, DSH Muse, and DSH Ox Alpha.
 5. For local tasks, verify ACP first; if fallback occurs, prove it happened
    before prompt dispatch. DSH ACPX receipts may be `dispatch_uncertain` after
    spawn because ACPX has no authoritative prompt-sent acknowledgement; those
@@ -89,8 +90,9 @@ opened. Never create an empty PR.
 
 ## GitHub Release notes
 
-The 3.2.0 GitHub Release body is
-[releases/v3.2.0.md](releases/v3.2.0.md). Keep historical
+The 3.2.1 GitHub Release body is
+[releases/v3.2.1.md](releases/v3.2.1.md). Keep historical
+[releases/v3.2.0.md](releases/v3.2.0.md),
 [releases/v3.1.0.md](releases/v3.1.0.md) and
 [releases/v3.1.1.md](releases/v3.1.1.md) in the repository even when
 GitHub Releases is empty. Documentation work must not tag, push, or
@@ -100,10 +102,10 @@ Capture the exact-tree gate receipt before any later publication:
 
 ```sh
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.2.0-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.2.1-release-gate.json
 ```
 
 When a maintainer later publishes against an exact reviewed `main` SHA,
-use the placeholder form in [releases/v3.2.0.md](releases/v3.2.0.md)
+use the placeholder form in [releases/v3.2.1.md](releases/v3.2.1.md)
 (`EXACT_REVIEWED_MAIN_SHA`). Do not invent a tag or remote mutation from
 documentation work.

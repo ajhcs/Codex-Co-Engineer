@@ -7,12 +7,12 @@ coding agents:
 - Grok Build on the local host
 - Cursor Local
 - Cursor Cloud
-- DeepSeek Harness (DSH) with Muse
+- DeepSeek Harness (DSH) with Muse by default or optional Ox Alpha
 
 Codex remains the chief engineer, reviewer, and merge authority. Providers
 retain their normal shell, coding, and dependency-installation capabilities.
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-This release is 3.2.0.
+This release is 3.2.1.
 
 ## Tools
 
@@ -30,6 +30,9 @@ The MCP server exposes five tools:
 path in the property named `repo`, a prompt, and `expected_duration_ms` or a
 backwards-compatible `timeout_ms`. Providers are `grok`, `cursor-local`,
 `cursor-cloud`, and `dsh`; roles are `review` and `implement`.
+DSH defaults to `muse-spark-1.2-contributor`. Set
+`dsh_model: "stealth/ox-alpha"` to select the separate OpenRouter-backed Ox
+Alpha configuration for that task.
 
 The argument name is part of the MCP contract: send
 `"repo": "/absolute/path/to/git-worktree"`. Do not substitute `git_root`,
@@ -53,7 +56,7 @@ turns are not available.
 
 ### Efficient workflow
 
-The 3.2.0 coordination path keeps the same five tools and the no-argument
+The 3.2.1 coordination path keeps the same five tools and the no-argument
 `tasks` behavior:
 
 - Call `status` with `detail: "compact"`, `task_limit` from 0 through 20, or
@@ -91,7 +94,7 @@ For an end-to-end pattern, see the repository's
 | --- | --- | --- | --- |
 | `grok` | ACP first | `managed` default, `direct` explicit | CLI fallback only before prompt dispatch; owner-only prompt file |
 | `cursor-local` | ACP first | `managed` default, `direct` explicit | Official fallback CLI takes the prompt positionally |
-| `dsh` | Official rc.7 ACP via ACPX | `managed` default, `direct` explicit | Marked `dispatch_uncertain` after ACPX spawn; never CLI-replayed |
+| `dsh` | Official rc.7 ACP via ACPX | `managed` default, `direct` explicit | Muse default; optional `stealth/ox-alpha`; marked `dispatch_uncertain` after ACPX spawn and never CLI-replayed |
 | `cursor-cloud` | Official Cursor SDK | Remote branch | Requires a pushed immutable `starting_ref` SHA |
 
 Once a prompt is dispatched, Codex-Co-Engineer never replays it through
@@ -170,7 +173,8 @@ Requirements:
 - the official Grok Build CLI
 - `cursor-agent`
 - a Cursor Cloud API key
-- a Muse/Meta model API key for DSH
+- a Muse/Meta model API key for default DSH use
+- an OpenRouter API key when selecting DSH Ox Alpha
 
 From this package directory—the directory containing `package.json` and
 `bin/setup.mjs`:
@@ -189,8 +193,9 @@ npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
 Setup installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and the cohesive
-official DSH `0.1.0-rc.7` composition. It writes a key-free DSH ACP
-configuration and owner-only session directory; it does not perform login.
+official DSH `0.1.0-rc.7` composition. It writes key-free Muse and Ox Alpha
+DSH ACP configurations plus an owner-only session directory; it does not
+perform login.
 `npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor SDK,
 and `worktree-bootstrap` dependencies. It does not install or authenticate
 Grok or Cursor Local or validate the Cursor Cloud key. Call `status` after
@@ -207,8 +212,10 @@ cursor-agent login
 bin/set-model-api-key
 ```
 
-DSH uses `MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or the
-default owner-only `~/.config/codex-co-engineer/model-api-key`. Cursor Cloud
+DSH Muse uses `MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or the
+default owner-only `~/.config/codex-co-engineer/model-api-key`. DSH Ox Alpha
+uses `OPENROUTER_API_KEY`, `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or
+`~/.config/codex-co-engineer/openrouter-api-key`. Cursor Cloud
 uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the existing owner-only
 `~/.config/cursor-cloud-control/api-key`. Credentials are never MCP
 arguments or task receipts.
@@ -219,7 +226,9 @@ arguments or task receipts.
 | --- | --- |
 | `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only task-state root. |
 | `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Owner-only DSH/Muse key file. |
+| `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE` | Owner-only OpenRouter key file for DSH Ox Alpha. |
 | `CODEX_CO_ENGINEER_DSH_ACP_CONFIG` | Absolute DSH ACP YAML path. |
+| `CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG` | Absolute Ox Alpha DSH ACP YAML path. |
 | `CURSOR_API_KEY_FILE` | Owner-only Cursor Cloud key file. |
 | `CODEX_CO_ENGINEER_GROK_COMMAND` | Grok executable override. |
 | `CODEX_CO_ENGINEER_CURSOR_COMMAND` | Cursor Local executable override. |

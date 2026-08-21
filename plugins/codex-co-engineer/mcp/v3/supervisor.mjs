@@ -58,6 +58,23 @@ const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-work
 const CLOUD_WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cursor-cloud-worker.mjs');
 const ACTIVE = new Set(ACTIVE_STATUSES);
 const PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
+const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
+const DSH_MODELS = Object.freeze({
+  [DEFAULT_DSH_MODEL]: Object.freeze({
+    configEnv: 'CODEX_CO_ENGINEER_DSH_ACP_CONFIG',
+    configFile: 'dsh-acp.yml',
+    credentialEnv: 'MODEL_API_KEY',
+    credentialFileEnv: 'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
+    credentialFile: 'model-api-key',
+  }),
+  'stealth/ox-alpha': Object.freeze({
+    configEnv: 'CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG',
+    configFile: 'dsh-acp-ox-alpha.yml',
+    credentialEnv: 'OPENROUTER_API_KEY',
+    credentialFileEnv: 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+    credentialFile: 'openrouter-api-key',
+  }),
+});
 const WORKSPACE_MODES = new Set(['managed', 'direct']);
 const WORKTREE_CREATE_MAX_BUFFER = 16 * 1024 * 1024;
 const PUBLIC_STARTUP_MESSAGES = Object.freeze({
@@ -138,14 +155,24 @@ function normalizedAbsolute(value, field) {
   return value;
 }
 
-function providerArgv(provider, env = process.env) {
+function resolveDshModel(value) {
+  const model = value ?? DEFAULT_DSH_MODEL;
+  if (!Object.hasOwn(DSH_MODELS, model)) {
+    fail('invalid_dsh_model', `dsh_model must be one of ${Object.keys(DSH_MODELS).join(', ')}.`);
+  }
+  return model;
+}
+
+function providerArgv(provider, env = process.env, dshModel) {
   if (provider === 'grok') return [env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok', 'agent', '--always-approve', 'stdio'];
   if (provider === 'cursor-local') return [env.CODEX_CO_ENGINEER_CURSOR_COMMAND ?? 'cursor-agent', 'acp'];
   if (provider === 'dsh') {
-    const config = env.CODEX_CO_ENGINEER_DSH_ACP_CONFIG ?? path.join(
+    const model = resolveDshModel(dshModel);
+    const selection = DSH_MODELS[model];
+    const config = env[selection.configEnv] ?? path.join(
       env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config'),
       'codex-co-engineer',
-      'dsh-acp.yml',
+      selection.configFile,
     );
     if (!path.isAbsolute(config)) fail('dsh_acp_not_configured', 'DSH ACP config path must be absolute.');
     return [env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo', '--config', path.resolve(config)];
@@ -153,19 +180,21 @@ function providerArgv(provider, env = process.env) {
   fail('unsupported_provider', `Unsupported provider: ${provider}`);
 }
 
-async function workerEnvironment(provider, source = process.env) {
+async function workerEnvironment(provider, source = process.env, dshModel) {
   const env = { ...source };
-  if (provider !== 'dsh' || env.MODEL_API_KEY) return env;
-  const file = env.CODEX_CO_ENGINEER_MODEL_API_KEY_FILE ?? path.join(
+  if (provider !== 'dsh') return env;
+  const selection = DSH_MODELS[resolveDshModel(dshModel)];
+  if (env[selection.credentialEnv]) return env;
+  const file = env[selection.credentialFileEnv] ?? path.join(
     env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config'),
     'codex-co-engineer',
-    'model-api-key',
+    selection.credentialFile,
   );
   const metadata = await stat(file);
   if ((metadata.mode & 0o077) !== 0) fail('credential_permissions', 'DSH credential file must be owner-only.');
   const key = (await readFile(file, 'utf8')).trim();
   if (!key || key.includes('\0') || Buffer.byteLength(key) > 16 * 1024) fail('invalid_credential_file', 'DSH credential file is invalid.');
-  env.MODEL_API_KEY = key;
+  env[selection.credentialEnv] = key;
   return env;
 }
 
@@ -509,7 +538,7 @@ export async function launchWorker({
   let child;
   let boundary;
   try {
-    const env = await workerEnvironment(provider, sourceEnv);
+    const env = await workerEnvironment(provider, sourceEnv, initial.dsh_model);
     if (provider === 'cursor-cloud') {
       child = spawn(command, args, {
         cwd,
@@ -594,6 +623,10 @@ export async function submitTask(input, dependencies = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('invalid_request', 'Task input must be an object.');
   const id = requireTaskId(input.task_id);
   if (!PROVIDERS.has(input.provider)) fail('unsupported_provider', `Unsupported provider: ${input.provider}`);
+  if (input.provider !== 'dsh' && input.dsh_model !== undefined) {
+    fail('invalid_dsh_model', 'dsh_model is supported only for DSH tasks.');
+  }
+  const dshModel = input.provider === 'dsh' ? resolveDshModel(input.dsh_model) : undefined;
   if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) fail('invalid_prompt', 'prompt must be non-empty text.');
   const role = input.role ?? 'implement';
   if (!['review', 'implement'].includes(role)) fail('invalid_role', 'role must be review or implement.');
@@ -630,7 +663,7 @@ export async function submitTask(input, dependencies = {}) {
   }
   let launchEnv;
   try {
-    launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env);
+    launchEnv = await workerEnvironment(input.provider, dependencies.env ?? process.env, dshModel);
   } catch (error) {
     throw publicStartupError(error, 'provider_startup_failed');
   }
@@ -669,7 +702,9 @@ export async function submitTask(input, dependencies = {}) {
         ...(readGit ? { readGit } : {}),
       });
     }
-    const agentArgv = input.provider === 'cursor-cloud' ? undefined : providerArgv(input.provider, dependencies.env ?? process.env);
+    const agentArgv = input.provider === 'cursor-cloud'
+      ? undefined
+      : providerArgv(input.provider, dependencies.env ?? process.env, dshModel);
     const { task } = await createTask({
       root,
       prompt: input.prompt,
@@ -677,6 +712,7 @@ export async function submitTask(input, dependencies = {}) {
         id,
         status: 'accepted',
         provider: input.provider,
+        ...(dshModel ? { dsh_model: dshModel } : {}),
         role,
         source_repo: input.repo,
         cwd: workspace.worktree_path,
@@ -888,13 +924,14 @@ async function providerReadiness(env = process.env) {
   const dshCommand = env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
   const acpxCommand = env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
   const dshAcpCommand = env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
-  const [grok, cursorLocal, dshCli, acpx, dshAcp, dshCredential, cursorCloud] = await Promise.all([
+  const [grok, cursorLocal, dshCli, acpx, dshAcp, dshMuseCredential, dshOxCredential, cursorCloud] = await Promise.all([
     probeCommand(grokCommand, ['models']),
     probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu),
     probeCommand(dshCommand, ['--version']),
     probeCommand(acpxCommand, ['--version']),
     probeCommand('which', [dshAcpCommand]),
-    workerEnvironment('dsh', env).then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
+    workerEnvironment('dsh', env, DEFAULT_DSH_MODEL).then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
+    workerEnvironment('dsh', env, 'stealth/ox-alpha').then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
     Promise.all([loadCursorApiKey(env), loadCursorSdk()])
       .then(() => ({ installed: true, ready: true }))
       .catch((error) => ({ installed: error?.code !== 'cursor_sdk_missing', ready: false, reason: error?.code ?? 'not_configured' })),
@@ -904,9 +941,14 @@ async function providerReadiness(env = process.env) {
     'cursor-local': { ...cursorLocal, transport: 'acp' },
     dsh: {
       installed: dshCli.installed && acpx.installed && dshAcp.installed,
-      ready: dshCli.ready && acpx.ready && dshAcp.ready && dshCredential.ready,
+      ready: dshCli.ready && acpx.ready && dshAcp.ready && dshMuseCredential.ready,
       transport: 'acpx',
-      ...(!dshCredential.ready ? { reason: dshCredential.reason } : {}),
+      default_model: DEFAULT_DSH_MODEL,
+      model_options: {
+        [DEFAULT_DSH_MODEL]: dshMuseCredential,
+        'stealth/ox-alpha': dshOxCredential,
+      },
+      ...(!dshMuseCredential.ready ? { reason: dshMuseCredential.reason } : {}),
     },
     'cursor-cloud': { ...cursorCloud, transport: 'cursor-sdk' },
   };

@@ -25,6 +25,7 @@ async function fixture(extra = {}) {
       id: extra.id ?? 'task-1',
       status: 'accepted',
       provider: extra.provider ?? 'grok',
+      ...(extra.dshModel ? { dsh_model: extra.dshModel } : {}),
       cwd,
       agent_argv: extra.agentArgv ?? [process.execPath, FAKE_AGENT, '--mode', extra.mode ?? 'normal'],
       ...(extra.cliArgv ? { cli_argv: extra.cliArgv } : {}),
@@ -140,6 +141,7 @@ test('redacts environment-style assignments and bearer tokens from ACP events an
   const prompt = 'private assignment prompt';
   const assignments = [
     ['MODEL_API_KEY', 'plain-model-value-1234567890'].join('='),
+    ['OPENROUTER_API_KEY', 'plain-openrouter-value-1234567890'].join('='),
     ['CURSOR_API_KEY', 'plain-cursor-value-1234567890'].join(': '),
     ['XAI_API_KEY', 'plain-xai-value-1234567890'].join(' = '),
     ['Authorization', ['Bearer', 'short-bearer-value-1234567890'].join(' ')].join(': '),
@@ -148,7 +150,7 @@ test('redacts environment-style assignments and bearer tokens from ACP events an
   const event = boundedEvent({ type: 'provider_update', text: payload, nested: { detail: payload } }, prompt);
   const failure = publicError(new Error(payload), prompt);
   for (const output of [JSON.stringify(event), failure.message]) {
-    assert.doesNotMatch(output, /private assignment prompt|plain-model-value|plain-cursor-value|plain-xai-value|short-bearer-value/iu);
+    assert.doesNotMatch(output, /private assignment prompt|plain-model-value|plain-openrouter-value|plain-cursor-value|plain-xai-value|short-bearer-value/iu);
   }
 });
 
@@ -230,12 +232,16 @@ test('provider failure after dispatch is never marked safe to replay', async () 
 
 test('DSH scopes ACPX artifacts to the task and removes them after persistence', async () => {
   const value = await fixture({ provider: 'dsh', id: 'dsh-flow' });
+  await updateTask(value.root, value.taskId, {
+    error: { code: 'worker_boundary_uncertain', message: 'stale reconciliation marker' },
+  });
   const artifactMarker = path.join(value.root, 'artifact-created');
   await withFakeAcpx('success', async () => {
     const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
     assert.equal(terminal.status, 'completed');
     assert.equal(terminal.transport, 'acp');
     assert.equal(terminal.result, 'DSH_FAKE_OK');
+    assert.equal(terminal.error, null);
     assert.equal(terminal.acp_session_id, 'dsh-fake-session');
     assert.equal(terminal.dispatch_uncertain, true);
     assert.equal(terminal.prompt_dispatched, undefined);
@@ -282,6 +288,65 @@ test('DSH does not fall back after ACPX has spawned without an acknowledgement',
   assert.equal(task.fallback_safe, false);
   await assert.rejects(access(cliMarker));
   assert.equal((await readdir(path.join(value.root, 'tasks', value.taskId))).includes('acpx-home'), false);
+});
+
+test('DSH Ox Alpha fails closed instead of using a model-blind pre-spawn CLI fallback', async () => {
+  const value = await fixture({
+    provider: 'dsh',
+    dshModel: 'stealth/ox-alpha',
+    id: 'dsh-ox-pre-spawn-failure',
+    cliArgv: [process.execPath, '-e', 'process.stdout.write("SHOULD_NOT_RUN")'],
+  });
+  const previous = process.env.CODEX_CO_ENGINEER_ACPX_COMMAND;
+  process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = '/definitely/missing/acpx';
+  try {
+    await assert.rejects(
+      runAcpTask({ root: value.root, taskId: value.taskId }),
+      (error) => error.code === 'ENOENT',
+    );
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_CO_ENGINEER_ACPX_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = previous;
+  }
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.transport, 'acp');
+  assert.equal(task.dsh_model, 'stealth/ox-alpha');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.fallback_from, undefined);
+  assert.equal(task.fallback_safe, false);
+  assert.notEqual(task.result, 'SHOULD_NOT_RUN');
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.doesNotMatch(events, /acp_failed_before_dispatch|"transport":"cli"|SHOULD_NOT_RUN/u);
+});
+
+test('DSH Muse still allows pre-spawn CLI fallback when ACPX cannot start', async () => {
+  const value = await fixture({
+    provider: 'dsh',
+    dshModel: 'muse-spark-1.2-contributor',
+    id: 'dsh-muse-pre-spawn-fallback',
+    cliArgv: [process.execPath, '-e', 'process.stdout.write("MUSE_CLI_FALLBACK_OK")'],
+  });
+  const previous = process.env.CODEX_CO_ENGINEER_ACPX_COMMAND;
+  process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = '/definitely/missing/acpx';
+  try {
+    const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+    assert.equal(terminal.status, 'completed');
+    assert.equal(terminal.result, 'MUSE_CLI_FALLBACK_OK');
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_CO_ENGINEER_ACPX_COMMAND;
+    else process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = previous;
+  }
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.transport, 'cli');
+  assert.equal(task.dsh_model, 'muse-spark-1.2-contributor');
+  assert.equal(task.fallback_from, 'acp');
+  assert.equal(task.prompt_dispatched, true);
+  assert.equal(task.fallback_safe, false);
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.match(events, /acp_failed_before_dispatch/u);
+  assert.match(events, /"transport":"cli"/u);
 });
 
 test('DSH deadline kills a detached ACPX descendant before terminalizing', async () => {

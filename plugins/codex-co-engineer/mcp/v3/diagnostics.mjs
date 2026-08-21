@@ -201,6 +201,7 @@ export function diagnosticEnvelope(task, runtime = null, extras = {}) {
   return Object.freeze({
     task_id: task.id,
     provider: task.provider ?? null,
+    ...(task.provider === 'dsh' ? { dsh_model: task.dsh_model ?? 'muse-spark-1.2-contributor' } : {}),
     session_id: task.acp_session_id ?? task.attention?.session_id ?? null,
     provider_run_id: task.provider_run_id ?? null,
     question_id: task.attention?.question_id ?? extras.question_id ?? null,

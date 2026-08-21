@@ -34,7 +34,7 @@ try {
   const statusEnvelope = inspect('tools/call', 'status');
   const status = statusEnvelope.structuredContent
     ?? JSON.parse(statusEnvelope.content?.[0]?.text ?? '{}');
-  assert.equal(status.version, '3.2.0');
+  assert.equal(status.version, '3.2.1');
   assert.equal(status.healthy, status.local_boundary.ready);
   assert.equal(status.active, 0);
   assert.deepEqual(status.tasks, []);

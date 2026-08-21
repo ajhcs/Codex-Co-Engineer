@@ -5,14 +5,14 @@
 [![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Codex-Co-Engineer 3.2.0** lets Codex delegate real review and
+**Codex-Co-Engineer 3.2.1** lets Codex delegate real review and
 implementation work to authenticated peer coding agents — Grok Build,
 Cursor Local, Cursor Cloud, and DeepSeek Harness (DSH) — then wait for a
 durable receipt instead of polling routine text.
 
 Codex stays the chief engineer, reviewer, and merge authority. The
 stable machine identifier is `codex-co-engineer`. In-repo release notes:
-[docs/releases/v3.2.0.md](docs/releases/v3.2.0.md).
+[docs/releases/v3.2.1.md](docs/releases/v3.2.1.md).
 
 ![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
 
@@ -52,7 +52,9 @@ plugins/codex-co-engineer/bin/set-model-api-key
 Cursor Cloud uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the
 owner-only `~/.config/cursor-cloud-control/api-key`. DSH uses
 `MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or
-`~/.config/codex-co-engineer/model-api-key`. Never put credentials in
+`~/.config/codex-co-engineer/model-api-key` for Muse. The optional Ox Alpha
+route uses `OPENROUTER_API_KEY`, `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`,
+or `~/.config/codex-co-engineer/openrouter-api-key`. Never put credentials in
 MCP arguments or prompts.
 
 ### 3. First run
@@ -96,7 +98,7 @@ SHA is a separate, Cursor Cloud-only `starting_ref` property.
 Use Codex-Co-Engineer when you want Codex to:
 
 - run a review or implementation on Grok Build, Cursor Local, Cursor Cloud, or
-  DeepSeek Harness (DSH) / Muse Spark
+  DeepSeek Harness (DSH) / Muse Spark or Ox Alpha
 - keep one writer per managed local worktree and branch
 - wait on a durable receipt instead of a fire-and-forget shell job
 - cancel an owned local process group or Cursor Cloud run
@@ -105,7 +107,7 @@ Use Codex-Co-Engineer when you want Codex to:
 Do not use it as a security sandbox, a credential broker, or a replacement for
 the provider's own login and approval flow.
 
-Version 3.2.0 exposes five tools: `status`, `delegate`, `task`, `tasks`,
+Version 3.2.1 exposes five tools: `status`, `delegate`, `task`, `tasks`,
 and `cancel`. `delegate` records `expected_duration_ms` or `timeout_ms`
 and a 20% deadline margin. `task` can wait with `wait_until: "terminal"`
 until the recorded deadline, inspect summary/compact/diagnostics views,
@@ -138,7 +140,7 @@ pagination rules, terminal evidence metadata, and Cursor Cloud preflight.
 | --- | --- | --- | --- | --- |
 | Grok Build | `grok` | ACP first; CLI fallback only before prompt dispatch | Managed worktree by default, or explicit `direct` | Required |
 | Cursor Local | `cursor-local` | ACP first; CLI fallback only before prompt dispatch | Managed worktree by default, or explicit `direct` | Required |
-| DeepSeek Harness / Muse | `dsh` | Official rc.7 ACP composition through ACPX | Managed worktree by default, or explicit `direct` | Required |
+| DeepSeek Harness / Muse or Ox Alpha | `dsh` | Official rc.7 ACP composition through ACPX | Managed worktree by default, or explicit `direct` | Required |
 | Cursor Cloud | `cursor-cloud` | Official Cursor SDK | Remote provider branch; no local worktree | Not used |
 
 Roles are `review` and `implement`. An accepted prompt is never replayed
@@ -322,7 +324,7 @@ Node 24. GitHub Actions is a credential-free mirror; live Grok, Cursor,
 Cursor Cloud, and DSH acceptance is recorded separately because CI must not
 send repository content to model providers.
 
-GitHub-ready 3.2.0 notes live in [docs/releases/v3.2.0.md](docs/releases/v3.2.0.md).
+GitHub-ready 3.2.1 notes live in [docs/releases/v3.2.1.md](docs/releases/v3.2.1.md).
 This repository does not create the GitHub Release, tag, or remote from that
 file.
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -304,7 +304,111 @@ test('local create_pr and starting_ref are rejected before workspace creation', 
       }),
       (error) => error.code === 'invalid_starting_ref',
     );
+    await assert.rejects(
+      submitTask({ task_id: 'local-dsh-model', provider: 'grok', repo: '/repo', prompt: 'review', dsh_model: 'stealth/ox-alpha' }, {
+        root, createWorkspace,
+      }),
+      (error) => error.code === 'invalid_dsh_model',
+    );
+    await assert.rejects(
+      submitTask({ task_id: 'unknown-dsh-model', provider: 'dsh', repo: '/repo', prompt: 'review', dsh_model: 'unknown/model' }, {
+        root, createWorkspace,
+      }),
+      (error) => error.code === 'invalid_dsh_model',
+    );
     assert.equal(createCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('DSH Ox Alpha selection uses its dedicated config and credential without replacing Muse', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-dsh-ox-'));
+  const repo = path.join(root, 'repo');
+  const oxConfig = path.join(root, 'dsh-acp-ox-alpha.yml');
+  const oxKey = path.join(root, 'openrouter-api-key');
+  let launched;
+  try {
+    await mkdir(repo);
+    await writeFile(oxConfig, 'fixture', { mode: 0o600 });
+    await writeFile(oxKey, 'test-openrouter-value\n', { mode: 0o600 });
+    const execute = async (_command, args) => {
+      if (args.includes('--show-toplevel')) return { stdout: `${repo}\n` };
+      if (args.includes('--show-current')) return { stdout: 'feature\n' };
+      if (args.includes('HEAD')) return { stdout: `${SHA}\n` };
+      throw new Error(`unexpected args: ${args.join(' ')}`);
+    };
+    const value = await submitTask({
+      task_id: 'dsh-ox-one',
+      provider: 'dsh',
+      dsh_model: 'stealth/ox-alpha',
+      repo,
+      prompt: 'exercise Ox Alpha routing',
+      workspace_mode: 'direct',
+      expected_duration_ms: 10_000,
+    }, {
+      root,
+      env: {
+        CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG: oxConfig,
+        CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE: oxKey,
+      },
+      execute,
+      probeBoundary: readyBoundary,
+      launch: async (request) => {
+        launched = request;
+        return { pid: 9002, process_group: 9002, process_start_ticks: '2' };
+      },
+    });
+    assert.equal(value.task.provider, 'dsh');
+    assert.equal(value.task.dsh_model, 'stealth/ox-alpha');
+    assert.deepEqual(value.task.agent_argv, ['dsh-acp-demo', '--config', oxConfig]);
+    assert.equal(launched.env.OPENROUTER_API_KEY, 'test-openrouter-value');
+    assert.equal(launched.env.MODEL_API_KEY, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('DSH omission keeps the Muse config and credential as the stored default', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-dsh-muse-'));
+  const repo = path.join(root, 'repo');
+  const museConfig = path.join(root, 'dsh-acp.yml');
+  const museKey = path.join(root, 'model-api-key');
+  let launched;
+  try {
+    await mkdir(repo);
+    await writeFile(museConfig, 'fixture', { mode: 0o600 });
+    await writeFile(museKey, 'test-muse-value\n', { mode: 0o600 });
+    const execute = async (_command, args) => {
+      if (args.includes('--show-toplevel')) return { stdout: `${repo}\n` };
+      if (args.includes('--show-current')) return { stdout: 'feature\n' };
+      if (args.includes('HEAD')) return { stdout: `${SHA}\n` };
+      throw new Error(`unexpected args: ${args.join(' ')}`);
+    };
+    const value = await submitTask({
+      task_id: 'dsh-muse-default',
+      provider: 'dsh',
+      repo,
+      prompt: 'exercise default Muse routing',
+      workspace_mode: 'direct',
+      expected_duration_ms: 10_000,
+    }, {
+      root,
+      env: {
+        CODEX_CO_ENGINEER_DSH_ACP_CONFIG: museConfig,
+        CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: museKey,
+      },
+      execute,
+      probeBoundary: readyBoundary,
+      launch: async (request) => {
+        launched = request;
+        return { pid: 9003, process_group: 9003, process_start_ticks: '3' };
+      },
+    });
+    assert.equal(value.task.dsh_model, 'muse-spark-1.2-contributor');
+    assert.deepEqual(value.task.agent_argv, ['dsh-acp-demo', '--config', museConfig]);
+    assert.equal(launched.env.MODEL_API_KEY, 'test-muse-value');
+    assert.equal(launched.env.OPENROUTER_API_KEY, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -341,7 +445,16 @@ test('status makes boundary health explicit and fails only local providers close
   const providerReadiness = {
     grok: { installed: true, ready: true, transport: 'acp' },
     'cursor-local': { installed: true, ready: true, transport: 'acp' },
-    dsh: { installed: true, ready: true, transport: 'acpx' },
+    dsh: {
+      installed: true,
+      ready: true,
+      transport: 'acpx',
+      default_model: 'muse-spark-1.2-contributor',
+      model_options: {
+        'muse-spark-1.2-contributor': { ready: true },
+        'stealth/ox-alpha': { ready: true },
+      },
+    },
     'cursor-cloud': { installed: true, ready: true, transport: 'cursor-sdk' },
   };
   try {
@@ -361,6 +474,7 @@ test('status makes boundary health explicit and fails only local providers close
       assert.equal(status.readiness[provider].reason, 'systemd_user_manager_unavailable');
     }
     assert.equal(status.readiness['cursor-cloud'].ready, true);
+    assert.deepEqual(status.readiness.dsh.model_options, providerReadiness.dsh.model_options);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

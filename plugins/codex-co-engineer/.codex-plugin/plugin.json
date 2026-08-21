@@ -1,6 +1,6 @@
 {
   "name": "codex-co-engineer",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Codex-Co-Engineer delegates real coding work to Grok, Cursor Local, Cursor Cloud, and DeepSeek Harness through a thin ACP-first supervisor.",
   "author": {
     "name": "Codex-Co-Engineer"
