@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- **R1 bounded-run architecture ADR.** Documents the accepted 3.3.0 run
+  model: 1–8 independent assignments, one immutable repository/base
+  identity, deterministic explicit/profile resolution, no direct mode for
+  run submissions, disjoint writer scopes, read-only verification, no
+  post-dispatch fallback or replay, bounded evidence, Codex-only final
+  acceptance, and additive 3.2.1 compatibility. Frozen verified child
+  deltas may be composed into one run-owned, single-parent,
+  non-authoritative candidate; required writer lanes block a complete
+  candidate when rejected or unresolved.
+
 ## [3.2.1] - 2026-08-21
 
 Optional Ox Alpha support for DSH without changing the default Muse route or
