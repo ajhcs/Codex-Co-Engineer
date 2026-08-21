@@ -21,6 +21,14 @@
   credential, environment, executable/argv/shell/command-catalog,
   merge/push/create-PR authority, direct-mode, moving-ref, and
   embedded prompt/result content each fail closed with dedicated codes.
+- **ProfileV1 adversarial rejection suite.** Adds a dedicated negative
+  test catalog proving profiles reject credential keys and secret-shaped
+  values, environment interpolation and env catalogs, executables, argv,
+  shell strings, command catalogs and `VerificationPolicyV1`-shaped
+  content, direct-mode workspace configuration, merge/push/create-PR and
+  protected-ref authority, moving refs, embedded prompt/result content,
+  symlinked or non-regular catalogs, duplicate keys, oversized catalogs,
+  and non-conforming profile names.
 - **R1 bounded-run architecture ADR.** Documents the accepted 3.3.0 run
   model: 1–8 independent assignments, one immutable repository/base
   identity, deterministic explicit/profile resolution, data-only profiles

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -37,7 +38,10 @@ async function makeWorkspace({ project, owner } = {}) {
     await writeJson(path.join(repositoryPath, '.codex', 'co-engineer-profiles.json'), project);
   }
   if (owner !== undefined) {
-    await writeJson(path.join(ownerConfigDir, 'codex-co-engineer', 'profiles.json'), owner);
+    const ownerFile = path.join(ownerConfigDir, 'codex-co-engineer', 'profiles.json');
+    await writeJson(ownerFile, owner);
+    await chmod(path.dirname(ownerFile), 0o700);
+    await chmod(ownerFile, 0o600);
   }
   return {
     root,
@@ -59,6 +63,11 @@ test('profile roots are explicit and reject relative or traversal paths', () => 
   assert.equal(envRoots.owner.file, path.join('/xdg', 'codex-co-engineer', 'profiles.json'));
   const homeRoots = profileRoots({ repositoryPath: '/repo', env: { HOME: '/home/test-user' } });
   assert.equal(homeRoots.owner.file, path.join('/home/test-user/.config', 'codex-co-engineer', 'profiles.json'));
+  const relativeXdg = profileRoots({
+    repositoryPath: '/repo',
+    env: { XDG_CONFIG_HOME: 'relative/config', HOME: '/home/test-user' },
+  });
+  assert.equal(relativeXdg.owner.file, path.join('/home/test-user/.config', 'codex-co-engineer', 'profiles.json'));
 
   for (const bad of ['relative/repo', '/repo/../elsewhere', '.', '', undefined, 7]) {
     assert.throws(
@@ -119,6 +128,10 @@ test('loadProfiles merges owner and project catalogs deterministically', async (
     assert.deepEqual(first.profiles.map((record) => record.name), ['a-implement', 'b-review', 'z-owner-default']);
     assert.equal(findProfile(first, 'a-implement').scope, 'project', 'project scope must take precedence');
     assert.equal(findProfile(first, 'z-owner-default').scope, 'owner');
+    assert.deepEqual(first.sources.map(({ scope, loaded }) => ({ scope, loaded })), [
+      { scope: 'project', loaded: true },
+      { scope: 'owner', loaded: true },
+    ]);
 
     const shadowed = first.shadowed.find((record) => record.name === 'a-implement');
     assert.ok(shadowed, 'the shadowed owner record must be reported');
@@ -145,6 +158,10 @@ test('missing catalogs load as empty and lookups stay exact', async () => {
     const loaded = await loadProfiles(options);
     assert.deepEqual(loaded.profiles, []);
     assert.deepEqual(loaded.shadowed, []);
+    assert.deepEqual(loaded.sources.map(({ scope, loaded: present }) => ({ scope, loaded: present })), [
+      { scope: 'project', loaded: false },
+      { scope: 'owner', loaded: false },
+    ]);
     assert.equal(findProfile(loaded, 'anything'), undefined);
     assert.throws(() => findProfile(loaded, 'Not-A-Name'), (error) => error.code === 'invalid_profile_name');
   } finally {
@@ -205,6 +222,12 @@ test('catalog files must be regular, bounded, and structurally sound', async () 
       await writeFile(catalogPath, text);
       await assert.rejects(() => loadProfiles(options), (error) => error.code === code, `${text} must fail ${code}`);
     }
+    await writeFile(catalogPath, Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0xff, 0x7d]));
+    await assert.rejects(
+      () => loadProfiles(options),
+      (error) => error.code === 'invalid_profile_catalog_encoding',
+      'invalid UTF-8 must never be replacement-decoded',
+    );
 
     const tooMany = {};
     for (let index = 0; index <= MAX_PROFILES_PER_CATALOG; index += 1) {
@@ -215,6 +238,42 @@ test('catalog files must be regular, bounded, and structurally sound', async () 
     await cleanup();
   } finally {
     await base.cleanup();
+  }
+});
+
+test('catalog special files are rejected without blocking before fstat', {
+  skip: process.platform !== 'linux',
+  timeout: 2_000,
+}, async () => {
+  const workspace = await makeWorkspace();
+  try {
+    const catalogPath = path.join(
+      workspace.repositoryPath,
+      '.codex',
+      'co-engineer-profiles.json',
+    );
+    await mkdir(path.dirname(catalogPath), { recursive: true });
+    execFileSync('mkfifo', [catalogPath], { stdio: 'ignore' });
+    await assert.rejects(
+      () => loadProfiles(workspace.options),
+      (error) => error.code === 'profile_catalog_not_regular',
+    );
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test('owner catalogs reject group- or world-writable control surfaces', async () => {
+  const { options, ownerConfigDir, cleanup } = await makeWorkspace({ owner: { secure: validDefinition() } });
+  try {
+    const ownerCatalog = path.join(ownerConfigDir, 'codex-co-engineer', 'profiles.json');
+    await chmod(ownerCatalog, 0o666);
+    await assert.rejects(
+      () => loadProfiles(options),
+      (error) => error.code === 'profile_catalog_not_owner_controlled',
+    );
+  } finally {
+    await cleanup();
   }
 });
 
@@ -294,6 +353,13 @@ test('policy data stays bounded, non-executable, and deterministic', async () =>
     const loaded = await loadProfiles(options);
     assert.deepEqual(loaded.profiles[0].definition.policy.pre_dispatch_provider_preference,
       ['dsh', 'grok', 'cursor-local', 'cursor-cloud'], 'authored preference order must be preserved');
+    assert.ok(Object.isFrozen(loaded.profiles[0].definition.policy));
+    assert.ok(Object.isFrozen(loaded.profiles[0].definition.policy.pre_dispatch_provider_preference));
+    assert.throws(
+      () => loaded.profiles[0].definition.policy.pre_dispatch_provider_preference.push('dsh'),
+      TypeError,
+      'validated nested profile data must be immutable',
+    );
 
     const cases = [
       [{ schema: PROFILE_SCHEMA, policy: 'fast' }, 'invalid_profile_policy'],

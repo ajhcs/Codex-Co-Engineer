@@ -84,7 +84,7 @@ There are exactly two roots:
 | Scope | Path |
 | --- | --- |
 | Project | `<repository>/.codex/co-engineer-profiles.json` |
-| Owner | `<XDG_CONFIG_HOME|$HOME/.config>/codex-co-engineer/profiles.json` |
+| Owner | `<XDG_CONFIG_HOME|$HOME/.config|os.homedir()/.config>/codex-co-engineer/profiles.json` |
 
 Profile names match `^[a-z0-9][a-z0-9._-]{0,63}$`. Catalog files must be
 regular non-symlink files of at most 64 KiB holding at most 64 profiles;

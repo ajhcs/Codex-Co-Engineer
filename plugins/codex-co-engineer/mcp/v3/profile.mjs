@@ -245,7 +245,12 @@ async function assertDirectoryUnchanged(dir, before, label) {
 async function readCatalogText(file, label) {
   let handle;
   try {
-    handle = await open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    // A read-only open of a FIFO waits for a writer before fstat can reject
+    // it. O_NONBLOCK makes the handle inspection authoritative without ever
+    // waiting on attacker-controlled special-file behavior; it is inert for
+    // regular files.
+    handle = await open(file,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
   } catch (error) {
     if (error && error.code === 'ENOENT') return undefined;
     if (error && (error.code === 'ENOTDIR' || error.code === 'ELOOP')) {
@@ -343,6 +348,7 @@ const FORBIDDEN_KEY_CLASSES = Object.freeze([
     'executable', 'exec', 'bin', 'binary', 'command', 'commands', 'cmd',
     'argv', 'args', 'argument', 'arguments', 'shell', 'shellcommand',
     'script', 'entrypoint', 'interpreter', 'run', 'runner',
+    'runnercommand', 'commandid',
     'commandcatalog', 'commandcatalogs', 'verification',
     'verificationpolicy', 'verificationpolicyv1', 'verificationcommand',
     'verificationcommands', 'argvtemplate', 'template', 'templates',
@@ -373,8 +379,14 @@ const FORBIDDEN_KEY_CLASSES = Object.freeze([
   ])],
 ]);
 
+// Credential vocabulary matches by substring so mutations such as
+// client_secret or api_key_v2 cannot slip past exact-match lists.
+const CREDENTIAL_CODE = 'profile_credential_key_rejected';
+const CREDENTIAL_TOKENS = FORBIDDEN_KEY_CLASSES[0][1];
+
 function classifyKey(key) {
   const normalized = normalizeKey(key);
+  if (CREDENTIAL_TOKENS.some((token) => normalized.includes(token))) return CREDENTIAL_CODE;
   for (const [code, members] of FORBIDDEN_KEY_CLASSES) {
     if (members.includes(normalized)) return code;
   }
@@ -403,6 +415,7 @@ const SECRET_VALUE_PATTERNS = [
 const ENV_VALUE_PATTERNS = [
   /\$\{[^}]*\}/u,
   /\$[A-Za-z_][A-Za-z0-9_]*/u,
+  /\$\([^)]*\)/u,
   /%[A-Za-z_][A-Za-z0-9_]*%/u,
   /`[^`]*`/u,
 ];
@@ -410,7 +423,6 @@ const SHELL_VALUE_PATTERNS = [
   /[;&|<>`]/u,
   /(^|[^A-Za-z0-9])(?:sh|bash|zsh|fish|pwsh|powershell|cmd)(?![A-Za-z0-9])/iu,
   /^#!/u,
-  /\$\([^)]*\)/u,
   /(?:^|[^A-Za-z0-9])(?:sudo|eval|exec)\s/u,
 ];
 const MOVING_REF_VALUE_PATTERNS = [
@@ -436,12 +448,12 @@ function scanValue(name, key, value) {
 }
 
 function deepScanStrings(name, container, prefix) {
-  const stack = [{ value: container, depth: 0 }];
+  const stack = [{ value: container, depth: 0, field: prefix }];
   const seen = new Set();
   let nodes = 0;
   let stringBytes = 0;
   while (stack.length > 0) {
-    const { value, depth } = stack.pop();
+    const { value, depth, field } = stack.pop();
     nodes += 1;
     if (nodes > MAX_PROFILE_STRUCTURE_NODES || depth > MAX_PROFILE_STRUCTURE_DEPTH) {
       fail('profile_structure_too_complex', `Profile "${name}" exceeds the bounded data structure limits.`);
@@ -451,7 +463,7 @@ function deepScanStrings(name, container, prefix) {
       if (stringBytes > MAX_PROFILE_CATALOG_BYTES) {
         fail('profile_structure_too_complex', `Profile "${name}" exceeds the bounded string-data limit.`);
       }
-      scanValue(name, prefix, value);
+      scanValue(name, field, value);
       continue;
     }
     if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
@@ -467,13 +479,14 @@ function deepScanStrings(name, container, prefix) {
     if (Array.isArray(value)) {
       const values = dataArrayValues(value, 'invalid_profile_data_value', 'Profile data array');
       for (let index = values.length - 1; index >= 0; index -= 1) {
-        stack.push({ value: values[index], depth: depth + 1 });
+        stack.push({ value: values[index], depth: depth + 1, field: `${field}[${index}]` });
       }
     } else {
       const descriptors = dataObjectDescriptors(value, 'invalid_profile_data_value', 'Profile data object');
       const keys = Object.keys(descriptors);
       for (let index = keys.length - 1; index >= 0; index -= 1) {
-        stack.push({ value: descriptors[keys[index]].value, depth: depth + 1 });
+        const key = keys[index];
+        stack.push({ value: descriptors[key].value, depth: depth + 1, field: `${field}.${key}` });
       }
     }
   }
@@ -588,7 +601,7 @@ export function validateProfileDefinition(name, raw) {
   if (has('role')) canonical.role = requireRole(name, descriptors.role.value);
   if (has('expected_duration_ms')) canonical.expected_duration_ms = requireExpectedDuration(name, descriptors.expected_duration_ms.value);
   if (has('policy')) canonical.policy = requirePolicy(name, descriptors.policy.value);
-  return canonical;
+  return deepFreezeData(canonical);
 }
 
 function canonicalProfileJsonInner(value, seen, depth) {
