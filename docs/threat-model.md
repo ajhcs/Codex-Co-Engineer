@@ -33,11 +33,11 @@ Local workers return commits and handoff evidence for Codex.
 
 ## Repository exposure
 
-A selected provider receives the **full repository** reachable from the
-assigned worktree or from the Cursor Cloud origin and `starting_ref`.
-That includes files that were accidentally committed: source, history
-present in the sent object set, fixtures, and secrets that landed in Git
-by mistake.
+A selected provider receives the **authorized full repository and history**
+reachable from the assigned worktree or from the Cursor Cloud origin and
+pinned SHA. That grant includes committed secrets: source, history present
+in the sent object set, fixtures, configuration, and any secret that landed
+in Git by mistake.
 
 Do not delegate a repository the provider is not authorized to process.
 Rotate any secret that was committed and then sent.
@@ -46,14 +46,22 @@ Platform-protected material is **not** part of that repository grant and
 must remain excluded from provider payloads, prompts, MCP arguments, and
 task records:
 
-- platform and provider control credentials, including owner-only key
-  files and process environment secrets;
-- protected refs and other refs the operator did not grant;
-- control-plane tokens, MCP session tokens, and supervisor lock secrets;
-- raw owner-only task state that is not the assigned workspace.
+- platform and Git/hosting write credentials, including owner-only key
+  files, SSH agents/private keys, and process environment secrets unrelated
+  to the selected provider route;
+- control-plane tokens, MCP session tokens, supervisor lock secrets, and
+  cleanup confirmation tokens;
+- owner-only raw evidence that is not the assigned workspace;
+- unauthorized refs, tags, remotes, and other refs the operator did not
+  grant for that provider.
 
 The platform must not copy those excluded classes into a worktree, prompt,
 or provider origin URL in order to make a task "easier."
+
+Because Cursor Cloud receives a caller-provided origin, operators must
+grant only origins and refs authorized for that provider. Documentation
+must not overclaim that the platform automatically strips arbitrary origin
+refs outside the authorized set.
 
 ## Cgroups are lifecycle control, not a sandbox
 
@@ -90,13 +98,18 @@ secrets in `result`, errors, nested handoff/validation, and events.
 
 ## Trusted verification policy
 
-Verification lanes are read-only. The **trusted verification policy** is
-the only executable command catalog those lanes may run. A verifier may
-not:
+Verification lanes are read-only. Profiles are data-only and must not carry
+executable catalogs. Owner-maintained `VerificationPolicyV1` is the only
+executable command catalog those lanes may run. Codex may select only
+approved command IDs and permitted parameters; manifests carry those IDs
+and parameters, never arbitrary executable argv. Provider-reported or
+provider-requested commands are evidence or attention only and are never
+automatically executed. A verifier may not:
 
 - invent commands outside the catalog;
 - install additional trust roots or mutate the workspace;
-- treat a model-suggested command as authorized;
+- treat a model-suggested, provider-reported, or provider-requested
+  command as authorized for automatic execution;
 - follow a worker-supplied script that is not an exact catalog entry.
 
 Gate A functional release checks remain the product's executable release
@@ -157,10 +170,14 @@ Machine-checked authority and threat-model identifiers:
 - `codex_only_final_acceptance`
 - `full_repository_provider_exposure`
 - `platform_protected_credentials_refs_tokens_excluded`
+- `cursor_cloud_origin_operator_authorized_only`
 - `cgroup_lifecycle_not_sandbox`
 - `raw_evidence_owner_only_local`
 - `sanitized_bounded_evidence_model_facing`
 - `trusted_verification_policy_command_catalog`
+- `profiles_data_only`
+- `verification_policy_v1_only_executable_catalog`
+- `provider_commands_evidence_never_auto_executed`
 - `manual_proof_bound_cleanup`
 - `no_automatic_gc`
 

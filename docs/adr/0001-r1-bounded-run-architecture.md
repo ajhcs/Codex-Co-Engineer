@@ -62,9 +62,18 @@ Each assignment is fully resolved before dispatch:
 4. Resolution failure is a pre-dispatch error. The platform does not
    substitute a different provider, model, role, or scope.
 
-A profile may name provider, role, expected duration, and a verification
-command catalog. It may not name credentials, moving refs, or a direct-mode
-workspace.
+Profiles are **data-only**. A profile may contain provider, model, role,
+expected duration, and non-executable selection/policy data. A profile
+**MUST NOT** define executables, argv, shell strings, command
+templates/catalogs, or credentials. It may not name moving refs or a
+direct-mode workspace.
+
+A separate user/owner-maintained `VerificationPolicyV1` is the only
+executable command catalog. Codex may select only approved command IDs and
+permitted parameters from that policy. Run manifests carry those IDs and
+parameters, never arbitrary executable argv. Provider-reported or
+provider-requested commands are evidence or attention only and are never
+automatically executed.
 
 ## No direct mode for run submissions
 
@@ -73,9 +82,12 @@ workspace.
 
 R1 **run submissions** reject direct mode. Every local writer assignment in
 a run uses a managed `worktree-bootstrap` worktree, branch, and writer
-lock. Cursor Cloud assignments continue to use a provider-accessible origin
-plus an exact already-pushed `starting_ref` SHA; they still do not mutate
-the caller's checkout.
+lock. Cursor Cloud assignments continue to use a provider-accessible origin;
+they still do not mutate the caller's checkout.
+
+For individual 3.2.1 Cursor Cloud tasks, `starting_ref` remains optional.
+Every 3.3.0 **run** Cloud lane **MUST** pin one exact already-pushed
+provider-visible SHA.
 
 ## Disjoint writer scopes
 
@@ -97,9 +109,11 @@ Verification assignments are read-only. They inspect declared worktrees,
 commits, and receipts. They do not create commits, push, open pull
 requests, or edit protected refs.
 
-The **trusted verification policy** is the only executable command catalog
-for verification lanes. A verifier may run only those exact commands. It
-may not invent shell, package, or network actions outside that catalog.
+`VerificationPolicyV1` is the only executable command catalog for
+verification lanes. A verifier may run only Codex-selected approved command
+IDs with permitted parameters from that owner-maintained policy. It may not
+invent shell, package, or network actions, execute profile-supplied
+command content, or auto-run provider-reported/requested commands.
 
 ## Transport, fallback, and replay
 
@@ -138,6 +152,12 @@ Composition rules:
 
 - Inputs are frozen, already-verified child deltas from the run's writer
   assignments.
+- Each eligible child head SHA is frozen, a binary-safe delta is computed
+  from the immutable run base, and eligible deltas are applied in manifest
+  order.
+- Before application, changed paths and Git operations are revalidated
+  against lane policy. Disallowed submodule, symlink, rename, or mode-change
+  behavior rejects the delta.
 - Application is exact and non-conflict-resolving. A patch that does not
   apply cleanly fails composition; the platform does not merge, rebase, or
   semantically repair conflicts.
@@ -145,10 +165,17 @@ Composition rules:
   base SHA.
 - The candidate is **run-owned** and **non-authoritative**. It is evidence
   for Codex, not an integration.
+- Its implementation-owned ref is exactly
+  `refs/codex-co-engineer/runs/<run-id>/candidate`.
+- That run-owned namespace is protected from worker and provider writes, but
+  it is not a user/protected branch or remote ref within the scope of
+  `gate_a_no_protected_ref_mutation`.
 - The platform **MUST NOT** integrate that candidate into a user branch, a
   protected branch, or a remote.
 - A required writer lane that is rejected or unresolved blocks a complete
   candidate. Optional/advisory lanes do not.
+- An explicitly requested diagnostic partial result is labeled
+  `incomplete_candidate` and can never receive `ready_for_codex_review`.
 
 Codex may accept, reject, or ignore the candidate after inspection. Workers
 and the composition step have no merge authority.
@@ -167,6 +194,9 @@ progress:
 - The run allows **at most one execution reply round**. A delivered reply
   is exactly-once for that batch. There is no debate loop and no automatic
   repair cycle.
+- Waiting never silently extends a deadline. A reply batch may carry an
+  explicit, audited lane-level deadline extension; no other extension is
+  inferred from attention or response timing.
 - Providers that cannot host a same-session reply, including DSH and
   Cursor Cloud, do not start a new prompt. Unsupported questions become
   **unresolved** and the affected assignment is **safely cancelled**. The
@@ -194,13 +224,40 @@ authority.
 
 | Gate | Name | Role |
 | --- | --- | --- |
-| A | Functional release | Authoritative. The existing provider-free local exact-tree gate, package inventory, and additive 3.2.1 contract checks. 3.3.0 ships only when Gate A passes. |
+| A | Functional release | Authoritative. Full 3.3.0 functional qualification below. 3.3.0 ships only when Gate A passes. |
 | B | Context-efficiency | Advisory. Token/context measurements must not block Gate A. |
 | C | Credit economics | Advisory. Provider-credit or cost measurements must not block Gate A. |
 
 Gate B and Gate C may be recorded as evidence. They are not reasons to
 renumber the release, withhold a Gate A-passing 3.3.0, or introduce a
 learned optimizer.
+
+### Gate A functional qualification
+
+Gate A is the mandatory 3.3.0 functional qualification contract. The
+existing provider-free local exact-tree/package gate remains
+**necessary but not sufficient**. Gate A also requires:
+
+- No duplicate dispatch.
+- Exact run, child, provider-run, workspace, and Git identity.
+- Idempotent submission.
+- Assignment-count `1..=8` enforcement.
+- Scope and read-only detection.
+- Deterministic candidate composition and combined-candidate verification.
+- Decision evidence.
+- `decision_or_attention` semantics, including no silently waiting
+  unanswerable lanes.
+- Cancellation, restart, and cursor recovery.
+- No protected-ref mutation caused or accepted by the platform.
+- Valid raw and sanitized artifacts.
+- Constrained trusted-policy (`VerificationPolicyV1`) command execution.
+- Safe per-run cleanup.
+- Additive 3.2.1 compatibility.
+- Every advertised provider route qualified.
+- Real-host five-, thirty-, and 240-minute waits.
+
+Gate B and Gate C remain advisory and do not substitute for these
+obligations.
 
 ## Additive 3.2.1 compatibility
 
@@ -243,13 +300,15 @@ These non-goals do **not** forbid:
 
 - Implementers add a run record and assignment lanes without a sixth MCP
   tool and without changing 3.2.1 default response shapes.
-- Verification policy becomes an executable allowlist, not a prompt
-  suggestion.
+- Profiles stay data-only; `VerificationPolicyV1` is the sole executable
+  verification allowlist, not a prompt suggestion or profile field.
 - Attention is batched per run; Codex is not a per-delta supervisor.
 - A composed candidate is a convenience for review. Missing or rejected
   required writers mean there is no complete candidate.
 - Cleanup stays operator-driven and evidence-preserving until an exact
   identity is deliberately removed.
+- Gate A ships only after the full functional qualification list, not
+  merely the provider-free exact-tree/package gate.
 
 ## Stable contract identifiers
 
@@ -258,7 +317,13 @@ Machine-checked 3.3.0 architecture identifiers:
 - `bounded_run_1_to_8`
 - `immutable_repo_base_identity`
 - `deterministic_explicit_or_profile_resolution`
+- `profiles_data_only`
+- `verification_policy_v1_only_executable_catalog`
+- `codex_selects_approved_command_ids_only`
+- `manifests_carry_command_ids_not_argv`
+- `provider_commands_evidence_never_auto_executed`
 - `no_direct_mode_for_run_submissions`
+- `run_cloud_lane_requires_pinned_starting_ref`
 - `disjoint_writer_scopes`
 - `read_only_verification`
 - `no_post_dispatch_fallback_or_replay`
@@ -267,10 +332,35 @@ Machine-checked 3.3.0 architecture identifiers:
 - `codex_only_final_acceptance`
 - `additive_3_2_1_compatibility`
 - `run_owned_candidate_composition`
+- `candidate_binary_safe_manifest_order`
+- `candidate_git_policy_revalidation`
+- `run_owned_candidate_ref_namespace`
+- `diagnostic_partial_candidate_never_ready`
 - `attention_batch_v1`
+- `attention_deadlines_not_silently_extended`
 - `gate_a_functional_release`
 - `gate_b_advisory_context_efficiency`
 - `gate_c_advisory_credit_economics`
+
+Machine-checked Gate A functional qualification identifiers:
+
+- `gate_a_no_duplicate_dispatch`
+- `gate_a_exact_run_child_provider_workspace_git_identity`
+- `gate_a_idempotent_submission`
+- `gate_a_assignment_count_1_to_8`
+- `gate_a_scope_and_read_only_detection`
+- `gate_a_candidate_composition_and_combined_verification`
+- `gate_a_decision_evidence`
+- `gate_a_decision_or_attention_no_silent_unanswerable`
+- `gate_a_cancellation_restart_cursor_recovery`
+- `gate_a_no_protected_ref_mutation`
+- `gate_a_valid_raw_and_sanitized_artifacts`
+- `gate_a_constrained_trusted_policy_command_execution`
+- `gate_a_safe_per_run_cleanup`
+- `gate_a_additive_3_2_1_compatibility`
+- `gate_a_every_advertised_provider_route`
+- `gate_a_real_host_5_30_240_minute_waits`
+- `gate_a_exact_tree_package_necessary_not_sufficient`
 
 Machine-checked first-release non-goal identifiers:
 
