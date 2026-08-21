@@ -174,6 +174,20 @@ test('scope prefix intersection is conservative and deterministic', () => {
   }
 });
 
+test('writer scopes reject dot aliases and conservatively collide across ASCII case', () => {
+  for (const scope of ['./src/**', 'src/./nested/**']) {
+    const error = violationOf((manifest) => { manifest.assignments[1].write_scope = [scope]; });
+    assert.equal(error.code, 'invalid_format');
+    assert.equal(error.path, 'assignments[1].write_scope[0]');
+  }
+  const caseAlias = violationOf((manifest) => {
+    manifest.assignments[1].write_scope = ['SRC/shared/**'];
+    manifest.assignments[2].write_scope = ['src/shared/**'];
+  });
+  assert.equal(caseAlias.code, 'overlapping_writer_scope');
+  assert.equal(writerScopesOverlap('SRC/shared/**', 'src/shared/**'), true);
+});
+
 test('read-only lanes never collide with writer scopes', () => {
   const mixed = fanOutRun(2);
   mixed.run_id = 'mixed-lane-run';
@@ -193,7 +207,11 @@ test('dependency vocabulary is denied at the manifest root', () => {
 });
 
 test('dependency vocabulary is denied on assignments', () => {
-  for (const key of ['depends_on', 'dependencies', 'blocked_by', 'requires', 'after', 'needs']) {
+  for (const key of [
+    'depends_on', 'dependencies', 'blocked_by', 'blocking', 'requires', 'after',
+    'before', 'needs', 'prerequisites', 'waits_for', 'parent', 'parents',
+    'children', 'dag', 'edges',
+  ]) {
     const error = violationOf((manifest) => { manifest.assignments[1][key] = ['review-1']; });
     assert.equal(error.code, 'dependency_not_allowed', key);
     assert.equal(error.path, `assignments[1].${key}`);
@@ -241,7 +259,7 @@ test('an eight-lane fully-connected DAG attempt is still just one rejection', ()
 test('no edge vocabulary exists anywhere in the closed key sets', () => {
   const forbiddenEverywhere = new Set([
     'depends_on', 'dependencies', 'blocked_by', 'requires', 'needs',
-    'after', 'before', 'prerequisites', 'waits_for', 'parents', 'children',
+    'after', 'before', 'prerequisites', 'waits_for', 'parent', 'parents', 'children',
     'dag', 'edges',
   ]);
   for (const [label, keys] of [
