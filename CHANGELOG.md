@@ -4,6 +4,14 @@
 
 ### Added
 
+- **ProfileV1 owner and project profile loading.** Adds the data-only
+  profile catalog: explicit project
+  (`<repository>/.codex/co-engineer-profiles.json`) and owner
+  (`<config>/codex-co-engineer/profiles.json`) roots, the
+  `^[a-z0-9][a-z0-9._-]{0,63}$` profile-name grammar, deterministic
+  project-over-owner precedence with reported shadowing, bounded regular
+  non-symlink catalogs, duplicate-key rejection, and a stable SHA-256
+  provenance digest over validated canonical data.
 - **R1 bounded-run architecture ADR.** Documents the accepted 3.3.0 run
   model: 1–8 independent assignments, one immutable repository/base
   identity, deterministic explicit/profile resolution, data-only profiles

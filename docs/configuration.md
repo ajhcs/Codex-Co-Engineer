@@ -1,9 +1,13 @@
 # Configuration
 
-Codex-Co-Engineer has no project policy file. Provider authentication is
-normal persistent login/session state or an owner-only key file. The setup
-command installs the pinned local composition and creates the default DSH
-configuration; it never performs login on the user's behalf.
+Codex-Co-Engineer has no executable project policy file. The only
+project-scoped configuration data is the data-only ProfileV1 catalog
+described in [Profiles](#profiles); verification commands never come from
+profiles and remain a separate owner-maintained `VerificationPolicyV1`.
+Provider authentication is normal persistent login/session state or an
+owner-only key file. The setup command installs the pinned local composition
+and creates the default DSH configuration; it never performs login on the
+user's behalf.
 
 ## Host environment
 
@@ -63,6 +67,49 @@ MCP process's real environment; Grok, Cursor Local, and DSH are forced to
 `ready: false` when the boundary is unavailable. Local delegation repeats the
 check before creating any workspace or task artifact. The release gate also
 tests a server launched with only the MCP manifest's allowlisted environment.
+
+## Profiles
+
+R1 profiles are owner-authored, data-only selection records used by the
+deterministic run resolver. A profile may name a provider, a model,
+a role, an expected duration, and bounded non-executable selection policy.
+A profile **MUST NOT** define executables, argv, shell strings, command
+templates or catalogs (including anything shaped like
+`VerificationPolicyV1`), credentials, tokens, secrets, environment values,
+moving refs, direct-mode workspace configuration, merge/push/create-PR
+authority, or embedded prompt/result content.
+
+There are exactly two roots:
+
+| Scope | Path |
+| --- | --- |
+| Project | `<repository>/.codex/co-engineer-profiles.json` |
+| Owner | `<XDG_CONFIG_HOME|$HOME/.config>/codex-co-engineer/profiles.json` |
+
+Profile names match `^[a-z0-9][a-z0-9._-]{0,63}$`. Catalog files must be
+regular non-symlink files of at most 64 KiB holding at most 64 profiles;
+duplicate JSON keys are rejected instead of silently last-wins. Precedence
+is fixed and deterministic: when both scopes define the same name, the
+project record applies and the owner record is reported as deterministically
+shadowed. Every loaded profile carries a stable SHA-256 provenance digest
+computed over its validated canonical form plus its exact name, so identical
+data yields identical digests regardless of key order or whitespace.
+
+```json
+{
+  "deep-security-review": {
+    "schema": "codex-co-engineer.profile.v1",
+    "provider": "dsh",
+    "model": "stealth/ox-alpha",
+    "role": "implement",
+    "expected_duration_ms": 1200000
+  }
+}
+```
+
+Profiles only name selections. Resolution across assignments, defaults, and
+selection questions are resolver concerns; provider/model attestation happens
+at preflight, not at authoring time.
 
 ## Task inputs
 
