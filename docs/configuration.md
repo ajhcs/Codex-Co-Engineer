@@ -94,6 +94,9 @@ project record applies and the owner record is reported as deterministically
 shadowed. Every loaded profile carries a stable SHA-256 provenance digest
 computed over its validated canonical form plus its exact name, so identical
 data yields identical digests regardless of key order or whitespace.
+The owner-scope directory and catalog must be owned by the current user and
+must not be writable by group or other users. Project-scope ownership follows
+the repository's normal access policy.
 
 ```json
 {
@@ -106,6 +109,27 @@ data yields identical digests regardless of key order or whitespace.
   }
 }
 ```
+
+### Field validation
+
+Profiles validate against the 3.2.1 provider routes:
+
+- `provider` is one of `dsh`, `grok`, `cursor-local`, `cursor-cloud`.
+- `model` may be named only beside `provider: "dsh"` and must be
+  `muse-spark-1.2-contributor` or `stealth/ox-alpha`; attestation of the
+  effective model still happens at preflight, not at authoring time.
+- `role` is `review` or `implement`.
+- `expected_duration_ms` is an integer from 1,000 to 86,400,000.
+- `policy` is data-only selection policy. Today it may contain exactly
+  `pre_dispatch_provider_preference`: one to four unique known provider
+  names in the owner's deterministic pre-dispatch preference order.
+
+Unknown fields are rejected at every level. Fields naming credentials,
+environment values, executables/argv/shell/command catalogs or templates,
+merge/push/create-PR or protected-ref authority, moving refs, direct-mode
+workspace configuration, or embedded prompt/result content fail closed with
+dedicated error codes, as do string values that look like secret material,
+environment interpolation, shell syntax, or a branch/ref name.
 
 Profiles only name selections. Resolution across assignments, defaults, and
 selection questions are resolver concerns; provider/model attestation happens

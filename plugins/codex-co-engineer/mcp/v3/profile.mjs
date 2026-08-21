@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
+
+import { MAX_EXPECTED_DURATION_MS, MIN_DURATION_MS } from './contract.mjs';
 
 // ProfileV1 (ADR 0001: deterministic_explicit_or_profile_resolution,
 // profiles_data_only). Profiles are owner-authored, data-only selection
@@ -20,6 +23,9 @@ export const OWNER_PROFILE_FILENAME = 'profiles.json';
 
 export const MAX_PROFILE_CATALOG_BYTES = 64 * 1024;
 export const MAX_PROFILES_PER_CATALOG = 64;
+export const MAX_PROFILE_STRUCTURE_NODES = 512;
+export const MAX_PROFILE_STRUCTURE_DEPTH = 16;
+export const MAX_PROFILE_OBJECT_KEYS = 64;
 
 // Mirrors the supervisor provider routes and DSH model identifiers without
 // importing launch logic. Preflight attests the actual provider/model later;
@@ -27,8 +33,8 @@ export const MAX_PROFILES_PER_CATALOG = 64;
 export const PROFILE_PROVIDERS = Object.freeze(['dsh', 'grok', 'cursor-local', 'cursor-cloud']);
 export const PROFILE_DSH_MODELS = Object.freeze(['muse-spark-1.2-contributor', 'stealth/ox-alpha']);
 export const PROFILE_ROLES = Object.freeze(['review', 'implement']);
-export const MIN_PROFILE_EXPECTED_DURATION_MS = 1_000;
-export const MAX_PROFILE_EXPECTED_DURATION_MS = 86_400_000;
+export const MIN_PROFILE_EXPECTED_DURATION_MS = MIN_DURATION_MS;
+export const MAX_PROFILE_EXPECTED_DURATION_MS = MAX_EXPECTED_DURATION_MS;
 
 const SCOPES = Object.freeze(['project', 'owner']);
 
@@ -37,7 +43,74 @@ function fail(code, message) {
 }
 
 function isPlainObject(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
+}
+
+function dataObjectDescriptors(value, code, label) {
+  if (!isPlainObject(value)) fail(code, `${label} must be a plain data object.`);
+  let descriptors;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    fail(code, `${label} properties could not be inspected safely.`);
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== 'string')) {
+    fail(code, `${label} must not define symbol properties.`);
+  }
+  if (keys.length > MAX_PROFILE_OBJECT_KEYS) {
+    fail('profile_structure_too_complex', `${label} exceeds the bounded property count.`);
+  }
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      fail(code, `${label} must contain enumerable data properties only.`);
+    }
+  }
+  return descriptors;
+}
+
+function dataArrayValues(value, code, label) {
+  if (!Array.isArray(value)) fail(code, `${label} must be an array.`);
+  let prototype;
+  try {
+    prototype = Object.getPrototypeOf(value);
+  } catch {
+    fail(code, `${label} could not be inspected safely.`);
+  }
+  if (prototype !== Array.prototype && prototype !== null) {
+    fail(code, `${label} must be a standard data array.`);
+  }
+  let descriptors;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    fail(code, `${label} properties could not be inspected safely.`);
+  }
+  const length = descriptors.length?.value;
+  if (!Number.isInteger(length) || length < 0 || length > MAX_PROFILE_OBJECT_KEYS) {
+    fail('profile_structure_too_complex', `${label} exceeds the bounded item count.`);
+  }
+  const expected = new Set(['length', ...Array.from({ length }, (_, index) => String(index))]);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== 'string' || !expected.has(key)) || keys.length !== expected.size) {
+    fail(code, `${label} must be dense and must not define extra properties.`);
+  }
+  const values = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      fail(code, `${label} must contain enumerable data items only.`);
+    }
+    values.push(descriptor.value);
+  }
+  return values;
 }
 
 function isWhitespace(char) {
@@ -45,17 +118,23 @@ function isWhitespace(char) {
 }
 
 function requireNormalizedAbsolute(value, code, label) {
-  if (typeof value !== 'string' || value.length === 0 || path.resolve(value) !== value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096
+    || value.includes('\0') || path.resolve(value) !== value) {
     fail(code, `${label} must be an absolute, normalized path.`);
   }
   return value;
 }
 
 function defaultOwnerConfigDir(env) {
-  if (typeof env.XDG_CONFIG_HOME === 'string' && env.XDG_CONFIG_HOME.length > 0) {
-    return path.resolve(env.XDG_CONFIG_HOME);
+  if (typeof env.XDG_CONFIG_HOME === 'string' && env.XDG_CONFIG_HOME.length > 0
+    && path.isAbsolute(env.XDG_CONFIG_HOME) && path.resolve(env.XDG_CONFIG_HOME) === env.XDG_CONFIG_HOME) {
+    return env.XDG_CONFIG_HOME;
   }
-  const home = typeof env.HOME === 'string' && env.HOME.length > 0 ? env.HOME : homedir();
+  const home = typeof env.HOME === 'string' && env.HOME.length > 0
+    && path.isAbsolute(env.HOME) && path.resolve(env.HOME) === env.HOME
+    ? env.HOME
+    : homedir();
+  requireNormalizedAbsolute(home, 'invalid_profile_owner_config_dir', 'owner home directory');
   return path.join(home, '.config');
 }
 
@@ -137,34 +216,85 @@ export function assertNoDuplicateCatalogKeys(text) {
   }
 }
 
-async function readCatalogText(file, label) {
-  let entry;
+function sameEntry(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+    && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function requireOwnerControl(entry, label, kind) {
+  if (label !== 'owner') return;
+  const effectiveUid = typeof process.geteuid === 'function' ? BigInt(process.geteuid()) : undefined;
+  if ((effectiveUid !== undefined && entry.uid !== effectiveUid) || (entry.mode & 0o022n) !== 0n) {
+    fail('profile_catalog_not_owner_controlled',
+      `The owner profile ${kind} must be owned by the current user and not writable by group or other users.`);
+  }
+}
+
+async function assertDirectoryUnchanged(dir, before, label) {
+  let after;
   try {
-    entry = await lstat(file);
+    after = await lstat(dir, { bigint: true });
+  } catch (error) {
+    fail('profile_catalog_changed_during_read', `The ${label} profile directory changed while its catalog was read.`);
+  }
+  if (!sameEntry(before, after)) {
+    fail('profile_catalog_changed_during_read', `The ${label} profile directory changed while its catalog was read.`);
+  }
+}
+
+async function readCatalogText(file, label) {
+  let handle;
+  try {
+    handle = await open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   } catch (error) {
     if (error && error.code === 'ENOENT') return undefined;
-    if (error && error.code === 'ENOTDIR') {
+    if (error && (error.code === 'ENOTDIR' || error.code === 'ELOOP')) {
       fail('profile_catalog_not_regular', `The ${label} profile catalog path is not a regular file location.`);
     }
-    fail('profile_catalog_unreadable', `The ${label} profile catalog could not be inspected.`);
+    fail('profile_catalog_unreadable', `The ${label} profile catalog could not be opened safely.`);
   }
-  if (entry.isSymbolicLink() || !entry.isFile()) {
-    fail('profile_catalog_not_regular', `The ${label} profile catalog must be a regular non-symlink file.`);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) {
+      fail('profile_catalog_not_regular', `The ${label} profile catalog must be a regular non-symlink file.`);
+    }
+    requireOwnerControl(before, label, 'catalog');
+    if (before.size > BigInt(MAX_PROFILE_CATALOG_BYTES)) {
+      fail('profile_catalog_too_large', `The ${label} profile catalog exceeds ${MAX_PROFILE_CATALOG_BYTES} bytes.`);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (!sameEntry(before, after)) {
+      fail('profile_catalog_changed_during_read', `The ${label} profile catalog changed while it was read.`);
+    }
+    if (bytes.byteLength > MAX_PROFILE_CATALOG_BYTES) {
+      fail('profile_catalog_too_large', `The ${label} profile catalog exceeds ${MAX_PROFILE_CATALOG_BYTES} bytes.`);
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+      fail('invalid_profile_catalog_json', `The ${label} profile catalog must not begin with a UTF-8 BOM.`);
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      fail('invalid_profile_catalog_encoding', `The ${label} profile catalog must be valid UTF-8.`);
+    }
+  } catch (error) {
+    if (error?.code?.startsWith?.('profile_') || error?.code?.startsWith?.('invalid_profile_')) throw error;
+    fail('profile_catalog_unreadable', `The ${label} profile catalog could not be read safely.`);
+  } finally {
+    await handle.close().catch(() => {});
   }
-  if (entry.size > MAX_PROFILE_CATALOG_BYTES) {
-    fail('profile_catalog_too_large', `The ${label} profile catalog exceeds ${MAX_PROFILE_CATALOG_BYTES} bytes.`);
-  }
-  return (await readFile(file)).toString('utf8');
 }
 
 async function requireRealDirectoryOrMissing(dir, label) {
-  const entry = await lstat(dir).catch((error) => {
+  const entry = await lstat(dir, { bigint: true }).catch((error) => {
     if (error && error.code === 'ENOENT') return undefined;
     fail('profile_catalog_unreadable', `The ${label} profile directory could not be inspected.`);
   });
   if (entry !== undefined && (entry.isSymbolicLink() || !entry.isDirectory())) {
     fail('profile_catalog_not_regular', `The ${label} profile directory must be a real non-symlink directory.`);
   }
+  if (entry !== undefined) requireOwnerControl(entry, label, 'directory');
   return entry;
 }
 
@@ -186,28 +316,303 @@ function parseCatalog(text, label) {
   return parsed;
 }
 
+const PROFILE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./:-]{0,127}$/u;
+
+export const ALLOWED_PROFILE_FIELDS = Object.freeze([
+  'schema', 'provider', 'model', 'role', 'expected_duration_ms', 'policy',
+]);
+export const ALLOWED_PROFILE_POLICY_FIELDS = Object.freeze(['pre_dispatch_provider_preference']);
+export const MAX_PROVIDER_PREFERENCE_ENTRIES = PROFILE_PROVIDERS.length;
+
+// Keys are normalized (case and -/_ folded) before classification so trivial
+// mutations cannot smuggle a forbidden field past an exact-match list.
+const normalizeKey = (key) => String(key).toLowerCase().replace(/[-_ ]+/gu, '');
+
+const FORBIDDEN_KEY_CLASSES = Object.freeze([
+  ['profile_credential_key_rejected', Object.freeze([
+    'credential', 'credentials', 'apikey', 'apisecret', 'token', 'tokens',
+    'secret', 'secrets', 'password', 'passwd', 'auth', 'authorization',
+    'bearer', 'cookie', 'sessiontoken', 'sessionkey', 'accesstoken',
+    'refreshtoken', 'privatekey', 'signingkey',
+  ])],
+  ['profile_environment_key_rejected', Object.freeze([
+    'env', 'environment', 'envvar', 'envvars', 'environmentvariable',
+    'environmentvariables', 'envfile', 'dotenv', 'variables',
+  ])],
+  ['profile_executable_key_rejected', Object.freeze([
+    'executable', 'exec', 'bin', 'binary', 'command', 'commands', 'cmd',
+    'argv', 'args', 'argument', 'arguments', 'shell', 'shellcommand',
+    'script', 'entrypoint', 'interpreter', 'run', 'runner',
+    'commandcatalog', 'commandcatalogs', 'verification',
+    'verificationpolicy', 'verificationpolicyv1', 'verificationcommand',
+    'verificationcommands', 'argvtemplate', 'template', 'templates',
+    'workingdirectory', 'cwd', 'network', 'environmentallowlist',
+    'timeout', 'timeoutms', 'cpulimit', 'memorylimit', 'pidslimit',
+  ])],
+  ['profile_authority_key_rejected', Object.freeze([
+    'merge', 'allowmerge', 'mergeauthority', 'mergemode', 'push',
+    'allowpush', 'pushurl', 'createpr', 'autocreatepr',
+    'createpullrequest', 'prmode', 'protectedrefs', 'protectedref',
+    'protect', 'protectedbranch', 'protectedbranches', 'forcepush',
+    'deletebranch', 'defaultbranch',
+  ])],
+  ['profile_direct_mode_key_rejected', Object.freeze([
+    'workspacemode', 'workspace', 'workspaces', 'worktree', 'direct',
+    'directmode', 'directworkspace',
+  ])],
+  ['profile_moving_ref_key_rejected', Object.freeze([
+    'ref', 'refs', 'branch', 'startingref', 'baseref', 'head', 'tag',
+    'tags', 'remote', 'remotes', 'origin', 'latest', 'pin', 'pinnedref',
+  ])],
+  ['profile_embedded_content_key_rejected', Object.freeze([
+    'prompt', 'prompts', 'prompttemplate', 'systemprompt', 'messages',
+    'message', 'system', 'instructions', 'instruction', 'result',
+    'results', 'output', 'outputs', 'response', 'responses', 'content',
+    'body', 'text', 'notes', 'description', 'comments', 'context',
+    'memory', 'history', 'transcript',
+  ])],
+]);
+
+function classifyKey(key) {
+  const normalized = normalizeKey(key);
+  for (const [code, members] of FORBIDDEN_KEY_CLASSES) {
+    if (members.includes(normalized)) return code;
+  }
+  return undefined;
+}
+
+function rejectKey(name, key, code, fallbackCode) {
+  if (code !== undefined) {
+    fail(code, `Profile "${name}" must not define that forbidden field; profiles are data-only.`);
+  }
+  fail(fallbackCode, `Profile "${name}" defines an unknown field.`);
+}
+
+// Value scans are defense in depth: even a future allowlisted string field
+// must never carry secret material, environment interpolation, shell syntax,
+// or moving-ref names.
+const SECRET_VALUE_PATTERNS = [
+  [/\bsk-[A-Za-z0-9_-]{8,}\b/u, null],
+  [/\bxox[baprs]-[A-Za-z0-9-]+/u, null],
+  [/\bgh[pou]_[A-Za-z0-9]{16,}/u, null],
+  [/\bgithub_pat_[A-Za-z0-9_]{16,}/u, null],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/iu, null],
+  [/^[a-f0-9]{40,}$/iu, null],
+  [/^[A-Za-z0-9+/]{43,}={0,2}$/u, null],
+];
+const ENV_VALUE_PATTERNS = [
+  /\$\{[^}]*\}/u,
+  /\$[A-Za-z_][A-Za-z0-9_]*/u,
+  /%[A-Za-z_][A-Za-z0-9_]*%/u,
+  /`[^`]*`/u,
+];
+const SHELL_VALUE_PATTERNS = [
+  /[;&|<>`]/u,
+  /(^|[^A-Za-z0-9])(?:sh|bash|zsh|fish|pwsh|powershell|cmd)(?![A-Za-z0-9])/iu,
+  /^#!/u,
+  /\$\([^)]*\)/u,
+  /(?:^|[^A-Za-z0-9])(?:sudo|eval|exec)\s/u,
+];
+const MOVING_REF_VALUE_PATTERNS = [
+  /^refs\//u, /^(?:origin|upstream)\//u, /^HEAD(?:@|$)/u, /@\{/u,
+  /^(?:main|master|develop|trunk|latest)$/iu,
+];
+
+function scanValue(name, key, value) {
+  for (const [pattern] of SECRET_VALUE_PATTERNS) {
+    if (pattern.test(value)) {
+      fail('profile_secret_value_rejected', `Profile "${name}" field ${key} looks like secret material.`);
+    }
+  }
+  if (ENV_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
+    fail('profile_environment_value_rejected', `Profile "${name}" field ${key} must not contain environment interpolation.`);
+  }
+  if (SHELL_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
+    fail('profile_shell_value_rejected', `Profile "${name}" field ${key} must not contain shell syntax.`);
+  }
+  if (MOVING_REF_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
+    fail('profile_moving_ref_value_rejected', `Profile "${name}" field ${key} names a moving ref.`);
+  }
+}
+
+function deepScanStrings(name, container, prefix) {
+  const stack = [{ value: container, depth: 0 }];
+  const seen = new Set();
+  let nodes = 0;
+  let stringBytes = 0;
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop();
+    nodes += 1;
+    if (nodes > MAX_PROFILE_STRUCTURE_NODES || depth > MAX_PROFILE_STRUCTURE_DEPTH) {
+      fail('profile_structure_too_complex', `Profile "${name}" exceeds the bounded data structure limits.`);
+    }
+    if (typeof value === 'string') {
+      stringBytes += Buffer.byteLength(value, 'utf8');
+      if (stringBytes > MAX_PROFILE_CATALOG_BYTES) {
+        fail('profile_structure_too_complex', `Profile "${name}" exceeds the bounded string-data limit.`);
+      }
+      scanValue(name, prefix, value);
+      continue;
+    }
+    if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+      continue;
+    }
+    if (typeof value !== 'object') {
+      fail('invalid_profile_data_value', `Profile "${name}" contains a non-data value.`);
+    }
+    if (seen.has(value)) {
+      fail('invalid_profile_data_graph', `Profile "${name}" contains a cycle or shared object identity.`);
+    }
+    seen.add(value);
+    if (Array.isArray(value)) {
+      const values = dataArrayValues(value, 'invalid_profile_data_value', 'Profile data array');
+      for (let index = values.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: values[index], depth: depth + 1 });
+      }
+    } else {
+      const descriptors = dataObjectDescriptors(value, 'invalid_profile_data_value', 'Profile data object');
+      const keys = Object.keys(descriptors);
+      for (let index = keys.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: descriptors[keys[index]].value, depth: depth + 1 });
+      }
+    }
+  }
+}
+
+function requireProvider(name, provider) {
+  if (!PROFILE_PROVIDERS.includes(provider)) {
+    fail('unsupported_profile_provider', `Profile "${name}" provider must be one of ${PROFILE_PROVIDERS.join(', ')}.`);
+  }
+  return provider;
+}
+
+function requireModel(name, model, provider) {
+  if (provider !== 'dsh') {
+    fail('invalid_profile_model_for_provider', `Profile "${name}" may name a model only for provider "dsh".`);
+  }
+  if (typeof model !== 'string' || model.includes('..') || !PROFILE_MODEL_PATTERN.test(model)) {
+    fail('invalid_profile_model', `Profile "${name}" model must match a bounded provider model identifier.`);
+  }
+  if (!PROFILE_DSH_MODELS.includes(model)) {
+    fail('unknown_profile_model', `Profile "${name}" model must be one of ${PROFILE_DSH_MODELS.join(', ')}.`);
+  }
+  return model;
+}
+
+function requireRole(name, role) {
+  if (!PROFILE_ROLES.includes(role)) {
+    fail('unsupported_profile_role', `Profile "${name}" role must be one of ${PROFILE_ROLES.join(', ')}.`);
+  }
+  return role;
+}
+
+function requireExpectedDuration(name, duration) {
+  if (!Number.isInteger(duration) || duration < MIN_PROFILE_EXPECTED_DURATION_MS
+    || duration > MAX_PROFILE_EXPECTED_DURATION_MS) {
+    fail('invalid_profile_expected_duration_ms',
+      `Profile "${name}" expected_duration_ms must be an integer from ${MIN_PROFILE_EXPECTED_DURATION_MS}`
+      + ` to ${MAX_PROFILE_EXPECTED_DURATION_MS}.`);
+  }
+  return duration;
+}
+
+function requirePolicy(name, policy) {
+  const descriptors = dataObjectDescriptors(policy, 'invalid_profile_policy', `Profile "${name}" policy`);
+  const canonical = {};
+  for (const key of Object.keys(descriptors)) {
+    const classification = classifyKey(key);
+    if (!ALLOWED_PROFILE_POLICY_FIELDS.includes(key) || classification !== undefined) {
+      rejectKey(name, key, classification, 'unknown_profile_policy_field');
+    }
+    if (key === 'pre_dispatch_provider_preference') {
+      canonical[key] = requireProviderPreference(name, descriptors[key].value);
+    }
+  }
+  return canonical;
+}
+
+function requireProviderPreference(name, preference) {
+  let values;
+  try {
+    values = dataArrayValues(preference, 'invalid_profile_provider_preference',
+      `Profile "${name}" pre_dispatch_provider_preference`);
+  } catch (error) {
+    if (error.code === 'profile_structure_too_complex') {
+      fail('invalid_profile_provider_preference',
+        `Profile "${name}" pre_dispatch_provider_preference exceeds its bounded provider count.`);
+    }
+    throw error;
+  }
+  if (values.length === 0 || values.length > MAX_PROVIDER_PREFERENCE_ENTRIES
+    || !values.every((entry) => typeof entry === 'string')) {
+    fail('invalid_profile_provider_preference',
+      `Profile "${name}" pre_dispatch_provider_preference must be 1-${MAX_PROVIDER_PREFERENCE_ENTRIES} provider names.`);
+  }
+  const seen = new Set();
+  for (const entry of values) {
+    requireProvider(name, entry);
+    if (seen.has(entry)) {
+      fail('duplicate_profile_preference_provider', `Profile "${name}" repeats provider "${entry}" in its preference order.`);
+    }
+    seen.add(entry);
+  }
+  return [...values];
+}
+
 // Structural validation shared by loading and later linting. Field-level
 // policy/provider/model validation is layered on top of this check.
 export function validateProfileDefinition(name, raw) {
   if (!isValidProfileName(name)) {
-    fail('invalid_profile_name', `Profile name "${String(name)}" must match ${PROFILE_NAME_PATTERN.source}.`);
+    fail('invalid_profile_name', `Profile name must match ${PROFILE_NAME_PATTERN.source}.`);
   }
-  if (!isPlainObject(raw)) {
-    fail('invalid_profile_definition', `Profile "${name}" must be a JSON object.`);
-  }
-  if (raw.schema !== PROFILE_SCHEMA) {
+  const descriptors = dataObjectDescriptors(raw, 'invalid_profile_definition', `Profile "${name}"`);
+  if (!Object.hasOwn(descriptors, 'schema') || descriptors.schema.value !== PROFILE_SCHEMA) {
     fail('invalid_profile_schema', `Profile "${name}" must declare schema "${PROFILE_SCHEMA}".`);
   }
-  return { ...raw };
+
+  // Fail closed on dangerous content before any structural leniency.
+  deepScanStrings(name, raw, 'profile');
+
+  const canonical = { schema: PROFILE_SCHEMA };
+  for (const key of Object.keys(descriptors)) {
+    if (key === 'schema') continue;
+    const classification = classifyKey(key);
+    if (!ALLOWED_PROFILE_FIELDS.includes(key) || classification !== undefined) {
+      rejectKey(name, key, classification, 'unknown_profile_field');
+    }
+  }
+  const has = (field) => Object.hasOwn(descriptors, field);
+  if (has('provider')) canonical.provider = requireProvider(name, descriptors.provider.value);
+  // A model name is meaningful only beside its dsh provider selection.
+  if (has('model')) canonical.model = requireModel(name, descriptors.model.value, canonical.provider);
+  if (has('role')) canonical.role = requireRole(name, descriptors.role.value);
+  if (has('expected_duration_ms')) canonical.expected_duration_ms = requireExpectedDuration(name, descriptors.expected_duration_ms.value);
+  if (has('policy')) canonical.policy = requirePolicy(name, descriptors.policy.value);
+  return canonical;
+}
+
+function canonicalProfileJsonInner(value, seen, depth) {
+  if (depth > MAX_PROFILE_STRUCTURE_DEPTH) {
+    fail('invalid_profile_canonical_data', 'Canonical profile data exceeds the bounded nesting depth.');
+  }
+  if (typeof value === 'string' || typeof value === 'boolean' || value === null) return JSON.stringify(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (typeof value !== 'object') {
+    fail('invalid_profile_canonical_data', 'Canonical profile data contains an unsupported value.');
+  }
+  if (seen.has(value)) fail('invalid_profile_canonical_data', 'Canonical profile data contains a cycle or alias.');
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const values = dataArrayValues(value, 'invalid_profile_canonical_data', 'Canonical profile array');
+    return `[${values.map((entry) => canonicalProfileJsonInner(entry, seen, depth + 1)).join(',')}]`;
+  }
+  const descriptors = dataObjectDescriptors(value, 'invalid_profile_canonical_data', 'Canonical profile object');
+  const keys = Object.keys(descriptors).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalProfileJsonInner(descriptors[key].value, seen, depth + 1)}`).join(',')}}`;
 }
 
 export function canonicalProfileJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalProfileJson).join(',')}]`;
-  if (isPlainObject(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalProfileJson(value[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value ?? null);
+  return canonicalProfileJsonInner(value, new Set(), 0);
 }
 
 // Stable provenance digest over validated canonical data. Scope and source
@@ -220,8 +625,26 @@ export function profileProvenanceDigest({ name, definition }) {
   return `sha256:${createHash('sha256').update(payload).digest('hex')}`;
 }
 
+function deepFreezeData(value) {
+  const stack = [value];
+  const seen = new Set();
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (typeof current !== 'object' || current === null || seen.has(current)) continue;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      stack.push(...dataArrayValues(current, 'invalid_profile_definition', 'Validated profile array'));
+    } else {
+      const descriptors = dataObjectDescriptors(current, 'invalid_profile_definition', 'Validated profile object');
+      stack.push(...Object.values(descriptors).map((descriptor) => descriptor.value));
+    }
+    Object.freeze(current);
+  }
+  return value;
+}
+
 function buildRecord(name, raw, scope, source) {
-  const definition = Object.freeze(validateProfileDefinition(name, raw));
+  const definition = deepFreezeData(validateProfileDefinition(name, raw));
   return Object.freeze({
     name,
     scope,
@@ -238,10 +661,13 @@ function buildRecord(name, raw, scope, source) {
 export async function loadProfiles(options = {}) {
   const roots = profileRoots(options);
   const catalogs = new Map();
+  const loadedScopes = new Set();
   for (const scope of SCOPES) {
     const root = roots[scope];
-    await requireRealDirectoryOrMissing(root.dir, scope);
-    const text = await readCatalogText(root.file, scope);
+    const directory = await requireRealDirectoryOrMissing(root.dir, scope);
+    const text = directory === undefined ? undefined : await readCatalogText(root.file, scope);
+    if (directory !== undefined) await assertDirectoryUnchanged(root.dir, directory, scope);
+    if (text !== undefined) loadedScopes.add(scope);
     catalogs.set(scope, text === undefined ? {} : parseCatalog(text, scope));
   }
 
@@ -269,7 +695,11 @@ export async function loadProfiles(options = {}) {
     roots,
     profiles: Object.freeze(profiles),
     shadowed: Object.freeze(shadowed),
-    sources: Object.freeze(SCOPES.map((scope) => Object.freeze({ scope, file: roots[scope].file, loaded: catalogs.get(scope) !== undefined && 'profiles' in catalogs.get(scope) }))),
+    sources: Object.freeze(SCOPES.map((scope) => Object.freeze({
+      scope,
+      file: roots[scope].file,
+      loaded: loadedScopes.has(scope),
+    }))),
   });
 }
 
@@ -280,7 +710,7 @@ export function findProfile(loaded, name) {
     fail('invalid_profile_load_result', 'loadProfiles() result is required.');
   }
   if (!isValidProfileName(name)) {
-    fail('invalid_profile_name', `Profile name "${String(name)}" must match ${PROFILE_NAME_PATTERN.source}.`);
+    fail('invalid_profile_name', `Profile name must match ${PROFILE_NAME_PATTERN.source}.`);
   }
   return loaded.profiles.find((record) => record.name === name);
 }

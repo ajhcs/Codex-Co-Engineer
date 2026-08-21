@@ -12,6 +12,15 @@
   project-over-owner precedence with reported shadowing, bounded regular
   non-symlink catalogs, duplicate-key rejection, and a stable SHA-256
   provenance digest over validated canonical data.
+- **ProfileV1 provider/model/policy validation.** Profile definitions now
+  validate against the additive 3.2.1 routes: known providers, DSH-only
+  bounded model names (`muse-spark-1.2-contributor`,
+  `stealth/ox-alpha`), `review|implement` roles, contract duration bounds,
+  and data-only policy with an optional deterministic
+  `pre_dispatch_provider_preference`. Unknown keys are rejected everywhere;
+  credential, environment, executable/argv/shell/command-catalog,
+  merge/push/create-PR authority, direct-mode, moving-ref, and
+  embedded prompt/result content each fail closed with dedicated codes.
 - **R1 bounded-run architecture ADR.** Documents the accepted 3.3.0 run
   model: 1–8 independent assignments, one immutable repository/base
   identity, deterministic explicit/profile resolution, data-only profiles

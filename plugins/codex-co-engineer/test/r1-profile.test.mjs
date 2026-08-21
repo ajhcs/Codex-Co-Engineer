@@ -57,8 +57,8 @@ test('profile roots are explicit and reject relative or traversal paths', () => 
 
   const envRoots = profileRoots({ repositoryPath: '/repo', env: { XDG_CONFIG_HOME: '/xdg' } });
   assert.equal(envRoots.owner.file, path.join('/xdg', 'codex-co-engineer', 'profiles.json'));
-  const homeRoots = profileRoots({ repositoryPath: '/repo', env: { HOME: '/home/owner' } });
-  assert.equal(homeRoots.owner.file, path.join('/home/owner/.config', 'codex-co-engineer', 'profiles.json'));
+  const homeRoots = profileRoots({ repositoryPath: '/repo', env: { HOME: '/home/test-user' } });
+  assert.equal(homeRoots.owner.file, path.join('/home/test-user/.config', 'codex-co-engineer', 'profiles.json'));
 
   for (const bad of ['relative/repo', '/repo/../elsewhere', '.', '', undefined, 7]) {
     assert.throws(
@@ -227,15 +227,123 @@ test('definitions must be objects declaring the ProfileV1 schema', async () => {
       [{ a: [PROFILE_SCHEMA] }, 'invalid_profile_definition'],
       [{ a: {} }, 'invalid_profile_schema'],
       [{ a: { schema: 'codex-co-engineer.profile.v2' } }, 'invalid_profile_schema'],
-      [{ a: { schema: PROFILE_SCHEMA, provider: 7 } }, undefined],
+      [{ a: { schema: PROFILE_SCHEMA, provider: 7 } }, 'unsupported_profile_provider'],
     ];
     for (const [catalog, code] of cases) {
       await writeJson(catalogPath, catalog);
-      if (code === undefined) {
-        await assert.doesNotReject(() => loadProfiles(options));
-      } else {
-        await assert.rejects(() => loadProfiles(options), (error) => error.code === code);
-      }
+      await assert.rejects(() => loadProfiles(options), (error) => error.code === code);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('provider, model, and role fields validate against the 3.2.1 routes', async () => {
+  const { options, repositoryPath, cleanup } = await makeWorkspace();
+  try {
+    const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
+    const write = (definition) => writeJson(catalogPath, { probe: definition });
+
+    for (const provider of ['dsh', 'grok', 'cursor-local', 'cursor-cloud']) {
+      await write({ schema: PROFILE_SCHEMA, provider });
+      const loaded = await loadProfiles(options);
+      assert.equal(findProfile(loaded, 'probe').definition.provider, provider);
+    }
+    for (const model of ['muse-spark-1.2-contributor', 'stealth/ox-alpha']) {
+      await write({ schema: PROFILE_SCHEMA, provider: 'dsh', model });
+      assert.equal((await loadProfiles(options)).profiles[0].definition.model, model);
+    }
+    for (const role of ['review', 'implement']) {
+      await write({ schema: PROFILE_SCHEMA, provider: 'dsh', role });
+      assert.equal((await loadProfiles(options)).profiles[0].definition.role, role);
+    }
+
+    const cases = [
+      [{ schema: PROFILE_SCHEMA, provider: 'claude' }, 'unsupported_profile_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 'DSH' }, 'unsupported_profile_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'gpt-9' }, 'unknown_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'stealth/../../ox' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: `${'a'.repeat(60)}!${'a'.repeat(68)}` }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'grok', model: 'grok-4' }, 'invalid_profile_model_for_provider'],
+      [{ schema: PROFILE_SCHEMA, model: 'stealth/ox-alpha' }, 'invalid_profile_model_for_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'orchestrate' }, 'unsupported_profile_role'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 999 }, 'invalid_profile_expected_duration_ms'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 86_400_001 }, 'invalid_profile_expected_duration_ms'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 1.5 }, 'invalid_profile_expected_duration_ms'],
+    ];
+    for (const [definition, code] of cases) {
+      await write(definition);
+      await assert.rejects(() => loadProfiles(options), (error) => error.code === code, JSON.stringify(definition));
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('policy data stays bounded, non-executable, and deterministic', async () => {
+  const { options, repositoryPath, cleanup } = await makeWorkspace();
+  try {
+    const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
+    const write = (definition) => writeJson(catalogPath, { probe: definition });
+
+    await write({
+      schema: PROFILE_SCHEMA,
+      provider: 'dsh',
+      policy: { pre_dispatch_provider_preference: ['dsh', 'grok', 'cursor-local', 'cursor-cloud'] },
+    });
+    const loaded = await loadProfiles(options);
+    assert.deepEqual(loaded.profiles[0].definition.policy.pre_dispatch_provider_preference,
+      ['dsh', 'grok', 'cursor-local', 'cursor-cloud'], 'authored preference order must be preserved');
+
+    const cases = [
+      [{ schema: PROFILE_SCHEMA, policy: 'fast' }, 'invalid_profile_policy'],
+      [{ schema: PROFILE_SCHEMA, policy: [] }, 'invalid_profile_policy'],
+      [{ schema: PROFILE_SCHEMA, policy: {} , extra: 1 }, 'unknown_profile_field'],
+      [{ schema: PROFILE_SCHEMA, policy: { commands: ['npm', 'test'] } }, 'profile_executable_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { executable: '/usr/bin/npm' } }, 'profile_executable_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { argv_template: ['test'] } }, 'profile_executable_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { verification_commands: [] } }, 'profile_executable_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { environment: { CI: '1' } } }, 'profile_environment_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { allow_merge: true } }, 'profile_authority_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { create_pr: true } }, 'profile_authority_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { workspace_mode: 'direct' } }, 'profile_direct_mode_key_rejected'],
+      // The deep value scan runs first: 'main' is itself a moving-ref name.
+      [{ schema: PROFILE_SCHEMA, policy: { branch: 'release-1.2' } }, 'profile_moving_ref_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { branch: 'main' } }, 'profile_moving_ref_value_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { prompt: 'do things' } }, 'profile_embedded_content_key_rejected'],
+      [{ schema: PROFILE_SCHEMA, policy: { unknown_thing: 1 } }, 'unknown_profile_policy_field'],
+      [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: [] } }, 'invalid_profile_provider_preference'],
+      [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 7] } }, 'invalid_profile_provider_preference'],
+      [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 'claude'] } }, 'unsupported_profile_provider'],
+      [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 'dsh'] } }, 'duplicate_profile_preference_provider'],
+      [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 'grok', 'cursor-local', 'cursor-cloud', 'dsh'] } }, 'invalid_profile_provider_preference'],
+    ];
+    for (const [definition, code] of cases) {
+      await write(definition);
+      await assert.rejects(() => loadProfiles(options), (error) => error.code === code, JSON.stringify(definition));
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('unknown keys are rejected and dangerous values never survive validation', async () => {
+  const { options, repositoryPath, cleanup } = await makeWorkspace();
+  try {
+    const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
+    const write = (definition) => writeJson(catalogPath, { probe: definition });
+
+    const cases = [
+      ['credential key', { schema: PROFILE_SCHEMA, provider: 'dsh', api_key: 'x' }, 'profile_credential_key_rejected'],
+      ['credential token', { schema: PROFILE_SCHEMA, provider: 'dsh', 'access-token': 'x' }, 'profile_credential_key_rejected'],
+      ['secret value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'sk-abcdefghijklmnop' }, 'profile_secret_value_rejected'],
+      ['env interpolation', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: '${DSH_MODEL}' }, 'profile_environment_value_rejected'],
+      ['shell value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'a; rm -rf' }, 'profile_shell_value_rejected'],
+      ['moving ref value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'refs/heads/main' }, 'profile_moving_ref_value_rejected'],
+    ];
+    for (const [label, definition, code] of cases) {
+      await write(definition);
+      await assert.rejects(() => loadProfiles(options), (error) => error.code === code, label);
     }
   } finally {
     await cleanup();
