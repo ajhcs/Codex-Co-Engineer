@@ -15,7 +15,7 @@ import {
 } from './contract.mjs';
 import { COMPACT_VIEW, projectCompactTask, resolveTaskView } from './compact-task.mjs';
 import { deadlineReached, nextDeadlineExtension, resolveTaskDeadline } from './deadline.mjs';
-import { compactSummary, compactTaskCard, diagnosticEnvelope, readTaskDiagnostics } from './diagnostics.mjs';
+import { compactSummary, compactTaskCard, diagnosticEnvelope, projectCompactStatus, readTaskDiagnostics } from './diagnostics.mjs';
 import { submitReply } from './mailbox.mjs';
 import {
   appendTaskEvent,
@@ -1206,5 +1206,5 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
     limit: taskLimit,
     tasks: detail === 'compact' ? windowTasks.map((t) => compactTaskCard(t)) : windowTasks,
   };
-  return result;
+  return detail === 'compact' ? projectCompactStatus(result) : result;
 }

@@ -6,6 +6,7 @@ import {
   MAX_DIAGNOSTIC_BYTES,
   MAX_DIAGNOSTIC_BYTES_CAP,
   MAX_EVENT_LOG_BYTES,
+  MAX_TIMEOUT_MS,
   MIN_DIAGNOSTIC_BYTES,
   providerCapabilities,
   publicState,
@@ -246,6 +247,19 @@ const COMPACT_FIELD_LIMITS = Object.freeze({
   state: 32,
 });
 const COMPACT_MAX_BRANCH_LEN = 24;
+// Compact status shell bounds: keep readiness/model identity, clamp host-variable
+// strings and omit long capability/mcp prose so 20-card JSON-RPC stays ≤24,576.
+const COMPACT_STATUS_STRING_LIMITS = Object.freeze({
+  reason: 64,
+  action: 96,
+  status: 48,
+  boundary: 64,
+  manager_version: 32,
+  control_group: 96,
+  transport: 32,
+  evidence: 64,
+  model: 64,
+});
 
 function boundString(value, maxLen, fallback = null) {
   if (value == null) return fallback;
@@ -261,8 +275,155 @@ function boundDeadline(deadline) {
   if (Number.isInteger(deadline.expected_duration_ms)) out.expected_duration_ms = deadline.expected_duration_ms;
   if (typeof deadline.deadline_at === 'string') out.deadline_at = boundString(deadline.deadline_at, 64, null);
   if (typeof deadline.deadline_source === 'string') out.deadline_source = boundString(deadline.deadline_source, 32, null);
-  if (Number.isInteger(deadline.remaining_ms) || typeof deadline.remaining_ms === 'number') out.remaining_ms = deadline.remaining_ms;
+  if (Number.isInteger(deadline.remaining_ms) || typeof deadline.remaining_ms === 'number') {
+    // Clamp so clock skew / far-future fixtures cannot inflate digit width.
+    const remaining = Math.trunc(deadline.remaining_ms);
+    if (Number.isFinite(remaining)) {
+      out.remaining_ms = Math.max(0, Math.min(MAX_TIMEOUT_MS, remaining));
+    }
+  }
   return Object.keys(out).length ? out : null;
+}
+
+function projectCompactCapability(entry) {
+  if (!entry || typeof entry !== 'object') return entry ?? null;
+  const out = {
+    live_progress: entry.live_progress === true,
+    same_session_reply: entry.same_session_reply === true,
+    restart_recovery: entry.restart_recovery === true,
+    cancellation_confirmation: entry.cancellation_confirmation === true,
+    detailed_tool_events: entry.detailed_tool_events === true,
+    evidence: boundString(entry.evidence ?? 'unknown', COMPACT_STATUS_STRING_LIMITS.evidence, 'unknown'),
+  };
+  if (typeof entry.dispatch_confidence === 'string') {
+    out.dispatch_confidence = boundString(entry.dispatch_confidence, COMPACT_STATUS_STRING_LIMITS.evidence, null);
+  }
+  // Omit long provider prose notes from compact status; full detail retains them.
+  return out;
+}
+
+function projectCompactLocalBoundary(boundary) {
+  if (!boundary || typeof boundary !== 'object') {
+    return Object.freeze({
+      ready: false,
+      status: 'unavailable',
+      reason: 'boundary_probe_failed',
+      provider_started: false,
+    });
+  }
+  const out = {
+    ready: boundary.ready === true,
+    status: boundString(boundary.status ?? 'unavailable', COMPACT_STATUS_STRING_LIMITS.status, 'unavailable'),
+    provider_started: boundary.provider_started === true,
+  };
+  if (typeof boundary.boundary === 'string') {
+    out.boundary = boundString(boundary.boundary, COMPACT_STATUS_STRING_LIMITS.boundary, null);
+  }
+  if (typeof boundary.manager_version === 'string') {
+    out.manager_version = boundString(boundary.manager_version, COMPACT_STATUS_STRING_LIMITS.manager_version, null);
+  }
+  if (typeof boundary.control_group === 'string') {
+    out.control_group = boundString(boundary.control_group, COMPACT_STATUS_STRING_LIMITS.control_group, null);
+  }
+  if (typeof boundary.reason === 'string') {
+    out.reason = boundString(boundary.reason, COMPACT_STATUS_STRING_LIMITS.reason, null);
+  }
+  if (typeof boundary.action === 'string') {
+    out.action = boundString(boundary.action, COMPACT_STATUS_STRING_LIMITS.action, null);
+  }
+  if (boundary.capabilities && typeof boundary.capabilities === 'object') {
+    out.capabilities = {
+      kill_mode: boundString(boundary.capabilities.kill_mode, 32, null),
+      environment: boundString(boundary.capabilities.environment, 32, null),
+      provider_sandbox: boundary.capabilities.provider_sandbox === true,
+      manager_owned: boundary.capabilities.manager_owned === true,
+    };
+  }
+  return out;
+}
+
+function projectCompactModelOption(entry) {
+  if (!entry || typeof entry !== 'object') return { ready: false };
+  const out = { ready: entry.ready === true };
+  if (typeof entry.reason === 'string') {
+    out.reason = boundString(entry.reason, COMPACT_STATUS_STRING_LIMITS.reason, null);
+  }
+  return out;
+}
+
+function projectCompactReadinessEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry ?? null;
+  const out = {
+    installed: entry.installed === true,
+    ready: entry.ready === true,
+    transport: boundString(entry.transport, COMPACT_STATUS_STRING_LIMITS.transport, null),
+  };
+  if (typeof entry.reason === 'string') {
+    out.reason = boundString(entry.reason, COMPACT_STATUS_STRING_LIMITS.reason, null);
+  }
+  if (typeof entry.default_model === 'string') {
+    out.default_model = boundString(entry.default_model, COMPACT_STATUS_STRING_LIMITS.model, null);
+  }
+  if (entry.model_options && typeof entry.model_options === 'object') {
+    out.model_options = Object.fromEntries(
+      Object.entries(entry.model_options).slice(0, 8).map(([model, option]) => [
+        boundString(model, COMPACT_STATUS_STRING_LIMITS.model, model),
+        projectCompactModelOption(option),
+      ]),
+    );
+  }
+  return out;
+}
+
+function projectCompactMcpPending(report) {
+  if (!report || typeof report !== 'object') return report ?? null;
+  // Keep budget identity; drop the long explanatory notes from compact shells.
+  return {
+    advertised_budget_ms: Number.isFinite(report.advertised_budget_ms) ? report.advertised_budget_ms : null,
+    tool_timeout_sec: Number.isFinite(report.tool_timeout_sec) ? report.tool_timeout_sec : null,
+    measured_desktop_limit_ms: report.measured_desktop_limit_ms ?? null,
+    measured_desktop_limit: boundString(report.measured_desktop_limit, 32, 'unmeasured'),
+    reconnect_on_budget: report.reconnect_on_budget === true,
+  };
+}
+
+/**
+ * Explicit bounded projection for status detail=compact / readiness-only.
+ * Preserves readiness and DSH model identity while clamping host-variable
+ * strings and omitting long capability/mcp prose so worst-case JSON-RPC with
+ * 20 compact cards stays within the 24,576-byte ceiling with margin.
+ */
+export function projectCompactStatus(status) {
+  if (!status || typeof status !== 'object') fail('invalid_status', 'Status payload is invalid.');
+  const capabilities = status.capabilities && typeof status.capabilities === 'object'
+    ? Object.fromEntries(
+      Object.entries(status.capabilities).map(([provider, entry]) => [provider, projectCompactCapability(entry)]),
+    )
+    : status.capabilities;
+  const readiness = status.readiness && typeof status.readiness === 'object'
+    ? Object.fromEntries(
+      Object.entries(status.readiness).map(([provider, entry]) => [provider, projectCompactReadinessEntry(entry)]),
+    )
+    : status.readiness;
+  const projected = {
+    ...status,
+    capabilities,
+    readiness,
+    local_boundary: projectCompactLocalBoundary(status.local_boundary),
+    mcp_pending_call: projectCompactMcpPending(status.mcp_pending_call),
+    tasks: Array.isArray(status.tasks) ? status.tasks : [],
+  };
+  return freezeCompactDeep(projected);
+}
+
+function freezeCompactDeep(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    for (const entry of value) freezeCompactDeep(entry);
+    return Object.freeze(value);
+  }
+  for (const entry of Object.values(value)) freezeCompactDeep(entry);
+  return Object.freeze(value);
 }
 
 export function compactTaskCard(task) {

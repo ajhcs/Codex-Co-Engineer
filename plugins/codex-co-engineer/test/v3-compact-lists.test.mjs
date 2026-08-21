@@ -7,7 +7,8 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 
 import { createTask, listTasksPage, encodeTasksCursor, decodeTasksCursor } from '../mcp/v3/task-store.mjs';
-import { compactTaskCard, sanitizePublicReceipt } from '../mcp/v3/diagnostics.mjs';
+import { compactTaskCard, projectCompactStatus, sanitizePublicReceipt } from '../mcp/v3/diagnostics.mjs';
+import { mcpPendingCallReport, providerCapabilities, VERSION } from '../mcp/v3/contract.mjs';
 
 import { fileURLToPath } from 'node:url';
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'v3', 'server.mjs');
@@ -166,7 +167,7 @@ test('compactTaskCard bounds every field under worst valid values', async () => 
   };
   const card = compactTaskCard(worst);
   assert.equal(card.id, worst.id);
-  assert.ok(card.branch.length <= 200);
+  assert.ok(card.branch.length <= 24);
   assert.ok(card.start_sha.length <= 40);
   const json = JSON.stringify(card);
   // Single card must be tiny (<700 bytes per spec)
@@ -383,42 +384,142 @@ test('compact cards do not leak full receipt bodies and tasks filtering avoids c
   });
 });
 
-test('byte targets under worst valid values: readiness <=8192, compact status 20 cards <=24576, compact tasks page <=32768 JSON-RPC bytes', async () => {
-  await withServer(async ({ state, request }) => {
-    // Readiness-only size: include_tasks false
-    const readiness = await request({ jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'status', arguments:{detail:'compact', include_tasks:false}}});
-    const readinessBytes = jsonRpcBytes(readiness.result.structuredContent);
-    assert.ok(readinessBytes <= 8192, `readiness ${readinessBytes} exceeds 8192`);
-    // Create worst-case tasks with max field lengths and full deadline
-    for (let i=0;i<20;i++) {
-      const id = 'worst-'+String(i).padStart(2,'0')+'-'+ 'x'.repeat(70);
-      await createTask({ root: state, prompt:'p', record:{
-        id: id.slice(0,80),
-        status:'environment_blocked',
-        provider:'cursor-cloud',
-        created_at:'2026-08-20T00:00:00.000Z',
-        updated_at:'2026-08-20T00:00:00.000Z',
-        finished_at:null,
-        branch:'b'.repeat(200),
-        start_sha:'a'.repeat(40),
-        expected_duration_ms: 86400000,
-        deadline_at:'2026-08-21T00:00:00.000Z',
-        deadline_source:'margin'
-      }});
-    }
-    // Need fresh server fetch? tasks already in state, request again
-    const statusCompact = await request({ jsonrpc:'2.0', id:2, method:'tools/call', params:{name:'status', arguments:{detail:'compact', task_limit:20}}});
-    const statusBytes = jsonRpcBytes(statusCompact.result.structuredContent);
-    assert.ok(statusBytes <= 24576, `status compact ${statusBytes} exceeds 24576`);
-    const tasksPage = await request({ jsonrpc:'2.0', id:3, method:'tools/call', params:{name:'tasks', arguments:{detail:'compact', limit:20}}});
-    const tasksBytes = jsonRpcBytes(tasksPage.result.structuredContent);
-    assert.ok(tasksBytes <= 32768, `tasks page ${tasksBytes} exceeds 32768`);
-    // Ensure server actually enforces limit 20: request 20 should succeed, 21 fail
-    const ok20 = await request({ jsonrpc:'2.0', id:4, method:'tools/call', params:{name:'tasks', arguments:{detail:'compact', limit:20}}});
-    assert.equal(ok20.result.isError, undefined);
-    const bad21 = await request({ jsonrpc:'2.0', id:5, method:'tools/call', params:{name:'tasks', arguments:{detail:'compact', limit:21}}});
-    assert.equal(bad21.result.isError, true);
+test('projectCompactStatus preserves model identity and clamps host-variable shell fields', () => {
+  const fatBoundary = {
+    ready: true,
+    status: 'prerequisites_ready',
+    provider_started: false,
+    boundary: 'systemd-user-service-cgroup',
+    manager_version: 'v'.repeat(80),
+    control_group: `/user.slice/user-1000.slice/user@1000.service/${'c'.repeat(200)}`,
+    reason: 'r'.repeat(120),
+    action: 'a'.repeat(200),
+    capabilities: {
+      kill_mode: 'control-group',
+      environment: 'inherited',
+      provider_sandbox: false,
+      manager_owned: true,
+    },
+  };
+  const readiness = {
+    grok: { installed: true, ready: false, reason: 'probe_failed', transport: 'acp' },
+    'cursor-local': { installed: true, ready: false, reason: 'probe_failed', transport: 'acp' },
+    dsh: {
+      installed: true,
+      ready: false,
+      transport: 'acpx',
+      default_model: 'muse-spark-1.2-contributor',
+      model_options: {
+        'muse-spark-1.2-contributor': { ready: false, reason: 'ENOENT' },
+        'stealth/ox-alpha': { ready: false, reason: 'ENOENT' },
+      },
+      reason: 'ENOENT',
+    },
+    'cursor-cloud': { installed: true, ready: false, reason: 'ENOENT', transport: 'cursor-sdk' },
+  };
+  const tasks = [];
+  for (let i = 0; i < 20; i += 1) {
+    tasks.push(compactTaskCard({
+      id: `worst-${String(i).padStart(2, '0')}-${'x'.repeat(70)}`.slice(0, 80),
+      status: 'environment_blocked',
+      provider: 'cursor-cloud',
+      created_at: '2026-08-20T00:00:00.000Z',
+      updated_at: '2026-08-20T00:00:00.000Z',
+      branch: 'b'.repeat(200),
+      start_sha: 'a'.repeat(40),
+      expected_duration_ms: 86400000,
+      deadline_at: '2099-08-21T00:00:00.000Z',
+      deadline_source: 'margin',
+    }));
+  }
+  const projected = projectCompactStatus({
+    version: VERSION,
+    healthy: true,
+    active: 0,
+    providers: ['grok', 'cursor-local', 'dsh', 'cursor-cloud'],
+    capabilities: {
+      grok: providerCapabilities('grok'),
+      'cursor-local': providerCapabilities('cursor-local'),
+      dsh: providerCapabilities('dsh'),
+      'cursor-cloud': providerCapabilities('cursor-cloud'),
+    },
+    mcp_pending_call: mcpPendingCallReport(),
+    local_boundary: fatBoundary,
+    readiness,
+    detail: 'compact',
+    task_count: 20,
+    returned_tasks: 20,
+    task_limit: 20,
+    include_tasks: true,
+    total: 20,
+    limit: 20,
+    tasks,
   });
+  assert.equal(projected.readiness.dsh.default_model, 'muse-spark-1.2-contributor');
+  assert.deepEqual(Object.keys(projected.readiness.dsh.model_options).sort(), [
+    'muse-spark-1.2-contributor',
+    'stealth/ox-alpha',
+  ].sort());
+  assert.equal(projected.readiness.dsh.model_options['stealth/ox-alpha'].ready, false);
+  assert.equal(Object.hasOwn(projected.capabilities.grok, 'notes'), false);
+  assert.equal(Object.hasOwn(projected.mcp_pending_call, 'notes'), false);
+  assert.ok(projected.local_boundary.control_group.length <= 96);
+  assert.ok(projected.local_boundary.manager_version.length <= 32);
+  assert.ok(projected.tasks[0].deadline.remaining_ms <= 103680000);
+  const bytes = jsonRpcBytes(projected);
+  assert.ok(bytes <= 24576, `worst-case compact status ${bytes} exceeds 24576`);
+  // Fat paths + max remaining_ms still leave ≥512 bytes under the JSON-RPC ceiling.
+  assert.ok(24576 - bytes >= 512, `compact status margin ${24576 - bytes} is below 512 bytes`);
+});
+
+test('byte targets under worst valid values: readiness <=8192, compact status 20 cards <=24576, compact tasks page <=32768 JSON-RPC bytes', async () => {
+  // Credential-less HOME matches CI: readiness reasons + model_options failure entries inflate the shell.
+  const isolatedHome = await mkdtemp(path.join(tmpdir(), 'coe-compact-home-'));
+  try {
+    await withServer(async ({ state, request }) => {
+      const readiness = await request({ jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'status', arguments:{detail:'compact', include_tasks:false}}});
+      const readinessBytes = jsonRpcBytes(readiness.result.structuredContent);
+      assert.ok(readinessBytes <= 8192, `readiness ${readinessBytes} exceeds 8192`);
+      assert.equal(readiness.result.structuredContent.readiness.dsh.default_model, 'muse-spark-1.2-contributor');
+      assert.ok(readiness.result.structuredContent.readiness.dsh.model_options['stealth/ox-alpha']);
+      assert.equal(Object.hasOwn(readiness.result.structuredContent.mcp_pending_call, 'notes'), false);
+      for (let i=0;i<20;i++) {
+        const id = 'worst-'+String(i).padStart(2,'0')+'-'+ 'x'.repeat(70);
+        await createTask({ root: state, prompt:'p', record:{
+          id: id.slice(0,80),
+          status:'environment_blocked',
+          provider:'cursor-cloud',
+          created_at:'2026-08-20T00:00:00.000Z',
+          updated_at:'2026-08-20T00:00:00.000Z',
+          finished_at:null,
+          branch:'b'.repeat(200),
+          start_sha:'a'.repeat(40),
+          expected_duration_ms: 86400000,
+          deadline_at:'2026-08-21T00:00:00.000Z',
+          deadline_source:'margin'
+        }});
+      }
+      const statusCompact = await request({ jsonrpc:'2.0', id:2, method:'tools/call', params:{name:'status', arguments:{detail:'compact', task_limit:20}}});
+      const statusBytes = jsonRpcBytes(statusCompact.result.structuredContent);
+      assert.ok(statusBytes <= 24576, `status compact ${statusBytes} exceeds 24576`);
+      assert.ok(24576 - statusBytes >= 1024, `status compact margin ${24576 - statusBytes} is below 1024 bytes`);
+      const tasksPage = await request({ jsonrpc:'2.0', id:3, method:'tools/call', params:{name:'tasks', arguments:{detail:'compact', limit:20}}});
+      const tasksBytes = jsonRpcBytes(tasksPage.result.structuredContent);
+      assert.ok(tasksBytes <= 32768, `tasks page ${tasksBytes} exceeds 32768`);
+      const ok20 = await request({ jsonrpc:'2.0', id:4, method:'tools/call', params:{name:'tasks', arguments:{detail:'compact', limit:20}}});
+      assert.equal(ok20.result.isError, undefined);
+      const bad21 = await request({ jsonrpc:'2.0', id:5, method:'tools/call', params:{name:'tasks', arguments:{detail:'compact', limit:21}}});
+      assert.equal(bad21.result.isError, true);
+    }, {
+      ...process.env,
+      HOME: isolatedHome,
+      OPENROUTER_API_KEY: '',
+      CURSOR_API_KEY: '',
+      XAI_API_KEY: '',
+    });
+  } finally {
+    await rm(isolatedHome, { recursive: true, force: true });
+  }
 });
 
 test('pre-existing receipts without sidecar produce compact cards via fallback; no durable truth change', async () => {
