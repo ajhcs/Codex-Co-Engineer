@@ -1,0 +1,240 @@
+// AssignmentManifestV1 — deep per-assignment schema (ADR 0001 identifiers
+// `deterministic_explicit_or_profile_resolution`, `profiles_data_only`,
+// `manifests_carry_command_ids_not_argv`, `no_direct_mode_for_run_submissions`,
+// `run_cloud_lane_requires_pinned_starting_ref`, `read_only_verification`).
+//
+// Additive v3 module. Validates one assignment object against the closed
+// AssignmentManifestV1 vocabulary:
+//   - role/access consistency (implement => writer; review|verify => read_only);
+//   - bounded well-formed UTF-8 prompts;
+//   - execution is exactly one explicit choice: a named profile reference
+//     (data-only name, never an inline profile object) or an exact
+//     provider + model pair from the 3.2.1 provider vocabulary;
+//   - Cursor Cloud lanes must pin one exact already-pushed 40-hex lowercase
+//     starting SHA; local lanes must not carry one (they use the run base);
+//   - writer scopes are required non-empty relative globs; read-only lanes
+//     must declare an empty scope;
+//   - acceptance entries reference user-approved VerificationPolicyV1
+//     command IDs with flat scalar parameters and bounded timeouts. Arbitrary
+//     argv, executables, shells, and credentials are denied by the envelope's
+//     forbidden-key classes before this schema runs;
+//   - expected duration within the 3.2.1 deadline bounds and a closed,
+//   duplicate-free required-evidence vocabulary.
+//
+// Validation is fail-fast in a fixed order so identical inputs always raise
+// identical first errors.
+
+import {
+  ACCEPTANCE_ALLOWED_KEYS,
+  ACCEPTANCE_MAX_COMMANDS,
+  ASSIGNMENT_ALLOWED_KEYS,
+  ASSIGNMENT_ID_PATTERN,
+  COMMAND_ID_PATTERN,
+  EVIDENCE_KINDS,
+  MAX_TIMEOUT_MS,
+  MIN_DURATION_MS,
+  MIN_TIMEOUT_MS,
+  MODEL_ID_MAX,
+  MODEL_ID_PATTERN,
+  PARAM_KEY_PATTERN,
+  PARAM_VALUE_MAX_BYTES,
+  PARAMS_MAX_KEYS,
+  PROFILE_NAME_MAX,
+  PROFILE_NAME_PATTERN,
+  PROVIDERS,
+  ROLE_ACCESS,
+  RunContractV1Error,
+  SHA40_PATTERN,
+  assertAllowedKeys,
+  assertBoundedText,
+  assertExpectedDurationMs,
+  assertTimeoutMs,
+  assertWriteScopePatterns,
+  isPlainObject,
+  utf8ByteLength,
+} from './run-manifest.mjs';
+
+function fail(code, path, message) {
+  throw new RunContractV1Error(code, path, message);
+}
+
+function validateExecution(execution, path) {
+  if (!isPlainObject(execution)) fail('invalid_type', path, `${path} must be an object.`);
+  assertAllowedKeys(execution, ['profile', 'provider', 'model'], path);
+  const hasProfile = 'profile' in execution;
+  const hasProvider = 'provider' in execution;
+  const hasModel = 'model' in execution;
+  if (hasProfile && (hasProvider || hasModel)) {
+    fail('execution_ambiguous', path,
+      `${path} must carry exactly one resolution choice: a named profile OR an explicit provider/model pair, never both.`);
+  }
+  if (!hasProfile && !hasProvider && !hasModel) {
+    fail('execution_missing', path, `${path} requires either a named profile or an explicit provider/model pair.`);
+  }
+  if (hasProfile) {
+    if (typeof execution.profile !== 'string') {
+      fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
+    }
+    if (!PROFILE_NAME_PATTERN.test(execution.profile)
+      || utf8ByteLength(execution.profile) > PROFILE_NAME_MAX) {
+      fail('invalid_format', `${path}.profile`,
+        `${path}.profile ${JSON.stringify(execution.profile)} violates the profile-name grammar ${PROFILE_NAME_PATTERN.source}.`);
+    }
+    return;
+  }
+  if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
+  if (!hasModel) fail('missing_key', `${path}.model`, `${path}.model is required when no profile is named.`);
+  if (!PROVIDERS.includes(execution.provider)) {
+    fail('unknown_provider', `${path}.provider`,
+      `${path}.provider ${JSON.stringify(execution.provider)} is not one of ${PROVIDERS.join(', ')}.`);
+  }
+  if (typeof execution.model !== 'string'
+    || !MODEL_ID_PATTERN.test(execution.model)
+    || utf8ByteLength(execution.model) > MODEL_ID_MAX) {
+    fail('invalid_format', `${path}.model`,
+      `${path}.model violates the model grammar ${MODEL_ID_PATTERN.source} (max ${MODEL_ID_MAX} bytes).`);
+  }
+}
+
+function validateStartingRef(assignment, path) {
+  const provider = assignment.execution?.provider;
+  const hasStartingRef = 'starting_ref' in assignment;
+  if (hasStartingRef && provider !== 'cursor-cloud') {
+    fail('starting_ref_forbidden_local', `${path}.starting_ref`,
+      `${path}.starting_ref is only valid for cursor-cloud lanes; local lanes start at the run's immutable base_sha.`);
+  }
+  if (provider === 'cursor-cloud') {
+    if (!hasStartingRef) {
+      fail('cloud_starting_ref_required', `${path}.starting_ref`,
+        `Every run cursor-cloud lane MUST pin one exact already-pushed provider-visible SHA in ${path}.starting_ref.`);
+    }
+    if (typeof assignment.starting_ref !== 'string' || !SHA40_PATTERN.test(assignment.starting_ref)) {
+      fail('invalid_format', `${path}.starting_ref`,
+        `${path}.starting_ref must be an exact 40-character lowercase hex commit SHA already visible to the provider.`);
+    }
+  }
+}
+
+function validateParameters(parameters, path) {
+  if (!isPlainObject(parameters)) {
+    fail('invalid_type', path, `${path} must be a flat object of scalar parameters.`);
+  }
+  const keys = Object.keys(parameters).sort();
+  if (keys.length > PARAMS_MAX_KEYS) {
+    fail('out_of_range', path, `${path} exceeds ${PARAMS_MAX_KEYS} parameter keys.`);
+  }
+  for (const key of keys) {
+    const entryPath = `${path}.${key}`;
+    if (!PARAM_KEY_PATTERN.test(key)) {
+      fail('invalid_format', entryPath, `${entryPath} violates the parameter-key grammar ${PARAM_KEY_PATTERN.source}.`);
+    }
+    const value = parameters[key];
+    if (typeof value === 'string') {
+      assertBoundedText(value, { min: 0, max: PARAM_VALUE_MAX_BYTES, path: entryPath, label: entryPath });
+    } else if (typeof value === 'number') {
+      if (!Number.isInteger(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+        fail('invalid_type', entryPath, `${entryPath} numeric parameters must be safe integers.`);
+      }
+    } else if (typeof value !== 'boolean') {
+      fail('invalid_type', entryPath, `${entryPath} parameters must be flat scalars (string, integer, boolean); no nested objects or arrays.`);
+    }
+  }
+}
+
+function validateAcceptance(acceptance, path) {
+  if (!Array.isArray(acceptance)) fail('invalid_type', path, `${path} must be an array of approved-command references.`);
+  if (acceptance.length > ACCEPTANCE_MAX_COMMANDS) {
+    fail('out_of_range', path, `${path} exceeds ${ACCEPTANCE_MAX_COMMANDS} acceptance commands.`);
+  }
+  const seenCommandIds = new Set();
+  for (let i = 0; i < acceptance.length; i += 1) {
+    const entryPath = `${path}[${i}]`;
+    const entry = acceptance[i];
+    if (!isPlainObject(entry)) fail('invalid_type', entryPath, `${entryPath} must be an object.`);
+    assertAllowedKeys(entry, ACCEPTANCE_ALLOWED_KEYS, entryPath);
+    if (typeof entry.command_id !== 'string' || !COMMAND_ID_PATTERN.test(entry.command_id)) {
+      fail('invalid_format', `${entryPath}.command_id`,
+        `${entryPath}.command_id must match ${COMMAND_ID_PATTERN.source}; manifests reference VerificationPolicyV1 commands by ID, never argv.`);
+    }
+    if (seenCommandIds.has(entry.command_id)) {
+      fail('duplicate_command_id', `${entryPath}.command_id`, `${entryPath}.command_id "${entry.command_id}" repeats within this assignment.`);
+    }
+    seenCommandIds.add(entry.command_id);
+    if (!('timeout_ms' in entry)) {
+      fail('missing_key', `${entryPath}.timeout_ms`, `${entryPath}.timeout_ms is required; acceptance timeouts have no hidden default.`);
+    }
+    assertTimeoutMs(entry.timeout_ms, `${entryPath}.timeout_ms`);
+    if ('parameters' in entry) validateParameters(entry.parameters, `${entryPath}.parameters`);
+  }
+}
+
+function validateRequiredEvidence(requiredEvidence, path) {
+  if (!Array.isArray(requiredEvidence)) {
+    fail('invalid_type', path, `${path} must be an array of evidence kinds.`);
+  }
+  if (requiredEvidence.length === 0) {
+    fail('out_of_range', path, `${path} needs at least one evidence kind.`);
+  }
+  const seen = new Set();
+  for (let i = 0; i < requiredEvidence.length; i += 1) {
+    const entryPath = `${path}[${i}]`;
+    const kind = requiredEvidence[i];
+    if (!EVIDENCE_KINDS.includes(kind)) {
+      fail('unknown_evidence_kind', entryPath, `${entryPath} ${JSON.stringify(kind ?? null)} is not one of ${EVIDENCE_KINDS.join(', ')}.`);
+    }
+    if (seen.has(kind)) fail('duplicate_evidence_kind', entryPath, `${entryPath} repeats evidence kind "${kind}".`);
+    seen.add(kind);
+  }
+}
+
+// Validate one AssignmentManifestV1 object at `assignments[<index>]`.
+// Throws RunContractV1Error on the first violation; returns undefined.
+export function validateAssignmentManifestV1(assignment, index = 0) {
+  const path = `assignments[${index}]`;
+  if (!isPlainObject(assignment)) fail('invalid_type', path, `${path} must be an object.`);
+  assertAllowedKeys(assignment, ASSIGNMENT_ALLOWED_KEYS, path);
+
+  const role = assignment.role;
+  if (!ROLE_ACCESS[role]) {
+    fail('unknown_role', `${path}.role`, `${path}.role ${JSON.stringify(role ?? null)} is not one of ${Object.keys(ROLE_ACCESS).join(', ')}.`);
+  }
+  const access = assignment.access;
+  if (access !== 'writer' && access !== 'read_only') {
+    fail('unknown_access', `${path}.access`, `${path}.access must be "writer" or "read_only".`);
+  }
+  if (ROLE_ACCESS[role] !== access) {
+    fail('role_access_mismatch', `${path}.access`,
+      `${path}: role "${role}" requires access "${ROLE_ACCESS[role]}", received "${access}".`);
+  }
+
+  assertBoundedText(assignment.prompt, {
+    min: 1, max: 16_384, path: `${path}.prompt`, label: `${path}.prompt`,
+  });
+  validateExecution(assignment.execution, `${path}.execution`);
+  validateStartingRef(assignment, path);
+
+  const scopePath = `${path}.write_scope`;
+  if (!('write_scope' in assignment)) {
+    fail('missing_key', scopePath, `${scopePath} is required; read-only lanes declare [], writers declare their owned paths.`);
+  }
+  if (access === 'read_only') {
+    assertWriteScopePatterns(assignment.write_scope, scopePath, { minPatterns: 0, maxPatterns: 0 });
+  } else {
+    assertWriteScopePatterns(assignment.write_scope, scopePath, { minPatterns: 1 });
+  }
+
+  if (!('acceptance' in assignment)) {
+    fail('missing_key', `${path}.acceptance`, `${path}.acceptance is required (use [] when a lane runs no approved commands).`);
+  }
+  validateAcceptance(assignment.acceptance, `${path}.acceptance`);
+
+  if (!('expected_duration_ms' in assignment)) {
+    fail('missing_key', `${path}.expected_duration_ms`, `${path}.expected_duration_ms is required; deadlines have no hidden default.`);
+  }
+  assertExpectedDurationMs(assignment.expected_duration_ms, `${path}.expected_duration_ms`);
+
+  if (!('required_evidence' in assignment)) {
+    fail('missing_key', `${path}.required_evidence`, `${path}.required_evidence is required; evidence obligations are explicit.`);
+  }
+  validateRequiredEvidence(assignment.required_evidence, `${path}.required_evidence`);
+}
