@@ -6,6 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { compactTaskCard } from '../plugins/codex-co-engineer/mcp/v3/diagnostics.mjs';
+import {
+  ADR_RELATIVE,
+  THREAT_MODEL_RELATIVE,
+  assertR1FirstReleaseContract,
+} from './r1-first-release-contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
@@ -19,7 +24,8 @@ const json = async (relative) => JSON.parse(await text(relative));
 const required = [
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/efficient-dogfood.md', 'docs/release.md',
-  'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/releases/v3.1.0.md',
+  'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/adr/0001-r1-bounded-run-architecture.md',
+  'docs/threat-model.md', 'docs/releases/v3.1.0.md',
   'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md', 'docs/releases/v3.2.1.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
@@ -40,7 +46,8 @@ const required = [
   `${PLUGIN}/vendor/dsh-acp-demo/package.json`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/SKILL.md`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/agents/openai.yaml`,
-  'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/inspector-preflight.mjs',
+  'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/r1-first-release-contract.mjs',
+  'scripts/inspector-preflight.mjs', `${PLUGIN}/test/r1-first-release-non-goals.test.mjs`,
   'scripts/process-boundary-preflight.mjs', 'scripts/mcp-environment-preflight.mjs',
   'tools/acpx-vendor/package.json', 'tools/acpx-vendor/package-lock.json',
 ];
@@ -255,5 +262,11 @@ for (const relative of tracked) {
     fail(`Legacy product identifier remains in ${relative}.`);
   }
 }
+
+assertR1FirstReleaseContract({
+  adrText: await text(ADR_RELATIVE),
+  threatText: await text(THREAT_MODEL_RELATIVE),
+  securityText: await text('SECURITY.md'),
+});
 
 process.stdout.write(`Codex-Co-Engineer ${RELEASE_VERSION} release validation passed.\n`);
