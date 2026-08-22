@@ -157,6 +157,23 @@ Profiles only name selections. Resolution across assignments, defaults, and
 selection questions are resolver concerns; provider/model attestation happens
 at preflight, not at authoring time.
 
+### Whole-catalog snapshots
+
+`loadProfileCatalogSnapshot(options)` takes the same arguments as
+`loadProfiles` and reads both catalogs exactly once. It returns one detached,
+deeply frozen snapshot `{ schema, catalog_digest, roots, sources, profiles,
+shadowed }`: `profiles` lists normalized ProfileV1 records (`name`, `scope`,
+`source`, `definition`, `digest`) in deterministic name order, `shadowed`
+keeps project-precedence losers visible, and `catalog_digest` binds the whole
+ordered catalog - each scope's presence and exact source file plus every
+record's provenance digest - so content, precedence, ordering, presence, or
+origin drift yields a different digest. Per-record provenance digests stay
+content-only and path-independent. The snapshot carries no executable,
+environment, default, or route-selection behavior; per-name resolution reuses
+`findProfile(snapshot, name)`, so a run resolves its `run_profile` plus every
+assignment profile from that one read without rereading files, and no mutable
+Map or live object escapes the boundary.
+
 ## Task inputs
 
 Repository paths, prompts, roles, deadlines, and workspace/PR intent are

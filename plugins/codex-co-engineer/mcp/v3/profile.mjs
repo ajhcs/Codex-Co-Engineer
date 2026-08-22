@@ -975,3 +975,97 @@ export function findProfile(loaded, name) {
   }
   return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Whole-catalog snapshot port (additive). P05 consumes one immutable catalog
+// snapshot instead of rereading files: this API performs exactly one
+// loadProfiles() read of both scopes and closes the merged result into a
+// detached, deeply frozen snapshot bound to per-record provenance digests and
+// one whole-catalog digest. It reuses the existing validators, grammar,
+// loader, and provenance machinery unchanged; legacy loadProfiles/findProfile
+// shapes and bytes stay identical, and exact-name resolution stays with
+// findProfile - the snapshot adds no executable, environment, default, or
+// route-selection behavior, and selection remains a resolver concern.
+// ---------------------------------------------------------------------------
+
+// Domain separation for the catalog-level digest. Per-record provenance
+// digests stay content-only and path-independent; this whole-catalog binding
+// is deliberately origin-aware: it covers each scope's presence and exact
+// source file plus every record binding in deterministic name order, so
+// content, precedence, ordering, presence, or origin drift yields a
+// different digest.
+const PROFILE_CATALOG_SNAPSHOT_DIGEST_DOMAIN = 'codex-co-engineer.profile-catalog.v1';
+
+// Incrementally hashed JSON frames: no single canonical string is ever
+// materialized, so even a fully loaded two-scope catalog stays far below the
+// bounded canonical encoding budget while every bound value keeps
+// unambiguous framing.
+function computeProfileCatalogDigest(loaded) {
+  const hash = createHash('sha256');
+  const bind = (label, value) => hash.update(`${JSON.stringify([label, value])}\n`);
+  bind('digest_domain', PROFILE_CATALOG_SNAPSHOT_DIGEST_DOMAIN);
+  for (const source of loaded.sources) bind('source', [source.scope, source.file, source.loaded]);
+  for (const record of loaded.profiles) {
+    bind('profile', [record.name, record.scope, record.source, record.digest]);
+  }
+  for (const record of loaded.shadowed) {
+    bind('shadowed',
+      [record.name, record.scope, record.source, record.reason, record.digest, record.primary_digest]);
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+// Closure proof over the emitted graph: every container must be a plain,
+// dense, static, deeply frozen value - no accessor, symbol key, exotic
+// prototype, Map/Set escape, or unfrozen object can reach a consumer through
+// a snapshot.
+function assertSnapshotClosure(value, seen = new Set()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return;
+  seen.add(value);
+  assertStaticData(value, 'The profile catalog snapshot');
+  if (!Object.isFrozen(value)) {
+    fail('invalid_profile_snapshot_closure', 'The profile catalog snapshot must be deeply frozen.');
+  }
+  const children = Array.isArray(value)
+    ? dataArrayValues(value, 'invalid_profile_snapshot_closure',
+      'The profile catalog snapshot array', MAX_LOADED_PROFILES)
+    : Object.values(dataObjectDescriptors(value, 'invalid_profile_snapshot_closure',
+      'The profile catalog snapshot container')).map((descriptor) => descriptor.value);
+  for (const child of children) assertSnapshotClosure(child, seen);
+}
+
+// One read, one closed snapshot: `options` are exactly loadProfiles()' options
+// (repositoryPath, ownerConfigDir, env) and keep their typed rejections for
+// hostile direct-JS views and mid-read catalog drift. `profiles` lists
+// normalized ProfileV1 records in deterministic name order; `shadowed` keeps
+// project-precedence losers visible; `catalog_digest` binds the whole
+// ordered catalog. Resolution reuses findProfile(snapshot, name), so a run
+// resolves its run_profile plus every assignment profile from this one
+// object without touching the filesystem again.
+export async function loadProfileCatalogSnapshot(options = {}) {
+  const loaded = await loadProfiles(options);
+  const snapshot = Object.freeze({
+    schema: PROFILE_SCHEMA,
+    catalog_digest: computeProfileCatalogDigest(loaded),
+    roots: loaded.roots,
+    sources: loaded.sources,
+    profiles: Object.freeze(loaded.profiles.map((record) => Object.freeze({
+      name: record.name,
+      scope: record.scope,
+      source: record.source,
+      definition: record.definition,
+      digest: record.digest,
+    }))),
+    shadowed: Object.freeze(loaded.shadowed.map((record) => Object.freeze({
+      name: record.name,
+      scope: record.scope,
+      source: record.source,
+      reason: record.reason,
+      definition: record.definition,
+      digest: record.digest,
+      primary_digest: record.primary_digest,
+    }))),
+  });
+  assertSnapshotClosure(snapshot);
+  return snapshot;
+}

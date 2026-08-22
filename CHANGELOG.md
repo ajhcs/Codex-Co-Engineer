@@ -4,6 +4,20 @@
 
 ### Added
 
+- **ProfileV1 whole-catalog snapshot port.** Adds the additive
+  `loadProfileCatalogSnapshot(options)` API beside `loadProfiles`/`findProfile`:
+  one read of both catalogs closes the merged result into a single detached,
+  deeply frozen snapshot - `{ schema, catalog_digest, roots, sources, profiles,
+  shadowed }` with normalized ProfileV1 records in deterministic name order -
+  bound to every record's provenance digest plus one origin-aware SHA-256
+  whole-catalog digest over scope presence, source files, and ordered record
+  bindings. Hostile direct-JS option views and mid-read catalog drift keep the
+  loader's typed rejections, a closure proof fails typed
+  (`invalid_profile_snapshot_closure`) if any container were not deeply frozen,
+  and per-name resolution reuses `findProfile(snapshot, name)` so run
+  resolution never rereads files and no mutable Map or live object escapes.
+  The snapshot adds no executable, environment, default, or route-selection
+  behavior; legacy load results, lookup bytes, and digests are unchanged.
 - **ProfileV1 optional primitive-true `default` flag.** Profile definitions
   accept one optional top-level `default` field as prerequisite metadata for
   later run-resolution work. When present it must be the primitive boolean
