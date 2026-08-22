@@ -4,6 +4,23 @@
 
 ### Added
 
+- **Deterministic P05 resolver and P17 capability bridge.** Additive
+  `resolveRunSelectionV1` / `resolveSelectionAnswersV1` bind every
+  assignment's provider/model from authored explicit execution, the
+  assignment-named profile, the run `profile` (omitted executions only),
+  or the single catalog `default: true` record. `models` null or absent
+  means membership undeclared for every provider, including DSH, and
+  never invents a required list. Availability plus complete closed P17
+  capability snapshot digests bind `SelectionRequestV1` identity;
+  `request_id` is `sel-` plus exactly 32 lowercase hex characters. Live
+  and revoked Proxies are rejected through `node:util` types before
+  reflection, own `undefined` is denied, and pure answer re-resolution
+  clones the caller manifest so snapshots and non-execution fields stay
+  unchanged. There is no ranking, fallback, replay, hidden default, or
+  provider substitution. Cursor Cloud still requires a pinned
+  `starting_ref`. Coverage lives in `r1-capability-bridge`,
+  `r1-resolver`, `r1-resolver-adversarial`, and
+  `r1-resolver-re-resolution` tests.
 - **Closed domain-separated identity digest authority.** The P03 identity
   module now owns one digest authority behind every RunIdentityV1 surface.
   `IDENTITY_LABELS` is a frozen null-prototype closed registry of the

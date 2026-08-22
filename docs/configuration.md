@@ -111,8 +111,10 @@ the repository's normal access policy.
 }
 ```
 
-The optional `default: true` flag is prerequisite metadata only; omitting it
-is ordinary and confers no resolution behavior by itself.
+The optional `default: true` flag is ordinary to omit. The P05 resolver
+applies it only after explicit execution, an assignment-named profile, and
+the run `profile` leave an omitted execution unresolved. A profile whose
+name is `default` still has no authority by name.
 
 ### Field validation
 
@@ -134,11 +136,13 @@ run-manifest runtime module.
   validation.
 - `role` is `review`, `implement`, or `verify` (read-only verification).
 - `expected_duration_ms` is an integer from 1,000 to 86,400,000.
-- `default` is optional prerequisite metadata. When present it must be the
-  primitive boolean `true` exactly; absence is ordinary. The flag marks an
-  owner-authored candidate default for later run-resolution work and carries
-  no authority in this release: lookup stays exact-name, a profile named
-  `default` has no authority by name, and selection stays a resolver concern.
+- `default` is optional. When present it must be the primitive boolean
+  `true` exactly; absence is ordinary. Lookup stays exact-name and a
+  profile named `default` has no authority by name. The P05 resolver may
+  use the single `default: true` catalog record only for a truly omitted
+  execution that neither the assignment profile nor the run `profile`
+  resolved. Two `default: true` records fail closed; the resolver never
+  ranks defaults.
 - `policy` is data-only selection policy. Today it may contain exactly
   `pre_dispatch_provider_preference`: one to four unique known provider
   names in the owner's deterministic pre-dispatch preference order.
@@ -153,9 +157,15 @@ grammar-governed top-level `model` identifier itself, which is an opaque
 identifier validated only by the bounded model grammar above, never parsed
 as a path, ref, command, or credential.
 
-Profiles only name selections. Resolution across assignments, defaults, and
-selection questions are resolver concerns; provider/model attestation happens
-at preflight, not at authoring time.
+Profiles only name selections. `resolveRunSelectionV1` is the deterministic
+resolver: explicit assignment `execution.provider`/`model` wins, then the
+assignment-named profile, then the run `profile` for omitted executions,
+then the single `default: true` record. Availability `models` null or
+absent means membership is undeclared for every provider, including DSH.
+Unsupported, unavailable, and `not_supported` routes stay unresolved and
+are never substituted. Cursor Cloud lanes still require one pinned
+already-pushed `starting_ref`. Provider/model attestation of the effective
+pair remains a later preflight concern.
 
 ### Whole-catalog snapshots
 
@@ -173,6 +183,17 @@ environment, default, or route-selection behavior; per-name resolution reuses
 `findProfile(snapshot, name)`, so a run resolves its `run_profile` plus every
 assignment profile from that one read without rereading files, and no mutable
 Map or live object escapes the boundary.
+
+### Run selection
+
+`resolveRunSelectionV1` consumes one parsed run manifest, one availability
+snapshot, one complete P17 capability snapshot, and an optional branded or
+load-shaped profile catalog. It never ranks, scores, falls back, replays,
+or substitutes a provider. `SelectionRequestV1` identity binds both
+recomputed snapshot digests; `request_id` is `sel-` plus exactly 32
+lowercase hex characters. `resolveSelectionAnswersV1` is pure: an accepted
+answer batch re-resolves a cloned manifest, echoes the outstanding request
+identity, and leaves the original manifest and snapshots unchanged.
 
 ## Task inputs
 
