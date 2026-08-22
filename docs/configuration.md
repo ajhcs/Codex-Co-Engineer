@@ -129,8 +129,9 @@ run-manifest runtime module.
   availability, qualification, resolution, or attestation data, and no
   advertised-model list is ever enforced against a requested model. Whether a
   provider actually offers the named model is attested at preflight, not at
-  authoring time. The retired `PROFILE_DSH_MODELS` constant survives as
-  deprecated informational compatibility data only.
+  authoring time. The `PROFILE_DSH_MODELS` constant survives only as
+  deprecated informational compatibility data and is never consulted by
+  validation.
 - `role` is `review`, `implement`, or `verify` (read-only verification).
 - `expected_duration_ms` is an integer from 1,000 to 86,400,000.
 - `default` is optional prerequisite metadata. When present it must be the
