@@ -1,0 +1,300 @@
+{
+  "id": "codex-co-engineer.repo-path-matcher.v1.fixtures",
+  "comment": "Golden membership fixtures for the P02R2 repository path-matcher authority. Every entry is evaluated in file order by test/v3-repo-path-matcher.test.mjs; expectations are exact booleans.",
+  "matches": [
+    {
+      "pattern": "README.md",
+      "path": "README.md",
+      "expected": true
+    },
+    {
+      "pattern": "README.md",
+      "path": "readme.md",
+      "expected": false
+    },
+    {
+      "pattern": "docs/adr/0001-r1-bounded-run-architecture.md",
+      "path": "docs/adr/0001-r1-bounded-run-architecture.md",
+      "expected": true
+    },
+    {
+      "pattern": "src/*.ts",
+      "path": "src/index.ts",
+      "expected": true
+    },
+    {
+      "pattern": "src/*.ts",
+      "path": "src/cli/main.ts",
+      "expected": false
+    },
+    {
+      "pattern": "src/**/*.ts",
+      "path": "src/index.ts",
+      "expected": true
+    },
+    {
+      "pattern": "src/**/*.ts",
+      "path": "src/cli/main.ts",
+      "expected": true
+    },
+    {
+      "pattern": "src/**/*.ts",
+      "path": "lib/index.ts",
+      "expected": false
+    },
+    {
+      "pattern": "foo/**",
+      "path": "foo",
+      "expected": true
+    },
+    {
+      "pattern": "foo/**",
+      "path": "foo/bar/baz",
+      "expected": true
+    },
+    {
+      "pattern": "foo/**",
+      "path": "foobar",
+      "expected": false
+    },
+    {
+      "pattern": "**/foo",
+      "path": "foo",
+      "expected": true
+    },
+    {
+      "pattern": "**/foo",
+      "path": "a/b/foo",
+      "expected": true
+    },
+    {
+      "pattern": "**/foo",
+      "path": "a/foo/c",
+      "expected": false
+    },
+    {
+      "pattern": "**",
+      "path": "any/deep/path.txt",
+      "expected": true
+    },
+    {
+      "pattern": "**/**",
+      "path": "x/y",
+      "expected": true
+    },
+    {
+      "pattern": "a/**/b",
+      "path": "a/b",
+      "expected": true
+    },
+    {
+      "pattern": "a/**/b",
+      "path": "a/x/y/b",
+      "expected": true
+    },
+    {
+      "pattern": "*",
+      "path": "top-level-file",
+      "expected": true
+    },
+    {
+      "pattern": "*",
+      "path": "not/nested",
+      "expected": false
+    },
+    {
+      "pattern": "?at.txt",
+      "path": "cat.txt",
+      "expected": true
+    },
+    {
+      "pattern": "?at.txt",
+      "path": "at.txt",
+      "expected": false
+    },
+    {
+      "pattern": "😀.md",
+      "path": "😀.md",
+      "expected": true
+    },
+    {
+      "pattern": "?.md",
+      "path": "😀.md",
+      "expected": true
+    },
+    {
+      "pattern": "café/naïve.md",
+      "path": "café/naïve.md",
+      "expected": true
+    },
+    {
+      "pattern": "日付/*.log",
+      "path": "日付/run-01.log",
+      "expected": true
+    },
+    {
+      "pattern": "[abc].txt",
+      "path": "b.txt",
+      "expected": true
+    },
+    {
+      "pattern": "[abc].txt",
+      "path": "d.txt",
+      "expected": false
+    },
+    {
+      "pattern": "[a-mn-z].txt",
+      "path": "q.txt",
+      "expected": true
+    },
+    {
+      "pattern": "[a-mn-z].txt",
+      "path": "n2.txt",
+      "expected": false
+    },
+    {
+      "pattern": "[α-ω].md",
+      "path": "λ.md",
+      "expected": true
+    },
+    {
+      "pattern": "[A-Z]_*.sh",
+      "path": "X_build.sh",
+      "expected": true
+    },
+    {
+      "pattern": "[A-Z]_*.sh",
+      "path": "x_build.sh",
+      "expected": false
+    },
+    {
+      "pattern": "[a-]x",
+      "path": "-x",
+      "expected": true
+    },
+    {
+      "pattern": "[--0]x",
+      "path": "0x",
+      "expected": true
+    },
+    {
+      "pattern": "{a,b}.txt",
+      "path": "{a,b}.txt",
+      "expected": true
+    },
+    {
+      "pattern": "{a,b}.txt",
+      "path": "a.txt",
+      "expected": false
+    },
+    {
+      "pattern": "a*a*a*/z",
+      "path": "abacax/z",
+      "expected": true
+    },
+    {
+      "pattern": "v*.*.*",
+      "path": "v3.2.1",
+      "expected": true
+    },
+    {
+      "pattern": "v*.*.*",
+      "path": "v3.2",
+      "expected": false
+    }
+  ],
+  "rejections": [
+    {
+      "pattern": "[abc",
+      "code": "pattern_unclosed_class"
+    },
+    {
+      "pattern": "x/[ab",
+      "code": "pattern_unclosed_class"
+    },
+    {
+      "pattern": "[]",
+      "code": "pattern_empty_class"
+    },
+    {
+      "pattern": "[]tail",
+      "code": "pattern_empty_class"
+    },
+    {
+      "pattern": "[z-a]",
+      "code": "pattern_reversed_range"
+    },
+    {
+      "pattern": "[9-0]x",
+      "code": "pattern_reversed_range"
+    },
+    {
+      "pattern": "[a-a]",
+      "code": "pattern_reversed_range"
+    },
+    {
+      "pattern": "[!a]",
+      "code": "pattern_class_negation"
+    },
+    {
+      "pattern": "[^a]",
+      "code": "pattern_class_negation"
+    },
+    {
+      "pattern": "a**b",
+      "code": "pattern_double_star"
+    },
+    {
+      "pattern": "**suffix",
+      "code": "pattern_double_star"
+    },
+    {
+      "pattern": "***",
+      "code": "pattern_double_star"
+    },
+    {
+      "pattern": "a\\*b",
+      "code": "invalid_format"
+    },
+    {
+      "pattern": "/absolute",
+      "code": "invalid_format"
+    },
+    {
+      "pattern": "trailing/",
+      "code": "invalid_format"
+    },
+    {
+      "pattern": "a//b",
+      "code": "invalid_format"
+    },
+    {
+      "pattern": "./dot",
+      "code": "invalid_format"
+    },
+    {
+      "pattern": "../parent/x",
+      "code": "invalid_format"
+    },
+    {
+      "pattern": "@(a|b)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "+(a)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "!(a)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "?(a)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "*(a)",
+      "code": "pattern_extglob"
+    }
+  ]
+}

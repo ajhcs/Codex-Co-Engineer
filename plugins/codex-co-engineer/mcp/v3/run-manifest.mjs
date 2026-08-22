@@ -75,6 +75,10 @@ export {
   ROLE_ACCESS,
 };
 
+// Exact matchability ingress for write_scope globs. The matcher imports
+// nothing from this module, so this edge cannot form a cycle.
+import { RepoPathMatcherError, compileRepoGlob } from './repo-path-matcher.mjs';
+
 export const RUN_MANIFEST_SCHEMA_ID = 'codex-co-engineer.run.v1';
 export const ASSIGNMENT_SCHEMA_ID = 'codex-co-engineer.assignment.v1';
 export const POLICY_SCHEMA_ID = 'codex-co-engineer.policy.v1';
@@ -265,6 +269,7 @@ export function isPlainObject(value) {
 }
 
 export function utf8ByteLength(text) {
+  if (typeof text !== 'string') fail('invalid_type', '$', 'utf8ByteLength input must be a string.');
   return capturedUtf8ByteLength(text);
 }
 
@@ -691,6 +696,15 @@ export function assertWriteScopePatterns(value, path, { minPatterns, maxPatterns
     }
     if (utf8ByteLength(entry) > SCOPE_PATTERN_MAX_BYTES) {
       fail('out_of_range', entryPath, `${entryPath} exceeds ${SCOPE_PATTERN_MAX_BYTES} bytes.`);
+    }
+    // Matchability parity: every accepted write_scope pattern must also
+    // compile under the exact matcher ingress grammar (brace-as-literal, no
+    // extglob), so no submitted scope can be unmatchable downstream.
+    try {
+      compileRepoGlob(entry, entryPath);
+    } catch (error) {
+      if (!(error instanceof RepoPathMatcherError)) throw error;
+      fail('invalid_format', entryPath, `${entryPath} is not a matchable repository glob under the matcher grammar.`);
     }
     if (seen.has(entry)) fail('duplicate_scope_pattern', entryPath, `${entryPath} repeats pattern "${entry}".`);
     seen.add(entry);

@@ -743,6 +743,34 @@ test('each scope segment enforces the exported byte limit', () => {
   assert.match(error.message, new RegExp(String(SCOPE_SEGMENT_MAX_BYTES), 'u'));
 });
 
+test('every write_scope pattern is matchable under the exact matcher grammar', () => {
+  // The manifest alphabet alone would accept these; the matchability parity
+  // gate rejects them at submission with bounded, content-free diagnostics.
+  const unmatchable = ['[', '[]', '[z-a]', '[a-a]', 'a**b', '***', 'src/[ab'];
+  for (const pattern of unmatchable) {
+    const error = violation((manifest) => { manifest.assignments[0].write_scope = [pattern]; });
+    assert.ok(error instanceof RunContractV1Error);
+    assert.equal(error.code, 'invalid_format');
+    assert.equal(error.path, 'assignments[0].write_scope[0]');
+    assert.ok(error.message.length < 256);
+    if (pattern.length > 2) assert.equal(error.message.includes(pattern), false);
+  }
+  // Extglob openers are rejected at submission too.
+  for (const opener of ['@(a|b)', '+(a)', '!(a)', '?(a)', '*(a)']) {
+    const error = violation((manifest) => { manifest.assignments[0].write_scope = [opener]; });
+    assert.equal(error.code, 'invalid_format');
+  }
+  // Every previously accepted shape stays accepted. Braces and a bare '|'
+  // are matcher-level literals; the retained manifest alphabet never admitted
+  // their characters, so acceptance here covers manifest-legal shapes only.
+  for (const pattern of ['src/**', '[a-z]*/x', 'dir-?.md', '**/reports']) {
+    const summary = validateCompleteRunManifestV1(
+      { ...validRun(), assignments: [writer('lane-0', [pattern])] },
+    );
+    assert.deepEqual([...summary.assignment_ids], ['lane-0']);
+  }
+});
+
 test('the maximum legal lane, scope, command, and parameter cross-product fits the total budget', () => {
   const manifest = validRun();
   manifest.policy.max_concurrency = MAX_ASSIGNMENTS;
