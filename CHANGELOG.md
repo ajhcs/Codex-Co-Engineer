@@ -68,6 +68,20 @@
   properties, and custom prototypes at the direct-JavaScript boundary, so
   no hidden field can escape the closed shape. Canonical valid goldens are
   unchanged.
+- Close the direct-JavaScript Proxy boundary on the ProfileV1 data surfaces.
+  `validateProfileDefinition`, `canonicalProfileJson`,
+  `profileProvenanceDigest`, `profileRoots`, `findProfile`, and
+  `loadProfiles` now reject live and revoked Proxy views with the typed
+  `profile_proxy_rejected` code before any handler trap fires and before
+  `Array.isArray` or any other target-inspecting builtin can raise a native
+  TypeError. All nested data is read through one descriptor snapshot per
+  container (never by property access), argument bags and environment views
+  are snapshotted before use, and provenance digests are computed only over
+  fully validated ProfileV1 canonical output, so stateful views cannot hide
+  credential, argv, or merge-authority keys from validation, launder hidden
+  content into a digest, or produce unstable digests. Ordinary frozen and
+  null-prototype data and file-based JSON catalog loading are unchanged, and
+  digest values for valid data are byte-identical to the previous release.
 
 ## [3.2.1] - 2026-08-21
 
