@@ -1,0 +1,24 @@
+schema: codex-co-engineer.child-envelope.v1
+version: 1
+run_id: golden-prompt-fixtures
+lane_index: 2
+assignment_count: 3
+repository_path: /run-fixtures/repository
+base_sha: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
+begin-objective 113 bytes
+Compile 3.3.0 golden child-envelope fixtures with exact UTF-8 byte boundaries. Ziel: byte-exakte Umschläge. 🦊
+end-objective
+assignment_id: cloud-verify
+role: verify
+access: read_only
+execution.provider: cursor-cloud
+execution.model: cursor-agent-v1
+execution.profile: -
+starting_ref: b0a9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1
+write_scope.count: 0
+acceptance.count: 0
+required_evidence.count: 1
+required_evidence[0]: provider_report
+begin-prompt 72 bytes
+Verify the provider-visible starting SHA and report drift only. 🦊🦊
+end-prompt
