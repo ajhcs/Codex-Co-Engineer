@@ -634,17 +634,8 @@ function requirePolicy(name, policy) {
 }
 
 function requireProviderPreference(name, preference) {
-  let values;
-  try {
-    values = dataArrayValues(preference, 'invalid_profile_provider_preference',
-      `Profile "${name}" pre_dispatch_provider_preference`);
-  } catch (error) {
-    if (error.code === 'profile_structure_too_complex') {
-      fail('invalid_profile_provider_preference',
-        `Profile "${name}" pre_dispatch_provider_preference exceeds its bounded provider count.`);
-    }
-    throw error;
-  }
+  const values = dataArrayValues(preference, 'invalid_profile_provider_preference',
+    `Profile "${name}" pre_dispatch_provider_preference`);
   if (values.length === 0 || values.length > MAX_PROVIDER_PREFERENCE_ENTRIES
     || !values.every((entry) => typeof entry === 'string')) {
     fail('invalid_profile_provider_preference',
