@@ -135,6 +135,7 @@ const IS_PROXY = utilTypes.isProxy;
 const IS_ARRAY_BUFFER = utilTypes.isArrayBuffer;
 const IS_SHARED_ARRAY_BUFFER = utilTypes.isSharedArrayBuffer;
 const MATH_MIN = Math.min;
+const MATH_MAX = Math.max;
 const REGEXP_CTOR = RegExp;
 
 const UINT8ARRAY_PROTOTYPE = Uint8Array.prototype;
@@ -209,6 +210,35 @@ function addCounts(target, extra) {
   target.env_assignments += extra.env_assignments;
   target.url_credentials += extra.url_credentials;
   target.prompts += extra.prompts;
+}
+
+function isHighSurrogate(code) {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code) {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+// Deterministic well-formed projection: unpaired UTF-16 surrogates become
+// U+FFFD so sanitized UTF-8 never carries an unpaired surrogate. Astral
+// pairs are preserved intact.
+function wellFormedText(value) {
+  const text = STRING(value ?? '');
+  if (typeof text.toWellFormed === 'function') return text.toWellFormed();
+  let output = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (isHighSurrogate(code) && isLowSurrogate(text.charCodeAt(index + 1))) {
+      output += text.slice(index, index + 2);
+      index += 1;
+    } else if (isHighSurrogate(code) || isLowSurrogate(code)) {
+      output += '\uFFFD';
+    } else {
+      output += text[index];
+    }
+  }
+  return output;
 }
 
 function makeDecoder() {
@@ -354,19 +384,37 @@ function emitSanitized(session, text) {
   session.sanitizedBytes += bytes.byteLength;
 }
 
-function commitPending(session) {
+function commitPending(session, isFinal) {
   const text = session.pending;
   if (text.length === 0) return;
-  const redacted = redactRegion(text);
+  const overlap = isFinal ? 0 : ARTIFACT_SANITIZER_OVERLAP_CHARS;
+  const limit = isFinal ? text.length : MATH_MAX(0, text.length - overlap);
+  if (limit === 0 && !isFinal) return;
+
+  let commitEnd = limit;
+  if (!isFinal) {
+    const selected = selectMatches(findAllMatches(text));
+    for (let index = 0; index < selected.length; index += 1) {
+      const match = selected[index];
+      if (match.index < limit && match.end > limit) {
+        commitEnd = MATH_MIN(commitEnd, match.index);
+        break;
+      }
+    }
+  }
+
+  if (commitEnd <= 0) return;
+  const region = text.slice(0, commitEnd);
+  const redacted = redactRegion(region);
   addCounts(session.counts, redacted.counts);
   emitSanitized(session, redacted.text);
-  session.pending = '';
+  session.pending = text.slice(commitEnd);
 }
 
 function feedDecoded(session, decoded) {
   if (decoded.length === 0) return;
-  session.pending += decoded;
-  commitPending(session);
+  session.pending += wellFormedText(decoded);
+  commitPending(session, false);
 }
 
 function feedView(session, view) {
@@ -394,6 +442,7 @@ function feedView(session, view) {
 function finishSession(session) {
   const tail = session.decoder.decode();
   feedDecoded(session, tail);
+  commitPending(session, true);
   if (session.received !== session.declaredLength) {
     failSanitizer('artifact_length_mismatch', 'artifact_ref.byte_length',
       'Actual artifact length does not match the declared byte length; nothing was published.');

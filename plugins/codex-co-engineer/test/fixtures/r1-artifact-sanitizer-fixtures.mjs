@@ -254,6 +254,7 @@ export const SAMPLES = Object.freeze({
 export const MALFORMED_RAW = Buffer.from([0x61, 0xff, 0x62, 0x0a]);
 export const MALFORMED_SANITIZED = Buffer.from('a\uFFFDb\n', 'utf8');
 
-// U+D800 encoded as UTF-8 (ED A0 80) is malformed; decoder emits U+FFFD.
+// U+D800 encoded as UTF-8 (ED A0 80) is malformed; the streaming decoder
+// emits one U+FFFD per invalid unit, which is three replacements here.
 export const UNPAIRED_RAW = Buffer.from([0x61, 0xed, 0xa0, 0x80, 0x62, 0x0a]);
-export const UNPAIRED_SANITIZED = Buffer.from('a\uFFFDb\n', 'utf8');
+export const UNPAIRED_SANITIZED = Buffer.from('a\uFFFD\uFFFD\uFFFDb\n', 'utf8');

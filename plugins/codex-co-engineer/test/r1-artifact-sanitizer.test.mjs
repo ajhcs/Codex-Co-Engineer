@@ -24,15 +24,21 @@ import {
 } from '../mcp/v3/artifact-ref.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import {
+  byteSplits,
   CHILD_A,
   CHILD_B,
   chunksOf,
   digestOf,
   makeStoreRoot,
+  MALFORMED_RAW,
+  MALFORMED_SANITIZED,
   rawRefFor,
   removeRoot,
   RUN_ID,
   SAMPLES,
+  splitAt,
+  UNPAIRED_RAW,
+  UNPAIRED_SANITIZED,
 } from './fixtures/r1-artifact-sanitizer-fixtures.mjs';
 
 async function errorOfAsync(action, expectedCode, expectedPath) {
@@ -294,6 +300,110 @@ test('provenance and denials are content-free', async () => {
     assert.equal(projected.includes(ARTIFACT_SANITIZER_REPLACEMENT) === false
       || projected.includes(sample.raw.toString('utf8')) === false, true);
     assert.equal(projected.includes(root), false);
+  });
+});
+
+test('secrets split across a chunk boundary redact to the same bytes and counts', async () => {
+  await withStore(async (store) => {
+    const cases = [
+      ['credential', SAMPLES.credentialFormat, 9],
+      ['bearer', SAMPLES.bearer, 20],
+      ['env', SAMPLES.envAssignment, 16],
+      ['url', SAMPLES.urlCredential, 18],
+      ['prompt', SAMPLES.prompt, 12],
+    ];
+    for (const [name, sample, offset] of cases) {
+      const unsplit = await sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(sample.raw, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/unsplit-${name}.txt`,
+        }),
+        source: sample.raw,
+      });
+      const provenance = await sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(sample.raw, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/split-${name}.txt`,
+        }),
+        source: splitAt(sample.raw, offset),
+      });
+      assert.equal(provenance.sanitized_digest, unsplit.sanitized_digest, name);
+      assert.equal(provenance.sanitized_digest, digestOf(sample.sanitized), name);
+      assert.deepEqual(provenance.redaction_counts, sample.counts, name);
+    }
+  });
+});
+
+test('one-byte streams and mixed-policy splits stay deterministic', async () => {
+  await withStore(async (store) => {
+    const sample = SAMPLES.mixed;
+    const viaBytes = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(sample.raw),
+      source: byteSplits(sample.raw),
+    });
+    assertProvenanceShape(viaBytes, sample);
+    const viaFive = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(sample.raw, {
+        assignment_id: CHILD_B,
+        relative_path: `runs/${RUN_ID}/${CHILD_B}/mixed.txt`,
+      }),
+      source: chunksOf(sample.raw, 5),
+    });
+    assert.equal(viaFive.sanitized_digest, viaBytes.sanitized_digest);
+    assert.deepEqual(viaFive.redaction_counts, sample.counts);
+  });
+});
+
+test('astral UTF-8 sequences survive every split without clipping', async () => {
+  await withStore(async (store) => {
+    const sample = SAMPLES.astral;
+    const unsplit = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(sample.raw),
+      source: sample.raw,
+    });
+    assertProvenanceShape(unsplit, sample);
+    for (let offset = 0; offset <= sample.raw.byteLength; offset += 1) {
+      const provenance = await sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(sample.raw, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/astral-${offset}.txt`,
+        }),
+        source: splitAt(sample.raw, offset),
+      });
+      assert.equal(provenance.sanitized_digest, unsplit.sanitized_digest);
+      assert.equal(provenance.sanitized_byte_length, sample.sanitized.byteLength);
+    }
+  });
+});
+
+test('malformed and unpaired UTF-8 become U+FFFD deterministically', async () => {
+  await withStore(async (store) => {
+    const malformed = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(MALFORMED_RAW),
+      source: MALFORMED_RAW,
+    });
+    assert.equal(malformed.sanitized_digest, digestOf(MALFORMED_SANITIZED));
+    const malformedSplit = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(MALFORMED_RAW, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/malformed-split.txt`,
+      }),
+      source: splitAt(MALFORMED_RAW, 2),
+    });
+    assert.equal(malformedSplit.sanitized_digest, malformed.sanitized_digest);
+
+    const unpaired = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(UNPAIRED_RAW, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/unpaired.txt`,
+      }),
+      source: UNPAIRED_RAW,
+    });
+    assert.equal(unpaired.sanitized_digest, digestOf(UNPAIRED_SANITIZED));
+    for (let offset = 1; offset < UNPAIRED_RAW.byteLength; offset += 1) {
+      const split = await sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(UNPAIRED_RAW, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/unpaired-${offset}.txt`,
+        }),
+        source: splitAt(UNPAIRED_RAW, offset),
+      });
+      assert.equal(split.sanitized_digest, unpaired.sanitized_digest);
+    }
   });
 });
 
