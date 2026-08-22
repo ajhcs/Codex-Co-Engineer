@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -14,6 +14,7 @@ import {
   loadProfiles,
   profileProvenanceDigest,
   profileRoots,
+  validateProfileDefinition,
 } from '../mcp/v3/profile.mjs';
 
 const validDefinition = () => ({
@@ -414,4 +415,176 @@ test('unknown keys are rejected and dangerous values never survive validation', 
   } finally {
     await cleanup();
   }
+});
+
+test('live and revoked Proxy views are rejected with typed codes before any inspection', () => {
+  const definition = validDefinition();
+  const transparent = new Proxy(definition, {});
+  const revoked = Proxy.revocable(definition, {});
+  revoked.revoke();
+
+  for (const hostile of [transparent, revoked.proxy]) {
+    for (const run of [
+      () => validateProfileDefinition('hostile', hostile),
+      () => canonicalProfileJson(hostile),
+      () => profileProvenanceDigest({ name: 'hostile', definition: hostile }),
+      () => profileRoots(hostile),
+      () => findProfile(hostile, 'anything'),
+    ]) {
+      assert.throws(run, (error) => error.code === 'profile_proxy_rejected',
+        'every direct-JS surface must reject Proxy views with the typed code');
+    }
+  }
+
+  // Revoked Proxies make even Array.isArray throw natively; rejection had to
+  // happen before that target-inspecting builtin could run.
+  assert.throws(() => Array.isArray(revoked.proxy), TypeError);
+
+  // Ordinary static data is untouched by the boundary.
+  const policy = { pre_dispatch_provider_preference: ['dsh'] };
+  const withPolicy = { ...definition, policy };
+  const frozen = Object.freeze({
+    ...withPolicy,
+    policy: Object.freeze({ ...policy,
+      pre_dispatch_provider_preference: Object.freeze([...policy.pre_dispatch_provider_preference]) }),
+  });
+  const baseline = profileProvenanceDigest({ name: 'static-data', definition: withPolicy });
+  assert.equal(baseline, profileProvenanceDigest({ name: 'static-data', definition: frozen }),
+    'frozen and plain static views must produce identical digests');
+  assert.ok(Object.isFrozen(validateProfileDefinition('static-data', frozen)));
+});
+
+test('digest inputs are closed over validated ProfileV1 data only', () => {
+  const base = validDefinition();
+  // Hidden own content can never reach the hash.
+  const hidden = { ...base };
+  Object.defineProperty(hidden, 'api_key', { enumerable: false, value: 'sk-hidden' });
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'hidden-key', definition: hidden }),
+    (error) => error.code === 'invalid_profile_definition',
+    'non-enumerable properties must be rejected, not ignored',
+  );
+
+  let accessorReads = 0;
+  const accessor = { ...base };
+  Object.defineProperty(accessor, 'role', {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      return 'review';
+    },
+  });
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'accessor-key', definition: accessor }),
+    (error) => error.code === 'invalid_profile_definition',
+    'accessor properties must be rejected without being read',
+  );
+  assert.equal(accessorReads, 0);
+
+  const symbolKeyed = { ...base };
+  symbolKeyed[Symbol('merge_authority')] = true;
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'symbol-key', definition: symbolKeyed }),
+    (error) => error.code === 'invalid_profile_definition',
+    'symbol-keyed content must be rejected',
+  );
+
+  // Arbitrary or dangerous payloads cannot be laundered into provenance:
+  // full ProfileV1 validation gates every digest.
+  for (const [definition, code] of [
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', api_key: 'sk-x' }, 'profile_credential_key_rejected'],
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', unknown_field: 1 }, 'unknown_profile_field'],
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', policy: { unknown_policy_field: 1 } }, 'unknown_profile_policy_field'],
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'orchestrate' }, 'unsupported_profile_role'],
+    [{}, 'invalid_profile_schema'],
+  ]) {
+    assert.throws(
+      () => profileProvenanceDigest({ name: 'laundered', definition }),
+      (error) => error.code === code,
+      `${code} must gate the digest`,
+    );
+  }
+});
+
+test('findProfile and profileRoots consume arguments as one static snapshot', async () => {
+  // Accessor-bearing results fail typed without ever reading through getters.
+  let getterReads = 0;
+  const accessorLoaded = {};
+  Object.defineProperty(accessorLoaded, 'profiles', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return [];
+    },
+  });
+  assert.throws(
+    () => findProfile(accessorLoaded, 'anything'),
+    (error) => error.code === 'invalid_profile_load_result',
+    'accessor profiles lists must be rejected',
+  );
+  assert.equal(getterReads, 0);
+
+  // A well-formed static result still resolves by exact name and preserves
+  // record identity.
+  const record = Object.freeze({
+    name: 'probe',
+    scope: 'project',
+    definition: Object.freeze(validDefinition()),
+    digest: `sha256:${'0'.repeat(64)}`,
+  });
+  const loaded = Object.freeze({ profiles: Object.freeze([record]), shadowed: [], sources: [] });
+  assert.equal(findProfile(loaded, 'probe'), record);
+  assert.equal(findProfile(loaded, 'missing'), undefined);
+
+  // Malformed records fail closed instead of returning partial matches.
+  for (const badList of [[{ provider: 'dsh' }], [{ name: 7 }], new Array(8)]) {
+    assert.throws(
+      () => findProfile({ profiles: badList }, 'probe'),
+      (error) => error.code === 'invalid_profile_load_result',
+      `malformed list ${JSON.stringify(badList)} must be rejected`,
+    );
+  }
+
+  // Argument objects are inspected as snapshots, never dereferenced.
+  let optionReads = 0;
+  const accessorOptions = {};
+  Object.defineProperty(accessorOptions, 'repositoryPath', {
+    enumerable: true,
+    get() {
+      optionReads += 1;
+      return '/repo';
+    },
+  });
+  assert.throws(
+    () => profileRoots(accessorOptions),
+    (error) => error.code === 'invalid_profile_options',
+    'accessor-bearing root arguments must be rejected',
+  );
+  assert.equal(optionReads, 0);
+  assert.throws(() => profileRoots(null), (error) => error.code === 'invalid_profile_options');
+  assert.throws(
+    () => profileProvenanceDigest(null),
+    (error) => error.code === 'invalid_profile_provenance_payload',
+  );
+});
+
+test('environment views are snapshotted per key without changing fallback order', () => {
+  assert.throws(
+    () => profileRoots({ repositoryPath: '/repo', env: new Proxy(process.env, {}) }),
+    (error) => error.code === 'profile_proxy_rejected',
+    'proxy environment views are rejected before any property access',
+  );
+  let envReads = 0;
+  const countingEnv = new Proxy({}, {
+    get(_target, key) {
+      envReads += 1;
+      return undefined;
+    },
+  });
+  // A plain static environment keeps the documented XDG/HOME behavior.
+  assert.equal(profileRoots({ repositoryPath: '/repo', env: {} }).owner.file,
+    path.join(homedir(), '.config', 'codex-co-engineer', 'profiles.json'));
+  assert.equal(profileRoots({ repositoryPath: '/repo', env: { XDG_CONFIG_HOME: '/xdg' } }).owner.file,
+    path.join('/xdg', 'codex-co-engineer', 'profiles.json'));
+  assert.equal(envReads, 0, 'environment fallback must not rely on property access');
 });
