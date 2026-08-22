@@ -441,6 +441,52 @@ test('crash debris: torn temporaries, orphaned content, and orphaned sidecars st
   }
 });
 
+test('a reserved temporary-name parent cannot publish and later self-condemns', async () => {
+  const { root, store } = await freshStore();
+  try {
+    const reserved = `.tmp-${'a'.repeat(32)}`;
+    const bytes = Buffer.from('temp-segment payload');
+    const reservedRef = refFor(bytes, { relative_path: `runs/${reserved}/x.bin` });
+    await expectCode(() => store.publish(reservedRef, bytes), 'artifact_reserved_name_denied');
+    // Denial leaves the store clean: later audit/open must not self-condemn.
+    assert.equal((await store.audit()).artifacts, 0);
+    assert.equal((await closeAndReopen(root).then((reopened) => reopened.audit())).artifacts, 0);
+
+    // Operator-planted reserved parents remain crash debris, not artifacts.
+    mkdirSync(path.join(root, 'sanitized', 'content', 'runs', reserved), { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(root, 'sanitized', 'content', 'runs', reserved, 'x.bin'), bytes);
+    await expectCode(() => store.audit(), 'artifact_torn_temporary');
+    await expectCode(() => closeAndReopen(root), 'artifact_torn_temporary');
+  } finally {
+    removeRoot(root);
+  }
+});
+
+test('verification compares stored snapshots and never trusts a caller-forged digest', async () => {
+  const { root, store } = await freshStore();
+  try {
+    await store.publish(BASE_REF, PAYLOAD);
+    await expectCode(
+      () => store.verifyArtifact(refFor(PAYLOAD, { media_type: 'application/json' })),
+      'artifact_metadata_conflict',
+    );
+    await expectCode(
+      () => store.verifyArtifact(refFor(PAYLOAD, { run_id: 'run-store-99' })),
+      'artifact_metadata_conflict',
+    );
+    assert.equal(await store.verifyArtifact(BASE_REF).then((verdict) => verdict.verified), true);
+
+    const swapped = Buffer.from(PAYLOAD.map((byte) => byte ^ 0x01));
+    const contentLeaf = path.join(root, 'sanitized', 'content', 'runs', 'run-store-01',
+      'lane-alpha', 'diff.patch');
+    writeFileSync(contentLeaf, swapped);
+    await expectCode(() => store.verifyArtifact(refFor(swapped)), 'artifact_content_conflict');
+    await expectCode(() => store.verifyArtifact(BASE_REF), 'artifact_digest_mismatch');
+  } finally {
+    removeRoot(root);
+  }
+});
+
 test('truncated, oversized, swapped, and malformed stored state fails verification and restart', async () => {
   const root = makeStoreRoot();
   try {

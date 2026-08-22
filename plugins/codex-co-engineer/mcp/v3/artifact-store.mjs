@@ -904,9 +904,9 @@ async function measurePublishedContent(targetPath, snapshot) {
 }
 
 // Verify one stored location end-to-end against one validated reference:
-// sidecar presence, strict shape, regular-file discipline, streaming
-// length/digest agreement, and exact reference equality. Returns the stored
-// reference snapshot on success.
+// sidecar presence, strict shape, exact stored-vs-requested snapshot
+// equality, regular-file discipline, and streaming length/digest agreement
+// against the stored sidecar claims (never the caller view).
 async function verifyLocation(rootPath, snapshot) {
   const locations = namespaceLocations(rootPath, snapshot.artifact_class, snapshot.relative_path);
   const metaOpened = await readBoundedFile(locations.metaTarget, MAX_ARTIFACT_STORE_META_BYTES, 'meta');
@@ -919,8 +919,13 @@ async function verifyLocation(rootPath, snapshot) {
     }
     failStore('artifact_not_found', 'artifact_ref', 'No stored artifact exists for that reference.');
   }
-  parseMetaDocument(metaOpened.bytes, snapshot.artifact_class, snapshot.relative_path, 'meta');
-  await measurePublishedContent(locations.contentTarget, snapshot);
+  const storedSnapshot = parseMetaDocument(metaOpened.bytes, snapshot.artifact_class,
+    snapshot.relative_path, 'meta');
+  if (canonicalSnapshotText(storedSnapshot) !== canonicalSnapshotText(snapshot)) {
+    failStore(classifyExistingConflict(storedSnapshot, snapshot), 'artifact_ref',
+      'A different artifact already occupies this location.');
+  }
+  await measurePublishedContent(locations.contentTarget, storedSnapshot);
   return locations;
 }
 
@@ -1190,11 +1195,13 @@ function classifyExistingConflict(existingSnapshot, snapshot) {
 async function publishPrepared(root, snapshot, source) {
   const locations = namespaceLocations(root.path, snapshot.artifact_class, snapshot.relative_path);
   const cap = maxByteLengthForClass(snapshot.artifact_class);
-  const leaf = locations.segments[locations.segments.length - 1];
-  if (capturedTest(PRIVATE_TEMP_NAME_PATTERN, leaf)
-    || capturedTest(PRIVATE_TEMP_NAME_PATTERN, `${leaf}${ARTIFACT_STORE_META_SUFFIX}`)) {
-    failStore('artifact_reserved_name_denied', 'artifact_ref.relative_path',
-      'An artifact path may not spell the reserved temporary-name grammar.');
+  for (let index = 0; index < locations.segments.length; index += 1) {
+    const segment = locations.segments[index];
+    if (capturedTest(PRIVATE_TEMP_NAME_PATTERN, segment)
+      || capturedTest(PRIVATE_TEMP_NAME_PATTERN, `${segment}${ARTIFACT_STORE_META_SUFFIX}`)) {
+      failStore('artifact_reserved_name_denied', 'artifact_ref.relative_path',
+        'An artifact path may not spell the reserved temporary-name grammar.');
+    }
   }
 
   const captures = [];
