@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Closed P20 DSH ACPX provider driver for Muse Spark 1.2 Contributor and Ox
+  Alpha.** Additive `DshApxDriverV1` hard-binds provider `dsh` plus exactly the
+  two allowed DSH models and implements the accepted P17 preflight/launch/
+  reconcile/cancel lifecycle against an injected bounded ACPX one-shot
+  transport port, inheriting every envelope, capability, transition, and denial
+  rule from the accepted contract with no parallel schema. ACPX provides no
+  authoritative prompt-sent acknowledgement: after spawn intent the posture
+  stays `dispatch_uncertain`, post-intent exceptions and loss are never
+  replayed, retried, or fallback-substituted, and only provably pre-spawn
+  failures may report `not_sent` under a two-attempt lane budget. Same-session
+  reply is unsupported: unresolved attention surfaces honestly and no
+  replacement prompt or session is started. Live progress, detailed events,
+  cancellation confirmation, and restart recovery read recorded ACPX evidence
+  through bounded cursor-monotonic pages; exact model/config/credential
+  identity and task/session correlation fail closed on drift; forged receipts
+  fail closed while genuine loss degrades to uncertainty. Events, records,
+  cursors, lanes, attempts, operations, clock readings, and diagnostics are
+  capped, and detail telemetry is content-free by construction. The module
+  claims no real-transport qualification, durable P19/P21 store, supervisor
+  cutover, or merge/PR authority; the exact port surface for later real DSH
+  Muse/Ox lifecycle conformance is recorded in
+  `docs/dsh-acpx-driver.md`. Coverage lives in `r1-dsh-acpx-driver` and
+  `r1-dsh-acpx-driver-adversarial` tests.
 - **Closed P17 provider-driver envelope and capability contract.** Additive
   `ProviderDriverV1` owns the preflight/launch/reconcile/cancel lifecycle
   plus typed results, exact ChildEnvelopeV1 launch proof (text bytes and

@@ -18,9 +18,15 @@ fallback or replay, and Codex-only final acceptance.
 The P17 `ProviderDriverV1` envelope/capability contract is in-tree as a
 pure contract and provider-agnostic conformance harness. It validates
 preflight/launch/reconcile/cancel requests and results against the
-accepted P05 13-field capability bridge. It does not implement Grok,
-Cursor Local, DSH, or Cursor Cloud transports, registry cutover,
-scheduler, or durable store; those remain P18/P20/P19/P21 and later
+accepted P05 13-field capability bridge. The P20 DSH adapter
+(`DshApxDriverV1`) now drives that contract over an injected bounded
+ACPX one-shot transport port for Muse Spark 1.2 Contributor and Ox
+Alpha, with honest post-spawn uncertainty, unsupported same-session
+reply, bounded recorded-evidence reconcile/restart/cancel behavior, and
+fail-closed identity/correlation drift denials; it qualifies no real
+transport (see `docs/dsh-acpx-driver.md`). No implementation exists for
+Grok, Cursor Local, or Cursor Cloud driver transports, registry cutover,
+scheduler, or durable store; those remain P18/P19/P21 and later
 run-runtime work. This worktree does not implement the run runtime,
 candidate composition, or `AttentionBatchV1`. Gate A remains the
 functional release authority; Gate B context-efficiency and Gate C
