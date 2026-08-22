@@ -336,6 +336,64 @@ test('cancellation maps confirmed/requested/already_terminal outcomes with bound
   }
 });
 
+test('reconcile-terminal then cancel is local already_terminal with zero transport', () => {
+  const terminals = [
+    { state: 'completed', stop_reason: 'end_turn' },
+    { state: 'failed', stop_reason: 'error' },
+    { state: 'cancelled', stop_reason: 'cancelled' },
+  ];
+  for (const receipt of terminals) {
+    const transport = fakeDshTransport({ polls: [receipt] });
+    const driver = createFixtureDriver(MUSE_MODEL, transport);
+    const lane = dispatchLane(driver.driver, dshEnvelope(MUSE_MODEL));
+    const first = lane.reconcile();
+    assert.equal(first.disposition, 'terminal', receipt.state);
+    const before = transport.counts();
+    const result = lane.cancel();
+    assert.equal(result.disposition, 'already_terminal', receipt.state);
+    assert.equal(result.detail_code, 'already_terminal', receipt.state);
+    assert.match(result.detail_message, CONTENT_FREE_DETAIL);
+    assert.deepEqual(transport.counts(), before,
+      `${receipt.state} later cancel must not call configIdentity/cancel/poll/events/spawn`);
+  }
+});
+
+test('repeated confirmed cancel is local already_terminal with zero further transport', () => {
+  const transport = fakeDshTransport({ cancelReceipts: [{ outcome: 'confirmed' }] });
+  const driver = createFixtureDriver(MUSE_MODEL, transport);
+  const lane = dispatchLane(driver.driver, dshEnvelope(MUSE_MODEL));
+  const first = lane.cancel();
+  assert.equal(first.disposition, 'cancel_confirmed');
+  const before = transport.counts();
+  assert.equal(before.cancel, 1);
+  const second = lane.cancel();
+  assert.equal(second.disposition, 'already_terminal');
+  assert.equal(second.detail_code, 'already_terminal');
+  assert.match(second.detail_message, CONTENT_FREE_DETAIL);
+  assert.deepEqual(transport.counts(), before,
+    'repeated confirmed cancel must not call configIdentity/cancel/poll/events/spawn');
+});
+
+test('cancel_requested remains nonterminal so a later cancel still reaches the port', () => {
+  const transport = fakeDshTransport({
+    cancelReceipts: [{ outcome: 'requested' }, { outcome: 'confirmed' }],
+  });
+  const driver = createFixtureDriver(MUSE_MODEL, transport);
+  const lane = dispatchLane(driver.driver, dshEnvelope(MUSE_MODEL));
+  const first = lane.cancel();
+  assert.equal(first.disposition, 'cancel_requested');
+  const afterRequested = transport.counts();
+  const second = lane.cancel();
+  assert.equal(second.disposition, 'cancel_confirmed');
+  assert.equal(transport.counts().cancel, afterRequested.cancel + 1);
+  assert.equal(transport.counts().configIdentity, afterRequested.configIdentity + 1);
+  const afterConfirmed = transport.counts();
+  const third = lane.cancel();
+  assert.equal(third.disposition, 'already_terminal');
+  assert.deepEqual(transport.counts(), afterConfirmed,
+    'cancel after cancel_confirmed must not call the injected port');
+});
+
 test('duplicate launch after any launch observation fails closed as a replay', () => {
   const transport = fakeDshTransport();
   const driver = createFixtureDriver(MUSE_MODEL, transport);
@@ -355,6 +413,10 @@ test('a provably pre-spawn failure reports not_sent and permits exactly one more
   const lane = dispatchLane(driver.driver, fixture);
   assert.equal(lane.launch.disposition, 'not_sent');
   assert.equal(lane.launch.detail_code, 'transport_prespawn_denied');
+  assert.match(lane.launch.detail_message, CONTENT_FREE_DETAIL);
+  assert.equal(lane.launch.detail_message.includes('probe=spawn'), true);
+  assert.equal(lane.launch.detail_message.includes('port_denied'), false);
+  assert.equal(lane.launch.detail_message.includes('code='), false);
 
   // One retry is allowed because the prompt provably never went out.
   const recovering = fakeDshTransport();

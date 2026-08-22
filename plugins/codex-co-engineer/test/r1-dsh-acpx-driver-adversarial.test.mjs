@@ -447,6 +447,203 @@ test('the ox-alpha lane rejects muse-model evidence and vice versa', () => {
   }
 });
 
+test('latched terminal evidence denies the exact hostile non-terminal regressions', () => {
+  const sequences = [
+    {
+      label: 'completed->running',
+      terminal: { kind: 'reconcile', receipt: { state: 'completed', stop_reason: 'end_turn' } },
+      hostile: { state: 'running' },
+    },
+    {
+      label: 'completed->absent',
+      terminal: { kind: 'reconcile', receipt: { state: 'completed', stop_reason: 'end_turn' } },
+      hostile: { state: 'absent' },
+    },
+    {
+      label: 'failed->running',
+      terminal: { kind: 'reconcile', receipt: { state: 'failed', stop_reason: 'error' } },
+      hostile: { state: 'running' },
+    },
+    {
+      label: 'cancelled->accepted',
+      terminal: { kind: 'reconcile', receipt: { state: 'cancelled', stop_reason: 'cancelled' } },
+      hostile: { state: 'accepted' },
+    },
+    {
+      label: 'completed->needs_attention',
+      terminal: { kind: 'reconcile', receipt: { state: 'completed', stop_reason: 'end_turn' } },
+      hostile: { state: 'needs_attention', question_ref: `q-${LEAK_MARKER}` },
+    },
+    {
+      label: 'cancel_confirmed->running',
+      terminal: { kind: 'cancel', receipt: { outcome: 'confirmed' } },
+      hostile: { state: 'running' },
+    },
+    {
+      label: 'already_terminal->running',
+      terminal: { kind: 'cancel', receipt: { outcome: 'already_terminal' } },
+      hostile: { state: 'running' },
+    },
+  ];
+  for (const sequence of sequences) {
+    const transport = sequence.terminal.kind === 'reconcile'
+      ? fakeDshTransport({ polls: [sequence.terminal.receipt, sequence.hostile] })
+      : fakeDshTransport({
+        cancelReceipts: [sequence.terminal.receipt],
+        polls: [sequence.hostile],
+      });
+    const fixture = dshEnvelope(MUSE_MODEL);
+    const driver = createFixtureDriver(MUSE_MODEL, transport);
+    const lane = dispatchLane(driver.driver, fixture);
+    if (sequence.terminal.kind === 'reconcile') {
+      const first = lane.reconcile();
+      assert.equal(first.disposition, 'terminal', sequence.label);
+      assert.notEqual(first.disposition, 'in_progress', sequence.label);
+      assert.notEqual(first.disposition, 'dispatch_uncertain', sequence.label);
+      assert.notEqual(first.disposition, 'unresolved_attention', sequence.label);
+    } else {
+      const first = lane.cancel();
+      const expected = sequence.terminal.receipt.outcome === 'confirmed'
+        ? 'cancel_confirmed' : 'already_terminal';
+      assert.equal(first.disposition, expected, sequence.label);
+    }
+    const eventsBefore = transport.counts().events;
+    expectCode(() => lane.reconcile({ include: ['live_progress'] }),
+      'terminal_regression_denied', sequence.label);
+    expectCode(() => lane.launchAgain(), 'replay_denied', sequence.label);
+    const oxManifest = JSON.parse(JSON.stringify(dshManifest(OX_MODEL)));
+    oxManifest.assignments[0].assignment_id = fixture.assignment_id;
+    const oxEnvelope = compileChildEnvelopeV1(oxManifest, fixture.assignment_id);
+    expectCode(() => driver.driver.preflight(requestFor({
+      ...fixture,
+      envelope_text: oxEnvelope.envelope_text,
+      child_envelope_digest: childEnvelopeDigestV1(oxEnvelope).digest,
+    }, 'preflight')), 'stale_identity_denied', sequence.label);
+    expectCode(() => lane.reconcile({
+      include: ['live_progress'],
+      intent: 'restart_reattach',
+      reply: { session_id: 's', response: 'answered' },
+    }), undefined, `${sequence.label} replacement prompt/answer is denied`);
+    assert.equal(transport.counts().spawn, 1, `${sequence.label} must not spawn again`);
+    assert.equal(transport.counts().events, eventsBefore,
+      `${sequence.label} must not read events or answer attention after the regression`);
+  }
+});
+
+test('post-terminal cancel is local already_terminal even if the port would throw', () => {
+  const sequences = [
+    {
+      label: 'completed then cancel',
+      kind: 'reconcile',
+      poll: { state: 'completed', stop_reason: 'end_turn' },
+    },
+    {
+      label: 'failed then cancel',
+      kind: 'reconcile',
+      poll: { state: 'failed', stop_reason: 'error' },
+    },
+    {
+      label: 'cancelled then cancel',
+      kind: 'reconcile',
+      poll: { state: 'cancelled', stop_reason: 'cancelled' },
+    },
+    {
+      label: 'cancel_confirmed then cancel',
+      kind: 'cancel',
+      cancelOutcome: 'confirmed',
+    },
+    {
+      label: 'provider already_terminal then cancel',
+      kind: 'cancel',
+      cancelOutcome: 'already_terminal',
+    },
+  ];
+  for (const sequence of sequences) {
+    let sealed = false;
+    const denySealed = (channel) => {
+      if (sealed) throw new Error(`${sequence.label} must not call ${channel}`);
+    };
+    const transport = fakeDshTransport({
+      identity: () => {
+        denySealed('configIdentity');
+        return readyIdentity();
+      },
+      spawnReceipts: [() => {
+        denySealed('spawn');
+        return { session_ref: 'sess-ok-0001' };
+      }],
+      polls: [(request) => {
+        denySealed('poll');
+        return {
+          session_ref: request.session_ref, ...request.correlation,
+          event_count: 1, cursor: 1, updated_at_ms: 10,
+          ...sequence.poll,
+        };
+      }],
+      eventPages: [(request) => {
+        denySealed('events');
+        return { records: [], next_cursor: request.cursor, truncated: false };
+      }],
+      cancelReceipts: [(request) => {
+        denySealed('cancel');
+        return {
+          session_ref: request.session_ref, ...request.correlation,
+          outcome: sequence.cancelOutcome ?? 'confirmed',
+        };
+      }],
+    });
+    const fixture = dshEnvelope(MUSE_MODEL);
+    const driver = createFixtureDriver(MUSE_MODEL, transport);
+    const lane = dispatchLane(driver.driver, fixture);
+    if (sequence.kind === 'reconcile') {
+      assert.equal(lane.reconcile().disposition, 'terminal', sequence.label);
+    } else {
+      const expected = sequence.cancelOutcome === 'confirmed'
+        ? 'cancel_confirmed' : 'already_terminal';
+      assert.equal(lane.cancel().disposition, expected, sequence.label);
+    }
+    const before = transport.counts();
+    sealed = true;
+    const later = lane.cancel();
+    assert.equal(later.disposition, 'already_terminal', sequence.label);
+    assert.equal(later.detail_code, 'already_terminal', sequence.label);
+    assert.deepEqual(transport.counts(), before,
+      `${sequence.label} must make zero configIdentity/cancel/poll/events/spawn calls`);
+    expectCode(() => lane.launchAgain(), 'replay_denied', sequence.label);
+  }
+});
+
+test('cancel_requested is not a terminal latch and a later cancel still hits the port', () => {
+  let sealed = false;
+  const outcomes = ['requested', 'confirmed'];
+  const transport = fakeDshTransport({
+    identity: () => {
+      if (sealed) throw new Error('cancel_requested must not skip identity');
+      return readyIdentity();
+    },
+    cancelReceipts: [(request, callIndex) => {
+      if (sealed) throw new Error('cancel_requested must not skip cancel');
+      return {
+        session_ref: request.session_ref, ...request.correlation,
+        outcome: outcomes[Math.min(callIndex - 1, outcomes.length - 1)],
+      };
+    }],
+  });
+  const driver = createFixtureDriver(MUSE_MODEL, transport);
+  const lane = dispatchLane(driver.driver, dshEnvelope(MUSE_MODEL));
+  assert.equal(lane.cancel().disposition, 'cancel_requested');
+  const afterRequested = transport.counts();
+  const second = lane.cancel();
+  assert.equal(second.disposition, 'cancel_confirmed');
+  assert.equal(transport.counts().cancel, afterRequested.cancel + 1);
+  assert.equal(transport.counts().configIdentity, afterRequested.configIdentity + 1);
+  sealed = true;
+  const beforeLocal = transport.counts();
+  const third = lane.cancel();
+  assert.equal(third.disposition, 'already_terminal');
+  assert.deepEqual(transport.counts(), beforeLocal);
+});
+
 test('results never carry provider-authored text even from deeply hostile transports', () => {
   const fixture = dshEnvelope(MUSE_MODEL);
   const hostileText = `${LEAK_MARKER} token sk-abc123defghijk password=hunter2 AKIAIOSFODNN7EXAMPLE`;

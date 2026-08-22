@@ -131,6 +131,19 @@ export const DSH_EVIDENCE_STATES = capturedFreeze([
 export const DSH_TERMINAL_EVIDENCE_STATES = capturedFreeze([
   'completed', 'failed', 'cancelled',
 ]);
+// Hostile non-terminal poll states after a terminal latch. Reconcile must
+// never map these back to in_progress, dispatch_uncertain, or
+// unresolved_attention once completed/failed/cancelled or
+// cancel_confirmed/already_terminal has been observed on the lane.
+// Later cancel after any of those latches is a local already_terminal
+// result and must not probe the injected port. cancel_requested stays
+// nonterminal so a later cancel may still be delivered.
+const DSH_POST_TERMINAL_REGRESSION_STATES = capturedFreeze([
+  'accepted', 'running', 'needs_attention', 'absent',
+]);
+const DSH_TERMINAL_CANCEL_OUTCOMES = capturedFreeze([
+  'confirmed', 'already_terminal',
+]);
 export const DSH_STOP_REASONS = capturedFreeze(['end_turn', 'cancelled', 'timeout', 'error']);
 export const DSH_EVENT_KINDS = capturedFreeze([
   'text_delta', 'thought_delta', 'tool_call', 'tool_call_update',
@@ -726,6 +739,50 @@ export function createDshApxDriverV1(options) {
     }
   }
 
+  function hasTerminalLatch(lane) {
+    return lane.terminal_latch !== null && lane.terminal_latch !== undefined;
+  }
+
+  function evidenceLatch(evidence) {
+    return freezeData({
+      kind: 'evidence',
+      state: evidence.state,
+      stop_reason: evidence.stop_reason,
+    });
+  }
+
+  function cancelLatch(outcome) {
+    return freezeData({ kind: 'cancel', outcome });
+  }
+
+  function denyTerminalRegression(operation) {
+    fail('terminal_regression_denied', `driver.${operation}.request`,
+      'Recorded ACPX evidence moved backwards from a latched terminal disposition; '
+      + 'terminal regressions fail closed.');
+  }
+
+  function latchedTerminalResult(operation, request, envelope, lane, includeCount) {
+    const terminal = baseResult(operation, request, envelope, 'terminal');
+    if (!includeCount) return terminal;
+    const latch = lane.terminal_latch;
+    const extra = latch.kind === 'evidence'
+      ? [
+        `state=${latch.state}`,
+        ...(latch.stop_reason ? [`stop_reason=${latch.stop_reason}`] : []),
+      ]
+      : [`outcome=${latch.outcome}`];
+    return withDetail(terminal, 'terminal_evidence', [...extra, ...progressFragments(lane)]);
+  }
+
+  function localAlreadyTerminalCancel(request, envelope, lane, timestamp) {
+    lanes.set(laneKey(envelope), advance(lane, {}, timestamp));
+    return withDetail(
+      baseResult('cancel', request, envelope, 'already_terminal'),
+      'already_terminal',
+      ['outcome=already_terminal'],
+    );
+  }
+
   function readIdentityOrBlocked(request, envelope, model) {
     try {
       return { identity: currentIdentity(model, 'preflight'), error: null };
@@ -779,6 +836,7 @@ export function createDshApxDriverV1(options) {
       observed_at_ms: Math.max(prior?.observed_at_ms ?? timestamp, timestamp),
       operation_count: (prior?.operation_count ?? 0) + 1,
       run_id: envelope.run_id,
+      terminal_latch: prior?.terminal_latch ?? null,
     }));
     return baseResult(operation, request, envelope, 'ready');
   }
@@ -851,7 +909,7 @@ export function createDshApxDriverV1(options) {
       }, timestamp));
       if (provablyPrespawn) {
         return withDetail(baseResult(operation, request, envelope, 'not_sent'),
-          'transport_prespawn_denied', [`code=${optOwn(error, 'code')}`]);
+          'transport_prespawn_denied', ['probe=spawn', `model=${model}`]);
       }
       // Exception or loss after spawn intent stays dispatch_uncertain forever:
       // never replayed, retried, or fallback-substituted.
@@ -896,12 +954,23 @@ export function createDshApxDriverV1(options) {
     beginOperation(lane, operation, timestamp);
     requireDispatch(lane, operation);
     const includeCount = Array.isArray(request.include) ? request.include.length : 0;
+
+    function commit(updatedLane, patch) {
+      const next = advance(updatedLane, patch, timestamp);
+      lanes.set(laneKey(envelope), next);
+      return next;
+    }
+
     if (lane.dispatch.session_ref === null) {
       // An intent-only lane carries no session handle: nothing can be
       // observed or correlated, so honesty stays at uncertainty and no
       // doomed transport call is made. The child is never replayed to
-      // recover a handle.
-      lanes.set(laneKey(envelope), advance(lane, {}, timestamp));
+      // recover a handle. A latched terminal disposition is retained
+      // instead of degrading back to uncertainty.
+      if (hasTerminalLatch(lane)) {
+        return latchedTerminalResult(operation, request, envelope, commit(lane, {}), includeCount);
+      }
+      commit(lane, {});
       const uncertain = baseResult(operation, request, envelope, 'dispatch_uncertain');
       return includeCount
         ? withDetail(uncertain, 'evidence_absent', progressFragments(lane, ['evidence=unavailable']))
@@ -910,7 +979,9 @@ export function createDshApxDriverV1(options) {
 
     // Exact identity must hold on every observation too: credential or config
     // DRIFT fails the observation closed with a typed error below, while a
-    // lost identity/evidence probe degrades honestly to uncertainty.
+    // lost identity/evidence probe degrades honestly to uncertainty unless a
+    // terminal latch already exists. After terminal evidence, uncertainty is
+    // denied; the latched terminal disposition is retained instead.
     let evidence;
     try {
       const identity = currentIdentity(model, operation);
@@ -921,19 +992,47 @@ export function createDshApxDriverV1(options) {
       })), lane);
     } catch (error) {
       if (isTypedContractError(error)) throw error;
+      if (hasTerminalLatch(lane)) {
+        return latchedTerminalResult(operation, request, envelope, commit(lane, {}), includeCount);
+      }
       // Loss or exception during observation degrades honestly to uncertainty.
       // It never invents a terminal state and never replays the child.
-      lanes.set(laneKey(envelope), advance(lane, {}, timestamp));
+      commit(lane, {});
       const uncertain = baseResult(operation, request, envelope, 'dispatch_uncertain');
       return includeCount
         ? withDetail(uncertain, 'evidence_absent', progressFragments(lane, ['evidence=unavailable']))
         : uncertain;
     }
 
+    // Hostile running/accepted/absent/needs_attention after a terminal latch
+    // fails closed with one typed regression. The lane is left untouched so
+    // no second spawn, provider/model substitution, or attention answer can
+    // follow from the denied observation.
+    if (hasTerminalLatch(lane) && capturedIncludes(DSH_POST_TERMINAL_REGRESSION_STATES, evidence.state)) {
+      denyTerminalRegression(operation);
+    }
+
     const updated = applyEventPage(lane, includeCount, operation);
-    lanes.set(laneKey(envelope), advance(updated, {}, timestamp));
     const progress = progressFragments(updated);
 
+    if (capturedIncludes(DSH_TERMINAL_EVIDENCE_STATES, evidence.state)) {
+      const latch = hasTerminalLatch(lane) ? lane.terminal_latch : evidenceLatch(evidence);
+      commit(updated, { terminal_latch: latch });
+      const terminal = baseResult(operation, request, envelope, 'terminal');
+      return includeCount
+        ? withDetail(terminal, 'terminal_evidence', [
+          `state=${evidence.state}`,
+          ...(evidence.stop_reason ? [`stop_reason=${evidence.stop_reason}`] : []),
+          ...progress,
+        ])
+        : terminal;
+    }
+
+    if (hasTerminalLatch(lane)) {
+      return latchedTerminalResult(operation, request, envelope, commit(updated, {}), includeCount);
+    }
+
+    commit(updated, {});
     if (evidence.state === 'absent') {
       const code = request.intent === 'restart_reattach'
         ? 'restart_evidence_absent'
@@ -949,16 +1048,6 @@ export function createDshApxDriverV1(options) {
         ? withDetail(attention, 'unresolved_attention', [...progress, 'same_session_reply=unsupported'])
         : attention;
     }
-    if (capturedIncludes(DSH_TERMINAL_EVIDENCE_STATES, evidence.state)) {
-      const terminal = baseResult(operation, request, envelope, 'terminal');
-      return includeCount
-        ? withDetail(terminal, 'terminal_evidence', [
-          `state=${evidence.state}`,
-          ...(evidence.stop_reason ? [`stop_reason=${evidence.stop_reason}`] : []),
-          ...progress,
-        ])
-        : terminal;
-    }
     const running = baseResult(operation, request, envelope, 'in_progress');
     return includeCount ? withDetail(running, 'live_progress', progress) : running;
   }
@@ -973,6 +1062,15 @@ export function createDshApxDriverV1(options) {
     const timestamp = nowMs(operation);
     beginOperation(lane, operation, timestamp);
     requireDispatch(lane, operation);
+    // After completed/failed/cancelled evidence or a confirmed/
+    // already_terminal cancel, every later cancel is a local
+    // already_terminal result. The injected port is not probed again:
+    // no configIdentity, cancel, poll, events, spawn, reply, or reattach.
+    // cancel_requested is not a terminal latch, so a later cancel may
+    // still be delivered as a control signal.
+    if (hasTerminalLatch(lane)) {
+      return localAlreadyTerminalCancel(request, envelope, lane, timestamp);
+    }
     if (lane.dispatch.session_ref === null) {
       fail('dsh_cancel_unresolved', `driver.${operation}.request`,
         'This DSH lane holds only an unconfirmed spawn intent and no session handle; '
@@ -998,7 +1096,11 @@ export function createDshApxDriverV1(options) {
         'The DSH cancellation request could not be resolved; the lane stays untouched '
         + 'and cancellation may be requested again without any replay.');
     }
-    lanes.set(laneKey(envelope), advance(lane, {}, timestamp));
+    const latchWorthy = capturedIncludes(DSH_TERMINAL_CANCEL_OUTCOMES, receipt.outcome);
+    const terminalLatch = latchWorthy
+      ? (hasTerminalLatch(lane) ? lane.terminal_latch : cancelLatch(receipt.outcome))
+      : lane.terminal_latch ?? null;
+    lanes.set(laneKey(envelope), advance(lane, { terminal_latch: terminalLatch }, timestamp));
     const disposition = receipt.outcome === 'confirmed'
       ? 'cancel_confirmed'
       : receipt.outcome === 'requested' ? 'cancel_requested' : 'already_terminal';
