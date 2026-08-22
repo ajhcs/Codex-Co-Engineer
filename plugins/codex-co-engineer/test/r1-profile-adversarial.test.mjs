@@ -8,7 +8,10 @@ import {
   MAX_PROFILES_PER_CATALOG,
   PROFILE_SCHEMA,
   canonicalProfileJson,
+  findProfile,
   loadProfiles,
+  profileProvenanceDigest,
+  profileRoots,
   validateProfileDefinition,
 } from '../mcp/v3/profile.mjs';
 
@@ -342,4 +345,409 @@ test('canonical profile encoding rejects unsupported graphs and values', () => {
     () => validateProfileDefinition(secretName, base()),
     (error) => error.code === 'invalid_profile_name' && !error.message.includes('ssssssss'),
   );
+});
+
+// ---------------------------------------------------------------------------
+// P04 remediation: the direct-JavaScript Proxy boundary. Every exported
+// surface must consume static data only. Live Proxies are rejected before any
+// handler trap fires, revoked Proxies never reach Array.isArray or other
+// target-inspecting builtins, and every failure carries a typed code.
+
+const TRAP_NAMES = Object.freeze([
+  'apply', 'construct', 'defineProperty', 'deleteProperty', 'get',
+  'getOwnPropertyDescriptor', 'getPrototypeOf', 'has', 'isExtensible',
+  'ownKeys', 'preventExtensions', 'set', 'setPrototypeOf',
+]);
+
+// Module-global so the closing test can assert the exact total.
+const observedTraps = Object.fromEntries(TRAP_NAMES.map((trap) => [trap, 0]));
+let proxyCallsObserved = 0;
+
+function countingHandler() {
+  const handler = {};
+  for (const trap of TRAP_NAMES) {
+    handler[trap] = (...args) => {
+      observedTraps[trap] += 1;
+      proxyCallsObserved += 1;
+      return Reflect[trap](...args);
+    };
+  }
+  return handler;
+}
+
+const transparentProxyOf = (target) => new Proxy(target, countingHandler());
+
+function rejectTyped(run, label) {
+  try {
+    run();
+  } catch (error) {
+    assert.equal(error.code, 'profile_proxy_rejected', `${label}: expected the typed proxy code`);
+    assert.ok(!(error instanceof TypeError), `${label}: must never surface a native TypeError`);
+    assert.doesNotMatch(error.message, /trap-boom/u, `${label}: trap errors must not escape`);
+    assert.match(error.message, /Proxy/u, `${label}: the message must name the rejected view`);
+    return;
+  }
+  assert.fail(`${label}: expected a typed rejection`);
+}
+
+test('live Proxies are rejected before a single trap fires on every direct-JS surface', async () => {
+  const proxyDefinition = transparentProxyOf(withSchema({ role: 'review' }));
+
+  const syncSurfaces = [
+    ['validateProfileDefinition', () => validateProfileDefinition('transparent', proxyDefinition)],
+    ['canonicalProfileJson', () => canonicalProfileJson(proxyDefinition)],
+    ['profileProvenanceDigest', () => profileProvenanceDigest({ name: 'transparent', definition: proxyDefinition })],
+    ['findProfile(loaded)', () => findProfile(transparentProxyOf({ profiles: [] }), 'anything')],
+    ['findProfile(list)', () => findProfile({ profiles: transparentProxyOf([]) }, 'anything')],
+    ['findProfile(record)', () => findProfile({ profiles: [transparentProxyOf(withSchema({}))] }, 'x')],
+    ['profileRoots(options)', () => profileRoots(transparentProxyOf({ repositoryPath: '/repo' }))],
+    ['profileRoots(env)', () => profileRoots({ repositoryPath: '/repo', env: transparentProxyOf(process.env) })],
+    ['nested proxy array', () => validateProfileDefinition('nested-array', withSchema({
+      policy: { pre_dispatch_provider_preference: transparentProxyOf(['dsh']) },
+    }))],
+    ['nested proxy policy object', () => validateProfileDefinition('nested-object', withSchema({
+      policy: transparentProxyOf({ pre_dispatch_provider_preference: ['dsh'] }),
+    }))],
+    ['deeply nested proxy element', () => validateProfileDefinition('deep-nested', withSchema({
+      policy: { pre_dispatch_provider_preference: [transparentProxyOf({})] },
+    }))],
+  ];
+  for (const [label, run] of syncSurfaces) rejectTyped(run, label);
+
+  await assert.rejects(
+    () => loadProfiles(transparentProxyOf({ repositoryPath: '/repo', ownerConfigDir: '/owner-config' })),
+    expectCode('profile_proxy_rejected', 'loadProfiles(options)'),
+  );
+
+  // Transparent forwarding still exists for ordinary consumers elsewhere:
+  // the boundary scopes profile surfaces, not a global Proxy ban. This probe
+  // deliberately uses an uncounted proxy so the zero-trap ledger above stays exact.
+  assert.equal(new Proxy({ profiles: [] }, {}).profiles.length, 0);
+});
+
+test('stateful descriptor-forging views cannot hide credentials, argv, or merge authority', () => {
+  // If any trap were consulted, this view alternates between a clean facade
+  // and a credential-bearing reality, and its descriptors disagree with what
+  // later property reads return - exactly the behavior that hid content from
+  // validation while serving it to dispatch.
+  let phase = 0;
+  const forged = new Proxy({}, {
+    ownKeys() {
+      phase += 1;
+      return phase % 2 === 1
+        ? ['schema', 'provider']
+        : ['schema', 'provider', 'api_key', 'argv', 'merge_authority'];
+    },
+    getOwnPropertyDescriptor(_target, key) {
+      if (phase % 2 === 1 && (key === 'schema' || key === 'provider')) {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: key === 'schema' ? PROFILE_SCHEMA : 'dsh',
+        };
+      }
+      return { configurable: true, enumerable: true, writable: true, value: 'sk-hidden-secret' };
+    },
+    get(_target, key) {
+      if (key === 'schema') return PROFILE_SCHEMA;
+      if (key === 'provider') return 'dsh';
+      return 'sk-hidden-secret';
+    },
+    getPrototypeOf() { return Object.prototype; },
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    rejectTyped(() => validateProfileDefinition('forging', forged), `forging validation ${attempt}`);
+    rejectTyped(() => canonicalProfileJson(forged), `forging canonical ${attempt}`);
+    rejectTyped(() => profileProvenanceDigest({ name: 'forging', definition: forged }),
+      `forging digest ${attempt}`);
+  }
+  // Every attempt saw the same typed rejection because no observation ever
+  // reached the view - which also means phase stayed untouched by the module.
+});
+
+test('throwing-trap and revoked Proxies fail typed, and never reach native TypeErrors', () => {
+  const hostile = new Proxy(withSchema({ role: 'review' }), {
+    getPrototypeOf() { throw new Error('trap-boom'); },
+    ownKeys() { throw new Error('trap-boom'); },
+    getOwnPropertyDescriptor() { throw new Error('trap-boom'); },
+    get() { throw new Error('trap-boom'); },
+    has() { throw new Error('trap-boom'); },
+    isExtensible() { throw new Error('trap-boom'); },
+  });
+  rejectTyped(() => validateProfileDefinition('hostile', hostile), 'hostile definition');
+  rejectTyped(() => canonicalProfileJson(hostile), 'hostile canonical');
+  rejectTyped(() => profileProvenanceDigest({ name: 'hostile', definition: hostile }), 'hostile digest');
+
+  const revokedObject = Proxy.revocable(withSchema({ role: 'review' }), {});
+  revokedObject.revoke();
+  const revokedArray = Proxy.revocable(['dsh'], {});
+  revokedArray.revoke();
+
+  rejectTyped(() => validateProfileDefinition('revoked', revokedObject.proxy), 'revoked definition');
+  rejectTyped(() => canonicalProfileJson(revokedObject.proxy), 'revoked canonical root');
+  rejectTyped(() => profileProvenanceDigest({ name: 'revoked', definition: revokedObject.proxy }),
+    'revoked digest input');
+  rejectTyped(() => validateProfileDefinition('revoked-preference', withSchema({
+    policy: { pre_dispatch_provider_preference: revokedArray.proxy },
+  })), 'revoked nested array');
+  rejectTyped(() => findProfile(Object.freeze({ profiles: revokedArray.proxy }), 'any'),
+    'revoked profile list');
+  // Matching lookup records are revalidated and detached; a caller cannot
+  // smuggle a revoked or live nested definition through a fabricated
+  // loadProfiles-shaped record and trigger it downstream.
+  const fabricatedRecord = Object.freeze({
+    name: 'any',
+    scope: 'project',
+    source: '/repo/.codex/co-engineer-profiles.json',
+    definition: revokedObject.proxy,
+    digest: `sha256:${'0'.repeat(64)}`,
+  });
+  rejectTyped(() => findProfile({ profiles: [fabricatedRecord] }, 'any'),
+    'revoked matching record definition');
+
+  let nestedDefinitionTraps = 0;
+  const trappedDefinition = new Proxy(withSchema({}), {
+    getPrototypeOf() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+    ownKeys() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+    getOwnPropertyDescriptor() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+    get() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+  });
+  rejectTyped(() => findProfile({ profiles: [{
+    name: 'any',
+    scope: 'project',
+    source: '/repo/.codex/co-engineer-profiles.json',
+    definition: trappedDefinition,
+    digest: `sha256:${'0'.repeat(64)}`,
+  }] }, 'any'), 'live matching record definition');
+  assert.equal(nestedDefinitionTraps, 0,
+    'nested definition rejection must occur before a single handler trap fires');
+  rejectTyped(() => profileRoots((() => {
+    const options = Proxy.revocable({ repositoryPath: '/repo' }, {});
+    options.revoke();
+    return options.proxy;
+  })()), 'revoked roots arguments');
+
+  // The hazard this ordering defends against: these operations really do
+  // throw natively on revoked targets.
+  assert.throws(() => Array.isArray(revokedArray.proxy), TypeError);
+  assert.throws(() => Object.getOwnPropertyDescriptors(revokedObject.proxy), TypeError);
+});
+
+test('hidden non-enumerable, accessor, and symbol-keyed content cannot reach a digest', () => {
+  const hiddenProperty = withSchema({});
+  Object.defineProperty(hiddenProperty, 'api_key', { enumerable: false, value: 'sk-hidden' });
+  assert.throws(
+    () => validateProfileDefinition('hidden', hiddenProperty),
+    expectCode('invalid_profile_definition', 'non-enumerable key'),
+  );
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'hidden', definition: hiddenProperty }),
+    expectCode('invalid_profile_definition', 'non-enumerable key digest'),
+  );
+
+  let accessorReads = 0;
+  const accessorView = withSchema({});
+  Object.defineProperty(accessorView, 'role', {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      return 'review';
+    },
+  });
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'accessor', definition: accessorView }),
+    expectCode('invalid_profile_definition', 'accessor key'),
+  );
+  assert.equal(accessorReads, 0, 'digest gating must inspect descriptors without invoking getters');
+
+  const symbolKeyed = withSchema({});
+  symbolKeyed[Symbol('merge_authority')] = true;
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'symbolic', definition: symbolKeyed }),
+    expectCode('invalid_profile_definition', 'symbol key'),
+  );
+
+  // Arbitrary content is never digestible: full ProfileV1 validation gates
+  // the provenance identity.
+  assert.throws(
+    () => profileProvenanceDigest({ name: 'laundered', definition: withSchema({ api_key: 'sk-x' }) }),
+    expectCode('profile_credential_key_rejected', 'credential laundering'),
+  );
+  assert.throws(
+    () => profileProvenanceDigest({
+      name: 'laundered',
+      definition: withSchema({ unknown_field: 1 }),
+    }),
+    expectCode('unknown_profile_field', 'unknown-field laundering'),
+  );
+
+  // Payload bags themselves are snapshotted too: an accessor payload is
+  // rejected instead of dereferenced.
+  let payloadReads = 0;
+  const accessorPayload = {};
+  Object.defineProperty(accessorPayload, 'name', {
+    enumerable: true,
+    get() {
+      payloadReads += 1;
+      return 'stable';
+    },
+  });
+  Object.defineProperty(accessorPayload, 'definition', { enumerable: true, value: withSchema({}) });
+  assert.throws(
+    () => profileProvenanceDigest(accessorPayload),
+    expectCode('invalid_profile_provenance_payload', 'accessor payload'),
+  );
+  assert.equal(payloadReads, 0);
+});
+
+test('digests stay stable across static views of identical validated data', () => {
+  const definition = withSchema({
+    role: 'implement',
+    expected_duration_ms: 1_200_000,
+    policy: { pre_dispatch_provider_preference: ['grok', 'dsh'] },
+  });
+  const baseline = profileProvenanceDigest({ name: 'stable', definition });
+  assert.match(baseline, /^sha256:[0-9a-f]{64}$/u);
+  assert.equal(baseline,
+    profileProvenanceDigest({ name: 'stable', definition: structuredClone(definition) }));
+  assert.equal(baseline,
+    profileProvenanceDigest({ name: 'stable', definition: JSON.parse(JSON.stringify(definition)) }));
+  assert.equal(baseline,
+    profileProvenanceDigest({ name: 'stable', definition: deepFrozenClone(definition) }));
+  // Key order stays irrelevant.
+  assert.equal(baseline, profileProvenanceDigest({
+    name: 'stable',
+    definition: {
+      policy: { pre_dispatch_provider_preference: ['grok', 'dsh'] },
+      expected_duration_ms: 1_200_000,
+      role: 'implement',
+      provider: 'dsh',
+      schema: PROFILE_SCHEMA,
+    },
+  }));
+
+  function deepFrozenClone(value) {
+    if (Array.isArray(value)) return Object.freeze(value.map(deepFrozenClone));
+    if (value !== null && typeof value === 'object') {
+      return Object.freeze(Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, deepFrozenClone(entry)]),
+      ));
+    }
+    return value;
+  }
+});
+
+test('findProfile consumes load results as one bounded static snapshot', async () => {
+  const workspace = await rejectingWorkspace();
+  try {
+    await workspace.write({ 'find-me': withSchema({ role: 'review' }) });
+    const loaded = await loadProfiles(workspace.options);
+    const record = findProfile(loaded, 'find-me');
+    assert.equal(record.scope, 'project');
+    assert.equal(findProfile(loaded, 'missing'), undefined);
+
+    // Accessor results fail typed without reading through getters.
+    let getterReads = 0;
+    const accessorLoaded = {};
+    Object.defineProperty(accessorLoaded, 'profiles', {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return [];
+      },
+    });
+    assert.throws(
+      () => findProfile(accessorLoaded, 'find-me'),
+      expectCode('invalid_profile_load_result', 'accessor profiles'),
+    );
+    assert.equal(getterReads, 0);
+
+    // Malformed records fail closed instead of matching partially.
+    for (const badList of [[{ provider: 'dsh' }], [{ name: 7 }], [null], new Array(8)]) {
+      assert.throws(
+        () => findProfile({ profiles: badList }, 'find-me'),
+        expectCode('invalid_profile_load_result', 'malformed record'),
+      );
+    }
+
+    // The merged two-scope catalog bound is enforced as a typed failure.
+    const overSized = Array.from({ length: MAX_PROFILES_PER_CATALOG * 2 + 1 },
+      (_unused, index) => ({ name: `filler-${index}` }));
+    assert.throws(
+      () => findProfile({ profiles: overSized }, 'filler-0'),
+      expectCode('profile_structure_too_complex', 'over-large profile list'),
+    );
+    // At the bound, lookup still works on static records.
+    const atBound = Array.from({ length: MAX_PROFILES_PER_CATALOG * 2 },
+      (_unused, index) => ({ name: `filler-${index}` }));
+    const terminalDefinition = withSchema({ role: 'review' });
+    atBound[127] = {
+      name: 'filler-127',
+      scope: 'project',
+      source: '/repo/.codex/co-engineer-profiles.json',
+      definition: terminalDefinition,
+      digest: profileProvenanceDigest({ name: 'filler-127', definition: terminalDefinition }),
+    };
+    assert.equal(findProfile({ profiles: atBound }, 'missing'), undefined);
+    assert.equal(findProfile({ profiles: atBound }, 'filler-127').name, 'filler-127');
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test('profileRoots rejects hostile argument views while keeping documented fallback order', async () => {
+  const workspace = await rejectingWorkspace();
+  try {
+    // Accessor-bearing arguments fail typed without dereferencing.
+    let optionReads = 0;
+    const accessorOptions = {};
+    Object.defineProperty(accessorOptions, 'repositoryPath', {
+      enumerable: true,
+      get() {
+        optionReads += 1;
+        return '/repo';
+      },
+    });
+    assert.throws(
+      () => profileRoots(accessorOptions),
+      expectCode('invalid_profile_options', 'accessor options'),
+    );
+    assert.equal(optionReads, 0);
+
+    // Non-object argument bags stay typed failures, never native TypeErrors.
+    assert.throws(() => profileRoots(null), expectCode('invalid_profile_options', 'null options'));
+    assert.throws(() => profileRoots(7), expectCode('invalid_profile_options', 'numeric options'));
+    assert.throws(
+      () => profileRoots({ repositoryPath: '/repo', env: null }),
+      expectCode('invalid_profile_environment', 'null environment'),
+    );
+
+    let envReads = 0;
+    const countingEnv = {
+      get XDG_CONFIG_HOME() {
+        envReads += 1;
+        return '/xdg';
+      },
+    };
+    assert.throws(
+      () => profileRoots({ repositoryPath: '/repo', env: countingEnv }),
+      expectCode('invalid_profile_environment', 'accessor environment'),
+    );
+    assert.equal(envReads, 0);
+
+    const loaded = await loadProfiles(workspace.options);
+    assert.deepEqual(loaded.profiles.map(({ name }) => name), [],
+      'ordinary file loading behavior is unchanged by the boundary');
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test('the whole Proxy battery observes exactly zero trap calls', () => {
+  for (const trap of TRAP_NAMES) {
+    assert.equal(observedTraps[trap], 0, `${trap} must never be dispatched`);
+  }
+  assert.equal(proxyCallsObserved, 0);
 });
