@@ -136,6 +136,77 @@ test('a validated buffer source publishes raw and sanitized and returns frozen p
   });
 });
 
+test('intrinsic Buffer and Uint8Array views keep the same digest; own surface overrides are denied', async () => {
+  await withStore(async (store, root) => {
+    const sample = SAMPLES.plain;
+    const viaBuffer = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(sample.raw, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/buffer.txt`,
+      }),
+      source: sample.raw,
+    });
+    const uint8 = Uint8Array.from(sample.raw);
+    const viaUint8 = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(uint8, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/uint8.txt`,
+      }),
+      source: uint8,
+    });
+    assert.equal(viaBuffer.source_digest, digestOf(sample.raw));
+    assert.equal(viaUint8.source_digest, viaBuffer.source_digest);
+    assert.equal(viaUint8.sanitized_digest, viaBuffer.sanitized_digest);
+    assertProvenanceShape(viaBuffer, sample);
+    assertProvenanceShape(viaUint8, sample);
+
+    let getterRuns = 0;
+    const dressed = Buffer.from(sample.raw);
+    Object.defineProperty(dressed, 'byteLength', {
+      configurable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error('attacker getter must never run');
+      },
+    });
+    const dressedError = await errorOfAsync(
+      () => sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(sample.raw, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/dressed-source.txt`,
+        }),
+        source: dressed,
+      }),
+      'artifact_stream_invalid_source',
+      'source',
+    );
+    assert.equal(getterRuns, 0);
+    assert.equal(dressedError.message.includes('attacker getter'), false);
+    assert.equal(dressedError.message.includes(root), false);
+
+    const attacker = Buffer.from('ATTACKER_SUBSTITUTED_BYTES\n');
+    const overridden = Uint8Array.from(sample.raw);
+    Object.defineProperty(overridden, 'subarray', {
+      configurable: true,
+      writable: true,
+      value() { return attacker; },
+    });
+    async function* dressedChunk() { yield overridden; }
+    const chunkError = await errorOfAsync(
+      () => sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(sample.raw, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/dressed-chunk.txt`,
+        }),
+        source: dressedChunk(),
+      }),
+      'artifact_stream_invalid_chunk',
+      'source',
+    );
+    assert.equal(chunkError.message.includes('ATTACKER_SUBSTITUTED_BYTES'), false);
+    const report = await store.audit();
+    assert.equal(report.artifacts, 4);
+    assert.equal(report.namespaces.raw.artifacts, 2);
+    assert.equal(report.namespaces.sanitized.artifacts, 2);
+  });
+});
+
 test('buffer and bounded async stream sources produce identical sanitized digests', async () => {
   await withStore(async (store) => {
     const sample = SAMPLES.plain;

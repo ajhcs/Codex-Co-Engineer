@@ -222,6 +222,141 @@ test('oversized, endless, huge, short, and over-declared streams fail without pu
   });
 });
 
+const INTRINSIC_VIEW_SURFACE_KEYS = ['buffer', 'byteOffset', 'byteLength', 'subarray'];
+
+function copyView(kind, bytes) {
+  return kind === 'Buffer' ? Buffer.from(bytes) : Uint8Array.from(bytes);
+}
+
+function dressAccessor(view, key, trap) {
+  Object.defineProperty(view, key, {
+    configurable: true,
+    enumerable: false,
+    get() {
+      trap.runs += 1;
+      throw new Error('attacker getter must never run');
+    },
+    set() {
+      trap.runs += 1;
+      throw new Error('attacker setter must never run');
+    },
+  });
+  return view;
+}
+
+function dressData(view, key) {
+  const attacker = Buffer.from('ATTACKER_SUBSTITUTED_BYTES\n');
+  let value;
+  if (key === 'buffer') value = attacker.buffer;
+  else if (key === 'byteOffset') value = 1;
+  else if (key === 'byteLength') value = 1;
+  else value = () => attacker;
+  Object.defineProperty(view, key, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value,
+  });
+  return view;
+}
+
+async function* streamOf(view) {
+  yield view;
+}
+
+test('own accessors and data overrides on intrinsic byte views fail closed without traps or substitution', async () => {
+  await withStore(async (store, root) => {
+    const sample = SAMPLES.plain;
+    const viaBuffer = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(sample.raw, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/clean-buffer.txt`,
+      }),
+      source: sample.raw,
+    });
+    const uint8 = Uint8Array.from(sample.raw);
+    const viaUint8 = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(uint8, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/clean-uint8.txt`,
+      }),
+      source: uint8,
+    });
+    assert.equal(viaBuffer.source_digest, digestOf(sample.raw));
+    assert.equal(viaUint8.source_digest, viaBuffer.source_digest);
+    assert.equal(viaUint8.sanitized_digest, viaBuffer.sanitized_digest);
+    assert.equal(viaBuffer.sanitized_digest, digestOf(sample.sanitized));
+
+    const viaUint8Stream = await sanitizeAndPublishArtifactV1(store, {
+      artifact_ref: rawRefFor(uint8, {
+        relative_path: `runs/${RUN_ID}/${CHILD_A}/clean-uint8-stream.txt`,
+      }),
+      source: streamOf(Uint8Array.from(sample.raw)),
+    });
+    assert.equal(viaUint8Stream.source_digest, viaBuffer.source_digest);
+    assert.equal(viaUint8Stream.sanitized_digest, viaBuffer.sanitized_digest);
+
+    let caseIndex = 0;
+    for (const kind of ['Buffer', 'Uint8Array']) {
+      for (const key of INTRINSIC_VIEW_SURFACE_KEYS) {
+        for (const dress of ['accessor', 'data']) {
+          for (const mode of ['source', 'chunk']) {
+            caseIndex += 1;
+            const trap = { runs: 0 };
+            const view = copyView(kind, sample.raw);
+            if (dress === 'accessor') dressAccessor(view, key, trap);
+            else dressData(view, key);
+            const expectedCode = mode === 'chunk'
+              ? 'artifact_stream_invalid_chunk'
+              : 'artifact_stream_invalid_source';
+            const source = mode === 'chunk' ? streamOf(view) : view;
+            const error = await expectCode(
+              () => sanitizeAndPublishArtifactV1(store, {
+                artifact_ref: rawRefFor(sample.raw, {
+                  relative_path: `runs/${RUN_ID}/${CHILD_A}/override-${caseIndex}.txt`,
+                }),
+                source,
+              }),
+              expectedCode,
+              'source',
+            );
+            assert.equal(trap.runs, 0, `${kind} ${key} ${dress} ${mode} executed a getter`);
+            assertContentFree(error, root, sample.raw);
+            assert.equal(error.message.includes('attacker getter'), false);
+            assert.equal(error.message.includes('ATTACKER_SUBSTITUTED_BYTES'), false);
+            assert.equal(error instanceof RunContractV1Error, true);
+            assert.equal(error.code, expectedCode);
+          }
+        }
+      }
+    }
+
+    const substituting = Buffer.from(sample.raw);
+    let substituteRuns = 0;
+    Object.defineProperty(substituting, 'byteLength', {
+      configurable: true,
+      get() {
+        substituteRuns += 1;
+        return 0;
+      },
+    });
+    await expectCode(
+      () => sanitizeAndPublishArtifactV1(store, {
+        artifact_ref: rawRefFor(sample.raw, {
+          relative_path: `runs/${RUN_ID}/${CHILD_A}/substituting-byteLength.txt`,
+        }),
+        source: substituting,
+      }),
+      'artifact_stream_invalid_source',
+      'source',
+    );
+    assert.equal(substituteRuns, 0);
+
+    const report = await store.audit();
+    assert.equal(report.artifacts, 6);
+    assert.equal(report.namespaces.raw.artifacts, 3);
+    assert.equal(report.namespaces.sanitized.artifacts, 3);
+  });
+});
+
 test('proxy, revoked proxy, subclass, shared buffer, accessor, and arbitrary streams fail closed', async () => {
   await withStore(async (store, root) => {
     const sample = SAMPLES.credentialFormat;

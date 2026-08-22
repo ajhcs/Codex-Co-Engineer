@@ -12,10 +12,13 @@
 // stored digest. The live caller-bound stream is the only source of bytes.
 //
 // Contract:
-//   - Source hardening matches P08: proxies (live or revoked), subclasses,
+//   - Source hardening matches P08 for proxies (live or revoked), subclasses,
 //     SharedArrayBuffer-backed views, accessor-dressed iterables, strings,
-//     and arbitrary class instances (including Node streams) are denied
-//     before a byte is read. Every yielded chunk is re-proved intrinsic.
+//     and arbitrary class instances (including Node streams). In addition,
+//     own accessors and data overrides on the buffer/byteOffset/byteLength/
+//     subarray surface of an otherwise intrinsic view are denied from
+//     captured descriptors before any of those properties are read or
+//     called. Every yielded chunk is re-proved intrinsic.
 //   - Only identity-encoded text media types are sanitized
 //     (text/plain, text/markdown, application/json, application/x-ndjson).
 //     application/octet-stream and base64 are refused.
@@ -147,6 +150,12 @@ const ASYNC_GENERATOR_PROTOTYPE = OBJECT_GET_PROTOTYPE_OF(
 const SYMBOL_ASYNC_ITERATOR = Symbol.asyncIterator;
 
 const OPTION_KEYS = capturedFreeze(['artifact_ref', 'source', 'source_truncated']);
+const INTRINSIC_VIEW_SURFACE_KEYS = capturedFreeze([
+  'buffer',
+  'byteOffset',
+  'byteLength',
+  'subarray',
+]);
 
 // Bounded built-in policy. Every value-consuming pattern is length-capped so
 // the finite overlap is sufficient to catch a split token and no caller
@@ -319,7 +328,35 @@ function redactRegion(text) {
   return { text: output, counts };
 }
 
-// ---- Binary source hardening (same discipline as P08, local copy). ---------
+// ---- Binary source hardening (P08 local copy plus own-surface checks). -----
+
+// Own accessors or data properties on these keys shadow the intrinsic
+// TypedArray/Buffer surface. Inspect captured descriptors only: a getter
+// must not run, and an overridden buffer/length/subarray must not be used.
+function hasOwnIntrinsicViewSurfaceOverride(value) {
+  try {
+    for (let index = 0; index < INTRINSIC_VIEW_SURFACE_KEYS.length; index += 1) {
+      const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+        value,
+        INTRINSIC_VIEW_SURFACE_KEYS[index],
+      );
+      if (descriptor !== undefined) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function denyNonIntrinsicView(code) {
+  if (code === 'artifact_stream_invalid_chunk') {
+    failSanitizer('artifact_stream_invalid_chunk', 'source',
+      'Every stream chunk must be an intrinsic Buffer/Uint8Array view.');
+  }
+  failSanitizer('artifact_stream_invalid_source', 'source',
+    'The artifact source must be an intrinsic Buffer/Uint8Array view or a bounded '
+    + 'async iterable of such views.');
+}
 
 function isIntrinsicBinaryView(value) {
   if (value === null || typeof value !== 'object') return false;
@@ -327,6 +364,7 @@ function isIntrinsicBinaryView(value) {
   const proto = OBJECT_GET_PROTOTYPE_OF(value);
   if (proto !== UINT8ARRAY_PROTOTYPE && proto !== BUFFER_PROTOTYPE) return false;
   if (!ARRAY_BUFFER_IS_VIEW(value)) return false;
+  if (hasOwnIntrinsicViewSurfaceOverride(value)) return false;
   const backing = value.buffer;
   if (!IS_ARRAY_BUFFER(backing) || IS_SHARED_ARRAY_BUFFER(backing)) return false;
   return true;
@@ -355,9 +393,7 @@ function classifySource(source) {
     }
     if (isAcceptableAsyncIterable(source)) return { kind: 'stream', value: source };
   }
-  failSanitizer('artifact_stream_invalid_source', 'source',
-    'The artifact source must be an intrinsic Buffer/Uint8Array view or a bounded '
-    + 'async iterable of such views.');
+  denyNonIntrinsicView('artifact_stream_invalid_source');
 }
 
 function createSession(declaredLength) {
@@ -417,7 +453,8 @@ function feedDecoded(session, decoded) {
   commitPending(session, false);
 }
 
-function feedView(session, view) {
+function feedView(session, view, denialCode = 'artifact_stream_invalid_source') {
+  if (hasOwnIntrinsicViewSurfaceOverride(view)) denyNonIntrinsicView(denialCode);
   const size = view.byteLength;
   if (size > MAX_RAW_ARTIFACT_BYTE_LENGTH - session.received) {
     failSanitizer('artifact_stream_over_cap', 'source',
@@ -467,10 +504,9 @@ async function* inspectAndForward(iterable, session) {
   try {
     for await (const chunk of iterable) {
       if (!isIntrinsicBinaryView(chunk)) {
-        failSanitizer('artifact_stream_invalid_chunk', 'source',
-          'Every stream chunk must be an intrinsic Buffer/Uint8Array view.');
+        denyNonIntrinsicView('artifact_stream_invalid_chunk');
       }
-      feedView(session, chunk);
+      feedView(session, chunk, 'artifact_stream_invalid_chunk');
       yield chunk;
     }
     finishSession(session);
