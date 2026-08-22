@@ -7,6 +7,10 @@
 // edits no existing runtime surface. This file validates the run ENVELOPE:
 //   - exact schema identity and git-ref-safe run IDs;
 //   - one immutable repository path + 40-hex lowercase base SHA per run;
+//   - an optional root profile NAME (exact assignment profile grammar) that
+//     P05 may later apply only to lanes whose execution was omitted, plus
+//     truly omittable assignment.execution classified as
+//     selection_resolution_required alongside named-profile lanes;
 //   - 1..8 independent assignments (no dependency edges of any shape);
 //   - strict unknown-key rejection at every object depth, with precise
 //     denial codes for dependency, executable-content, credential,
@@ -99,7 +103,18 @@ export const GLOB_SEGMENT_PATTERN = /^\*\*$|^[A-Za-z0-9._*?\[\]-]{1,128}$/u;
 // RunPolicyV1, where they are required as exact safe literals.
 export const ROOT_ALLOWED_KEYS = Object.freeze([
   'schema', 'run_id', 'repository', 'objective', 'assignments', 'policy', 'return_contract',
+  'profile',
 ]);
+// P05 reachability prerequisite: a run may bind ONE root profile name. It is
+// data-only, validated with the exact assignment execution.profile grammar,
+// and later fills ONLY lanes whose execution was omitted. P02 validates and
+// binds it; it resolves nothing, imports no profile catalog, and makes no
+// other field optional.
+export const ROOT_OPTIONAL_KEYS = Object.freeze(['profile']);
+export const ROOT_REQUIRED_KEYS = Object.freeze(
+  ROOT_ALLOWED_KEYS.filter((key) => !ROOT_OPTIONAL_KEYS.includes(key)),
+);
+export const BOUND_ROOT_PROFILE_KEY = 'profile';
 export const REPOSITORY_ALLOWED_KEYS = Object.freeze(['path', 'base_sha']);
 export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze([
   'mode', 'include_artifact_refs', 'allow_diagnostic_partial_candidate',
@@ -466,6 +481,20 @@ function assertPattern(value, pattern, code, path, label) {
   }
 }
 
+// The exact bounded profile-name grammar already owned by assignment
+// execution.profile validation, shared with the optional root profile
+// binding. Data-only by construction: a name, never an inline object, and
+// never a P04 catalog lookup at this boundary.
+export function assertProfileName(value, path) {
+  if (typeof value !== 'string') {
+    fail('invalid_type', path, `${path} must be a profile name string.`);
+  }
+  if (!PROFILE_NAME_PATTERN.test(value) || utf8ByteLength(value) > PROFILE_NAME_MAX) {
+    fail('invalid_format', path,
+      `${path} violates the profile-name grammar ${PROFILE_NAME_PATTERN.source}.`);
+  }
+}
+
 export function assertRunId(value, path = 'run_id') {
   assertPattern(value, RUN_ID_PATTERN, 'invalid_format', path,
     `run_id must match ${RUN_ID_PATTERN.source} (lowercase, git-ref-safe, ${RUN_ID_MIN}-${RUN_ID_MAX} chars)`);
@@ -629,16 +658,41 @@ function extractWriterScopes(assignments) {
   return writerScopes;
 }
 
-function extractUnresolvedProfileAssignmentIds(assignments) {
-  const unresolved = [];
+export const ASSIGNMENT_SELECTION_STATES = Object.freeze([
+  'dispatch_resolved', 'selection_resolution_required',
+]);
+
+// Single source of truth for P02R1 selection classification. Only an exact
+// explicit provider/model pair is dispatch-resolved at submission time. A
+// named-profile reference AND a truly absent execution both remain
+// selection_resolution_required until the P05 resolver produces the
+// effective manifest; explicit lanes stay dispatch-resolved.
+export function classifyAssignmentSelectionV1(assignment) {
+  if (!isPlainObject(assignment)) {
+    fail('invalid_type', 'assignment', 'assignment must be a plain JSON data object.');
+  }
+  if (!Object.hasOwn(assignment, 'execution')) return 'selection_resolution_required';
+  const execution = assignment.execution;
+  if (isPlainObject(execution) && Object.hasOwn(execution, 'profile')) {
+    return 'selection_resolution_required';
+  }
+  return 'dispatch_resolved';
+}
+
+function extractSelectionResolution(assignments) {
+  const unresolvedProfileAssignmentIds = [];
+  const selectionResolutionRequiredIds = [];
   for (let index = 0; index < assignments.length; index += 1) {
     const assignment = assignments[index];
-    if (isPlainObject(assignment.execution)
-      && Object.hasOwn(assignment.execution, 'profile')) {
-      unresolved.push(assignment.assignment_id);
+    if (classifyAssignmentSelectionV1(assignment) === 'selection_resolution_required') {
+      selectionResolutionRequiredIds.push(assignment.assignment_id);
+    }
+    const execution = assignment.execution;
+    if (isPlainObject(execution) && Object.hasOwn(execution, 'profile')) {
+      unresolvedProfileAssignmentIds.push(assignment.assignment_id);
     }
   }
-  return unresolved;
+  return { unresolvedProfileAssignmentIds, selectionResolutionRequiredIds };
 }
 
 function validateReturnContract(returnContract) {
@@ -669,6 +723,15 @@ function assertDiagnosticPartialAuthorization(returnContract) {
     fail('invalid_type', path,
       `${path} must be an exact boolean; absent or false keeps complete-only behavior and no coercion is performed.`);
   }
+}
+
+// Validate and bind the optional root profile name. Absent means unbound;
+// present means an exact bounded profile-name string. Nothing else about the
+// run changes: no lane becomes resolved, and no required field turns optional.
+function validateRootProfileBinding(manifest) {
+  if (!Object.hasOwn(manifest, BOUND_ROOT_PROFILE_KEY)) return null;
+  assertProfileName(manifest[BOUND_ROOT_PROFILE_KEY], BOUND_ROOT_PROFILE_KEY);
+  return manifest[BOUND_ROOT_PROFILE_KEY];
 }
 
 function validatePolicyEnvelope(policy) {
@@ -721,7 +784,7 @@ export function validateRunManifestEnvelopeV1(manifest, hooks) {
   assertManifestComplexity(manifest);
   if (!isPlainObject(manifest)) fail('invalid_type', '$', 'A run manifest must be a JSON object.');
   assertAllowedKeys(manifest, ROOT_ALLOWED_KEYS, '$');
-  for (const key of ROOT_ALLOWED_KEYS) {
+  for (const key of ROOT_REQUIRED_KEYS) {
     if (!Object.hasOwn(manifest, key)) {
       fail('missing_key', `$.${key}`, `$.${key} is required; run manifests have no hidden defaults.`);
     }
@@ -741,18 +804,23 @@ export function validateRunManifestEnvelopeV1(manifest, hooks) {
   assertBoundedText(manifest.objective, {
     min: OBJECTIVE_MIN_BYTES, max: OBJECTIVE_MAX_BYTES, path: 'objective', label: 'objective',
   });
+  const boundRootProfile = validateRootProfileBinding(manifest);
   validateReturnContract(manifest.return_contract);
   validatePolicyEnvelope(manifest.policy);
   hooks.validatePolicy(manifest.policy);
   const assignmentIds = validateAssignmentsEnvelope(manifest.assignments, hooks);
   assertDisjointWriterScopes(extractWriterScopes(manifest.assignments));
-  const unresolvedProfileAssignmentIds = extractUnresolvedProfileAssignmentIds(manifest.assignments);
+  const { unresolvedProfileAssignmentIds, selectionResolutionRequiredIds }
+    = extractSelectionResolution(manifest.assignments);
   return Object.freeze({
     run_id: manifest.run_id,
     assignment_count: manifest.assignments.length,
     assignment_ids: Object.freeze([...assignmentIds]),
     validation_depth: 'complete',
+    bound_root_profile: boundRootProfile,
     profile_resolution_required: unresolvedProfileAssignmentIds.length > 0,
     unresolved_profile_assignment_ids: Object.freeze(unresolvedProfileAssignmentIds),
+    selection_resolution_required: selectionResolutionRequiredIds.length > 0,
+    selection_resolution_required_assignment_ids: Object.freeze(selectionResolutionRequiredIds),
   });
 }
