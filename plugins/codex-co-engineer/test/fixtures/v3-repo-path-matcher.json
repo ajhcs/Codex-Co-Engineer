@@ -113,23 +113,23 @@
       "expected": false
     },
     {
-      "pattern": "\ud83d\ude00.md",
-      "path": "\ud83d\ude00.md",
+      "pattern": "😀.md",
+      "path": "😀.md",
       "expected": true
     },
     {
       "pattern": "?.md",
-      "path": "\ud83d\ude00.md",
+      "path": "😀.md",
       "expected": true
     },
     {
-      "pattern": "caf\u00e9/na\u00efve.md",
-      "path": "caf\u00e9/na\u00efve.md",
+      "pattern": "café/naïve.md",
+      "path": "café/naïve.md",
       "expected": true
     },
     {
-      "pattern": "\u65e5\u4ed8/*.log",
-      "path": "\u65e5\u4ed8/run-01.log",
+      "pattern": "日付/*.log",
+      "path": "日付/run-01.log",
       "expected": true
     },
     {
@@ -153,8 +153,8 @@
       "expected": false
     },
     {
-      "pattern": "[\u03b1-\u03c9].md",
-      "path": "\u03bb.md",
+      "pattern": "[α-ω].md",
+      "path": "λ.md",
       "expected": true
     },
     {
@@ -275,6 +275,26 @@
     {
       "pattern": "../parent/x",
       "code": "invalid_format"
+    },
+    {
+      "pattern": "@(a|b)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "+(a)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "!(a)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "?(a)",
+      "code": "pattern_extglob"
+    },
+    {
+      "pattern": "*(a)",
+      "code": "pattern_extglob"
     }
   ]
 }

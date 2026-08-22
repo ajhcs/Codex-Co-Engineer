@@ -1,53 +1,51 @@
 // RepoPathMatcherV1 — repository path-matching authority (R1 P02R2).
 //
-// Additive v3 module: it imports nothing from the run-manifest envelope and
-// edits no existing runtime surface. It answers exactly one question,
-// deterministically and fail-closed: does a normalized NFC UTF-8 POSIX
-// repository-relative path belong to a repository glob pattern?
+// Answers exactly one question, deterministically and fail closed: does a
+// normalized NFC UTF-8 POSIX repository-relative path belong to a repository
+// glob pattern? Additive v3 module: imports nothing from the run-manifest
+// envelope and edits no existing runtime surface.
 //
 // Frozen grammar (the pattern is split on '/'):
-//   - literals: any permitted Unicode code point, matched case-sensitively
-//     by code point;
-//   - '*' matches zero or more code points inside one segment;
-//   - '?' matches exactly one code point inside one segment;
-//   - '[abc]' / '[a-z0-9_-]' matches one code point from an explicit closed
-//     set of singles and strictly ascending inclusive ranges;
-//   - '**' is only legal as a whole segment. It matches zero or more whole
-//     segments: 'foo/**' matches 'foo' and its descendants, '**/foo' matches
-//     the root 'foo' and every descendant named 'foo', and a bare '**'
-//     matches every valid path.
-// Unsupported constructs are rejected before any matching work (fail closed):
-//   escapes ('\'), brace expansion, extglob, negated classes ('[!..]',
-//   '[^..]'), embedded double stars ('a**b'), empty ('[]') and unclosed
-//   ('[ab') classes, reversed or degenerate ranges ('[9-0]', '[a-a]'),
-//   '.', '..', empty segments, and non-NFC segments.
+//   - literals: any permitted Unicode code point, matched case-sensitively;
+//     '{' and '}' are ordinary literals — brace expansion does not exist;
+//   - '*' (zero or more code points) and '?' (exactly one) inside a segment;
+//   - '[abc]' / '[a-z0-9_-]': one code point from an explicit closed set;
+//   - '**' is only legal as a whole segment (zero or more whole segments);
+//   - '|' outside extglob is an ordinary literal.
+// Rejected before any matching work (fail closed): escapes ('\'), the extglob
+// opener sequences '@(' '+(' '!(' '?(' '*(', negated classes ('[!..]',
+// '[^..]'), embedded double stars ('a**b'), empty ('[]') and unclosed
+// ('[ab') classes, reversed or degenerate ranges ('[9-0]', '[a-a]'), '.',
+// '..', empty segments, and non-NFC text.
 //
-// Algorithm: bounded dynamic programming twice over — once across
-// (pattern-segment x path-segment) pairs, once across (atom x code point)
-// pairs inside each such pair. No regular expression is ever compiled from
-// caller input, there is no recursion, and total work is
-// O((sum of pattern atoms) x (sum of path code points)), a constant bounded
-// by the caps below and re-checked against GLOB_MATCH_STEP_BUDGET before any
-// character comparison runs.
+// Compiled authorities are opaque: compileRepoGlob returns a frozen
+// two-primitive handle whose provenance is authenticated by a module-private
+// WeakMap mapping it to deeply frozen detached intermediate representation.
+// Matching reads only that private IR, so forged id/segments shapes, getters,
+// active or revoked proxies, and mutation of public aliases can neither drive
+// nor observe matching, and no segment/atom/Set/range internal is exposed.
 //
-// Separation of authorities: this module is deliberately independent of the
-// conservative ASCII-case-folded writer-overlap safety check exported by
-// run-manifest.mjs (`scopeStaticPrefix` / `writerScopesOverlap`). That
-// check is an over-approximating dispatch-time safety net; it is neither
-// imported nor weakened here. This module provides exact case-sensitive
-// membership for scope/change-set adjudication and never decides writer
-// disjointness on its own.
+// Algorithm: bounded dynamic programming twice over — (pattern-segment x
+// path-segment) pairs, then (atom x code point) pairs. No regular expression
+// is compiled from caller input and there is no recursion. Every public call
+// is bounded: single-path work is checked against GLOB_MATCH_STEP_BUDGET
+// per match, and batch calls against one aggregate budget of compiled pattern
+// work times the sum of all path work, rejected before the first match.
+//
+// Separation of authorities: deliberately independent of the conservative
+// ASCII-case-folded writer-overlap safety check exported by run-manifest.mjs
+// (`scopeStaticPrefix` / `writerScopesOverlap`). That check over-approximates
+// dispatch-time overlap; it is neither imported nor weakened here.
 
 import { types as utilTypes } from 'node:util';
 
 export const REPO_PATH_MATCHER_ID = 'codex-co-engineer.repo-path-matcher.v1';
 
-// Bounds. Path caps mirror the R1 repository-path validator (4096-byte
-// absolute paths) plus NAME_MAX-parity per-segment and depth caps so that a
-// hostile path cannot enlarge the DP matrix. Pattern caps mirror the R1
-// write-scope glob limits (SCOPE_PATTERN_MAX_BYTES / SCOPE_SEGMENT_MAX_BYTES /
-// SCOPE_MAX_SEGMENTS) so every manifest-accepted scope pattern is inside the
-// matchable envelope.
+// Bounds mirror the R1 repository-path validator and the R1 write-scope glob
+// limits so every manifest-accepted scope pattern stays inside the matchable
+// envelope. GLOB_MATCH_STEP_BUDGET sits far above the largest product the
+// caps allow and exists purely as defense in depth for both the single-path
+// matrix and the aggregate batch product.
 export const REPO_PATH_MAX_BYTES = 4096;
 export const REPO_PATH_MAX_SEGMENTS = 64;
 export const REPO_PATH_SEGMENT_MAX_BYTES = 255;
@@ -55,9 +53,6 @@ export const REPO_PATH_BATCH_MAX = 1024;
 export const GLOB_PATTERN_MAX_BYTES = 256;
 export const GLOB_PATTERN_MAX_SEGMENTS = 16;
 export const GLOB_PATTERN_SEGMENT_MAX_BYTES = 128;
-// Upper bound of (atom+1)*(code-point+1) products under the caps above is
-// ~33.8M; the budget sits above that ceiling and exists purely as defense in
-// depth so future cap growth cannot silently unbound the matcher.
 export const GLOB_MATCH_STEP_BUDGET = 67_108_864;
 
 // Stable typed-error vocabulary. Validation runs through one fixed pipeline,
@@ -72,6 +67,7 @@ export const REPO_PATH_MATCHER_ERROR_CODES = Object.freeze([
   'pattern_class_negation',
   'pattern_double_star',
   'pattern_empty_class',
+  'pattern_extglob',
   'pattern_reversed_range',
   'pattern_unclosed_class',
 ]);
@@ -89,16 +85,34 @@ function fail(code, location, message) {
   throw new RepoPathMatcherError(code, location, message);
 }
 
+// Labels become error locations, so they follow a fixed <=128-byte printable
+// ASCII grammar and anything else collapses to a constant fallback. Errors
+// therefore stay bounded and never reflect hostile labels, values, code
+// points, or ranges.
+const SAFE_LABEL_PATTERN = /^[\x20-\x7e]{1,128}$/u;
+
+function guardLabel(label, fallback) {
+  if (typeof label !== 'string' || label.length > 128 || !SAFE_LABEL_PATTERN.test(label)) {
+    return fallback;
+  }
+  return label;
+}
+
 export function utf8ByteLength(text) {
-  return Buffer.byteLength(String(text), 'utf8');
+  if (typeof text !== 'string') {
+    fail('invalid_type', 'utf8ByteLength', 'utf8ByteLength input must be a string.');
+  }
+  return Buffer.byteLength(text, 'utf8');
 }
 
 const STAR = 0x2a;
 const QUESTION_MARK = 0x3f;
-const BACKSLASH = 0x5c;
+const LEFT_PARENTHESIS = 0x28;
 const LEFT_BRACKET = 0x5b;
 const RIGHT_BRACKET = 0x5d;
 const EXCLAMATION_MARK = 0x21;
+const COMMERCIAL_AT = 0x40;
+const PLUS_SIGN = 0x2b;
 const CIRCUMFLEX_ACCENT = 0x5e;
 const RANGE_DASH = 0x2d;
 
@@ -110,23 +124,22 @@ function isForbiddenCodePoint(cp) {
     || (cp >= 0x2066 && cp <= 0x2069); // bidi isolates
 }
 
-// Character-level rejection shared by paths and patterns. Mirrors the exact
-// control/bidi/lone-surrogate classes of the R1 repository-path validator so
-// both authorities accept the same alphabet.
 function assertSegmentCodePoints(segment, location) {
   for (const ch of segment) {
-    const cp = ch.codePointAt(0);
-    if (isForbiddenCodePoint(cp)) {
+    if (isForbiddenCodePoint(ch.codePointAt(0))) {
       fail('invalid_format', location,
-        `${location} contains a control, bidi-control, or lone-surrogate character U+${cp.toString(16).padStart(4, '0')}.`);
+        `${location} contains a control, bidi-control, or lone-surrogate character.`);
     }
   }
 }
 
-// Per-segment pipeline order is fixed everywhere: structural aliases, byte
-// bound, character scan left-to-right, NFC. The first failure wins, which is
-// what makes the typed errors reproducible.
+// Per-segment pipeline order is fixed everywhere: O(1) unit-length cap, byte
+// bound, structural aliases, character scan, NFC. The first failure wins,
+// which is what makes the typed errors reproducible.
 function assertSegmentBasics(segment, location, maxSegmentBytes) {
+  if (segment.length > maxSegmentBytes) {
+    fail('out_of_range', location, `${location} exceeds the ${maxSegmentBytes}-byte segment limit.`);
+  }
   if (segment.length === 0) {
     fail('invalid_format', location, `${location} is an empty path segment.`);
   }
@@ -144,9 +157,12 @@ function assertSegmentBasics(segment, location, maxSegmentBytes) {
 }
 
 export function assertRepoRelativePath(value, label = 'path') {
-  const location = typeof label === 'string' && label.length > 0 ? label : 'path';
+  const location = guardLabel(label, 'path');
   if (typeof value !== 'string') {
     fail('invalid_type', location, `${location} must be a string repository-relative path.`);
+  }
+  if (value.length > REPO_PATH_MAX_BYTES) {
+    fail('out_of_range', location, `${location} exceeds the ${REPO_PATH_MAX_BYTES}-byte path limit.`);
   }
   if (value.length === 0) {
     fail('invalid_format', location, `${location} must not be empty.`);
@@ -182,16 +198,27 @@ export function isRepoRelativePath(value) {
   }
 }
 
-// Compiled atoms. Only these five shapes exist; classes carry their closed
-// membership set explicitly so matching never consults locale, case folding,
-// or the RegExp engine.
-//   { kind: 'double_star' }
-//   { kind: 'segment', atoms: [
-//       { type: 'star' } | { type: 'any' } |
-//       { type: 'literal', cp } |
-//       { type: 'class', singles: Set<cp>, ranges: [[lo, hi]] } ] }
-
+// Private detached IR. Only these five atom shapes exist; classes carry their
+// closed membership data explicitly so matching never consults locale, case
+// folding, or the RegExp engine. Everything below is deeply frozen and never
+// reachable from the public handle.
+//   segment IR: { kind: 'double_star' } |
+//               { kind: 'segment', atoms: [
+//                   { type: 'star' } | { type: 'any' } |
+//                   { type: 'literal', cp } |
+//                   { type: 'class', singles: Set<cp>, ranges: [[lo, hi]] }] }
 const DOUBLE_STAR_SEGMENT = Object.freeze({ kind: 'double_star' });
+
+// Module-private authority: only objects this module created are keys here,
+// so handle provenance cannot be forged.
+const IR_BY_HANDLE = new WeakMap();
+
+function freezeAtom(atom) {
+  if (atom.type === 'class') {
+    return Object.freeze({ type: 'class', singles: atom.singles, ranges: Object.freeze(atom.ranges.map(Object.freeze)) });
+  }
+  return Object.freeze(atom);
+}
 
 function compileWildcardSegment(segment, location) {
   const cps = [];
@@ -200,6 +227,12 @@ function compileWildcardSegment(segment, location) {
   let i = 0;
   while (i < cps.length) {
     const cp = cps[i];
+    if ((cp === STAR || cp === QUESTION_MARK || cp === EXCLAMATION_MARK
+        || cp === COMMERCIAL_AT || cp === PLUS_SIGN)
+      && i + 1 < cps.length && cps[i + 1] === LEFT_PARENTHESIS) {
+      fail('pattern_extglob', location,
+        `${location} opens an extglob group; extglob is not part of the grammar.`);
+    }
     if (cp === STAR) {
       if (i + 1 < cps.length && cps[i + 1] === STAR) {
         fail('pattern_double_star', location,
@@ -240,9 +273,9 @@ function compileWildcardSegment(segment, location) {
           const hi = cps[i + 2];
           if (hi <= lo) {
             fail('pattern_reversed_range', location,
-              `${location} contains the class range ${String.fromCodePoint(lo)}-${String.fromCodePoint(hi)}; ranges must be strictly increasing.`);
+              `${location} contains a reversed or degenerate class range; ranges must be strictly increasing.`);
           }
-          ranges.push(Object.freeze([lo, hi]));
+          ranges.push([lo, hi]);
           i += 3;
           continue;
         }
@@ -258,13 +291,17 @@ function compileWildcardSegment(segment, location) {
     atoms.push({ type: 'literal', cp });
     i += 1;
   }
-  return { kind: 'segment', atoms };
+  return Object.freeze({ kind: 'segment', atoms: Object.freeze(atoms.map(freezeAtom)) });
 }
 
 export function compileRepoGlob(pattern, label = 'pattern') {
-  const location = typeof label === 'string' && label.length > 0 ? label : 'pattern';
+  const location = guardLabel(label, 'pattern');
   if (typeof pattern !== 'string') {
     fail('invalid_type', location, `${location} must be a string repository glob.`);
+  }
+  if (pattern.length > GLOB_PATTERN_MAX_BYTES) {
+    fail('out_of_range', location,
+      `${location} exceeds the ${GLOB_PATTERN_MAX_BYTES}-byte pattern limit.`);
   }
   if (pattern.length === 0) {
     fail('invalid_format', location, `${location} must not be empty.`);
@@ -295,20 +332,20 @@ export function compileRepoGlob(pattern, label = 'pattern') {
     assertSegmentBasics(raw, segmentLocation, GLOB_PATTERN_SEGMENT_MAX_BYTES);
     segments.push(raw === '**' ? DOUBLE_STAR_SEGMENT : compileWildcardSegment(raw, segmentLocation));
   }
-  return Object.freeze({
-    id: REPO_PATH_MATCHER_ID,
-    pattern,
-    segments: Object.freeze(segments),
-  });
+  const handle = Object.freeze({ id: REPO_PATH_MATCHER_ID, pattern });
+  IR_BY_HANDLE.set(handle, Object.freeze({ segments: Object.freeze(segments) }));
+  return handle;
 }
 
-function assertCompiledRepoGlob(value) {
-  if (!value || typeof value !== 'object' || utilTypes.isProxy(value) || value.id !== REPO_PATH_MATCHER_ID) {
+function irOf(compiled) {
+  if (!compiled || typeof compiled !== 'object' || utilTypes.isProxy(compiled)) {
     fail('invalid_type', 'compiled', 'compiled must be a compileRepoGlob() result.');
   }
-  if (!Array.isArray(value.segments)) {
+  const ir = IR_BY_HANDLE.get(compiled);
+  if (!ir || compiled.id !== REPO_PATH_MATCHER_ID) {
     fail('invalid_type', 'compiled', 'compiled must be a compileRepoGlob() result.');
   }
+  return ir;
 }
 
 function codePointMatchesClass(atom, cp) {
@@ -360,14 +397,12 @@ function segmentMatches(atoms, textCps) {
 // Bounded DP over (pattern-segment x path-segment). dp[i][j] is true iff
 // segments[i..] match pathSegments[j..]; whole-segment '**' reduces to
 // dp[i+1][j] (consume nothing) || dp[i][j+1] (consume one more segment).
-function compiledMatchesPathSegments(compiled, pathCpSegments, stepBudgetLocation) {
-  const patternSegments = compiled.segments;
+// The derived matrix is checked against GLOB_MATCH_STEP_BUDGET before any
+// character comparison runs.
+function irMatchesPathSegments(ir, pathCpSegments, stepBudgetLocation) {
+  const patternSegments = ir.segments;
   const patternCount = patternSegments.length;
   const pathCount = pathCpSegments.length;
-
-  // Fail closed before any character work if the derived matrix would exceed
-  // the fixed step budget. Under the shipped caps this can never fire; it
-  // keeps the matcher bounded if the caps ever grow.
   let patternSteps = 0;
   for (let i = 0; i < patternCount; i += 1) {
     patternSteps += patternSegments[i].kind === 'double_star' ? 1 : patternSegments[i].atoms.length + 1;
@@ -380,7 +415,6 @@ function compiledMatchesPathSegments(compiled, pathCpSegments, stepBudgetLocatio
     fail('match_work_exceeded', stepBudgetLocation,
       `${stepBudgetLocation} would exceed the ${GLOB_MATCH_STEP_BUDGET}-step match budget; reject rather than match unbounded.`);
   }
-
   const dp = new Array(patternCount + 1);
   for (let i = 0; i <= patternCount; i += 1) {
     dp[i] = new Uint8Array(pathCount + 1);
@@ -401,8 +435,8 @@ function compiledMatchesPathSegments(compiled, pathCpSegments, stepBudgetLocatio
   return dp[0][0] === 1;
 }
 
-function pathToCodePointSegments(value, label) {
-  assertRepoRelativePath(value, label);
+function pathToCodePointSegments(value, location) {
+  assertRepoRelativePath(value, location);
   const pathSegments = value.split('/');
   const cpSegments = [];
   for (let i = 0; i < pathSegments.length; i += 1) {
@@ -413,26 +447,34 @@ function pathToCodePointSegments(value, label) {
   return cpSegments;
 }
 
-export function compiledRepoGlobMatchesPath(compiled, value, label = 'path') {
-  assertCompiledRepoGlob(compiled);
-  return compiledMatchesPathSegments(compiled, pathToCodePointSegments(value, label), label);
-}
-
-export function repoGlobMatchesPath(pattern, value, label = 'path') {
-  const compiled = compileRepoGlob(pattern, 'pattern');
-  return compiledMatchesPathSegments(compiled, pathToCodePointSegments(value, label), label);
-}
-
-// Batch inputs are plain JSON data: Proxies, exotic prototypes, sparse or
-// decorated arrays are rejected without dispatching a single trap, mirroring
-// the run-envelope array discipline.
-function assertPathBatch(paths, label) {
-  const location = typeof label === 'string' && label.length > 0 ? label : 'paths';
-  if (!Array.isArray(paths)) {
-    fail('invalid_type', location, `${location} must be an array of repository-relative paths.`);
+// Aggregate batch budget: compiled pattern work times the sum of every
+// path's work, computed from validated strings alone and rejected before the
+// first match, so a full legal-cap batch can never burn seconds synchronously.
+function assertAggregateBatchBudget(ir, totalPathWork, location) {
+  let patternSteps = 0;
+  for (let i = 0; i < ir.segments.length; i += 1) {
+    const segment = ir.segments[i];
+    patternSteps += segment.kind === 'double_star' ? 1 : segment.atoms.length + 1;
   }
+  if (patternSteps * totalPathWork > GLOB_MATCH_STEP_BUDGET) {
+    fail('match_work_exceeded', location,
+      `${location} exceeds the ${GLOB_MATCH_STEP_BUDGET}-step aggregate batch match budget; chunk the batch.`);
+  }
+}
+
+// Batch inputs are validated through a bounded numeric snapshot: proxies are
+// rejected before Array.isArray, the length cap runs before any descriptor
+// walk, and only index descriptors 0..length-1 are inspected. Expando,
+// symbol-keyed, or inherited decorations are unreachable from that snapshot
+// and are ignored without ever being enumerated or invoked, so attacker-sized
+// key sets cost nothing. Accessor elements are rejected unread.
+// Returns the summed path work for the aggregate budget check.
+function assertPathBatch(paths, location) {
   if (utilTypes.isProxy(paths)) {
     fail('invalid_array', location, `${location} must be a concrete JSON array, not a Proxy.`);
+  }
+  if (!Array.isArray(paths)) {
+    fail('invalid_type', location, `${location} must be an array of repository-relative paths.`);
   }
   let prototype;
   try {
@@ -443,63 +485,62 @@ function assertPathBatch(paths, label) {
   if (prototype !== Array.prototype && prototype !== null) {
     fail('invalid_array', location, `${location} must use the standard or null array prototype.`);
   }
-  // Inherited enumerable properties are unreachable from JSON; reject them
-  // without reading any element so accessor traps stay undispatched.
-  for (const key in paths) {
-    if (!Object.hasOwn(paths, key)) {
-      fail('invalid_array', location, `${location} must not inherit enumerable array properties.`);
-    }
-  }
   if (paths.length > REPO_PATH_BATCH_MAX) {
     fail('out_of_range', location, `${location} exceeds the ${REPO_PATH_BATCH_MAX}-path batch limit.`);
   }
-  let ownKeys;
-  try {
-    ownKeys = Reflect.ownKeys(paths);
-  } catch {
-    fail('invalid_array', location, `${location} keys could not be inspected safely.`);
-  }
-  let indexCount = 0;
-  for (const key of ownKeys) {
-    if (key === 'length') continue;
-    if (typeof key !== 'string') {
-      fail('invalid_array', location, `${location} must be a dense JSON array without extra or symbol properties.`);
-    }
-    const asNumber = Number(key);
-    if (!Number.isInteger(asNumber) || asNumber < 0 || asNumber >= paths.length || String(asNumber) !== key) {
-      fail('invalid_array', location, `${location} must be a dense JSON array without extra or symbol properties.`);
-    }
+  let totalPathWork = 0;
+  for (let i = 0; i < paths.length; i += 1) {
     let descriptor;
     try {
-      descriptor = Object.getOwnPropertyDescriptor(paths, key);
+      descriptor = Object.getOwnPropertyDescriptor(paths, i);
     } catch {
-      fail('invalid_array', `${location}[${key}]`, `${location}[${key}] descriptor could not be inspected safely.`);
+      fail('invalid_array', `${location}[${i}]`, `${location}[${i}] descriptor could not be inspected safely.`);
     }
     if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
-      fail('invalid_array', `${location}[${key}]`, `${location}[${key}] must be an enumerable data element.`);
+      fail('invalid_array', `${location}[${i}]`, `${location}[${i}] must be an enumerable data element.`);
     }
-    indexCount += 1;
-  }
-  if (indexCount !== paths.length) {
-    fail('invalid_array', location, `${location} must be dense; sparse arrays are not path batches.`);
-  }
-  // Validate every element before answering anything: a typed failure on the
-  // last element must not leave a partially filtered answer behind.
-  for (let i = 0; i < paths.length; i += 1) {
     if (typeof paths[i] !== 'string') {
       fail('invalid_type', `${location}[${i}]`, `${location}[${i}] must be a string repository-relative path.`);
     }
     assertRepoRelativePath(paths[i], `${location}[${i}]`);
+    totalPathWork += pathWorkOf(paths[i]);
   }
+  return totalPathWork;
 }
 
+// Code points plus segment count: exactly the per-path DP work factor.
+function pathWorkOf(value) {
+  let work = 1;
+  let codePoints = 0;
+  for (const ch of value) {
+    if (ch === '/') work += 1;
+    else codePoints += 1;
+  }
+  return codePoints + work;
+}
+
+export function compiledRepoGlobMatchesPath(compiled, value, label = 'path') {
+  const location = guardLabel(label, 'path');
+  return irMatchesPathSegments(irOf(compiled), pathToCodePointSegments(value, location), location);
+}
+
+export function repoGlobMatchesPath(pattern, value, label = 'path') {
+  const location = guardLabel(label, 'path');
+  const ir = irOf(compileRepoGlob(pattern, 'pattern'));
+  return irMatchesPathSegments(ir, pathToCodePointSegments(value, location), location);
+}
+
+// Validate every element before answering anything: a typed failure on the
+// last element must not leave a partially filtered answer behind.
 export function filterRepoPathsByGlob(pattern, paths, label = 'paths') {
-  const compiled = compileRepoGlob(pattern, 'pattern');
-  const location = typeof label === 'string' && label.length > 0 ? label : 'paths';
-  assertPathBatch(paths, location);
+  const location = guardLabel(label, 'paths');
+  const ir = irOf(compileRepoGlob(pattern, 'pattern'));
+  const totalPathWork = assertPathBatch(paths, location);
+  assertAggregateBatchBudget(ir, totalPathWork, location);
   const matched = [];
   for (let i = 0; i < paths.length; i += 1) {
-    if (compiledMatchesPathSegments(compiled, pathToCodePointSegments(paths[i], `${location}[${i}]`), `${location}[${i}]`)) {
+    const elementLocation = `${location}[${i}]`;
+    if (irMatchesPathSegments(ir, pathToCodePointSegments(paths[i], elementLocation), elementLocation)) {
       matched.push(paths[i]);
     }
   }
@@ -507,11 +548,13 @@ export function filterRepoPathsByGlob(pattern, paths, label = 'paths') {
 }
 
 export function repoGlobMatchesAnyPath(pattern, paths, label = 'paths') {
-  const compiled = compileRepoGlob(pattern, 'pattern');
-  const location = typeof label === 'string' && label.length > 0 ? label : 'paths';
-  assertPathBatch(paths, location);
+  const location = guardLabel(label, 'paths');
+  const ir = irOf(compileRepoGlob(pattern, 'pattern'));
+  const totalPathWork = assertPathBatch(paths, location);
+  assertAggregateBatchBudget(ir, totalPathWork, location);
   for (let i = 0; i < paths.length; i += 1) {
-    if (compiledMatchesPathSegments(compiled, pathToCodePointSegments(paths[i], `${location}[${i}]`), `${location}[${i}]`)) {
+    const elementLocation = `${location}[${i}]`;
+    if (irMatchesPathSegments(ir, pathToCodePointSegments(paths[i], elementLocation), elementLocation)) {
       return true;
     }
   }

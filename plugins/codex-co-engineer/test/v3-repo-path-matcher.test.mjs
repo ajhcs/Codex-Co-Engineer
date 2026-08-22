@@ -7,15 +7,18 @@ import {
   filterRepoPathsByGlob,
   GLOB_MATCH_STEP_BUDGET,
   GLOB_PATTERN_MAX_BYTES,
+  GLOB_PATTERN_MAX_SEGMENTS,
   REPO_PATH_BATCH_MAX,
   repoGlobMatchesAnyPath,
   REPO_PATH_MATCHER_ERROR_CODES,
+  REPO_PATH_MATCHER_ID,
   RepoPathMatcherError,
   assertRepoRelativePath,
   compileRepoGlob,
   compiledRepoGlobMatchesPath,
   isRepoRelativePath,
   repoGlobMatchesPath,
+  utf8ByteLength,
 } from '../mcp/v3/repo-path-matcher.mjs';
 import {
   scopeStaticPrefix,
@@ -162,6 +165,30 @@ test('malformed classes fail closed with stable typed errors', () => {
   matchError(() => matches('[^a]', 'b'), 'pattern_class_negation');
 });
 
+test('extglob opener sequences are rejected; braces and bare pipes stay literal', () => {
+  for (const opener of ['@(a|b)', '+(a)', '!(a)', '?(a)', '*(a)']) {
+    const error = matchError(() => matches(opener, 'a'), 'pattern_extglob');
+    assert.equal(error.location, 'pattern.segments[0]');
+    assert.ok(!error.message.includes(opener)); // content-free diagnostic
+  }
+  assert.equal(matchError(() => matches('x/@(y)', 'x/y'), 'pattern_extglob').location,
+    'pattern.segments[1]');
+  matchError(() => matches('x/+(y)', 'x/y'), 'pattern_extglob');
+  matchError(() => matches('x/!(y)', 'x/y'), 'pattern_extglob');
+  matchError(() => matches('x/?(y)', 'x/y'), 'pattern_extglob');
+  matchError(() => matches('x/*(y)', 'x/y'), 'pattern_extglob');
+  // A '(' alone or after any other character is still an ordinary literal.
+  assert.equal(matches('(a)', '(a)'), true);
+  // Braces are ordinary literals; brace expansion does not exist anywhere in
+  // this ingress, and the docs say exactly that.
+  assert.equal(matches('{a,b}.txt', '{a,b}.txt'), true);
+  assert.equal(matches('{a,b}.txt', 'a.txt'), false);
+  assert.equal(matches('{a,b}.txt', 'b.txt'), false);
+  // A bare '|' outside extglob remains a literal.
+  assert.equal(matches('a|b', 'a|b'), true);
+  assert.equal(matches('a|b', 'a'), false);
+});
+
 test('unsupported pattern syntax fails closed as invalid_format', () => {
   matchError(() => matches('a\\*b', 'ab'), 'invalid_format'); // escapes rejected outright
   matchError(() => matches('', ''), 'invalid_format');
@@ -238,16 +265,76 @@ test('validation pipeline order is fixed so first errors are deterministic', () 
   assert.equal(matchError(() => matches('..', 'x'), 'invalid_format').location, 'pattern.segments[0]');
 });
 
-test('compileRepoGlob returns a frozen reusable compilation', () => {
+test('compileRepoGlob returns an opaque provenance-authenticated handle', () => {
   const compiled = compileRepoGlob('src/**/*.ts');
+  // The handle carries only frozen primitives; no segment/atom/Set/range
+  // internal is reachable from it.
   assert.ok(Object.isFrozen(compiled));
-  assert.ok(Object.isFrozen(compiled.segments));
+  assert.deepEqual([...Object.getOwnPropertyNames(compiled)], ['id', 'pattern']);
+  assert.equal(compiled.id, REPO_PATH_MATCHER_ID);
   assert.equal(compiled.pattern, 'src/**/*.ts');
+  assert.equal(compiled.segments, undefined);
   assert.equal(compiledRepoGlobMatchesPath(compiled, 'src/a/b.ts'), true);
   assert.equal(compiledRepoGlobMatchesPath(compiled, 'lib/a/b.ts'), false);
-  matchError(() => compiledRepoGlobMatchesPath({}, 'src/a.ts'), 'invalid_type');
+});
+
+test('forged handles fail closed without driving matching', () => {
+  const genuine = compileRepoGlob('src/**/*.ts');
+  const forgeries = [
+    undefined,
+    null,
+    {},
+    { id: REPO_PATH_MATCHER_ID },
+    { id: REPO_PATH_MATCHER_ID, pattern: 'src/**/*.ts' },
+    { id: REPO_PATH_MATCHER_ID, segments: [{ kind: 'segment', atoms: [{ type: 'star' }] }] },
+    Object.create(compileRepoGlob('a')),
+    JSON.parse(JSON.stringify({ id: REPO_PATH_MATCHER_ID })),
+  ];
+  for (const forgery of forgeries) {
+    matchError(() => compiledRepoGlobMatchesPath(forgery, 'src/a.ts'), 'invalid_type');
+    matchError(() => compiledRepoGlobMatchesPath(forgery, 'anything/at/all'), 'invalid_type');
+  }
+  // A forged segments shape can never be smuggled past provenance: matching
+  // reads only module-private IR, so getter-backed atoms never execute.
+  let getterRan = false;
+  const hostile = {
+    id: REPO_PATH_MATCHER_ID,
+    get segments() {
+      getterRan = true;
+      return [{ kind: 'segment', atoms: [{ type: 'star' }] }];
+    },
+  };
+  matchError(() => compiledRepoGlobMatchesPath(hostile, 'x'), 'invalid_type');
+  assert.equal(getterRan, false);
+  void genuine;
+});
+
+test('active and revoked proxies of handles are rejected before any read', () => {
   matchError(() => compiledRepoGlobMatchesPath(new Proxy(compileRepoGlob('a'), {}), 'a'),
     'invalid_type');
+  const { proxy, revoke } = Proxy.revocable(compileRepoGlob('a'), {});
+  revoke();
+  matchError(() => compiledRepoGlobMatchesPath(proxy, 'a'), 'invalid_type');
+  const forgedProxy = new Proxy({ id: REPO_PATH_MATCHER_ID }, {});
+  matchError(() => compiledRepoGlobMatchesPath(forgedProxy, 'a'), 'invalid_type');
+});
+
+test('mutation of every prior public alias has no effect on matching', () => {
+  const compiled = compileRepoGlob('src/*.ts');
+  const aliases = ['segments', 'segments.0.atoms', 'segments.0.kind'];
+  for (const alias of aliases) {
+    let cursor = compiled;
+    const parts = alias.split('.');
+    for (const part of parts.slice(0, -1)) cursor = cursor?.[part];
+    try {
+      cursor[parts.at(-1)] = [{ type: 'star' }];
+    } catch {
+      // Frozen surfaces throw; absent surfaces silently ignore. Either way
+      // matching must be unchanged.
+    }
+  }
+  assert.equal(compiledRepoGlobMatchesPath(compiled, 'deep/nested/a.ts'), false);
+  assert.equal(compiledRepoGlobMatchesPath(compileRepoGlob('src/*.ts'), 'src/a.ts'), true);
 });
 
 test('isRepoRelativePath classifies without throwing', () => {
@@ -285,7 +372,7 @@ test('fixtures exercise every pattern-specific typed error code', () => {
   const covered = new Set(FIXTURES.rejections.map((entry) => entry.code));
   for (const code of [
     'pattern_unclosed_class', 'pattern_empty_class', 'pattern_reversed_range',
-    'pattern_class_negation', 'pattern_double_star',
+    'pattern_class_negation', 'pattern_double_star', 'pattern_extglob',
   ]) {
     assert.ok(covered.has(code), `fixture set must cover ${code}`);
     assert.ok(REPO_PATH_MATCHER_ERROR_CODES.includes(code));
@@ -337,20 +424,61 @@ test('batch inputs are plain JSON arrays; traps and exotica are rejected untouch
     Object.defineProperty(array, '0', { get() { throw new Error('trap dispatched'); }, enumerable: true });
     return array;
   })()), 'invalid_array');
-  matchError(() => filterRepoPathsByGlob('src/**', (() => {
-    const array = ['src/a.ts'];
-    array[Symbol('extra')] = 1;
-    return array;
-  })()), 'invalid_array');
-  matchError(() => filterRepoPathsByGlob('src/**', (() => {
+  // Revoked proxies must fail typed, never with a native TypeError from
+  // Array.isArray's IsArray operation.
+  const { proxy, revoke } = Proxy.revocable(['src/a.ts'], {});
+  revoke();
+  matchError(() => filterRepoPathsByGlob('src/**', proxy), 'invalid_array');
+  matchError(() => repoGlobMatchesAnyPath('src/**', (() => {
     const array = new Array(3);
     array[2] = 'src/a.ts';
     return array;
   })()), 'invalid_array');
+  // Expando, symbol-keyed, and inherited decorations are unreachable from
+  // the bounded numeric descriptor snapshot; they are ignored without being
+  // enumerated, and an attacker-sized key set costs no enumeration work.
+  const decorated = ['src/a.ts'];
+  decorated[Symbol('extra')] = 1;
+  decorated.expando = 'ignored';
+  assert.deepEqual(filterRepoPathsByGlob('src/**', decorated), ['src/a.ts']);
+  const hugeExpando = ['src/deep/a.ts'];
+  for (let i = 0; i < 200_000; i += 1) hugeExpando[`e${i}`] = i;
+  const expandoStarted = process.hrtime.bigint();
+  assert.deepEqual(filterRepoPathsByGlob('src/**', hugeExpando), ['src/deep/a.ts']);
+  const expandoMs = Number(process.hrtime.bigint() - expandoStarted) / 1e6;
+  assert.ok(expandoMs < 250, `decoration enumeration leaked: ${expandoMs}ms`);
   // Null-prototype dense string arrays are legitimate JSON data.
   const nullProto = ['src/a.ts'];
   Object.setPrototypeOf(nullProto, null);
   assert.deepEqual(filterRepoPathsByGlob('src/**', nullProto), ['src/a.ts']);
+});
+
+test('accessor elements are rejected without dispatching a single trap', () => {
+  let reads = 0;
+  const getterArray = ['ok.txt'];
+  Object.defineProperty(getterArray, '1', {
+    get() {
+      reads += 1;
+      return '/absolute';
+    },
+    enumerable: true,
+  });
+  getterArray.length = 2;
+  matchError(() => filterRepoPathsByGlob('**', getterArray), 'invalid_array');
+  assert.equal(reads, 0); // rejected on the descriptor alone
+
+  // An oversized batch is rejected at the O(1) length cap before any element
+  // or descriptor is touched.
+  const oversized = new Array(1025);
+  Object.defineProperty(oversized, '1024', {
+    get() {
+      reads += 1;
+      throw new Error('element read past the cap');
+    },
+    enumerable: true,
+  });
+  matchError(() => filterRepoPathsByGlob('**', oversized), 'out_of_range');
+  assert.equal(reads, 0);
 });
 
 test('batch size is bounded', () => {
@@ -379,6 +507,97 @@ test('matching stays bounded on worst-case-shaped inputs under the caps', () => 
   assert.equal(repoGlobMatchesPath(hostilePattern, `${fullPath}/a`), false);
   // The budget constant exists as defense in depth above the caps' product.
   assert.ok(GLOB_MATCH_STEP_BUDGET > 33_554_432);
+});
+
+test('the aggregate batch budget rejects the legal-cap stress before the first match', () => {
+  // Every input is individually legal: 1024 paths (batch cap) of 16 segments
+  // x 254 bytes each (4079-byte path, under every path cap) against a
+  // wildcard-heavy 16-segment pattern.
+  const segment = 'a'.repeat(254);
+  const stressPath = Array.from({ length: 16 }, () => segment).join('/');
+  assert.equal(Buffer.byteLength(stressPath, 'utf8'), 4079);
+  const batch = Array.from({ length: REPO_PATH_BATCH_MAX }, () => stressPath);
+  const pattern = Array.from({ length: GLOB_PATTERN_MAX_SEGMENTS }, () => '*[a-d]*?').join('/');
+  const startedAt = process.hrtime.bigint();
+  matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
+  matchError(() => repoGlobMatchesAnyPath(pattern, batch), 'match_work_exceeded');
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  assert.ok(elapsedMs < 500, `aggregate rejection was not fast: ${elapsedMs}ms`);
+  // The same batch stays answerable when the product fits the budget.
+  assert.equal(filterRepoPathsByGlob('**', batch).length, REPO_PATH_BATCH_MAX);
+  assert.deepEqual(filterRepoPathsByGlob(pattern, ['src/x.ts']), []); // single-path semantics intact
+  // The same pattern/path pair answers exactly on a single call; only the
+  // aggregate batch product crosses the budget.
+  assert.equal(repoGlobMatchesPath(pattern, stressPath), true);
+  // Deterministic typed failure on repeat calls.
+  const first = matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
+  const again = matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
+  assert.equal(again.code, first.code);
+  assert.equal(again.location, first.location);
+  assert.equal(again.message, first.message);
+});
+
+test('hostile labels collapse to constant bounded locations', () => {
+  const hostileLabels = [
+    `${'L'.repeat(100_000)}secret`,
+    { toString() { throw new Error('label getter must never run'); } },
+    42,
+    null,
+    Symbol('label'),
+    ['paths'],
+    'bad\u0000control',
+    'x'.repeat(129),
+  ];
+  for (const label of hostileLabels) {
+    const error = matchError(() => repoGlobMatchesPath('[bad', 'probe-path', label),
+      'pattern_unclosed_class');
+    assert.equal(error.location, 'pattern.segments[0]');
+    assert.ok(error.message.length < 256);
+    assert.ok(!error.message.includes('secret'));
+    const batchError = matchError(() => repoGlobMatchesAnyPath('*', 'not-an-array', label),
+      'invalid_type');
+    assert.equal(batchError.location, 'paths');
+  }
+  // Safe labels pass through verbatim on their side of the call: pattern
+  // diagnostics keep the fixed 'pattern' prefix; path diagnostics use the
+  // caller's label. Derived element locations stay bounded.
+  const patternSide = matchError(() => repoGlobMatchesPath('[bad', 'probe-path', 'scope-a'),
+    'pattern_unclosed_class');
+  assert.equal(patternSide.location, 'pattern.segments[0]');
+  const pathSide = matchError(() => repoGlobMatchesPath('src/x.ts', '/abs', 'scope-a'),
+    'invalid_format');
+  assert.equal(pathSide.location, 'scope-a');
+  const element = matchError(() => filterRepoPathsByGlob('**', ['a//b'], 'lane-1'),
+    'invalid_format');
+  assert.equal(element.location, 'lane-1[0].segments[1]');
+  const structural = matchError(() => filterRepoPathsByGlob('**', ['/abs'], 'lane-2'),
+    'invalid_format');
+  assert.equal(structural.location, 'lane-2[0]');
+});
+
+test('utf8ByteLength is strictly string-only and typed', () => {
+  assert.equal(utf8ByteLength('café'), 5);
+  assert.equal(utf8ByteLength('\u{1F600}'), 4);
+  for (const hostile of [Symbol('x'), 42, null, undefined, {}, ['x'], { toString() { throw new Error('ran'); } }]) {
+    matchError(() => utf8ByteLength(hostile), 'invalid_type');
+  }
+});
+
+test('new typed errors are deterministic across repeats', () => {
+  const probes = [
+    [() => matches('@(a)', 'a'), 'pattern_extglob'],
+    [() => matches(String.fromCharCode(0), 'x'), 'invalid_format'],
+    [() => filterRepoPathsByGlob('**', new Proxy([], {})), 'invalid_array'],
+  ];
+  for (const [invoke, code] of probes) {
+    const first = matchError(invoke, code);
+    for (let i = 0; i < 3; i += 1) {
+      const repeat = matchError(invoke, code);
+      assert.equal(repeat.code, first.code);
+      assert.equal(repeat.location, first.location);
+      assert.equal(repeat.message, first.message);
+    }
+  }
 });
 
 test('matcher authority stays separate from the writer-overlap safety check', () => {
