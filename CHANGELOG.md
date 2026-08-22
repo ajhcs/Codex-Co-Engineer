@@ -4,6 +4,42 @@
 
 ### Added
 
+- **Closed domain-separated identity digest authority.** The P03 identity
+  module now owns one digest authority behind every RunIdentityV1 surface.
+  `IDENTITY_LABELS` is a frozen null-prototype closed registry of the
+  established `run-manifest.v1`, `assignment-prompt.v1`, and
+  `child-envelope.v1` spellings plus the ratified R1 surfaces
+  `run-identity.v1`, `child-identity.v1`, `resolution-snapshot.v1`,
+  `resolved-lane-binding.v1`, `workspace-anchor.v1`,
+  `workspace-identity.v1`, `dispatch-attempt.v1`,
+  `provider-operation.v1`, `provider-run-identity.v1`,
+  `request-idempotency.v1`, `provider-capability.v1`,
+  `evidence-bundle.v1`, `verification-policy.v1`,
+  `verification-command-descriptor.v1`,
+  `verification-executable-closure.v1`,
+  `verification-command-plan.v1`, and
+  `verification-execution-receipt.v1`. There is no runtime registration:
+  every digest path resolves its label through the registry, so arbitrary or
+  unregistered labels fail with a stable `unknown_label` error before any
+  byte is read. New generic `identityDigestV1(label, parts)` accepts only
+  exact registry constants, requires ordinary Node Buffer parts (Proxies,
+  custom prototypes, typed-array views, DataViews, ArrayBuffers,
+  SharedArrayBuffers, growable ArrayBuffers, streams, getter-bearing values,
+  and coercion hooks are rejected without ever running caller code), reads
+  lengths and viewed backing stores through trusted `%TypedArray%` internal
+  slots so spoofed `length` properties cannot lie and
+  `Buffer.from(SharedArrayBuffer)` or growable-ArrayBuffer parts are
+  rejected before any byte is read, snapshots bytes so later mutation cannot
+  drift a digest, enforces exported caps
+  `MAX_IDENTITY_DIGEST_PARTS = 16` and
+  `MAX_IDENTITY_DIGEST_INPUT_BYTES = 4_194_304` with stable
+  `parts_exceeded`/`unbounded_input` errors in fixed validation order, and
+  returns the shared deeply frozen detached descriptor over the unchanged
+  length-framed domain/version/label/parts layout. Absent and explicit-false
+  diagnostic partial authorization keep identical identity bytes; exact true
+  remains distinct. All existing manifest, assignment-prompt, child-envelope,
+  and prompt-golden digests keep their exact bytes; adversarial coverage
+  lives in `test/v3-identity-digest-authority.test.mjs`.
 - **ProfileV1 whole-catalog snapshot port.** Adds the additive
   `loadProfileCatalogSnapshot(options)` API beside `loadProfiles`/`findProfile`:
   one read of both catalogs closes the merged result into a single detached,
@@ -84,6 +120,35 @@
 
 ### Fixed
 
+- **Identity digest authority hardens detached backing, hostile labels,
+  prototype brands, captured intrinsics, and parts-container bounds.**
+  `identityDigestV1` and every dedicated RunIdentityV1 surface now normalize
+  a failed trusted typed-array internal-slot read or byte snapshot — most
+  importantly an otherwise ordinary Buffer whose ArrayBuffer backing store
+  was detached out from under it — to one stable typed `invalid_object`
+  error with a constant content-free path (`parts`) and message, so no
+  native TypeError leaks and nothing is hashed; ordinary, pooled, subarray,
+  empty, and caller-ArrayBuffer-backed Buffers stay accepted and byte exact.
+  Digest labels now pass an O(1) code-unit type/length preflight (exported
+  bound `MAX_IDENTITY_LABEL_CODE_UNITS = 64`) before the closed-registry
+  lookup, so overlength, control-bearing, or secret-bearing labels are never
+  hashed, scanned, truncated, or reflected: every unknown label fails with
+  one constant content-free `unknown_label` diagnostic. The exact
+  `MAX_IDENTITY_DIGEST_PARTS = 16` cap is enforced before any indexed
+  descriptor is captured. Active and revoked Proxies are rejected first; the
+  container must be an exact ordinary array whose intrinsic length is read
+  O(1), and each bounded indexed data descriptor is captured exactly once
+  through precomputed numeric keys. Extra string or symbol decorations are
+  never enumerated or hashed, so even massively decorated under-cap arrays
+  cannot drive unbounded work or change a digest. Buffer authority now
+  requires the trusted Uint8Array internal brand plus exact
+  `Buffer.prototype`, preventing prototype-spoofed non-byte typed arrays and
+  prototype traps from swapping a validated part. Buffer/Uint8Array,
+  `writeUInt32BE`, hash `update`/`digest`, JSON `stringify`, `String`, and
+  reflection/collection/typed-array intrinsics are captured at clean module
+  import. Existing deterministic ordering for normal arrays, total-byte/
+  part-index errors, digest framing, and all manifest, assignment-prompt,
+  child-envelope, run-identity, and prompt-golden digests are unchanged.
 - **ProfileV1 accepts a bounded model beside every provider under one shared
   grammar.** Profile definitions now validate `model` beside any of the four
   exact providers (`grok`, `cursor-local`, `cursor-cloud`, `dsh`) whenever it
