@@ -124,7 +124,10 @@ export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze([
 // permission (never an obligation) for a later P35A diagnostic
 // incomplete_candidate. Absent and false both keep complete-only behavior,
 // and the submitted frozen form is preserved, so an explicit false remains
-// an own key and may digest differently from absence.
+// an own key for audit/display. Identity-wise (P02R1) absent and false are
+// equivalent complete-only manifests: the RunIdentityV1 projection in
+// identity.mjs omits an exact false, so both produce identical canonical
+// bytes and digests, while explicit true stays identity-distinct.
 export const RETURN_CONTRACT_REQUIRED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
 export const DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY = 'allow_diagnostic_partial_candidate';
 export const POLICY_ALLOWED_KEYS = Object.freeze([
@@ -637,6 +640,49 @@ export function assertTimeoutMs(value, path) {
     `${path} must be between ${MIN_DURATION_MS} and ${MAX_TIMEOUT_MS} ms`);
 }
 
+// The single AssignmentManifestV1 execution grammar, owned here beside its
+// closed vocabulary (EXECUTION_ALLOWED_KEYS, PROVIDERS, the model grammar)
+// so every consumer shares one contract with no second grammar. Exactly one
+// resolution choice survives: a named profile reference (data-only name,
+// never an inline object) or an exact provider + model pair. Absence is not
+// this function's concern: callers decide what a truly absent execution
+// means (the P02R3 classifier treats absence as selection-deferral; deep
+// assignment validation never reaches it with execution absent).
+export function validateExecution(execution, path) {
+  if (!isPlainObject(execution)) fail('invalid_type', path, `${path} must be an object.`);
+  assertAllowedKeys(execution, EXECUTION_ALLOWED_KEYS, path);
+  const hasProfile = Object.hasOwn(execution, 'profile');
+  const hasProvider = Object.hasOwn(execution, 'provider');
+  const hasModel = Object.hasOwn(execution, 'model');
+  if (hasProfile && (hasProvider || hasModel)) {
+    fail('execution_ambiguous', path,
+      `${path} must carry exactly one resolution choice: a named profile OR an explicit provider/model pair, never both.`);
+  }
+  if (!hasProfile && !hasProvider && !hasModel) {
+    fail('execution_missing', path, `${path} requires either a named profile or an explicit provider/model pair.`);
+  }
+  if (hasProfile) {
+    if (typeof execution.profile !== 'string') {
+      fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
+    }
+    assertProfileName(execution.profile, `${path}.profile`);
+    return Object.freeze({ kind: 'profile', provider: null });
+  }
+  if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
+  if (!hasModel) fail('missing_key', `${path}.model`, `${path}.model is required when no profile is named.`);
+  if (!PROVIDERS.includes(execution.provider)) {
+    fail('unknown_provider', `${path}.provider`,
+      `${path}.provider is not one of ${PROVIDERS.join(', ')}.`);
+  }
+  if (typeof execution.model !== 'string'
+    || !MODEL_ID_PATTERN.test(execution.model)
+    || utf8ByteLength(execution.model) > MODEL_ID_MAX) {
+    fail('invalid_format', `${path}.model`,
+      `${path}.model violates the model grammar ${MODEL_ID_PATTERN.source} (max ${MODEL_ID_MAX} bytes).`);
+  }
+  return Object.freeze({ kind: 'explicit', provider: execution.provider });
+}
+
 function extractWriterScopes(assignments) {
   const writerScopes = [];
   for (let i = 0; i < assignments.length; i += 1) {
@@ -671,12 +717,25 @@ export function classifyAssignmentSelectionV1(assignment) {
   if (!isPlainObject(assignment)) {
     fail('invalid_type', 'assignment', 'assignment must be a plain JSON data object.');
   }
-  if (!Object.hasOwn(assignment, 'execution')) return 'selection_resolution_required';
-  const execution = assignment.execution;
-  if (isPlainObject(execution) && Object.hasOwn(execution, 'profile')) {
-    return 'selection_resolution_required';
-  }
-  return 'dispatch_resolved';
+  // This public classifier accepts an assignment-shaped data snapshot, never
+  // a reflective object surface. Validate the assignment's complete closed
+  // own-key shape before deciding whether execution is absent, then read the
+  // already-proven enumerable data property through its descriptor. This
+  // keeps an accessor from firing and prevents a hidden or symbol-keyed
+  // execution value from being mistaken for true absence.
+  assertAllowedKeys(assignment, ASSIGNMENT_ALLOWED_KEYS, 'assignment');
+  const executionDescriptor = Object.getOwnPropertyDescriptor(assignment, 'execution');
+  // A truly absent execution remains the documented P05 selection deferral.
+  // Every PRESENT execution object is first validated through the exact
+  // shared validateExecution grammar: null, own undefined, empty, partial
+  // pairs, profile ambiguity, and unknown grammars fail closed at this
+  // public boundary instead of ever being classified. Deep assignment
+  // validation runs the identical contract before its summary reaches this
+  // classifier, so direct callers can no longer observe a state that the
+  // manifest boundary itself would have rejected.
+  if (!executionDescriptor) return 'selection_resolution_required';
+  const resolution = validateExecution(executionDescriptor.value, 'assignment.execution');
+  return resolution.kind === 'explicit' ? 'dispatch_resolved' : 'selection_resolution_required';
 }
 
 function extractSelectionResolution(assignments) {
