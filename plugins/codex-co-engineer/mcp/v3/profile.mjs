@@ -50,9 +50,19 @@ export const PROFILE_ROLES = Object.freeze(['review', 'implement', 'verify']);
 // Bounded requested-bytes model grammar mirrored from the assignment contract:
 // first character alphanumeric, then alphanumerics plus `._/:-`, at most 128
 // encoded UTF-8 bytes. Syntax and size only - no advertised-model membership
-// is enforced here or anywhere else in ProfileV1.
+// is enforced here or anywhere else in ProfileV1. A model identifier is an
+// opaque identifier, not a path, ref, command, or credential, so the exact
+// top-level `model` value is exempt from the generic semantic value scanners
+// below; those scanners still cover every other profile string at any depth,
+// and the grammar plus requested-byte bound remain the model's whole safety
+// contract, identical on both sides of the shared run vocabulary.
 export const PROFILE_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$/u;
 export const PROFILE_MODEL_ID_MAX_BYTES = 128;
+
+// The one exempt scan path: the top-level `model` field of a profile under
+// validation (`<prefix>.model`). Deeper or differently named paths never match,
+// so a non-string `model` container and every nested string stay fully scanned.
+const MODEL_SCAN_EXEMPT_PATHS = new Set(['profile.model']);
 
 /**
  * Deprecated informational compatibility data: the DSH model identifiers that
@@ -555,7 +565,12 @@ function scanValue(name, key, value) {
   }
 }
 
-function deepScanStrings(name, container, prefix) {
+// `exemptPaths` skips only the generic semantic value scan for exactly matching
+// field paths (today: the top-level opaque model identifier). It never skips
+// the walk itself: exempt values still count toward every structural bound,
+// still pass through the descriptor snapshot and static-data/identity-graph
+// checks, and any string at any other path is scanned as before.
+function deepScanStrings(name, container, prefix, exemptPaths = MODEL_SCAN_EXEMPT_PATHS) {
   const stack = [{ value: container, depth: 0, field: prefix }];
   const seen = new Set();
   let nodes = 0;
@@ -571,7 +586,7 @@ function deepScanStrings(name, container, prefix) {
       if (stringBytes > MAX_PROFILE_CATALOG_BYTES) {
         fail('profile_structure_too_complex', `Profile "${name}" exceeds the bounded string-data limit.`);
       }
-      scanValue(name, field, value);
+      if (!exemptPaths.has(field)) scanValue(name, field, value);
       continue;
     }
     if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
@@ -614,10 +629,13 @@ function requireModel(name, model, provider) {
     fail('invalid_profile_model_for_provider',
       `Profile "${name}" may name a model only beside one of ${PROFILE_PROVIDERS.join(', ')}.`);
   }
-  // One grammar for every exact provider: syntax and requested-byte size only.
-  // No static allowlist is consulted, so a pattern-valid model is accepted on
-  // every route even when no advertisement lists it yet.
-  if (typeof model !== 'string' || model.includes('..')
+  // One grammar for every exact provider, identical to the shared assignment
+  // authority: syntax and requested-byte size only. No static allowlist and no
+  // extra profile-only clause (such as a '..' traversal guard) is consulted, so
+  // a pattern-valid model is accepted exactly where the shared grammar accepts
+  // it - model identifiers are opaque, never parsed as paths, refs, commands,
+  // or credentials.
+  if (typeof model !== 'string'
     || !PROFILE_MODEL_ID_PATTERN.test(model)
     || Buffer.byteLength(model, 'utf8') > PROFILE_MODEL_ID_MAX_BYTES) {
     fail('invalid_profile_model',

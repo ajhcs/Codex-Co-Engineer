@@ -395,10 +395,12 @@ test('provider, model, and role fields validate against one bounded run grammar'
     // a profile names a selection only and makes no membership or
     // availability claim.
     const providerModels = new Map([
-      ['dsh', ['muse-spark-1.2-contributor', 'stealth/ox-alpha']],
-      ['grok', ['grok-4', 'grok-code-fast-1']],
-      ['cursor-local', ['composer-1', 'cursor_smoke_model']],
-      ['cursor-cloud', ['claude-sonnet-4-5']],
+      // Opaque grammar-valid identifiers load like any other model: model IDs
+      // are not paths, refs, commands, or credentials.
+      ['dsh', ['muse-spark-1.2-contributor', 'stealth/ox-alpha', 'a..b', 'sk-abcdefghijklmnop']],
+      ['grok', ['grok-4', 'grok-code-fast-1', 'refs/heads/model']],
+      ['cursor-local', ['composer-1', 'cursor_smoke_model', 'cmd:model']],
+      ['cursor-cloud', ['claude-sonnet-4-5', 'origin/model']],
     ]);
     for (const [provider, models] of providerModels) {
       for (const model of models) {
@@ -416,7 +418,7 @@ test('provider, model, and role fields validate against one bounded run grammar'
     const cases = [
       [{ schema: PROFILE_SCHEMA, provider: 'claude' }, 'unsupported_profile_provider'],
       [{ schema: PROFILE_SCHEMA, provider: 'DSH' }, 'unsupported_profile_provider'],
-      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'stealth/../../ox' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: '/absolute/model' }, 'invalid_profile_model'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: '-leading-hyphen' }, 'invalid_profile_model'],
       [{ schema: PROFILE_SCHEMA, provider: 'grok', model: '.leading-dot' }, 'invalid_profile_model'],
       [{ schema: PROFILE_SCHEMA, provider: 'cursor-cloud', model: `${'a_'.repeat(64)}x` }, 'invalid_profile_model'],
@@ -566,10 +568,12 @@ test('unknown keys are rejected and dangerous values never survive validation', 
     const cases = [
       ['credential key', { schema: PROFILE_SCHEMA, provider: 'dsh', api_key: 'x' }, 'profile_credential_key_rejected'],
       ['credential token', { schema: PROFILE_SCHEMA, provider: 'dsh', 'access-token': 'x' }, 'profile_credential_key_rejected'],
-      ['secret value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'sk-abcdefghijklmnop' }, 'profile_secret_value_rejected'],
-      ['env interpolation', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: '${DSH_MODEL}' }, 'profile_environment_value_rejected'],
-      ['shell value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'a; rm -rf' }, 'profile_shell_value_rejected'],
-      ['moving ref value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'refs/heads/main' }, 'profile_moving_ref_value_rejected'],
+      // The top-level model value is an opaque grammar-governed identifier and
+      // is exempt from the semantic scans; every other string stays covered.
+      ['secret value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'sk-abcdefghijklmnop' }, 'profile_secret_value_rejected'],
+      ['env interpolation', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: '${DSH_MODEL}' }, 'profile_environment_value_rejected'],
+      ['shell value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'a; rm -rf' }, 'profile_shell_value_rejected'],
+      ['moving ref value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'refs/heads/main' }, 'profile_moving_ref_value_rejected'],
     ];
     for (const [label, definition, code] of cases) {
       await write(definition);

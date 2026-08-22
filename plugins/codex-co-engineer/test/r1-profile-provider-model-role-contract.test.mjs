@@ -42,6 +42,7 @@ import { validateAssignmentManifestV1 } from '../mcp/v3/assignment-manifest.mjs'
 import {
   BOUNDARY_ACCEPTED_MODELS,
   HOSTILE_MODEL_CORPUS,
+  PARITY_ACCEPTED_MODELS,
   PROFILE_ROLE_FIXTURES,
   PROVIDER_MODEL_FIXTURES,
   assignmentExecutionFixture,
@@ -170,11 +171,44 @@ test('every exact provider accepts grammar-valid models with no membership enfor
       assert.doesNotThrow(() => validateProfileDefinition('probe', modelDefinition('dsh', model)));
     }
 
-    // Grammar boundaries land exactly on the mirrored byte bound.
+    // Grammar boundaries land exactly on the mirrored byte bound, and the
+    // assignment side accepts the exact same boundary strings.
     for (const model of BOUNDARY_ACCEPTED_MODELS) {
+      assert.ok(Buffer.byteLength(model, 'utf8') <= PROFILE_MODEL_ID_MAX_BYTES);
       for (const { provider } of PROVIDER_MODEL_FIXTURES) {
         assert.doesNotThrow(() => validateProfileDefinition('probe', modelDefinition(provider, model)));
-        assert.ok(Buffer.byteLength(model, 'utf8') <= PROFILE_MODEL_ID_MAX_BYTES);
+        assert.doesNotThrow(
+          () => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model)),
+          `assignment lanes must accept ${provider} at the same byte bound`,
+        );
+      }
+    }
+
+    // Shared opaque-identifier corpus: accepted IDENTICALLY by ProfileV1
+    // (directly and end-to-end) and by AssignmentManifestV1 run and verify
+    // lanes. Model identifiers are opaque - not paths, refs, commands, or
+    // credentials - so hostile-looking shapes stay grammar-valid on both
+    // sides with no profile-only or assignment-only extra clause.
+    for (const { model } of PARITY_ACCEPTED_MODELS) {
+      assert.ok(MODEL_ID_PATTERN.test(model), `${JSON.stringify(model)} must be grammar-valid`);
+      assert.ok(Buffer.byteLength(model, 'utf8') <= MODEL_ID_MAX);
+      for (const { provider } of PROVIDER_MODEL_FIXTURES) {
+        assert.doesNotThrow(
+          () => validateProfileDefinition('probe', modelDefinition(provider, model)),
+          `ProfileV1 must accept ${provider}/${JSON.stringify(model)}`,
+        );
+        await writeCatalog({ probe: modelDefinition(provider, model) });
+        const loaded = await loadProfiles(options);
+        assert.equal(findProfile(loaded, 'probe').definition.model, model,
+          `${provider} must load ${JSON.stringify(model)} end-to-end`);
+        assert.doesNotThrow(
+          () => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model)),
+          `run lanes must accept ${provider}/${JSON.stringify(model)}`,
+        );
+        assert.doesNotThrow(
+          () => validateAssignmentManifestV1(verifyAssignmentFixture(provider, model)),
+          `verify lanes must accept ${provider}/${JSON.stringify(model)}`,
+        );
       }
     }
   } finally {
@@ -182,20 +216,24 @@ test('every exact provider accepts grammar-valid models with no membership enfor
   }
 });
 
-test('the hostile model corpus fails typed on every provider, implied by the shared grammar alone', async () => {
+test('the hostile model corpus fails typed and identically on both sides of the contract', async () => {
   const { options, writeCatalog, cleanup } = await makeWorkspace();
   try {
     const explains = {
       pattern: (model) => !MODEL_ID_PATTERN.test(model),
-      traversal: (model) => MODEL_ID_PATTERN.test(model) && model.includes('..'),
-      bytes: (model) => MODEL_ID_PATTERN.test(model) && !model.includes('..')
+      // Documented for completeness and provably unfireable on its own: the
+      // grammar's character class is ASCII-only, so every pattern-valid
+      // identifier is at most 128 characters = at most 128 UTF-8 bytes. The
+      // mirrored byte bound stays as defense in depth; its exact boundary is
+      // exercised in BOUNDARY_ACCEPTED_MODELS.
+      bytes: (model) => MODEL_ID_PATTERN.test(model)
         && Buffer.byteLength(model, 'utf8') > MODEL_ID_MAX,
     };
     for (const { provider } of PROVIDER_MODEL_FIXTURES) {
       for (const { model, impliedBy } of HOSTILE_MODEL_CORPUS) {
         // The documented predicate must genuinely explain the rejection under
-        // the shared grammar, so profile grammar can never be stricter or
-        // looser than assignment-execution grammar.
+        // the shared grammar alone, so profile grammar can never be stricter
+        // or looser than assignment-execution grammar.
         assert.ok(explains[impliedBy](model),
           `${JSON.stringify(model)} rejection must be implied by ${impliedBy}`);
 
@@ -208,6 +246,17 @@ test('the hostile model corpus fails typed on every provider, implied by the sha
         await assert.rejects(() => loadProfiles(options),
           (error) => error.code === 'invalid_profile_model',
           `${provider} must reject ${JSON.stringify(model)} end-to-end`);
+
+        const rejectLane = (run, label) => assert.throws(run, (error) => error.code === 'invalid_format'
+          && error.path === 'assignments[0].execution.model', label);
+        rejectLane(
+          () => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model)),
+          `${provider} run lane must reject ${JSON.stringify(model)}`,
+        );
+        rejectLane(
+          () => validateAssignmentManifestV1(verifyAssignmentFixture(provider, model)),
+          `${provider} verify lane must reject ${JSON.stringify(model)}`,
+        );
       }
     }
   } finally {
@@ -215,11 +264,10 @@ test('the hostile model corpus fails typed on every provider, implied by the sha
   }
 });
 
-test('assignment lanes accept every profile-accepted fixture and the shared-corpus rejections', () => {
-  // Subset parity: ProfileV1 accepts a model only when the shared assignment
-  // grammar does. Its extra '..' guard is deliberate profile-layer hardening
-  // (preserved from the original contract), so traversal-shaped identifiers
-  // are the one documented direction where the profile is STRICTER.
+test('assignment lanes and profiles accept and reject the exact same model corpus', () => {
+  // Exact bidirectional parity: one shared grammar governs both sides, with no
+  // profile-only or assignment-only extra clause, so the accepted fixture set
+  // and the hostile corpus behave identically in both directions.
   for (const { provider, models } of PROVIDER_MODEL_FIXTURES) {
     for (const model of models) {
       assert.doesNotThrow(() => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model)),
@@ -231,53 +279,85 @@ test('assignment lanes accept every profile-accepted fixture and the shared-corp
         `verify lanes must accept ${provider}/${model} read-only`);
     }
   }
-  for (const { model, impliedBy } of HOSTILE_MODEL_CORPUS) {
+  for (const { model } of PARITY_ACCEPTED_MODELS) {
     for (const { provider } of PROVIDER_MODEL_FIXTURES) {
-      const runsExecution = () => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model));
-      const runsVerify = () => validateAssignmentManifestV1(verifyAssignmentFixture(provider, model));
+      assert.doesNotThrow(
+        () => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model)),
+        `${provider} must accept the shared opaque identifier ${JSON.stringify(model)}`,
+      );
+    }
+  }
+  for (const { model } of HOSTILE_MODEL_CORPUS) {
+    for (const { provider } of PROVIDER_MODEL_FIXTURES) {
       const expectInvalidFormat = (run, label) => assert.throws(
         run,
         (error) => error.code === 'invalid_format'
           && error.path === 'assignments[0].execution.model',
         label,
       );
-      if (impliedBy === 'traversal' && MODEL_ID_PATTERN.test(model)
-        && Buffer.byteLength(model, 'utf8') <= MODEL_ID_MAX) {
-        assert.doesNotThrow(runsExecution,
-          `shared grammar alone accepts ${JSON.stringify(model)}; the traversal guard is profile-layer`);
-        assert.doesNotThrow(runsVerify);
-        continue;
-      }
-      expectInvalidFormat(runsExecution, `${provider} execution must reject ${JSON.stringify(model)}`);
-      expectInvalidFormat(runsVerify, `${provider} verify lane must reject ${JSON.stringify(model)}`);
+      expectInvalidFormat(
+        () => validateAssignmentManifestV1(assignmentExecutionFixture(provider, model)),
+        `${provider} execution must reject ${JSON.stringify(model)}`,
+      );
+      expectInvalidFormat(
+        () => validateAssignmentManifestV1(verifyAssignmentFixture(provider, model)),
+        `${provider} verify lane must reject ${JSON.stringify(model)}`,
+      );
     }
   }
 });
 
-test('data-only value scans keep precedence over pattern-valid model strings', () => {
-  // These model strings satisfy the shared grammar, yet the defense-in-depth
-  // value scans must win on every widened route. Only scan classes expressible
-  // inside the grammar can be probed here (secret shapes, shell command words,
-  // moving-ref names); interpolation and shell metacharacters cannot occur in
-  // a pattern-valid identifier at all.
-  const cases = [
-    ['sk-abcdefghijklmnop', 'profile_secret_value_rejected'],
-    ['ghp_' + 'a'.repeat(20), 'profile_secret_value_rejected'],
-    ['cmd:model', 'profile_shell_value_rejected'],
-    ['zsh/model', 'profile_shell_value_rejected'],
-    ['refs/heads/model', 'profile_moving_ref_value_rejected'],
-    ['origin/model', 'profile_moving_ref_value_rejected'],
-    ['main', 'profile_moving_ref_value_rejected'],
+test('the top-level model identifier is exempt from semantic value scans; every other string stays scanned', () => {
+  // Model identifiers are opaque: the exact top-level `model` value answers to
+  // the shared grammar alone, so secret-, shell-, and ref-shaped identifiers
+  // are accepted exactly as the assignment side accepts them.
+  const opaqueCases = [
+    'sk-abcdefghijklmnop',
+    'ghp_' + 'a'.repeat(20),
+    'cmd:model',
+    'zsh/model',
+    'refs/heads/model',
+    'origin/model',
+    'main',
   ];
-  for (const [model, code] of cases) {
-    assert.ok(MODEL_ID_PATTERN.test(model), `${model} must be grammar-valid for this precedence check`);
+  for (const model of opaqueCases) {
+    assert.ok(MODEL_ID_PATTERN.test(model), `${model} must be grammar-valid for this exemption check`);
     for (const provider of ['dsh', 'cursor-cloud']) {
-      assert.throws(
+      assert.doesNotThrow(
         () => validateProfileDefinition('probe', modelDefinition(provider, model)),
-        expectCode(code, `${provider}/${model}`),
+        `${provider}/${model} is an opaque grammar-valid identifier`,
       );
     }
   }
+
+  // The exemption is one exact field path, never a value shape: every other
+  // string in the profile keeps failing closed with its dedicated code, and
+  // the generic scans keep precedence over unknown-key rejection.
+  const scannedCases = [
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'sk-abcdefghijklmnop' },
+      'profile_secret_value_rejected', 'unknown-key secret value'],
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: '${DSH_MODEL}' },
+      'profile_environment_value_rejected', 'unknown-key interpolation value'],
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'a; rm -rf' },
+      'profile_shell_value_rejected', 'unknown-key shell value'],
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'refs/heads/main' },
+      'profile_moving_ref_value_rejected', 'unknown-key moving-ref value'],
+    // A non-string `model` container is not the exempt path: nested strings
+    // under it are still scanned before the typed grammar failure.
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: { nested: 'sk-abcdefghijklmnop' } },
+      'profile_secret_value_rejected', 'nested value under a non-string model'],
+    // The exemption is path-exact, never key-name-exact: a key literally
+    // named `model` anywhere below the top level stays fully scanned.
+    [{ schema: PROFILE_SCHEMA, provider: 'dsh', note: { model: 'sk-abcdefghijklmnop' } },
+      'profile_secret_value_rejected', 'nested key named model under another field'],
+  ];
+  for (const [definition, code, label] of scannedCases) {
+    assert.throws(() => validateProfileDefinition('probe', definition), expectCode(code, label));
+  }
+  assert.throws(
+    () => validateProfileDefinition('probe', { schema: PROFILE_SCHEMA, provider: 'dsh', note: 'plain text' }),
+    expectCode('unknown_profile_field', 'an unscanned unknown key still fails closed'),
+  );
 });
 
 test('pairing and metadata errors keep their typed precedence', () => {

@@ -148,7 +148,10 @@ environment values, executables/argv/shell/command catalogs or templates,
 merge/push/create-PR or protected-ref authority, moving refs, direct-mode
 workspace configuration, or embedded prompt/result content fail closed with
 dedicated error codes, as do string values that look like secret material,
-environment interpolation, shell syntax, or a branch/ref name.
+environment interpolation, shell syntax, or a branch/ref name - except the
+grammar-governed top-level `model` identifier itself, which is an opaque
+identifier validated only by the bounded model grammar above, never parsed
+as a path, ref, command, or credential.
 
 Profiles only name selections. Resolution across assignments, defaults, and
 selection questions are resolver concerns; provider/model attestation happens
