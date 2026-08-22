@@ -13,7 +13,9 @@
 //     merge/push/create-PR-authority, replay/fallback, and direct-mode keys;
 //   - disjoint writer scopes across assignments (conservative static-prefix
 //     intersection; glob metacharacters terminate the comparable prefix);
-//   - the verified-decision return contract (artifact addressing mandatory);
+//   - the verified-decision return contract (artifact addressing mandatory)
+//     plus its sole optional field, the exact-boolean diagnostic-partial
+//     candidate authorization that is resolution-inert downstream;
 //   - mandatory composition with the deep assignment and policy validators.
 //
 // Deep AssignmentManifestV1 and RunPolicyV1 value semantics live in
@@ -99,7 +101,17 @@ export const ROOT_ALLOWED_KEYS = Object.freeze([
   'schema', 'run_id', 'repository', 'objective', 'assignments', 'policy', 'return_contract',
 ]);
 export const REPOSITORY_ALLOWED_KEYS = Object.freeze(['path', 'base_sha']);
-export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
+export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze([
+  'mode', 'include_artifact_refs', 'allow_diagnostic_partial_candidate',
+]);
+// The verified-decision return contract still requires exactly these two
+// keys. allow_diagnostic_partial_candidate is the sole OPTIONAL field: a
+// permission (never an obligation) for a later P35A diagnostic
+// incomplete_candidate. Absent and false both keep complete-only behavior,
+// and the submitted frozen form is preserved, so an explicit false remains
+// an own key and may digest differently from absence.
+export const RETURN_CONTRACT_REQUIRED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
+export const DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY = 'allow_diagnostic_partial_candidate';
 export const POLICY_ALLOWED_KEYS = Object.freeze([
   'max_concurrency', 'require_same_base', 'require_disjoint_writer_scopes',
   'allow_post_dispatch_fallback', 'allow_merge', 'allow_create_pr',
@@ -633,7 +645,7 @@ function validateReturnContract(returnContract) {
   const path = 'return_contract';
   if (!isPlainObject(returnContract)) fail('invalid_type', path, 'return_contract must be an object.');
   assertAllowedKeys(returnContract, RETURN_CONTRACT_ALLOWED_KEYS, path);
-  for (const key of RETURN_CONTRACT_ALLOWED_KEYS) {
+  for (const key of RETURN_CONTRACT_REQUIRED_KEYS) {
     if (!Object.hasOwn(returnContract, key)) fail('missing_key', `${path}.${key}`, `${path}.${key} is required.`);
   }
   if (returnContract.mode !== 'verified_decision') {
@@ -642,6 +654,20 @@ function validateReturnContract(returnContract) {
   if (returnContract.include_artifact_refs !== true) {
     fail('invalid_format', `${path}.include_artifact_refs`,
       'return_contract.include_artifact_refs must be explicitly true; evidence stays artifact-addressable.');
+  }
+  assertDiagnosticPartialAuthorization(returnContract);
+}
+
+// Exact primitive boolean, no aliases, no defaults, no coercion. The flag is
+// resolution-inert: it never enters assignment prompts, ChildEnvelopeV1
+// bytes, or child-envelope digests, and P35A/P36 alone own any later
+// candidate status or disposition.
+function assertDiagnosticPartialAuthorization(returnContract) {
+  const path = `return_contract.${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}`;
+  if (!Object.hasOwn(returnContract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)) return;
+  if (typeof returnContract[DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY] !== 'boolean') {
+    fail('invalid_type', path,
+      `${path} must be an exact boolean; absent or false keeps complete-only behavior and no coercion is performed.`);
   }
 }
 
