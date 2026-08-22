@@ -4,6 +4,15 @@
 
 ### Added
 
+- **ProfileV1 optional primitive-true `default` flag.** Profile definitions
+  accept one optional top-level `default` field as prerequisite metadata for
+  later run-resolution work. When present it must be the primitive boolean
+  `true` exactly (`false`, `null`, numbers, strings, objects, and arrays fail
+  typed with `invalid_profile_default`); absence is ordinary and changes
+  nothing. The flag is bound into validated canonical data and provenance
+  digests but confers no authority in this release: exact-name lookup,
+  precedence, digests, and error ordering are unchanged, a profile named
+  `default` has no authority by name, and P05 selection remains out of scope.
 - **ProfileV1 owner and project profile loading.** Adds the data-only
   profile catalog: explicit project
   (`<repository>/.codex/co-engineer-profiles.json`) and owner

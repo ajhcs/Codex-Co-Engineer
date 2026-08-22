@@ -432,7 +432,7 @@ function parseCatalog(text, label) {
 }
 
 export const ALLOWED_PROFILE_FIELDS = Object.freeze([
-  'schema', 'provider', 'model', 'role', 'expected_duration_ms', 'policy',
+  'schema', 'provider', 'model', 'role', 'expected_duration_ms', 'policy', 'default',
 ]);
 export const ALLOWED_PROFILE_POLICY_FIELDS = Object.freeze(['pre_dispatch_provider_preference']);
 export const MAX_PROVIDER_PREFERENCE_ENTRIES = PROFILE_PROVIDERS.length;
@@ -678,6 +678,19 @@ function requireProviderPreference(name, preference) {
   return [...values];
 }
 
+// Optional prerequisite metadata only: `default: true` marks an
+// owner-authored candidate default for later run-resolution work. Absence is
+// ordinary, the value must be primitive `true` exactly, and the flag confers
+// no authority here - lookup stays exact-name, a profile named "default" has
+// no authority by name, and selection itself stays a resolver concern.
+function requireDefaultFlag(name, value) {
+  if (value !== true) {
+    fail('invalid_profile_default',
+      `Profile "${name}" default must be the primitive boolean true when present.`);
+  }
+  return true;
+}
+
 // Structural validation shared by loading and later linting. Field-level
 // policy/provider/model validation is layered on top of this check.
 export function validateProfileDefinition(name, raw) {
@@ -707,6 +720,7 @@ export function validateProfileDefinition(name, raw) {
   if (has('role')) canonical.role = requireRole(name, descriptors.role.value);
   if (has('expected_duration_ms')) canonical.expected_duration_ms = requireExpectedDuration(name, descriptors.expected_duration_ms.value);
   if (has('policy')) canonical.policy = requirePolicy(name, descriptors.policy.value);
+  if (has('default')) canonical.default = requireDefaultFlag(name, descriptors.default.value);
   return deepFreezeData(canonical);
 }
 
