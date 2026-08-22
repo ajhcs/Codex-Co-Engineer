@@ -34,12 +34,9 @@ import {
   ASSIGNMENT_ID_PATTERN,
   COMMAND_ID_PATTERN,
   EVIDENCE_KINDS,
-  EXECUTION_ALLOWED_KEYS,
   MAX_TIMEOUT_MS,
   MIN_DURATION_MS,
   MIN_TIMEOUT_MS,
-  MODEL_ID_MAX,
-  MODEL_ID_PATTERN,
   PARAM_KEY_PATTERN,
   PARAM_VALUE_MAX_BYTES,
   PARAMS_MAX_KEYS,
@@ -51,7 +48,6 @@ import {
   SHA40_PATTERN,
   assertAllowedKeys,
   assertBoundedText,
-  assertProfileName,
   assertDenseJsonArray,
   assertExpectedDurationMs,
   assertJsonDataObject,
@@ -59,45 +55,11 @@ import {
   assertWriteScopePatterns,
   isPlainObject,
   utf8ByteLength,
+  validateExecution,
 } from './run-manifest.mjs';
 
 function fail(code, path, message) {
   throw new RunContractV1Error(code, path, message);
-}
-
-function validateExecution(execution, path) {
-  if (!isPlainObject(execution)) fail('invalid_type', path, `${path} must be an object.`);
-  assertAllowedKeys(execution, EXECUTION_ALLOWED_KEYS, path);
-  const hasProfile = Object.hasOwn(execution, 'profile');
-  const hasProvider = Object.hasOwn(execution, 'provider');
-  const hasModel = Object.hasOwn(execution, 'model');
-  if (hasProfile && (hasProvider || hasModel)) {
-    fail('execution_ambiguous', path,
-      `${path} must carry exactly one resolution choice: a named profile OR an explicit provider/model pair, never both.`);
-  }
-  if (!hasProfile && !hasProvider && !hasModel) {
-    fail('execution_missing', path, `${path} requires either a named profile or an explicit provider/model pair.`);
-  }
-  if (hasProfile) {
-    if (typeof execution.profile !== 'string') {
-      fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
-    }
-    assertProfileName(execution.profile, `${path}.profile`);
-    return Object.freeze({ kind: 'profile', provider: null });
-  }
-  if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
-  if (!hasModel) fail('missing_key', `${path}.model`, `${path}.model is required when no profile is named.`);
-  if (!PROVIDERS.includes(execution.provider)) {
-    fail('unknown_provider', `${path}.provider`,
-      `${path}.provider is not one of ${PROVIDERS.join(', ')}.`);
-  }
-  if (typeof execution.model !== 'string'
-    || !MODEL_ID_PATTERN.test(execution.model)
-    || utf8ByteLength(execution.model) > MODEL_ID_MAX) {
-    fail('invalid_format', `${path}.model`,
-      `${path}.model violates the model grammar ${MODEL_ID_PATTERN.source} (max ${MODEL_ID_MAX} bytes).`);
-  }
-  return Object.freeze({ kind: 'explicit', provider: execution.provider });
 }
 
 export function validateResolvedStartingRefV1(assignment, provider, path = 'assignment') {

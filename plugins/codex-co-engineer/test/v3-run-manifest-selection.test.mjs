@@ -21,9 +21,11 @@ import {
   BOUND_ROOT_PROFILE_KEY,
   PROFILE_NAME_MAX,
   PROFILE_NAME_PATTERN,
+  PROVIDERS,
   RunContractV1Error,
   classifyAssignmentSelectionV1,
 } from '../mcp/v3/run-manifest.mjs';
+import { validateAssignmentManifestV1 } from '../mcp/v3/assignment-manifest.mjs';
 import {
   parseRunManifestV1,
   validateCompleteRunManifestV1,
@@ -117,6 +119,16 @@ function violationOf(build) {
   assert.fail('expected the mutated manifest to be rejected');
 }
 
+function directViolationOf(action) {
+  try {
+    action();
+  } catch (error) {
+    assert.ok(error instanceof RunContractV1Error, `expected RunContractV1Error, got ${error}`);
+    return error;
+  }
+  assert.fail('expected the direct contract call to be rejected');
+}
+
 test('assignment execution may be truly absent and classifies as selection_resolution_required', () => {
   const manifest = singleLane((assignment) => { delete assignment.execution; });
   const summary = validateCompleteRunManifestV1(manifest);
@@ -174,6 +186,241 @@ test('every hostile PRESENT execution form keeps failing closed exactly as befor
   // Absence remains distinct from every rejection above: removing the key
   // validates the very manifest that every present hostile form fails.
   validateCompleteRunManifestV1(singleLane((assignment) => { delete assignment.execution; }));
+});
+
+// P02R3 repair: classifyAssignmentSelectionV1 is public, so every PRESENT
+// execution object must clear the exact shared validateExecution grammar
+// before classification. Direct malformed calls fail closed with the
+// repository's typed validation error and can never observe dispatch_resolved
+// or selection_resolution_required; valid explicit, valid profile-only, and
+// truly omitted executions keep their pinned states exactly.
+test('direct classifier calls fail closed on every hostile PRESENT execution form', () => {
+  const hostile = [
+    ['null execution', () => null, 'invalid_type', 'assignment.execution'],
+    ['own undefined execution', () => undefined, 'invalid_type', 'assignment.execution'],
+    ['array execution', () => [], 'invalid_type', 'assignment.execution'],
+    ['string execution', () => 'dsh', 'invalid_type', 'assignment.execution'],
+    ['number execution', () => 42, 'invalid_type', 'assignment.execution'],
+    ['empty execution object', () => ({}), 'execution_missing', 'assignment.execution'],
+    ['partial provider only', () => ({ provider: 'dsh' }), 'missing_key',
+      'assignment.execution.model'],
+    ['partial model only', () => ({ model: 'stealth/ox-alpha' }), 'missing_key',
+      'assignment.execution.provider'],
+    ['own undefined provider', () => ({ provider: undefined, model: 'stealth/ox-alpha' }),
+      'unknown_provider', 'assignment.execution.provider'],
+    ['unknown provider', () => ({ provider: 'sky-net', model: 'x' }), 'unknown_provider',
+      'assignment.execution.provider'],
+    ['bad model grammar', () => ({ provider: 'dsh', model: 'stealth ox' }), 'invalid_format',
+      'assignment.execution.model'],
+    ['profile plus provider', () => ({ profile: 'fast-lane', provider: 'dsh' }),
+      'execution_ambiguous', 'assignment.execution'],
+    ['profile plus model', () => ({ profile: 'fast-lane', model: 'stealth/ox-alpha' }),
+      'execution_ambiguous', 'assignment.execution'],
+    ['inline profile object', () => ({ profile: { name: 'fast' } }), 'invalid_type',
+      'assignment.execution.profile'],
+    ['unknown profile grammar', () => ({ profile: '../escape' }), 'invalid_format',
+      'assignment.execution.profile'],
+    ['empty profile name', () => ({ profile: '' }), 'invalid_format',
+      'assignment.execution.profile'],
+    ['forbidden fallback key', () => ({ provider: 'dsh', model: 'm', fallback_provider: 'x' }),
+      'replay_or_fallback_denied', 'assignment.execution.fallback_provider'],
+    ['symbol-keyed execution', () => {
+      const execution = { provider: 'dsh', model: 'm' };
+      execution[Symbol('provider')] = 'dsh';
+      return execution;
+    }, 'invalid_object', 'assignment.execution'],
+    ['non-enumerable model', () => {
+      const execution = { provider: 'dsh' };
+      Object.defineProperty(execution, 'model', { value: 'm', enumerable: false });
+      return execution;
+    }, 'invalid_object', 'assignment.execution.model'],
+    ['exotic prototype', () => Object.assign(Object.create({ injected: true }), {
+      provider: 'dsh', model: 'm',
+    }), 'invalid_type', 'assignment.execution'],
+    ['cyclic self reference', () => {
+      const execution = { provider: 'dsh', model: 'm' };
+      execution.self = execution;
+      return execution;
+    }, 'unknown_key', 'assignment.execution.self'],
+  ];
+  for (const [name, buildExecution, code, expectedPath] of hostile) {
+    const assignment = reviewer('lane-0', 'explicit');
+    assignment.execution = buildExecution();
+    let classifierError;
+    try {
+      const state = classifyAssignmentSelectionV1(assignment);
+      assert.fail(`${name}: direct call returned ${state} instead of failing closed`);
+    } catch (error) {
+      classifierError = error;
+    }
+    assert.ok(classifierError instanceof RunContractV1Error,
+      `${name}: expected RunContractV1Error, got ${classifierError}`);
+    assert.equal(classifierError.code, code, name);
+    assert.equal(classifierError.path, expectedPath, name);
+
+    // Exact-contract proof: the deep AssignmentManifestV1 validator raises the
+    // identical code and message for the same complete-but-hostile lane, so
+    // the classifier reuses validateExecution instead of a second grammar.
+    // Paths differ only by the envelope's assignments[<index>] prefix.
+    let deepError;
+    try {
+      validateAssignmentManifestV1(assignment);
+      assert.fail(`${name}: deep assignment validation unexpectedly passed`);
+    } catch (error) {
+      deepError = error;
+    }
+    assert.equal(deepError.code, classifierError.code, name);
+    assert.equal(
+      deepError.message.replaceAll('assignments[0].', 'assignment.'),
+      classifierError.message.replaceAll('assignments[0].', 'assignment.'),
+      name,
+    );
+  }
+});
+
+test('direct classifier keeps the valid explicit/profile/omitted matrix exact', () => {
+  // Every provider in the closed vocabulary classifies identically: the
+  // explicit pair is dispatch-resolved regardless of which provider it names.
+  for (const provider of PROVIDERS) {
+    const assignment = reviewer('lane-0', 'explicit');
+    assignment.execution = { provider, model: 'unit/model' };
+    assert.equal(classifyAssignmentSelectionV1(assignment), 'dispatch_resolved', provider);
+  }
+
+  // Profile-only lanes stay selection_resolution_required, including the
+  // exact 64-character grammar boundary.
+  for (const profile of ['fast-lane', 'a', `${'a'.repeat(PROFILE_NAME_MAX - 2)}.9`]) {
+    const assignment = reviewer('lane-0', 'profile');
+    assignment.execution = { profile };
+    assert.equal(classifyAssignmentSelectionV1(assignment),
+      'selection_resolution_required', profile);
+  }
+
+  // A truly absent execution remains the documented P05 deferral.
+  const omitted = reviewer('lane-0', 'omitted');
+  assert.equal(Object.hasOwn(omitted, 'execution'), false);
+  assert.equal(classifyAssignmentSelectionV1(omitted), 'selection_resolution_required');
+
+  // Own undefined is PRESENT and hostile: absence is keyed absence only.
+  const ownUndefined = reviewer('lane-0', 'explicit');
+  ownUndefined.execution = undefined;
+  assert.equal(Object.hasOwn(ownUndefined, 'execution'), true);
+  assert.throws(() => classifyAssignmentSelectionV1(ownUndefined), RunContractV1Error);
+
+  // Frozen data and null-prototype JSON objects stay classifiable data.
+  const frozen = reviewer('lane-0', 'explicit');
+  frozen.execution = Object.freeze({ provider: 'dsh', model: 'stealth/ox-alpha' });
+  assert.equal(classifyAssignmentSelectionV1(frozen), 'dispatch_resolved');
+
+  const nullProto = reviewer('lane-0', 'profile');
+  nullProto.execution = Object.assign(Object.create(null), { profile: 'fast-lane' });
+  assert.equal(classifyAssignmentSelectionV1(nullProto), 'selection_resolution_required');
+});
+
+test('direct classifier rejects non-object assignment arguments at the typed boundary', () => {
+  for (const [name, value] of [['null', null], ['number', 42], ['string', 'lane-0'],
+    ['array', []], ['boolean', true]]) {
+    let caught;
+    try {
+      const state = classifyAssignmentSelectionV1(value);
+      assert.fail(`${name}: direct call returned ${state}`);
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof RunContractV1Error, `${name}: ${caught}`);
+    assert.equal(caught.code, 'invalid_type', name);
+    assert.equal(caught.path, 'assignment', name);
+  }
+});
+
+test('direct classifier validates the closed assignment surface before reading execution', () => {
+  let executionReads = 0;
+  const accessor = reviewer('lane-0', 'explicit');
+  delete accessor.execution;
+  Object.defineProperty(accessor, 'execution', {
+    enumerable: true,
+    get() {
+      executionReads += 1;
+      throw new Error('TOP_SECRET_GETTER');
+    },
+  });
+  const accessorError = directViolationOf(() => classifyAssignmentSelectionV1(accessor));
+  assert.equal(accessorError.code, 'invalid_object');
+  assert.equal(accessorError.path, 'assignment.execution');
+  assert.equal(executionReads, 0);
+  assert.doesNotMatch(accessorError.message, /TOP_SECRET_GETTER/u);
+
+  const symbolKeyed = reviewer('lane-0', 'omitted');
+  symbolKeyed[Symbol('execution')] = { provider: 'dsh', model: 'stealth/ox-alpha' };
+  const symbolError = directViolationOf(() => classifyAssignmentSelectionV1(symbolKeyed));
+  assert.equal(symbolError.code, 'invalid_object');
+  assert.equal(symbolError.path, 'assignment');
+
+  const hidden = reviewer('lane-0', 'explicit');
+  const execution = hidden.execution;
+  delete hidden.execution;
+  Object.defineProperty(hidden, 'execution', { value: execution, enumerable: false });
+  const hiddenError = directViolationOf(() => classifyAssignmentSelectionV1(hidden));
+  assert.equal(hiddenError.code, 'invalid_object');
+  assert.equal(hiddenError.path, 'assignment.execution');
+
+  const unknown = reviewer('lane-0', 'omitted');
+  unknown.unexpected = true;
+  const unknownError = directViolationOf(() => classifyAssignmentSelectionV1(unknown));
+  assert.equal(unknownError.code, 'unknown_key');
+  assert.equal(unknownError.path, 'assignment.unexpected');
+});
+
+test('hostile direct executions are rejected by reflection alone without executing traps', () => {
+  let trapReads = 0;
+  const proxied = reviewer('lane-0', 'explicit');
+  proxied.execution = new Proxy({ provider: 'dsh', model: 'stealth/ox-alpha' }, {
+    get(target, key) { trapReads += 1; return target[key]; },
+  });
+  let proxyError;
+  try {
+    classifyAssignmentSelectionV1(proxied);
+    assert.fail('proxied execution was classified instead of rejected');
+  } catch (error) {
+    proxyError = error;
+  }
+  assert.ok(proxyError instanceof RunContractV1Error);
+  assert.equal(proxyError.code, 'invalid_type');
+  assert.equal(proxyError.path, 'assignment.execution');
+  assert.equal(trapReads, 0);
+  assert.ok(utilTypes.isProxy(proxied.execution));
+
+  let getterCalls = 0;
+  const accessor = reviewer('lane-0', 'explicit');
+  accessor.execution = {};
+  Object.defineProperty(accessor.execution, 'provider', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'dsh'; },
+  });
+  let accessorError;
+  try {
+    classifyAssignmentSelectionV1(accessor);
+    assert.fail('accessor execution was classified instead of rejected');
+  } catch (error) {
+    accessorError = error;
+  }
+  assert.equal(accessorError.code, 'invalid_object');
+  assert.equal(getterCalls, 0);
+});
+
+test('direct classification agrees with the validated manifest summary for every lane kind', () => {
+  const kinds = ['explicit', 'profile', 'omitted'];
+  const manifest = run(kinds.map((kind, index) => reviewer(`lane-${index}`, kind)));
+  const summary = validateCompleteRunManifestV1(manifest);
+  kinds.forEach((kind, index) => {
+    const id = `lane-${index}`;
+    const direct = classifyAssignmentSelectionV1(manifest.assignments[index]);
+    const summarized = [...summary.selection_resolution_required_assignment_ids].includes(id);
+    assert.equal(direct === 'selection_resolution_required', summarized,
+      `${kind}: direct=${direct} summary=${summarized}`);
+    assert.equal(direct, kind === 'explicit' ? 'dispatch_resolved'
+      : 'selection_resolution_required', kind);
+  });
 });
 
 test('the optional root profile binds when valid and stays optional when absent', () => {
@@ -358,6 +605,9 @@ test('proxy, getter, symbol, non-enumerable, exotic, and cyclic inputs fail clos
   assert.equal(proxyError.code, 'invalid_type');
   assert.equal(proxyError.path, '$.assignments[0].execution');
   assert.ok(utilTypes.isProxy(proxiedExecution.assignments[0].execution));
+  // The instrumented proxy is the submitted object: rejection by reflection
+  // alone means every counted trap stayed silent.
+  assert.equal(trapReads, 0);
 
   // Enumerable accessor masquerading as provider: never invoked.
   let getterCalls = 0;
