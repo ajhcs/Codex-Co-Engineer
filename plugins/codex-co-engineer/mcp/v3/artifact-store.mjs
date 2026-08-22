@@ -80,12 +80,22 @@
 // operating-system error string. Errors carry stable codes from a closed
 // vocabulary plus fixed validator-style field labels.
 //
+// A narrow additive serialized range-read hook (readStoredSanitizedRangeV1)
+// exists so the P10 model-facing reader can, in one store operation,
+// no-follow open a regular single-link sanitized artifact, re-validate
+// sidecar/ref/identity/size/digest, hash the whole file in fixed chunks
+// while retaining only the requested bounded range, and prove before/after
+// stability. The hook never returns raw evidence, never buffers the whole
+// artifact, never echoes roots/paths/OS errors, and does not change
+// publish, verify, or audit. The model-facing contract, wire cap, and
+// truncation metadata live in artifact-reader.mjs.
+//
 // Out of scope and deliberately unclaimed: P09 sanitization/transformation,
-// the P10 model-facing bounded reader, the P13 evidence bundle, cleanup and
-// garbage collection of any kind, scheduler/provider/supervisor wiring, and
-// protected references. A store left torn by a crash stays torn: reopening,
-// publishing, verifying, or auditing it fails closed, and only an operator
-// action outside this module may remove anything.
+// MCP/provider/supervisor wiring of the reader, the P13 evidence bundle,
+// cleanup and garbage collection of any kind, and protected references. A
+// store left torn by a crash stays torn: reopening, publishing, verifying,
+// auditing, or range-reading it fails closed, and only an operator action
+// outside this module may remove anything.
 
 import { Buffer as NodeBuffer } from 'node:buffer';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -169,6 +179,9 @@ export const MAX_ARTIFACT_STORE_AUDIT_FILES = 1024;
 export const MAX_ARTIFACT_STORE_AUDIT_BYTES = 67_108_864;
 export const ARTIFACT_STORE_INGEST_CHUNK_BYTES = 131_072;
 export const ARTIFACT_STORE_MAX_DEPTH = ARTIFACT_PATH_MAX_SEGMENTS;
+// Hard cap on selected bytes retained by the sanitized range-read hook.
+// The P10 reader may apply a tighter wire/response cap on top.
+export const ARTIFACT_STORE_RANGE_READ_MAX_BYTES = 8_192;
 
 // Private unpredictable same-directory temporaries. The name grammar is
 // reserved: no artifact path may look like a temporary, so verification can
@@ -202,6 +215,7 @@ const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
 const REFLECT_HAS = Reflect.has;
+const REFLECT_APPLY = Reflect.apply;
 const ARRAY_BUFFER_IS_VIEW = ArrayBuffer.isView;
 const IS_PROXY = utilTypes.isProxy;
 const IS_ARRAY_BUFFER = utilTypes.isArrayBuffer;
@@ -213,6 +227,8 @@ const SYMBOL_ASYNC_ITERATOR = Symbol.asyncIterator;
 
 const UINT8ARRAY_PROTOTYPE = Uint8Array.prototype;
 const BUFFER_PROTOTYPE = Buffer.prototype;
+const BUFFER_TO_STRING = BUFFER_PROTOTYPE.toString;
+const UINT8ARRAY_SET = UINT8ARRAY_PROTOTYPE.set;
 const OBJECT_PROTOTYPE = Object.prototype;
 const ASYNC_GENERATOR_PROTOTYPE = OBJECT_GET_PROTOTYPE_OF(
   Object.getPrototypeOf((async function* () {}).prototype),
@@ -929,6 +945,139 @@ async function verifyLocation(rootPath, snapshot) {
   return locations;
 }
 
+function assertIntrinsicNonNegativeInteger(value, field, min, max) {
+  if (typeof value !== 'number' || !NUMBER_IS_SAFE_INTEGER(value)) {
+    failStore('invalid_type', field,
+      `${field} must be an intrinsic safe integer.`);
+  }
+  if (value < min || value > max) {
+    failStore('out_of_range', field,
+      `${field} must be an integer in ${min}..${max}.`);
+  }
+  return value;
+}
+
+// Hash one published sanitized artifact in fixed chunks, retain only
+// [offset, offset+maxBytes), and prove the file was a regular single-link
+// entry whose identity, size, and digest were stable across the read.
+// The selected window is copied into a buffer of at most maxBytes; the
+// rest of the file is hashed and discarded.
+async function readSanitizedRangePrepared(root, snapshot, offset, maxBytes) {
+  const locations = namespaceLocations(root.path, snapshot.artifact_class, snapshot.relative_path);
+  const metaOpened = await readBoundedFile(locations.metaTarget, MAX_ARTIFACT_STORE_META_BYTES, 'meta');
+  if (metaOpened === null) {
+    const probe = await openStoredFile(locations.contentTarget);
+    if (probe !== null) {
+      await probe.close().catch(() => {});
+      failStore('artifact_torn_publication', 'content',
+        'Content exists without its sidecar; the publication is torn.');
+    }
+    failStore('artifact_not_found', 'artifact_ref', 'No stored artifact exists for that reference.');
+  }
+  const storedSnapshot = parseMetaDocument(metaOpened.bytes, snapshot.artifact_class,
+    snapshot.relative_path, 'meta');
+  if (canonicalSnapshotText(storedSnapshot) !== canonicalSnapshotText(snapshot)) {
+    failStore(classifyExistingConflict(storedSnapshot, snapshot), 'artifact_ref',
+      'A different artifact already occupies this location.');
+  }
+  if (storedSnapshot.artifact_class !== 'sanitized') {
+    failStore('raw_artifact_denied', 'artifact_ref.artifact_class',
+      'Stored raw evidence is not returned by the sanitized range reader.');
+  }
+
+  const cap = maxByteLengthForClass(storedSnapshot.artifact_class);
+  const opened = await openPublishedContent(locations.contentTarget, cap);
+  if (opened === null) {
+    failStore('artifact_torn_publication', 'content',
+      'A sidecar exists without content; the publication is torn.');
+  }
+  try {
+    const before = await opened.handle.stat();
+    assertRegularUnsharedFile(before, 'content');
+    const size = Number(before.size);
+    if (!NUMBER_IS_SAFE_INTEGER(size) || size !== storedSnapshot.byte_length) {
+      failStore('artifact_length_mismatch', 'content',
+        'Stored content length does not match the declared byte length.');
+    }
+    if (offset > size) {
+      failStore('out_of_range', 'offset',
+        'The requested range offset is past the end of the stored artifact.');
+    }
+    const remaining = size - offset;
+    const take = maxBytes < remaining ? maxBytes : remaining;
+    const selected = BUFFER_ALLOC(take);
+    const hash = CREATE_HASH('sha256');
+    let received = 0;
+    let filled = 0;
+    const chunk = BUFFER_ALLOC(ARTIFACT_STORE_INGEST_CHUNK_BYTES);
+    while (true) {
+      let read;
+      try {
+        read = await opened.handle.read(chunk, 0, chunk.byteLength, null);
+      } catch {
+        failStore('artifact_entry_unsafe', 'content', 'Stored artifact bytes could not be read safely.');
+      }
+      if (read.bytesRead === 0) break;
+      received += read.bytesRead;
+      if (received > cap) {
+        failStore('artifact_entry_unsafe', 'content',
+          `Stored content exceeds the ${cap}-byte class cap.`);
+      }
+      const view = chunk.subarray(0, read.bytesRead);
+      hash.update(view);
+      if (take > 0) {
+        const chunkStart = received - read.bytesRead;
+        const selEnd = offset + take;
+        const copyFrom = chunkStart > offset ? chunkStart : offset;
+        const chunkEnd = chunkStart + read.bytesRead;
+        const copyTo = chunkEnd < selEnd ? chunkEnd : selEnd;
+        if (copyTo > copyFrom) {
+          const src = copyFrom - chunkStart;
+          const dest = copyFrom - offset;
+          const len = copyTo - copyFrom;
+          UINT8ARRAY_SET.call(selected, view.subarray(src, src + len), dest);
+          filled += len;
+        }
+      }
+    }
+    if (received !== size || filled !== take) {
+      failStore('artifact_length_mismatch', 'content',
+        'Stored content length does not match the declared byte length.');
+    }
+    const digest = hash.digest('hex');
+    if (!digestsMatch(digest, storedSnapshot.sha256)) {
+      failStore('artifact_digest_mismatch', 'content',
+        'Stored content does not hash to the declared SHA-256 digest.');
+    }
+    const afterHandle = await opened.handle.stat();
+    const afterPath = await lstat(locations.contentTarget).catch(() => undefined);
+    if (afterPath === undefined
+      || !sameIdentity(before, afterHandle)
+      || !sameIdentity(before, afterPath)
+      || Number(afterHandle.size) !== Number(before.size)
+      || Number(afterPath.size) !== Number(before.size)
+      || Number(afterHandle.nlink) !== Number(before.nlink)
+      || Number(afterPath.nlink) !== 1
+      || Number(afterHandle.mode) !== Number(before.mode)
+      || Number(afterPath.mode) !== Number(before.mode)) {
+      failStore('artifact_torn_publication', 'content',
+        'The stored document changed while it was read.');
+    }
+    const encoded = REFLECT_APPLY(BUFFER_TO_STRING, selected, ['base64']);
+    return freezeData({
+      artifact_ref: storedSnapshot,
+      byte_length: received,
+      sha256: digest,
+      offset,
+      selected_byte_length: take,
+      selected_encoding: 'base64',
+      selected_content: encoded,
+    });
+  } finally {
+    await opened.handle.close().catch(() => {});
+  }
+}
+
 // ---- Bounded enumeration for audit. --------------------------------------------
 
 async function listDirectoryEntries(directory, field) {
@@ -1460,6 +1609,20 @@ export async function verifyStoredArtifactsV1(store, refInputs) {
   return freezeData(verdicts);
 }
 
+export async function readStoredSanitizedRangeV1(store, refInput, offset, maxBytes) {
+  const handle = assertStoreHandle(store);
+  const snapshot = parseArtifactRefV1(refInput, 'artifact_ref');
+  if (snapshot.artifact_class !== 'sanitized') {
+    failStore('raw_artifact_denied', 'artifact_ref.artifact_class',
+      'The bounded reader accepts only sanitized artifacts; raw evidence is owner-only.');
+  }
+  const start = assertIntrinsicNonNegativeInteger(offset, 'offset', 0,
+    MAX_SANITIZED_ARTIFACT_BYTE_LENGTH);
+  const window = assertIntrinsicNonNegativeInteger(maxBytes, 'max_bytes', 0,
+    ARTIFACT_STORE_RANGE_READ_MAX_BYTES);
+  return handle.internalOperate((root) => readSanitizedRangePrepared(root, snapshot, start, window));
+}
+
 export async function auditArtifactStoreV1(store) {
   const handle = assertStoreHandle(store);
   return handle.internalOperate(async (root) => {
@@ -1503,4 +1666,5 @@ capturedFreeze(openArtifactStoreV1);
 capturedFreeze(publishArtifactV1);
 capturedFreeze(verifyStoredArtifactV1);
 capturedFreeze(verifyStoredArtifactsV1);
+capturedFreeze(readStoredSanitizedRangeV1);
 capturedFreeze(auditArtifactStoreV1);
