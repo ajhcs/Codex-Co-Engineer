@@ -17,6 +17,11 @@
 //   - live progress, detailed events, same-session reply identity,
 //     cancellation confirmation, and restart reattach are supported exactly
 //     where Grok ACP supports them, with stale identities failing closed;
+//   - completed, failed, cancelled, cancel_confirmed, and already_terminal
+//     latch process-local terminal evidence; later reconcile stays terminal
+//     and later cancel is already_terminal with no further transport cancel.
+//     cancel_requested stays nonterminal. Blocked-preflight receipts are
+//     validated, then provider detail is replaced with a fixed local pair;
 //   - event pages, text, counts, cursors, timings, and diagnostics are capped;
 //     envelope/prompt content is dispatch evidence and must not enter
 //     telemetry or driver detail messages.
@@ -172,6 +177,18 @@ const POST_SPAWN_ERROR_CODES = capturedFreeze([
   'dispatch_ack_missing', 'transport_exception', 'transport_lost', 'transport_timeout',
 ]);
 const TERMINAL_OBSERVE_STATUSES = capturedFreeze(['completed', 'failed', 'cancelled']);
+const TERMINAL_CANCEL_OUTCOMES = capturedFreeze(['cancel_confirmed', 'already_terminal']);
+const TERMINAL_LATCH_STATES = capturedFreeze([
+  'terminal', 'cancel_confirmed', 'already_terminal',
+]);
+const POSSIBLE_SEND_STATES = capturedFreeze([
+  'spawned', 'dispatch_uncertain', 'dispatched', 'in_progress', 'unresolved_attention',
+  'terminal', 'cancel_requested', 'cancel_confirmed', 'already_terminal',
+]);
+const BLOCKED_PREFLIGHT_DETAIL = capturedFreeze({
+  detail_code: 'preflight_blocked',
+  detail_message: 'Grok ACP preflight is blocked; the lane fails closed with no fallback.',
+});
 const DRIVER_STORES = new WEAK_MAP_CTOR();
 
 const GROK_ACP_NOTES = 'Grok ACP persistent session (grok-build). Launch confirms only after an authoritative ACP acknowledgement. Same-session reply is supported while the local worker is alive. Process-local lane state only; no durable P19/P21 store, supervisor cutover, or live-transport qualification.';
@@ -681,15 +698,31 @@ export function assertGrokAcpTransportV1(transport) {
   });
 }
 
+function laneMayHaveSent(record) {
+  return record !== undefined && (
+    record.spawned === true
+    || record.dispatch_intent === true
+    || capturedIncludes(POSSIBLE_SEND_STATES, record.state)
+  );
+}
+
+function hasTerminalLatch(record) {
+  if (record === undefined) return false;
+  if (record.terminal_latch === true) return true;
+  if (capturedIncludes(TERMINAL_LATCH_STATES, record.state)) return true;
+  if (record.last_status !== undefined
+    && capturedIncludes(TERMINAL_OBSERVE_STATUSES, record.last_status)) {
+    return true;
+  }
+  return record.cancel_outcome !== undefined
+    && capturedIncludes(TERMINAL_CANCEL_OUTCOMES, record.cancel_outcome);
+}
+
 function runPreflight(store, request) {
   const view = validateDriverPreflightRequestV1(request);
   const identity = identityFromEnvelope(view.envelope, view.child_envelope_digest);
   const prior = getLane(store, identity);
-  if (prior !== undefined && capturedIncludes(
-    ['spawned', 'dispatch_uncertain', 'dispatched', 'in_progress', 'unresolved_attention',
-      'terminal', 'cancel_requested', 'cancel_confirmed'],
-    prior.state,
-  )) {
+  if (laneMayHaveSent(prior)) {
     fail('invalid_transition', 'driver.preflight.request',
       'Preflight cannot run after a Grok prompt may have been dispatched; reconcile or cancel instead.');
   }
@@ -723,9 +756,9 @@ function runPreflight(store, request) {
     fail('malformed_receipt', 'transport.preflight.result.ok',
       'transport.preflight.result.ok must be an exact boolean.');
   }
-  const detail = assertDetailPair(receipt, 'transport.preflight.result');
+  assertDetailPair(receipt, 'transport.preflight.result');
   putLane(store, identity, { state: 'blocked', model: identity.model });
-  return driverResult('preflight', identity, 'blocked', detail);
+  return driverResult('preflight', identity, 'blocked', BLOCKED_PREFLIGHT_DETAIL);
 }
 
 function markUncertain(store, identity, extras = {}) {
@@ -897,8 +930,9 @@ function runReconcile(store, request) {
   }
   assertLaneIdentity(prior, identity, 'driver.reconcile.request');
   const include = view.include ?? capturedFreeze([]);
+  const latched = hasTerminalLatch(prior);
 
-  if (view.intent === 'restart_reattach') {
+  if (view.intent === 'restart_reattach' && !latched) {
     const reattachRequest = transportIdentityRequest(identity, {
       session_id: prior.session_id,
       request_id: prior.request_id,
@@ -921,6 +955,15 @@ function runReconcile(store, request) {
     putLane(store, identity, { ...prior, session_id: sessionId, reattached: true });
   }
 
+  if (latched) {
+    putLane(store, identity, {
+      ...prior,
+      state: capturedIncludes(TERMINAL_LATCH_STATES, prior.state) ? prior.state : 'terminal',
+      terminal_latch: true,
+    });
+    return driverResult('reconcile', identity, 'terminal');
+  }
+
   const observed = observeLane(store, identity, getLane(store, identity), include);
   const disposition = prior.state === 'dispatch_uncertain' && observed.status === 'lost'
     ? 'dispatch_uncertain'
@@ -935,6 +978,7 @@ function runReconcile(store, request) {
     evidence: observed.evidence,
     last_status: observed.status,
     session_id: observed.sessionId,
+    terminal_latch: nextState === 'terminal',
   });
   return driverResult('reconcile', identity, disposition);
 }
@@ -948,9 +992,8 @@ function runCancel(store, request) {
       'Cancel addresses an existing Grok dispatch; this child has no launch observation.');
   }
   assertLaneIdentity(prior, identity, 'driver.cancel.request');
-  if (prior.state === 'terminal' || prior.last_status !== undefined
-    && capturedIncludes(TERMINAL_OBSERVE_STATUSES, prior.last_status)) {
-    putLane(store, identity, { ...prior, state: 'already_terminal' });
+  if (hasTerminalLatch(prior)) {
+    putLane(store, identity, { ...prior, state: 'already_terminal', terminal_latch: true });
     return driverResult('cancel', identity, 'already_terminal');
   }
   const cancelRequest = transportIdentityRequest(identity, {
@@ -975,7 +1018,12 @@ function runCancel(store, request) {
     fail('invalid_format', 'transport.cancel.result.outcome',
       `transport.cancel.result.outcome must be one of ${capturedJoin(GROK_ACP_CANCEL_OUTCOMES, ', ')}.`);
   }
-  putLane(store, identity, { ...prior, state: outcome, cancel_outcome: outcome });
+  putLane(store, identity, {
+    ...prior,
+    state: outcome,
+    cancel_outcome: outcome,
+    terminal_latch: capturedIncludes(TERMINAL_CANCEL_OUTCOMES, outcome),
+  });
   return driverResult('cancel', identity, outcome);
 }
 

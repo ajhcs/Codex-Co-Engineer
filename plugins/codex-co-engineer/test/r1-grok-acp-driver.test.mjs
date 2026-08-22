@@ -51,6 +51,47 @@ function launchReady(transport = createScriptedGrokAcpTransportV1()) {
   return { driver, transport };
 }
 
+function identityReceipt(extra = {}) {
+  return {
+    session_id: GROK_FIXTURE_SESSION_ID,
+    provider: 'grok',
+    model: GROK_FIXTURE_MODEL,
+    run_id: fixture.run_id,
+    assignment_id: fixture.assignment_id,
+    lane_index: fixture.lane_index,
+    base_sha: fixture.base_sha,
+    child_envelope_digest: fixture.child_envelope_digest,
+    ...extra,
+  };
+}
+
+function transportCounts(transport) {
+  return {
+    preflight: grokAcpCallsOf(transport, 'preflight').length,
+    spawn: grokAcpCallsOf(transport, 'spawn').length,
+    dispatch: grokAcpCallsOf(transport, 'dispatch').length,
+    observe: grokAcpCallsOf(transport, 'observe').length,
+    cancel: grokAcpCallsOf(transport, 'cancel').length,
+    reattach: grokAcpCallsOf(transport, 'reattach').length,
+  };
+}
+
+function assertLatchedTerminalOrDenial(action) {
+  try {
+    const receipt = action();
+    assert.equal(receipt.disposition, 'terminal');
+    assert.notEqual(receipt.disposition, 'in_progress');
+    assert.notEqual(receipt.disposition, 'dispatch_uncertain');
+    assert.notEqual(receipt.disposition, 'unresolved_attention');
+    return receipt;
+  } catch (error) {
+    assert.ok(error instanceof RunContractV1Error);
+    assert.equal(error.code, 'terminal_regression_denied');
+    assert.notEqual(error.code, 'in_progress');
+    return undefined;
+  }
+}
+
 test('the Grok adapter hard-binds grok, the P05/P17 capability record, and managed worktree semantics', () => {
   const declaration = grokAcpDriverDeclarationV1();
   assert.equal(declaration.capability.provider, GROK_PROVIDER_SLOT);
@@ -379,6 +420,132 @@ test('unbound adapter still refuses post-spawn replay', () => {
   driver.preflight(requestFor('preflight'));
   assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched');
   expectCode(() => driver.launch(requestFor('launch')), 'replay_denied');
+  assert.equal(grokAcpCallsOf(transport, 'dispatch').length, 1);
+});
+
+test('completed then hostile running stays latched terminal or typed denial', () => {
+  const transport = createScriptedGrokAcpTransportV1({
+    observe: [
+      identityReceipt({ status: 'completed' }),
+      identityReceipt({ status: 'running' }),
+    ],
+  });
+  const { driver } = launchReady(transport);
+  assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched');
+  assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'terminal');
+  const observeAfterLatch = grokAcpCallsOf(transport, 'observe').length;
+  assert.equal(observeAfterLatch, 1);
+  assertLatchedTerminalOrDenial(() => driver.reconcile(requestFor('reconcile')));
+  const counts = transportCounts(transport);
+  assert.ok(counts.observe <= observeAfterLatch + 1, 'observe-call count must stay bounded');
+  assert.notEqual(counts.observe, Infinity);
+  assert.equal(counts.spawn, 1);
+  assert.equal(counts.dispatch, 1);
+  assert.equal(counts.cancel, 0);
+  expectCode(() => driver.launch(requestFor('launch')), 'replay_denied');
+  assert.equal(transportCounts(transport).spawn, 1);
+  assert.equal(transportCounts(transport).dispatch, 1);
+});
+
+test('two cancels after cancel_confirmed confirm once then already_terminal', () => {
+  const transport = createScriptedGrokAcpTransportV1({
+    cancel: identityReceipt({ outcome: 'cancel_confirmed' }),
+  });
+  const { driver } = launchReady(transport);
+  assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched');
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'cancel_confirmed');
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'already_terminal');
+  assert.equal(grokAcpCallsOf(transport, 'cancel').length, 1);
+  assert.equal(transportCounts(transport).spawn, 1);
+  assert.equal(transportCounts(transport).dispatch, 1);
+});
+
+test('terminal source variants latch without extra observe/cancel/spawn/dispatch', () => {
+  const sources = [
+    { label: 'completed', observe: identityReceipt({ status: 'completed' }) },
+    { label: 'failed', observe: identityReceipt({ status: 'failed' }) },
+    { label: 'cancelled', observe: identityReceipt({ status: 'cancelled' }) },
+    { label: 'cancel_confirmed', cancel: identityReceipt({ outcome: 'cancel_confirmed' }) },
+    { label: 'already_terminal', cancel: identityReceipt({ outcome: 'already_terminal' }) },
+  ];
+  for (const source of sources) {
+    const transport = createScriptedGrokAcpTransportV1({
+      observe: source.observe ?? identityReceipt({ status: 'running' }),
+      cancel: source.cancel ?? identityReceipt({ outcome: 'cancel_confirmed' }),
+    });
+    const { driver } = launchReady(transport);
+    assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched', source.label);
+    if (source.observe) {
+      assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'terminal', source.label);
+    } else {
+      const expected = source.cancel.outcome;
+      assert.equal(driver.cancel(requestFor('cancel')).disposition, expected, source.label);
+    }
+    const afterLatch = transportCounts(transport);
+    assert.equal(afterLatch.spawn, 1, source.label);
+    assert.equal(afterLatch.dispatch, 1, source.label);
+    if (source.cancel) assert.equal(afterLatch.cancel, 1, source.label);
+    if (source.observe) assert.equal(afterLatch.observe, 1, source.label);
+
+    assert.equal(driver.cancel(requestFor('cancel')).disposition, 'already_terminal', source.label);
+    assert.equal(transportCounts(transport).cancel, afterLatch.cancel, `${source.label} extra cancel`);
+
+    assertLatchedTerminalOrDenial(() => driver.reconcile(requestFor('reconcile', { intent: 'restart_reattach' })));
+    const afterReconcile = transportCounts(transport);
+    assert.ok(afterReconcile.observe <= afterLatch.observe + 1, `${source.label} extra observe`);
+    assert.equal(afterReconcile.spawn, 1, `${source.label} extra spawn`);
+    assert.equal(afterReconcile.dispatch, 1, `${source.label} extra dispatch`);
+    assert.equal(afterReconcile.cancel, afterLatch.cancel, `${source.label} extra cancel after reconcile`);
+    assert.equal(afterReconcile.reattach, afterLatch.reattach, `${source.label} extra reattach`);
+
+    expectCode(() => driver.launch(requestFor('launch')), 'replay_denied', source.label);
+    expectCode(() => driver.preflight(requestFor('preflight')), 'invalid_transition', source.label);
+    assert.equal(transportCounts(transport).spawn, 1, source.label);
+    assert.equal(transportCounts(transport).dispatch, 1, source.label);
+    assert.equal(transportCounts(transport).preflight, 1, source.label);
+  }
+});
+
+test('cancel_requested stays nonterminal and a later cancel may still reach transport', () => {
+  const transport = createScriptedGrokAcpTransportV1({
+    observe: identityReceipt({ status: 'running' }),
+    cancel: [
+      identityReceipt({ outcome: 'cancel_requested' }),
+      identityReceipt({ outcome: 'cancel_confirmed' }),
+    ],
+  });
+  const { driver } = launchReady(transport);
+  assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched');
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'cancel_requested');
+  assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'in_progress');
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'cancel_confirmed');
+  assert.equal(grokAcpCallsOf(transport, 'cancel').length, 2);
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'already_terminal');
+  assert.equal(grokAcpCallsOf(transport, 'cancel').length, 2);
+});
+
+test('unbound launch then cancel(already_terminal) then preflight cannot resend', () => {
+  const transport = createScriptedGrokAcpTransportV1({
+    cancel: {
+      outcome: 'already_terminal',
+      session_id: GROK_FIXTURE_SESSION_ID,
+      provider: 'grok',
+      model: GROK_FIXTURE_MODEL,
+      run_id: fixture.run_id,
+      assignment_id: fixture.assignment_id,
+      lane_index: fixture.lane_index,
+      base_sha: fixture.base_sha,
+      child_envelope_digest: fixture.child_envelope_digest,
+    },
+  });
+  const driver = createGrokAcpDriverV1(transport);
+  assert.equal(driver.preflight(requestFor('preflight')).disposition, 'ready');
+  assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched');
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'already_terminal');
+  expectCode(() => driver.preflight(requestFor('preflight')), 'invalid_transition');
+  expectCode(() => driver.launch(requestFor('launch')), 'replay_denied');
+  assert.equal(grokAcpCallsOf(transport, 'preflight').length, 1);
+  assert.equal(grokAcpCallsOf(transport, 'spawn').length, 1);
   assert.equal(grokAcpCallsOf(transport, 'dispatch').length, 1);
 });
 

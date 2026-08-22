@@ -33,6 +33,7 @@ import {
 } from './fixtures/r1-grok-acp-transport.mjs';
 
 const fixture = buildGrokDriverFixtureV1();
+const LEAK_MARKER = 'XSECRET7Q';
 
 function expectCode(fn, code, message) {
   assert.throws(fn, (error) => error instanceof RunContractV1Error && error.code === code, message);
@@ -367,6 +368,80 @@ test('cyclic and aliased receipts fail closed', () => {
   const { driver } = launchBound({ observe: cyclic });
   driver.launch(requestFor('launch'));
   expectCode(() => driver.reconcile(requestFor('reconcile')), 'aliased_reference_denied');
+});
+
+test('blocked preflight keeps XSECRET7Q out of results and errors', () => {
+  const leakSurfaces = [];
+  const transport = createScriptedGrokAcpTransportV1({
+    preflight: {
+      ok: false,
+      detail_code: 'xsecret7q',
+      detail_message: `provider authored ${LEAK_MARKER} token sk-abcdefghijklmnop`,
+      ...identityFields(),
+    },
+  });
+  const driver = bindGrokAcpDriverV1(transport);
+  let receipt;
+  try {
+    receipt = driver.preflight(requestFor('preflight'));
+  } catch (error) {
+    leakSurfaces.push(error);
+    throw error;
+  }
+  assert.equal(receipt.disposition, 'blocked');
+  assert.equal(receipt.detail_code, 'preflight_blocked');
+  assert.equal(
+    receipt.detail_message,
+    'Grok ACP preflight is blocked; the lane fails closed with no fallback.',
+  );
+  leakSurfaces.push(receipt);
+  const serialized = leakSurfaces.map((value) => {
+    if (value instanceof Error) {
+      return [value.name, value.code, value.path, value.message, value.stack, JSON.stringify(value)].join('\n');
+    }
+    return JSON.stringify(value);
+  }).join('\n');
+  assert.equal(serialized.includes(LEAK_MARKER), false);
+  assert.equal(JSON.stringify(receipt).includes(LEAK_MARKER), false);
+  expectCode(() => driver.launch(requestFor('launch')), 'blocked_lane_denied');
+});
+
+test('hostile running after latched completed never reports progress or copies provider text', () => {
+  const { driver, transport } = launchBound({
+    observe: [
+      { status: 'completed', session_id: GROK_FIXTURE_SESSION_ID, ...identityFields() },
+      {
+        status: 'running',
+        session_id: GROK_FIXTURE_SESSION_ID,
+        ...identityFields(),
+        progress: { status: 'running', cursor: '9', event_count: 3, elapsed_ms: 10 },
+        attention: { session_id: GROK_FIXTURE_SESSION_ID, question_id: `q-${LEAK_MARKER}` },
+      },
+    ],
+  });
+  driver.launch(requestFor('launch'));
+  assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'terminal');
+  const observeAfterLatch = grokAcpCallsOf(transport, 'observe').length;
+  let receipt;
+  try {
+    receipt = driver.reconcile(requestFor('reconcile', { include: ['live_progress'] }));
+  } catch (error) {
+    assert.equal(error.code, 'terminal_regression_denied');
+    assert.equal(String(error.message).includes(LEAK_MARKER), false);
+    assert.equal(JSON.stringify({ code: error.code, path: error.path, message: error.message }).includes(LEAK_MARKER), false);
+    assert.ok(grokAcpCallsOf(transport, 'observe').length <= observeAfterLatch + 1);
+    assert.equal(grokAcpCallsOf(transport, 'spawn').length, 1);
+    assert.equal(grokAcpCallsOf(transport, 'dispatch').length, 1);
+    return;
+  }
+  assert.equal(receipt.disposition, 'terminal');
+  assert.notEqual(receipt.disposition, 'in_progress');
+  assert.notEqual(receipt.disposition, 'unresolved_attention');
+  assert.notEqual(receipt.disposition, 'dispatch_uncertain');
+  assert.equal(JSON.stringify(receipt).includes(LEAK_MARKER), false);
+  assert.ok(grokAcpCallsOf(transport, 'observe').length <= observeAfterLatch + 1);
+  assert.equal(grokAcpCallsOf(transport, 'spawn').length, 1);
+  assert.equal(grokAcpCallsOf(transport, 'dispatch').length, 1);
 });
 
 test('createGrokAcpDriverV1 captures operations so later mutation cannot swap dispatch', () => {
