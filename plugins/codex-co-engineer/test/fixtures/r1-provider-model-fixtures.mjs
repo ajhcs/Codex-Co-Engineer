@@ -9,7 +9,12 @@
 // A model identifier is bounded REQUESTED BYTES only: ProfileV1 checks syntax
 // and size and never enforces membership against any advertised list, so the
 // accepted corpora deliberately mix advertised names with names that no
-// provider currently lists.
+// provider currently lists. Both sides of the contract accept and reject the
+// SAME corpus: a model identifier is an opaque identifier - never a path, ref,
+// command, or credential - so grammar-valid identifiers keep their meaning
+// (`a..b`, `x/../escape`, `main`, `refs/heads/model`, `cmd:model`,
+// `sk-abcdefghijklmnop`) and neither side applies any extra profile-only or
+// assignment-only clause to the top-level model value.
 
 export const PROFILE_SCHEMA = 'codex-co-engineer.profile.v1';
 
@@ -40,20 +45,21 @@ export const PROVIDER_MODEL_FIXTURES = Object.freeze([
   }),
 ]);
 
-// Hostile model corpus. Every entry is rejected by the shared bounded grammar,
-// and `impliedBy` documents the single predicate that explains the rejection:
+// Hostile model corpus. Every entry is rejected IDENTICALLY by both sides of
+// the contract, and `impliedBy` documents the single shared-grammar predicate
+// that explains the rejection:
 // - `pattern`: fails `^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$` (bad first
-//   character, a character outside the class, or more than 128 characters);
-// - `traversal`: matches the pattern but carries a '..' segment. The
-//   traversal guard itself lives only in the profile layer (preserved
-//   profile hardening); the shared assignment grammar has no such clause, so
-//   these are the one documented direction where ProfileV1 is stricter than
-//   the shared minimum.
+//   character, a character outside the class, or more than 128 characters).
+// There is no second clause: neither side carries an extra profile-only or
+// assignment-only guard (such as a '..' traversal rule), so the shared grammar
+// alone explains every rejection on both sides.
 //
-// The class is ASCII-only, so any pattern-valid identifier is at most 128
-// UTF-8 bytes; the separate requested-byte bound (mirrored from
-// RunManifestV1's MODEL_ID_MAX) therefore never fires alone. It is retained -
-// and its exact boundary is exercised below - as mirrored defense in depth.
+// The `bytes` predicate (pattern-valid but over 128 requested bytes) can never
+// fire on its own: the character class is ASCII-only, so every pattern-valid
+// identifier is at most 128 characters and therefore at most 128 UTF-8 bytes.
+// The requested-byte bound is retained on both sides - and exercised at its
+// exact 128-byte boundary in BOUNDARY_ACCEPTED_MODELS below - as mirrored
+// defense in depth.
 export const HOSTILE_MODEL_CORPUS = Object.freeze([
   // Pattern: first character.
   Object.freeze({ model: '', impliedBy: 'pattern' }),
@@ -72,30 +78,41 @@ export const HOSTILE_MODEL_CORPUS = Object.freeze([
   Object.freeze({ model: 'wild*card', impliedBy: 'pattern' }),
   Object.freeze({ model: 'query?param', impliedBy: 'pattern' }),
   Object.freeze({ model: 'bracke[t]s', impliedBy: 'pattern' }),
-  // Pattern: more than 128 characters (also past the 128-byte bound). Long
-// entries deliberately break the profile value-scan shapes (no 40+ hex or
-// base64-shaped runs) so the grammar alone explains their rejection.
+  // Pattern: more than 128 characters (also past the 128-byte bound).
   Object.freeze({ model: `${'q_'.repeat(64)}q`, impliedBy: 'pattern' }),
   Object.freeze({ model: `${'q'.repeat(42)}.${'q'.repeat(43)}.${'q'.repeat(42)}`, impliedBy: 'pattern' }),
   Object.freeze({ model: `${'a_'.repeat(64)}x`, impliedBy: 'pattern' }),
   Object.freeze({ model: `\u00e9${'a'.repeat(127)}`, impliedBy: 'pattern' }),
   Object.freeze({ model: '\u00e9'.repeat(65), impliedBy: 'pattern' }),
-  // Traversal: pattern-conforming shapes carrying '..'.
-  Object.freeze({ model: 'x/../escape', impliedBy: 'traversal' }),
-  Object.freeze({ model: 'stealth/../../ox', impliedBy: 'traversal' }),
-  Object.freeze({ model: 'a..b', impliedBy: 'traversal' }),
-  Object.freeze({
-    model: `${'m'.repeat(39)}.${'n'.repeat(39)}/../${'p'.repeat(45)}`,
-    impliedBy: 'traversal',
-  }),
 ]);
 
-// Exact grammar boundary strings that must be accepted on every provider: the
-// longest all-ASCII identifier sits exactly on the 128-character/128-byte
-// bound, and the short identifier exercises every special class member.
+// Shared accepted corpus of opaque identifiers: every entry is
+// grammar-valid and therefore accepted IDENTICALLY by ProfileV1 and by
+// AssignmentManifestV1 execution validation. The shapes are deliberately
+// hostile-looking - dot segments, ref-like prefixes, command-like prefixes,
+// credential-like prefixes - to prove that neither side applies any semantic
+// value scan or extra guard to the top-level model identifier: model IDs are
+// opaque identifiers, not paths, refs, commands, or credentials.
+export const PARITY_ACCEPTED_MODELS = Object.freeze([
+  Object.freeze({ model: 'a..b' }),
+  Object.freeze({ model: 'x/../escape' }),
+  Object.freeze({ model: 'stealth/../../ox' }),
+  Object.freeze({ model: 'main' }),
+  Object.freeze({ model: 'origin/model' }),
+  Object.freeze({ model: 'refs/heads/model' }),
+  Object.freeze({ model: 'cmd:model' }),
+  Object.freeze({ model: 'zsh/model' }),
+  Object.freeze({ model: 'sk-abcdefghijklmnop' }),
+  Object.freeze({ model: 'vendor_x/model.07:build' }),
+]);
+
+// Exact grammar boundary strings that must be accepted on every provider and
+// on the assignment side: one identifier exactly on the 128-character/128-byte
+// bound, one just under it, and one exercising every special class member.
 export const BOUNDARY_ACCEPTED_MODELS = Object.freeze([
-  // 127 characters: one under the 128-character/byte bound, segmented so the
-  // profile secret-value scans (40+ hex runs, 43+ base64 runs) never fire.
+  // Exactly 128 characters = exactly 128 UTF-8 bytes: the inclusive bound.
+  `${'z'.repeat(64)}.${'z'.repeat(63)}`,
+  // 127 characters: one under the bound.
   `${'z'.repeat(31)}.${'z'.repeat(31)}.${'z'.repeat(31)}.${'z'.repeat(31)}`,
   'A9._-:/x',
 ]);
