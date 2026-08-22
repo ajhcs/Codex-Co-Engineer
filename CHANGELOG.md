@@ -55,6 +55,20 @@
   selections; and that cleanup is manual and proof-bound, with no
   automatic GC.
 
+### Fixed
+
+- **ChildEnvelopeV1 strict parse closes the profile-plus-model routing gap.**
+  `parseChildEnvelopeV1` now rejects any `execution.model` other than `-`
+  on a profile-selected execution, and symmetrically every provider/model/
+  profile combination that is not exactly one compiler-emittable semantic
+  state (explicit provider+model with profile `-`, or one named profile
+  with provider and model both `-`), instead of silently discarding the
+  hidden routing value. `envelopeRoutingSurfaceV1` framed-block exact-shape
+  checks now also reject non-enumerable and symbol extra own keys, accessor
+  properties, and custom prototypes at the direct-JavaScript boundary, so
+  no hidden field can escape the closed shape. Canonical valid goldens are
+  unchanged.
+
 ## [3.2.1] - 2026-08-21
 
 Optional Ox Alpha support for DSH without changing the default Muse route or

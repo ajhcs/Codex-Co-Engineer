@@ -1,0 +1,63 @@
+{
+  "schema": "codex-co-engineer.identity.v1",
+  "run_manifest": {
+    "algorithm": "sha256",
+    "domain": "codex-co-engineer.identity.v1",
+    "version": 1,
+    "label": "run-manifest.v1",
+    "input_bytes": 2477,
+    "digest": "14a56392db16673e883b579dbe93950ff994e195f20ea9b4c6b0862db0cac0a6"
+  },
+  "assignment_prompts": {
+    "backend-writer": {
+      "algorithm": "sha256",
+      "domain": "codex-co-engineer.identity.v1",
+      "version": 1,
+      "label": "assignment-prompt.v1",
+      "input_bytes": 586,
+      "digest": "08f3798cfc2368ead32fdd046f585c1ce01623808f501aacc0ac386dee1de922"
+    },
+    "docs-reviewer": {
+      "algorithm": "sha256",
+      "domain": "codex-co-engineer.identity.v1",
+      "version": 1,
+      "label": "assignment-prompt.v1",
+      "input_bytes": 104,
+      "digest": "12d5d1ad2742a55d28eca30fa74739d4a991f6547e3c1abf12dee56b45b91717"
+    },
+    "cloud-verify": {
+      "algorithm": "sha256",
+      "domain": "codex-co-engineer.identity.v1",
+      "version": 1,
+      "label": "assignment-prompt.v1",
+      "input_bytes": 106,
+      "digest": "c872aabbf87e5df724bbf400173590118743d28d8667e8950f8aa0e38e628dfa"
+    }
+  },
+  "child_envelopes": {
+    "backend-writer": {
+      "algorithm": "sha256",
+      "domain": "codex-co-engineer.identity.v1",
+      "version": 1,
+      "label": "child-envelope.v1",
+      "input_bytes": 3555,
+      "digest": "caf1dc18402d1a05e3fd985b23700e4509f32e808f13c759238b3c52839a0e9a"
+    },
+    "docs-reviewer": {
+      "algorithm": "sha256",
+      "domain": "codex-co-engineer.identity.v1",
+      "version": 1,
+      "label": "child-envelope.v1",
+      "input_bytes": 1648,
+      "digest": "28fb6b34fbfce6a1516c3cf8fa088701b081a7eb8118b2225e0dbb8283d9be5c"
+    },
+    "cloud-verify": {
+      "algorithm": "sha256",
+      "domain": "codex-co-engineer.identity.v1",
+      "version": 1,
+      "label": "child-envelope.v1",
+      "input_bytes": 1689,
+      "digest": "fbe3cbcec07b90645f0ebb987cc74d2584c455bd8592dface3ec887384ed6a84"
+    }
+  }
+}

@@ -21,6 +21,7 @@ import {
   MAX_MANIFEST_DEPTH,
   MAX_MANIFEST_KEY_BYTES,
   MAX_MANIFEST_NODES,
+  MAX_MANIFEST_OBJECT_KEYS,
   MAX_MANIFEST_TOTAL_STRING_BYTES,
   MAX_TIMEOUT_MS,
   MIN_DURATION_MS,
@@ -538,6 +539,49 @@ test('first-error reporting is independent of input key insertion order', () => 
   assert.equal(first.message, second.message);
   assert.equal(first.code, 'unknown_key');
   assert.equal(first.path, '$.aaa_unknown');
+
+  const deep = () => {
+    let value = null;
+    for (let index = 0; index < MAX_MANIFEST_DEPTH + 1; index += 1) value = { nested: value };
+    return value;
+  };
+  const depthAz = { a: deep(), z: deep() };
+  const depthZa = { z: deep(), a: deep() };
+  const depthFirst = (() => { try { validateCompleteRunManifestV1(depthAz); } catch (e) { return e; } })();
+  const depthSecond = (() => { try { validateCompleteRunManifestV1(depthZa); } catch (e) { return e; } })();
+  assert.equal(depthFirst.code, 'depth_exceeded');
+  assert.equal(depthFirst.code, depthSecond.code);
+  assert.equal(depthFirst.path, depthSecond.path);
+  assert.equal(depthFirst.message, depthSecond.message);
+  assert.match(depthFirst.path, /^a\.nested/u);
+
+  let getterCalls = 0;
+  const accessors = (order) => {
+    const value = {};
+    for (const key of order) {
+      Object.defineProperty(value, key, {
+        enumerable: true,
+        get() { getterCalls += 1; return 'must not execute'; },
+      });
+    }
+    return value;
+  };
+  const accessorError = (order) => {
+    try {
+      validateCompleteRunManifestV1(accessors(order));
+    } catch (error) {
+      return error;
+    }
+    assert.fail('expected accessor data to be rejected');
+  };
+  const accessorAz = accessorError(['a', 'z']);
+  const accessorZa = accessorError(['z', 'a']);
+  assert.equal(accessorAz.code, 'invalid_object');
+  assert.equal(accessorAz.code, accessorZa.code);
+  assert.equal(accessorAz.path, accessorZa.path);
+  assert.equal(accessorAz.message, accessorZa.message);
+  assert.equal(accessorAz.path, '$.a');
+  assert.equal(getterCalls, 0);
 });
 
 test('the public validator is always complete and the envelope composer fails closed without hooks', () => {
@@ -587,6 +631,25 @@ test('direct-JavaScript prototype, accessor, symbol, sparse-array, and extra-arr
   const nullPrototype = validRun();
   nullPrototype.assignments[0] = Object.assign(Object.create(null), nullPrototype.assignments[0]);
   validateRunManifestV1(nullPrototype);
+});
+
+test('the public validator accepts canonical null-prototype arrays without inherited method calls', () => {
+  const manifest = validRun();
+  manifest.assignments.push(writer('lane-1', ['web/**']));
+  manifest.assignments[1].execution = { profile: 'cloud-fast' };
+
+  for (let index = 0; index < manifest.assignments.length; index += 1) {
+    const assignment = manifest.assignments[index];
+    Object.setPrototypeOf(assignment.write_scope, null);
+    Object.setPrototypeOf(assignment.acceptance, null);
+    Object.setPrototypeOf(assignment.required_evidence, null);
+  }
+  Object.setPrototypeOf(manifest.assignments, null);
+
+  const summary = validateRunManifestV1(manifest);
+  assert.deepEqual([...summary.assignment_ids], ['lane-0', 'lane-1']);
+  assert.equal(summary.profile_resolution_required, true);
+  assert.deepEqual([...summary.unresolved_profile_assignment_ids], ['lane-1']);
 });
 
 test('profile lanes are explicitly unresolved and preserve a future exact Cloud pin', () => {
@@ -711,6 +774,30 @@ test('manifest complexity, cycles, aliases, and policy authority keys fail befor
     manifest.assignments[0].note = Array.from({ length: MAX_MANIFEST_NODES + 1 }, () => 0);
   });
   assert.equal(tooManyNodes.code, 'manifest_too_complex');
+
+  let getterCalls = 0;
+  const oversizedArray = Array.from({ length: MAX_MANIFEST_NODES + 1 }, () => 0);
+  Object.defineProperty(oversizedArray, '0', {
+    enumerable: true,
+    get() { getterCalls += 1; return 0; },
+  });
+  assert.throws(
+    () => validateRunManifestV1(oversizedArray),
+    (error) => error instanceof RunContractV1Error && error.code === 'manifest_too_complex',
+  );
+
+  const oversizedObject = {};
+  for (let index = 0; index < MAX_MANIFEST_OBJECT_KEYS + 1; index += 1) {
+    Object.defineProperty(oversizedObject, `key-${String(index).padStart(2, '0')}`, {
+      enumerable: true,
+      get() { getterCalls += 1; return 0; },
+    });
+  }
+  assert.throws(
+    () => validateRunManifestV1(oversizedObject),
+    (error) => error instanceof RunContractV1Error && error.code === 'manifest_too_complex',
+  );
+  assert.equal(getterCalls, 0, 'graph bounds must reject before inspecting element descriptors');
 
   const cyclic = validRun();
   cyclic.assignments[0].loop = cyclic.assignments[0];

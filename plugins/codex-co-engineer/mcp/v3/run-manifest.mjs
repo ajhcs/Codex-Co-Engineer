@@ -23,6 +23,8 @@
 // with a fixed pipeline and sorted key iteration, so identical inputs always
 // produce identical first errors.
 
+import { types as utilTypes } from 'node:util';
+
 import {
   MAX_EXPECTED_DURATION_MS,
   MAX_TIMEOUT_MS,
@@ -58,6 +60,7 @@ export const PARAMS_MAX_KEYS = 8;
 export const PARAM_VALUE_MAX_BYTES = 256;
 export const MAX_MANIFEST_DEPTH = 32;
 export const MAX_MANIFEST_NODES = 2048;
+export const MAX_MANIFEST_OBJECT_KEYS = 64;
 export const MAX_MANIFEST_TOTAL_STRING_BYTES = 524_288;
 export const MAX_MANIFEST_KEY_BYTES = 128;
 
@@ -169,7 +172,12 @@ function fail(code, path, message) {
 }
 
 export function isPlainObject(value) {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (typeof value !== 'object' || value === null) return false;
+  // Proxy reflection is trap-dispatched: a Proxy can lie about descriptors or
+  // throw from an otherwise side-effect-free inspection. R1 accepts JSON data,
+  // never executable Proxy surfaces, so reject them before invoking any trap.
+  if (utilTypes.isProxy(value)) return false;
+  if (Array.isArray(value)) return false;
   try {
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
@@ -204,11 +212,18 @@ export function assertJsonDataObject(object, path) {
   } catch {
     fail('invalid_object', path, `${path} keys could not be inspected safely.`);
   }
+  if (keys.length > MAX_MANIFEST_OBJECT_KEYS) {
+    fail('manifest_too_complex', path,
+      `${path} exceeds ${MAX_MANIFEST_OBJECT_KEYS} object keys.`);
+  }
   const entries = [];
   for (const key of keys) {
     if (typeof key !== 'string') {
       fail('invalid_object', path, `${path} must not contain symbol keys.`);
     }
+  }
+  keys.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  for (const key of keys) {
     // Inspect the byte bound before the key is interpolated into a diagnostic
     // path. This keeps a hostile direct-JavaScript key from turning one typed
     // rejection into an attacker-sized error object.
@@ -235,6 +250,12 @@ function isCanonicalArrayIndex(key, length) {
 }
 
 export function assertDenseJsonArray(value, path) {
+  if (typeof value !== 'object' || value === null) {
+    fail('invalid_type', path, `${path} must be an array.`);
+  }
+  if (utilTypes.isProxy(value)) {
+    fail('invalid_array', path, `${path} must be a concrete JSON array, not a Proxy.`);
+  }
   if (!Array.isArray(value)) fail('invalid_type', path, `${path} must be an array.`);
   let prototype;
   try {
@@ -304,25 +325,52 @@ export function assertManifestComplexity(root) {
     }
     if (seen.has(value)) fail('invalid_json_value', path, `${path} contains a cyclic or aliased object value.`);
     seen.add(value);
+    if (utilTypes.isProxy(value)) {
+      // Array.isArray performs the ECMAScript IsArray operation, which throws
+      // for a revoked Proxy. Normalize every Proxy surface before that native
+      // boundary so direct-JavaScript inputs always fail with a bounded
+      // RunContractV1Error rather than leaking a raw TypeError.
+      let proxyIsArray = false;
+      try {
+        proxyIsArray = Array.isArray(value);
+      } catch {
+        fail('invalid_type', path, `${path} must be concrete JSON data, not a revoked Proxy.`);
+      }
+      fail(proxyIsArray ? 'invalid_array' : 'invalid_type', path,
+        `${path} must be concrete JSON data, not a Proxy.`);
+    }
     if (Array.isArray(value)) {
+      if (value.length > MAX_MANIFEST_NODES) {
+        fail('manifest_too_complex', path,
+          `${path} exceeds ${MAX_MANIFEST_NODES} array elements.`);
+      }
       assertDenseJsonArray(value, path);
       for (let i = value.length - 1; i >= 0; i -= 1) {
         stack.push({ value: value[i], path: `${path}[${i}]`, depth: depth + 1 });
       }
       continue;
     }
-    const entries = assertJsonDataObject(value, path);
+    const entries = assertJsonDataObject(value, path).sort((left, right) => (
+      left.key < right.key ? -1 : left.key > right.key ? 1 : 0
+    ));
     let ownEnumerableCount = 0;
-    for (const { key, value: childValue } of entries) {
+    for (const { key } of entries) {
       ownEnumerableCount += 1;
-      if (ownEnumerableCount > 64) {
-        fail('manifest_too_complex', path, `${path} exceeds 64 object keys.`);
+      if (ownEnumerableCount > MAX_MANIFEST_OBJECT_KEYS) {
+        fail('manifest_too_complex', path,
+          `${path} exceeds ${MAX_MANIFEST_OBJECT_KEYS} object keys.`);
       }
       stringBytes += utf8ByteLength(key);
       if (stringBytes > MAX_MANIFEST_TOTAL_STRING_BYTES) {
         fail('manifest_too_large', path,
           `Manifest string content exceeds ${MAX_MANIFEST_TOTAL_STRING_BYTES} bytes.`);
       }
+    }
+    // The traversal stack is LIFO. Push reverse-sorted children so invalid
+    // equivalent objects always visit the same lowest code-unit key first,
+    // independent of caller insertion order.
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const { key, value: childValue } = entries[index];
       stack.push({ value: childValue, path: `${path}.${key}`, depth: depth + 1 });
     }
   }
@@ -354,6 +402,11 @@ export function assertAllowedKeys(object, allowedKeys, path) {
 export function assertNoForbiddenKeysDeep(value, path, depth = 0) {
   if (depth > MAX_MANIFEST_DEPTH) {
     fail('depth_exceeded', path, `${path} exceeds the maximum manifest depth of ${MAX_MANIFEST_DEPTH}.`);
+  }
+  if ((typeof value === 'object' && value !== null) || typeof value === 'function') {
+    if (utilTypes.isProxy(value)) {
+      fail('invalid_type', path, `${path} must be concrete JSON data, not a Proxy.`);
+    }
   }
   if (Array.isArray(value)) {
     assertDenseJsonArray(value, path);
@@ -465,8 +518,12 @@ export function assertDisjointWriterScopes(writerScopes) {
     for (let j = i + 1; j < writerScopes.length; j += 1) {
       const left = writerScopes[i];
       const right = writerScopes[j];
-      for (const patternL of left.patterns) {
-        for (const patternR of right.patterns) {
+      // Valid JSON arrays may intentionally have a null prototype. Walk by
+      // index so validation never depends on an inherited iterator.
+      for (let leftIndex = 0; leftIndex < left.patterns.length; leftIndex += 1) {
+        const patternL = left.patterns[leftIndex];
+        for (let rightIndex = 0; rightIndex < right.patterns.length; rightIndex += 1) {
+          const patternR = right.patterns[rightIndex];
           if (writerScopesOverlap(patternL, patternR)) {
             fail(
               'overlapping_writer_scope',
@@ -544,8 +601,16 @@ function extractWriterScopes(assignments) {
   for (let i = 0; i < assignments.length; i += 1) {
     const assignment = assignments[i];
     const patterns = assignment?.write_scope;
-    if (Array.isArray(patterns) && patterns.every((p) => typeof p === 'string')
-      && assignment.access === 'writer') {
+    let allPatternsAreStrings = Array.isArray(patterns);
+    if (allPatternsAreStrings) {
+      for (let patternIndex = 0; patternIndex < patterns.length; patternIndex += 1) {
+        if (typeof patterns[patternIndex] !== 'string') {
+          allPatternsAreStrings = false;
+          break;
+        }
+      }
+    }
+    if (allPatternsAreStrings && assignment.access === 'writer') {
       writerScopes.push({ index: i, assignment_id: assignment.assignment_id, patterns });
     }
   }
@@ -553,10 +618,15 @@ function extractWriterScopes(assignments) {
 }
 
 function extractUnresolvedProfileAssignmentIds(assignments) {
-  return assignments
-    .filter((assignment) => isPlainObject(assignment.execution)
-      && Object.hasOwn(assignment.execution, 'profile'))
-    .map((assignment) => assignment.assignment_id);
+  const unresolved = [];
+  for (let index = 0; index < assignments.length; index += 1) {
+    const assignment = assignments[index];
+    if (isPlainObject(assignment.execution)
+      && Object.hasOwn(assignment.execution, 'profile')) {
+      unresolved.push(assignment.assignment_id);
+    }
+  }
+  return unresolved;
 }
 
 function validateReturnContract(returnContract) {
