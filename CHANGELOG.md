@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Protected identity and monotonic telemetry schemas.** Additive
+  `protected-identity.mjs` / `protected-telemetry.mjs` close exact run,
+  child, provider-run, workspace, and Git identities plus a content-free
+  DispatchTelemetryV1 view. GitIdentityV1 is the immutable
+  repository/base SHA shared by every assignment (P03 label
+  `workspace-anchor.v1`); WorkspaceIdentityV1 is one managed
+  worktree/branch/lock or a Cloud pin of that same base SHA (never
+  direct mode). Digests bind through the P03 closed-label authority:
+  P03 hex manifest/envelope digests and P05 `sha256:<hex>` capability
+  and resolved-lane digests are recorded facts, not re-resolved
+  routes. Request idempotency is attempt-bound and distinct from
+  SelectionRequestV1. Telemetry never serializes raw identifiers,
+  models, paths, prompts, results, credentials, provider references, or
+  idempotency keys. Continuity allows only null-to-value fills; known
+  provenance/status facts cannot be dropped or rewritten, counters and
+  revisions are monotone, and settled outcomes are absorbing. Outputs
+  are detached and deeply frozen. Descriptor, Proxy, accessor, symbol,
+  exotic, sparse, alias, cycle, depth, and size-hostile inputs fail
+  closed with typed stable errors. There is no driver mapping,
+  evidence-claim surface, filesystem/network/process effect, or
+  implicit authority. Coverage lives in `r1-protected-identity`,
+  `r1-protected-identity-adversarial`, and `r1-protected-telemetry`
+  tests.
 - **Deterministic P05 resolver and P17 capability bridge.** Additive
   `resolveRunSelectionV1` / `resolveSelectionAnswersV1` bind every
   assignment's provider/model from authored explicit execution, the
