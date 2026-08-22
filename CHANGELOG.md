@@ -4,6 +4,53 @@
 
 ### Added
 
+- **Atomic raw/sanitized artifact store.** Adds the additive v3
+  `artifact-store.mjs` module for W4-P08: it binds validated ArtifactRefV1
+  declarations to real bytes under one caller-supplied existing private store
+  root, mapping each strict relative path segment-for-segment into disjoint
+  `raw/` and `sanitized/` namespaces (`content/<path>` plus a strictly parsed
+  canonical sidecar per artifact), so raw evidence and model-facing
+  projections never collide even at one path and no parallel ref or path
+  schema is introduced - references are parsed with `parseArtifactRefV1` and
+  nothing else, so traversal, absolute paths, reserved device names,
+  separator look-alikes, and Unicode tricks inherit the exact P07 denials.
+  Sources are intrinsic Buffer/Uint8Array views or bounded async iterables of
+  such views; proxies, subclasses, SharedArrayBuffer backings, strings,
+  accessor-shaped iterables, and arbitrary class instances are denied before
+  any byte is read. Declared byte length and SHA-256 are treated as untrusted
+  claims: bytes stream into an unpredictable owner-only same-directory
+  temporary while the class cap (sanitized 256 KiB, raw 32 MiB) is enforced
+  on every chunk before it is written, actual length and digest are computed
+  from the streamed bytes, and both must match the declaration exactly before
+  publication; the temporary is fsynced, published by exclusive hardlink that
+  refuses to clobber, unlinked, and the parent directories fsynced, so no
+  partial artifact ever exists under an authoritative name. Exact same
+  validated ref plus bytes is idempotent across concurrent submissions (one
+  deterministic winner plus idempotent losers behind a per-root operation
+  chain); conflicting content at one location, the same digest under
+  different metadata, or any other competing publication fails closed with
+  typed content-free errors and leaves the authoritative state untouched,
+  rolling back a race loser's own link only when the platform proves the
+  inode is ours. Roots and parents use descriptor/no-follow discipline -
+  O_NOFOLLOW|O_DIRECTORY opens, device/inode identity brackets, lstat-walked
+  0700 parent chains re-proven after publication - rejecting missing,
+  non-private, symlinked, replaced, and swapped roots and parents wherever
+  provable. Verification and audit stream stored bytes in fixed chunks solely
+  to recompute length and digest (never returning or buffering content),
+  enumerate with bounded per-directory entries, files, depth, and total
+  audited bytes, and condemn leftover or torn temporaries (a reserved name
+  grammar artifacts may never spell), orphaned or duplicate sidecars,
+  symlinks, hardlinks, FIFOs and other non-regular entries, foreign names,
+  truncated or oversized content, malformed or misplaced metadata, and
+  content swapped under a path; audits return detached frozen metadata plus a
+  framed inventory fingerprint that restarts reproduce exactly. Receipts,
+  verdicts, and reports are deep-frozen, content-free, and never echo the
+  store root, artifact bytes, or operating-system errors. Out of scope and
+  unclaimed: P09 sanitization, the P10 reader, the P13 evidence bundle,
+  cleanup, scheduler/provider/supervisor wiring, and protected references;
+  a torn store stays torn and fails closed until an operator acts. Coverage
+  lives in `test/r1-artifact-store.test.mjs` and
+  `test/r1-artifact-store-adversarial.test.mjs`.
 - **ArtifactRefV1 and the strict relative artifact path policy.** Adds two
   additive, pure v3 modules for W3-P07. `artifact-path.mjs` owns one
   deterministic fail-closed question - is this string a strict portable
