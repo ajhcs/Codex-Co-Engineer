@@ -4,6 +4,11 @@ import test from 'node:test';
 import {
   CHILD_IDENTITY_SCHEMA_ID,
   DISPATCH_IDENTITY_SCHEMA_ID,
+  MAX_DISPATCH_ATTEMPT,
+  MAX_DURATION_MS,
+  MAX_METRIC_COUNTER,
+  MAX_RECORD_REVISION,
+  PROVIDER_DRIVERS,
   PROVIDER_RUN_IDENTITY_SCHEMA_ID,
   RUN_IDENTITY_SCHEMA_ID,
   SELECTED_EXTERNAL_PROVIDER_FULL_REPOSITORY,
@@ -134,6 +139,8 @@ test('idempotency keys bind the exact run, child, repository, and base SHA', () 
     run_id: TUPLE.run_id,
   });
   assert.equal(first, reordered);
+  assert.equal(first,
+    'idem-v1-3b99a4a99b3be3e4854977a47f9032ecc7565d7d4ef8ffa7f5c19b656baf58a1');
   assert.match(first, /^idem-v1-[0-9a-f]{64}$/u);
   assert.equal(validateRequestIdempotencyKeyV1(first, TUPLE), true);
   for (const [field, value] of [
@@ -175,6 +182,25 @@ test('provider-run identity derives its driver and permits uncertain dispatch wi
     provider_run_id: 'run/cloud-1',
   });
   assert.equal(cloud.driver, 'cloud-sdk');
+});
+
+test('every provider identity derives the one closed driver mapping', () => {
+  const expected = {
+    grok: 'acp',
+    'cursor-local': 'acp',
+    dsh: 'acpx',
+    'cursor-cloud': 'cloud-sdk',
+  };
+  assert.deepEqual({ ...PROVIDER_DRIVERS }, expected);
+  for (const [provider, driver] of Object.entries(expected)) {
+    const identity = buildProviderRunIdentityV1({
+      provider,
+      ...TUPLE,
+      request_idempotency_key: deriveRequestIdempotencyKeyV1(TUPLE),
+    });
+    assert.equal(identity.driver, driver, provider);
+    assert.equal(validateProviderRunIdentityV1(identity), true, provider);
+  }
 });
 
 test('closed schemas reject unknown, missing, malformed, and caller-derived fields', () => {
@@ -358,6 +384,112 @@ test('content-bearing and inconsistent provenance fails closed', () => {
     'unknown_key');
 });
 
+test('prompt result command environment and credential fields cannot enter provenance or telemetry', () => {
+  const cases = [
+    ['run.prompt', (input) => { input.run = { ...input.run, prompt: 'prompt-sentinel' }; }],
+    ['child.result', (input) => { input.child = { ...input.child, result: 'result-sentinel' }; }],
+    ['dispatch.argv', (input) => { input.dispatch = { ...input.dispatch, argv: ['sh'] }; }],
+    ['provider_run.credential', (input) => {
+      input.provider_run = { ...input.provider_run, credential: 'credential-sentinel' };
+    }],
+    ['requested.prompt', (input) => { input.requested.prompt = 'prompt-sentinel'; }],
+    ['resolved.command', (input) => { input.resolved.command = 'command-sentinel'; }],
+    ['observed.result', (input) => { input.observed.result = 'result-sentinel'; }],
+    ['model_attestation.token', (input) => {
+      input.model_attestation.token = 'credential-sentinel';
+    }],
+    ['lineage.environment', (input) => { input.lineage.environment = { SECRET: 'sentinel' }; }],
+    ['timing.stderr', (input) => { input.timing.stderr = 'result-sentinel'; }],
+    ['counters.api_key', (input) => { input.counters.api_key = 'credential-sentinel'; }],
+    ['provider_claims.prompt', (input) => {
+      input.provider_claims.prompt = 'prompt-sentinel';
+    }],
+    ['verified_facts.result', (input) => {
+      input.verified_facts.result = 'result-sentinel';
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const input = successInput();
+    mutate(input);
+    const error = errorOf(() => buildDispatchProvenanceV1(input));
+    assert.equal(error.code, 'unknown_key', name);
+  }
+
+  const claimInput = successInput();
+  claimInput.provider_claims.claimed_model = 'credential-sentinel';
+  const telemetry = projectDispatchTelemetryV1(buildDispatchProvenanceV1(claimInput));
+  const bytes = JSON.stringify(telemetry);
+  assert.doesNotMatch(bytes, /prompt-sentinel|result-sentinel|command-sentinel|credential-sentinel/u);
+  for (const key of ['prompt', 'result', 'command', 'commands', 'argv', 'env', 'environment',
+    'credential', 'credentials', 'secret', 'token', 'api_key', 'stdout', 'stderr']) {
+    assert.equal(Object.hasOwn(telemetry, key), false, key);
+    assert.equal(errorOf(() => validateDispatchTelemetryV1({ ...telemetry, [key]: 'sentinel' })).code,
+      'unknown_key', key);
+  }
+});
+
+test('telemetry projection is deterministic bounded and rejects identity tampering', () => {
+  const first = projectDispatchTelemetryV1(buildDispatchProvenanceV1(successInput()));
+  const secondInput = successInput();
+  secondInput.provider_claims.claimed_outcome = 'failed';
+  secondInput.provider_claims.claimed_head_sha = 'f'.repeat(40);
+  const second = projectDispatchTelemetryV1(buildDispatchProvenanceV1(secondInput));
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  assert.ok(Object.isFrozen(first));
+  assert.ok(Object.isFrozen(first.lineage));
+  assert.ok(Object.isFrozen(first.timing));
+  assert.ok(Object.isFrozen(first.counters));
+  assert.ok(Buffer.byteLength(JSON.stringify(first), 'utf8') <= 4096);
+
+  for (const [name, mutate, code] of [
+    ['driver', (value) => { value.driver = 'acp'; }, 'identity_mismatch'],
+    ['lineage', (value) => { value.lineage.manifest_digest = 'not-a-digest'; }, 'invalid_format'],
+    ['model evidence', (value) => { value.model_attested = false; }, 'identity_mismatch'],
+    ['duration', (value) => { value.timing.total_duration_ms = 1; }, 'lifecycle_conflict'],
+  ]) {
+    const tampered = JSON.parse(JSON.stringify(first));
+    mutate(tampered);
+    assert.equal(errorOf(() => validateDispatchTelemetryV1(tampered)).code, code, name);
+  }
+});
+
+test('identity revisions durations and counters accept exact safe maxima and reject overflow', () => {
+  const dispatch = buildDispatchIdentityV1({
+    run_id: TUPLE.run_id,
+    assignment_id: TUPLE.assignment_id,
+    attempt: MAX_DISPATCH_ATTEMPT,
+  });
+  assert.equal(dispatch.attempt, Number.MAX_SAFE_INTEGER);
+  assert.equal(errorOf(() => buildDispatchIdentityV1({
+    run_id: TUPLE.run_id,
+    assignment_id: TUPLE.assignment_id,
+    attempt: Number.MAX_SAFE_INTEGER + 1,
+  })).code, 'out_of_range');
+
+  const input = successInput();
+  const openedAt = Date.parse(input.timing.opened_at);
+  input.revision = MAX_RECORD_REVISION;
+  input.timing.dispatched_at = input.timing.opened_at;
+  input.timing.settled_at = new Date(openedAt + MAX_DURATION_MS).toISOString();
+  input.timing.dispatch_latency_ms = 0;
+  input.timing.total_duration_ms = MAX_DURATION_MS;
+  input.counters.wake_events = MAX_METRIC_COUNTER;
+  input.counters.outcome_events = MAX_METRIC_COUNTER;
+  const record = buildDispatchProvenanceV1(input);
+  assert.equal(record.revision, Number.MAX_SAFE_INTEGER);
+  assert.equal(record.counters.wake_events, Number.MAX_SAFE_INTEGER);
+
+  for (const [name, mutate] of [
+    ['revision', (value) => { value.revision = Number.MAX_SAFE_INTEGER + 1; }],
+    ['duration', (value) => { value.timing.total_duration_ms = MAX_DURATION_MS + 1; }],
+    ['wake counter', (value) => { value.counters.wake_events = Number.MAX_SAFE_INTEGER + 1; }],
+  ]) {
+    const overflow = successInput();
+    mutate(overflow);
+    assert.equal(errorOf(() => buildDispatchProvenanceV1(overflow)).code, 'out_of_range', name);
+  }
+});
+
 test('Proxy and accessor inputs fail without dispatching caller code', () => {
   let traps = 0;
   const proxy = new Proxy({ ...TUPLE }, {
@@ -387,4 +519,33 @@ test('Proxy and accessor inputs fail without dispatching caller code', () => {
   });
   assert.equal(errorOf(() => buildDispatchProvenanceV1(nested)).code, 'invalid_type');
   assert.equal(traps, 0);
+});
+
+test('non-JSON direct inputs fail closed before provenance construction', () => {
+  const symbolInput = successInput();
+  symbolInput.requested[Symbol('credential')] = 'sentinel';
+  assert.equal(errorOf(() => buildDispatchProvenanceV1(symbolInput)).code, 'invalid_object');
+
+  const hiddenInput = successInput();
+  Object.defineProperty(hiddenInput.requested, 'prompt', {
+    enumerable: false,
+    value: 'sentinel',
+  });
+  assert.equal(errorOf(() => buildDispatchProvenanceV1(hiddenInput)).code, 'invalid_object');
+
+  const sparseInput = successInput();
+  sparseInput.verified_facts.evidence_kinds = new Array(1);
+  assert.equal(errorOf(() => buildDispatchProvenanceV1(sparseInput)).code, 'invalid_array');
+
+  const aliasedInput = successInput();
+  aliasedInput.observed = aliasedInput.requested;
+  assert.equal(errorOf(() => buildDispatchProvenanceV1(aliasedInput)).code, 'invalid_json_value');
+
+  const cyclicInput = successInput();
+  cyclicInput.requested.cycle = cyclicInput.requested;
+  assert.equal(errorOf(() => buildDispatchProvenanceV1(cyclicInput)).code, 'invalid_json_value');
+
+  const exoticInput = successInput();
+  exoticInput.requested = new Date('2026-08-22T00:00:00.000Z');
+  assert.equal(errorOf(() => buildDispatchProvenanceV1(exoticInput)).code, 'invalid_type');
 });
