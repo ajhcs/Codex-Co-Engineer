@@ -28,7 +28,14 @@ import {
   parseRunManifestV1,
   validateCompleteRunManifestV1,
 } from '../mcp/v3/run-policy.mjs';
-import { runManifestDigestV1 } from '../mcp/v3/identity.mjs';
+import {
+  assignmentPromptDigestV1,
+  runManifestDigestV1,
+} from '../mcp/v3/identity.mjs';
+import {
+  compileChildEnvelopeV1,
+  compileChildEnvelopesV1,
+} from '../mcp/v3/prompt-compiler.mjs';
 
 const BASE_SHA = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
 const POLICY = Object.freeze({
@@ -452,4 +459,51 @@ test('pre-existing fully explicit manifests stay byte-identical through the dige
   // Same content minus the derived summary: digests depend on submitted
   // bytes only, so the repaired parser neither adds nor moves keys.
   assert.equal(JSON.stringify(JSON.parse(JSON.stringify(manifest))).includes('profile_resolution'), false);
+});
+
+test('compiling an omitted-execution lane fails closed at the typed contract boundary', () => {
+  const manifest = run([
+    reviewer('omitted-lane', 'omitted'),
+    reviewer('profile-lane', 'profile'),
+  ]);
+
+  const byIndex = (() => { try { compileChildEnvelopeV1(manifest, 0); } catch (e) { return e; } })();
+  assert.ok(byIndex instanceof RunContractV1Error);
+  assert.equal(byIndex.code, 'selection_resolution_required');
+  assert.equal(byIndex.path, 'assignments[0].execution');
+  assert.match(byIndex.message, /omits execution/u);
+
+  const byId = (() => { try { compileChildEnvelopeV1(manifest, 'omitted-lane'); } catch (e) { return e; } })();
+  assert.equal(byId.code, 'selection_resolution_required');
+
+  // Whole-run compilation fails on the first unresolved lane and yields no
+  // partial batch; the error names the exact offending lane.
+  const wholeError = (() => { try { compileChildEnvelopesV1(manifest); } catch (e) { return e; } })();
+  assert.equal(wholeError.code, 'selection_resolution_required');
+  assert.equal(wholeError.path, 'assignments[0].execution');
+
+  // The compiler guesses nothing: no provider, model, or profile value is
+  // synthesized for the omitted lane anywhere in a rendered byte stream.
+});
+
+test('resolved lanes keep compiling while unresolved identity stays digest-safe', () => {
+  const manifest = run([
+    reviewer('profile-lane', 'profile'),
+    writer('explicit-lane', ['src/**']),
+    reviewer('omitted-lane', 'omitted'),
+  ]);
+
+  // Named-profile and explicit lanes remain emittable exactly as before.
+  const profileEnvelope = compileChildEnvelopeV1(manifest, 'profile-lane');
+  const explicitEnvelope = compileChildEnvelopeV1(manifest, 1);
+  assert.deepEqual(profileEnvelope.execution,
+    { provider: null, model: null, profile: 'deep-security-review' });
+  assert.deepEqual(explicitEnvelope.execution,
+    { provider: 'dsh', model: 'stealth/ox-alpha', profile: null });
+
+  // Identity surfaces never need resolved execution: digests stay computable
+  // for a run that the compiler (correctly) refuses to render.
+  const digest = runManifestDigestV1(manifest);
+  assert.equal(digest.algorithm, 'sha256');
+  assert.deepEqual(assignmentPromptDigestV1(manifest, 'omitted-lane').digest.length, 64);
 });
