@@ -33,6 +33,7 @@ import {
   SCOPE_SEGMENT_MAX_BYTES,
   RunContractV1Error,
   SHA40_PATTERN,
+  utf8ByteLength,
   validateRunManifestEnvelopeV1,
 } from '../mcp/v3/run-manifest.mjs';
 import { validateResolvedStartingRefV1 } from '../mcp/v3/assignment-manifest.mjs';
@@ -582,6 +583,29 @@ test('first-error reporting is independent of input key insertion order', () => 
   assert.equal(accessorAz.message, accessorZa.message);
   assert.equal(accessorAz.path, '$.a');
   assert.equal(getterCalls, 0);
+});
+
+test('captured byte counting and key ordering survive hostile intrinsic patches', () => {
+  const originalByteLength = Buffer.byteLength;
+  const originalSort = Array.prototype.sort;
+  let bytes;
+  let error;
+  try {
+    Buffer.byteLength = () => 0;
+    Array.prototype.sort = function poisonedSort() { return this; };
+    bytes = utf8ByteLength('café');
+    error = violation((manifest) => {
+      manifest.zzz_unknown = 1;
+      manifest.aaa_unknown = 2;
+    });
+  } finally {
+    Buffer.byteLength = originalByteLength;
+    Array.prototype.sort = originalSort;
+  }
+
+  assert.equal(bytes, 5);
+  assert.equal(error.code, 'unknown_key');
+  assert.equal(error.path, '$.aaa_unknown');
 });
 
 test('the public validator is always complete and the envelope composer fails closed without hooks', () => {

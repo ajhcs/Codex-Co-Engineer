@@ -22,8 +22,10 @@ const arrayIsArray = Array.isArray;
 const arrayIncludes = Function.prototype.call.bind(Array.prototype.includes);
 const arraySlice = Function.prototype.call.bind(Array.prototype.slice);
 const arrayJoin = Function.prototype.call.bind(Array.prototype.join);
+const arraySort = Function.prototype.call.bind(Array.prototype.sort);
 const regExpTest = Function.prototype.call.bind(RegExp.prototype.test);
-const utf8ByteLength = (text) => Buffer.byteLength(String(text), 'utf8');
+const bufferByteLength = Buffer.byteLength;
+const utf8ByteLength = (text) => bufferByteLength(text, 'utf8');
 
 function freezeArray(values) {
   return objectFreeze(arraySlice(values));
@@ -170,6 +172,6 @@ export function modelIdGrammarSource() {
 
 export function sortedCapturedKeys(object) {
   const keys = objectKeys(object);
-  keys.sort();
+  arraySort(keys);
   return keys;
 }
