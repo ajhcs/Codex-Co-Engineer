@@ -24,7 +24,11 @@ import {
   runManifestDigestV1,
   verifyRunManifestDigestV1,
 } from '../mcp/v3/identity.mjs';
-import { MAX_ENVELOPE_BYTES, compileChildEnvelopeV1 } from '../mcp/v3/prompt-compiler.mjs';
+import {
+  MAX_ENVELOPE_BYTES,
+  compileChildEnvelopeV1,
+  parseChildEnvelopeV1,
+} from '../mcp/v3/prompt-compiler.mjs';
 
 const BASE_SHA = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
 const POLICY = Object.freeze({
@@ -294,9 +298,17 @@ test('child envelope digests are canonical, stable, and content-bound', () => {
 
   const reordered = reverseKeyOrder(JSON.parse(JSON.stringify(envelope)));
   assert.equal(childEnvelopeDigestV1(reordered).digest, descriptor.digest);
+  // A structured form that disagrees with its own envelope_text is rejected
+  // outright (see the dedicated adversarial test below), so meaningful
+  // content changes must travel through the compiled text itself.
   const tampered = JSON.parse(JSON.stringify(envelope));
   tampered.acceptance[0].timeout_ms = 61_000;
-  assert.notEqual(childEnvelopeDigestV1(tampered).digest, descriptor.digest);
+  assert.equal(errorOf(() => childEnvelopeDigestV1(tampered)).code, 'envelope_shape_mismatch');
+  const retimedManifest = defaultManifest();
+  retimedManifest.assignments[0].acceptance[0].timeout_ms = 610_000;
+  const retimed = compileChildEnvelopeV1(retimedManifest, 'backend-writer');
+  assert.notEqual(retimed.envelope_text, envelope.envelope_text);
+  assert.notEqual(childEnvelopeDigestV1(retimed).digest, descriptor.digest);
   const textOnlyChange = JSON.parse(JSON.stringify(envelope));
   textOnlyChange.envelope_text = `${textOnlyChange.envelope_text}`;
   assert.equal(childEnvelopeDigestV1(textOnlyChange).digest, descriptor.digest);
@@ -313,6 +325,132 @@ test('child envelope digests are canonical, stable, and content-bound', () => {
   function CHILD_ENVELOPE_SCHEMA() {
     return 'codex-co-engineer.child-envelope.v1';
   }
+});
+
+test('child envelope digests hash only the validated parse of their envelope text', () => {
+  const manifest = defaultManifest();
+  const envelope = compileChildEnvelopeV1(manifest, 'backend-writer');
+  const descriptor = childEnvelopeDigestV1(envelope);
+  const clone = () => JSON.parse(JSON.stringify(envelope));
+  const rejectsAs = (name, mutate, code) => {
+    const forged = clone();
+    mutate(forged);
+    const error = errorOf(() => childEnvelopeDigestV1(forged));
+    assert.equal(error.code, code, `case "${name}" should fail with ${code}`);
+  };
+
+  // Arbitrary text is not an envelope: it must first survive the strict
+  // byte-exact ChildEnvelopeV1 parse before any digest exists.
+  rejectsAs('arbitrary text instead of an envelope', (forged) => {
+    forged.envelope_text = 'arbitrary dispatch instructions\nwith a second line\n';
+    forged.envelope_byte_length = Buffer.byteLength(forged.envelope_text);
+  }, 'malformed_envelope');
+  // Forged identities, framing offsets, nested acceptance data, missing or
+  // extra fields: every divergence from the complete parsed canonical shape
+  // is rejected instead of hashed.
+  rejectsAs('forged assignment_id', (forged) => {
+    forged.assignment_id = 'frontend-writer';
+  }, 'envelope_shape_mismatch');
+  rejectsAs('forged run_id', (forged) => {
+    forged.run_id = 'other-run-under-test';
+  }, 'envelope_shape_mismatch');
+  rejectsAs('forged objective offset', (forged) => {
+    forged.framed_blocks.objective.byte_offset += 1;
+  }, 'envelope_shape_mismatch');
+  rejectsAs('forged prompt length', (forged) => {
+    forged.framed_blocks.prompt.byte_length += 2;
+  }, 'envelope_shape_mismatch');
+  rejectsAs('altered nested acceptance command id', (forged) => {
+    forged.acceptance[0].command_id = 'lint-tests';
+  }, 'envelope_shape_mismatch');
+  rejectsAs('extra nested acceptance parameter', (forged) => {
+    forged.acceptance[0].parameters = { injected: 'value' };
+  }, 'envelope_shape_mismatch');
+  rejectsAs('missing nested execution model', (forged) => {
+    delete forged.execution.model;
+  }, 'envelope_shape_mismatch');
+  rejectsAs('missing envelope_byte_length', (forged) => {
+    delete forged.envelope_byte_length;
+  }, 'invalid_format');
+  rejectsAs('extra top-level key', (forged) => {
+    forged.routing_hint = 'cursor-cloud';
+  }, 'envelope_shape_mismatch');
+
+  // Valid equivalents keep the exact digest: a fresh strict re-parse of the
+  // same text and any key order of the same shape canonicalize identically.
+  assert.equal(childEnvelopeDigestV1(parseChildEnvelopeV1(envelope.envelope_text)).digest,
+    descriptor.digest);
+  assert.equal(childEnvelopeDigestV1(reverseKeyOrder(JSON.parse(JSON.stringify(envelope)))).digest,
+    descriptor.digest);
+});
+
+test('child envelope digests reject hostile direct-JS envelope shapes fail-closed', () => {
+  // The exact-shape contract claims a closed direct-JavaScript surface, so
+  // extras that canonical JSON cannot witness (non-enumerable or symbol own
+  // keys), accessor properties, and custom prototypes must be rejected as
+  // invalid objects instead of being silently ignored by the canonical
+  // comparison.
+  const manifest = defaultManifest();
+  const envelope = compileChildEnvelopeV1(manifest, 'backend-writer');
+  const rejectsAs = (name, mutate, code) => {
+    const forged = JSON.parse(JSON.stringify(envelope));
+    mutate(forged);
+    const error = errorOf(() => childEnvelopeDigestV1(forged));
+    assert.equal(error.code, code, `case "${name}" should fail with ${code}`);
+  };
+
+  rejectsAs('non-enumerable extra top-level key', (forged) => {
+    Object.defineProperty(forged, 'routing_hint', { value: 'cursor-cloud', enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('non-enumerable extra execution key', (forged) => {
+    Object.defineProperty(forged.execution, 'fallback_provider', { value: 'grok', enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('non-enumerable framed offset shadow', (forged) => {
+    Object.defineProperty(forged.framed_blocks.prompt, 'true_offset', { value: 0, enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('symbol-keyed extra top-level key', (forged) => {
+    forged[Symbol('hidden_route')] = 'cursor-cloud';
+  }, 'invalid_object');
+  rejectsAs('symbol-keyed nested acceptance key', (forged) => {
+    forged.acceptance[0][Symbol('extra')] = true;
+  }, 'invalid_object');
+  rejectsAs('enumerable accessor masquerading as assignment_id', (forged) => {
+    Object.defineProperty(forged, 'assignment_id',
+      { get: () => envelope.assignment_id, enumerable: true });
+  }, 'invalid_object');
+  rejectsAs('non-enumerable accessor inside framed blocks', (forged) => {
+    Object.defineProperty(forged.framed_blocks.objective, 'lazy_length', { get: () => 1, enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('custom prototype on the structured envelope', (forged) => {
+    Object.setPrototypeOf(forged.execution, { fallback: 'grok' });
+  }, 'invalid_type');
+
+  for (const key of ['schema', 'version', 'envelope_text', 'envelope_byte_length']) {
+    const forged = JSON.parse(JSON.stringify(envelope));
+    let reads = 0;
+    Object.defineProperty(forged, key, {
+      enumerable: true,
+      get() {
+        reads += 1;
+        throw new Error('must not execute');
+      },
+    });
+    assert.equal(errorOf(() => childEnvelopeDigestV1(forged)).code, 'invalid_object');
+    assert.equal(reads, 0, `${key} getter must not execute before descriptor validation`);
+  }
+
+  // A hidden routing value in the bytes can never be laundered through a
+  // clean-looking structured form: the digest parses envelope_text strictly,
+  // so the profile-plus-model state fails with its dedicated semantic code
+  // before any shape comparison happens.
+  const profileEnvelope = compileChildEnvelopeV1(defaultManifest(), 'frontend-writer');
+  const laundered = JSON.parse(JSON.stringify(profileEnvelope));
+  laundered.envelope_text = profileEnvelope.envelope_text.replace(
+    'execution.model: -', 'execution.model: stealth/ox-alpha');
+  // Keep the declared byte length consistent so the digest reaches its
+  // strict-parse gate instead of failing early on framing bookkeeping.
+  laundered.envelope_byte_length = Buffer.byteLength(laundered.envelope_text, 'utf8');
+  assert.equal(errorOf(() => childEnvelopeDigestV1(laundered)).code, 'discarded_model_with_profile');
 });
 
 test('digest verification is constant-time and fails closed', () => {

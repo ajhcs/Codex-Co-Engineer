@@ -57,6 +57,7 @@ import {
   SHA40_PATTERN,
   assertBaseSha,
   assertBoundedText,
+  assertJsonDataObject,
   assertRepositoryPath,
   assertRunId,
   assertTimeoutMs,
@@ -145,6 +146,10 @@ function decimalInt(value, path, { min, max }) {
     fail('invalid_format', path, `${path} must be a non-negative decimal integer.`);
   }
   const parsed = Number(value);
+  if (String(parsed) !== value) {
+    fail('invalid_format', path,
+      `${path} must use the compiler's canonical decimal encoding without leading zeroes.`);
+  }
   if (parsed < min || parsed > max) {
     fail('out_of_range', path, `${path} is ${parsed}; allowed range is ${min}..${max}.`);
   }
@@ -157,7 +162,11 @@ function sortedParameters(parameters, path) {
     if (!PARAM_KEY_PATTERN.test(key)) {
       fail('invalid_format', `${path}.${key}`, `${path}.${key} violates the parameter-key grammar.`);
     }
-    sorted[key] = parameters[key];
+    // JSON's canonical numeric spelling maps negative zero to zero. Keep the
+    // structured compiler output in that same canonical domain so the object
+    // returned by compile, its rendered bytes, the strict parser result, and
+    // the identity digest are exact inverses rather than merely digest-equal.
+    sorted[key] = Object.is(parameters[key], -0) ? 0 : parameters[key];
   }
   return sorted;
 }
@@ -261,7 +270,7 @@ function resolveLaneIndex(assignments, selection) {
       fail('assignment_index_out_of_range', 'assignments',
         `assignment index must be an integer within 0..${assignments.length - 1}; received ${selection}.`);
     }
-    return selection;
+    return selection === 0 ? 0 : selection;
   }
   if (typeof selection === 'string') {
     const index = assignments.findIndex((assignment) => assignment.assignment_id === selection);
@@ -315,32 +324,44 @@ export function compileChildEnvelopesV1(manifest) {
 }
 
 // Elide framed opaque blocks so reviewers and tests can audit the exact
-// static scaffold a worker sees. Elision cuts on validated byte offsets, so
-// multi-byte content can never split the surrounding scaffold.
+// static scaffold a worker sees. Caller-supplied ranges are never trusted:
+// the envelope is parsed first and the supplied framedBlocks must exactly
+// equal the parser's closed objective/prompt framing (same ranges, no extra
+// or missing entries, no extra fields) before any offset is used. Elision
+// then cuts on those validated byte offsets, so multi-byte content can never
+// split the surrounding scaffold and forged offsets cannot reposition the
+// elision window over scaffold lines.
 export function envelopeRoutingSurfaceV1(envelopeText, framedBlocks) {
-  if (typeof envelopeText !== 'string' || !isPlainObject(framedBlocks)
-    || !isPlainObject(framedBlocks.objective) || !isPlainObject(framedBlocks.prompt)) {
+  if (typeof envelopeText !== 'string' || !isPlainObject(framedBlocks)) {
     fail('invalid_type', 'envelope', 'Routing-surface elision requires envelope text and framed block offsets.');
+  }
+  // The exact-shape contract is closed at the direct-JavaScript boundary as
+  // well: every own key of the supplied framing must be an enumerable string
+  // data property on a plain object. Non-enumerable or symbol extra own keys
+  // and accessor properties are invisible to deepEqualJson()'s Object.keys
+  // view, so they are rejected here before any offset is trusted.
+  const rootEntries = assertJsonDataObject(framedBlocks, 'envelope.framed_blocks');
+  const rootValues = new Map(rootEntries.map(({ key, value }) => [key, value]));
+  const objectiveFrame = rootValues.get('objective');
+  const promptFrame = rootValues.get('prompt');
+  if (!isPlainObject(objectiveFrame) || !isPlainObject(promptFrame)) {
+    fail('invalid_type', 'envelope', 'Routing-surface elision requires envelope text and framed block offsets.');
+  }
+  assertJsonDataObject(objectiveFrame, 'envelope.framed_blocks.objective');
+  assertJsonDataObject(promptFrame, 'envelope.framed_blocks.prompt');
+  const parsed = parseChildEnvelopeV1(envelopeText);
+  if (!deepEqualJson(framedBlocks, parsed.framed_blocks)) {
+    fail('framed_blocks_mismatch', 'envelope.framed_blocks',
+      'Supplied framed blocks do not exactly equal the parsed objective/prompt framing of this envelope.');
   }
   const bytes = Buffer.from(envelopeText, 'utf8');
   const segments = [];
   let cursor = 0;
   for (const name of ['objective', 'prompt']) {
-    const block = framedBlocks[name];
-    for (const field of ['byte_offset', 'byte_length']) {
-      if (!Number.isSafeInteger(block[field]) || block[field] < 0) {
-        fail('invalid_format', `envelope.framed_blocks.${name}.${field}`,
-          `${field} must be a non-negative safe integer.`);
-      }
-    }
-    if (block.byte_offset < cursor || block.byte_offset + block.byte_length + 1 > bytes.length
-      || bytes[block.byte_offset + block.byte_length] !== 0x0a) {
-      fail('malformed_envelope', `envelope.framed_blocks.${name}`,
-        `Framed-block offsets for "${name}" do not address an opaque block inside this envelope.`);
-    }
-    segments.push(wellFormedUtf8(bytes.subarray(cursor, block.byte_offset), 'envelope'));
-    segments.push(`<${name} ${block.byte_length} bytes elided>\n`);
-    cursor = block.byte_offset + block.byte_length + 1;
+    const { byte_offset: byteOffset, byte_length: byteLength } = parsed.framed_blocks[name];
+    segments.push(wellFormedUtf8(bytes.subarray(cursor, byteOffset), 'envelope'));
+    segments.push(`<${name} ${byteLength} bytes elided>\n`);
+    cursor = byteOffset + byteLength + 1;
   }
   segments.push(wellFormedUtf8(bytes.subarray(cursor), 'envelope'));
   return segments.join('');
@@ -401,6 +422,10 @@ function expectBlock(reader, name, path) {
       `Expected "begin-${name} <n> bytes", found "${truncateForMessage(header)}".`);
   }
   const byteLength = Number(match[2]);
+  if (String(byteLength) !== match[2]) {
+    fail('invalid_format', path,
+      `Framed block "${name}" must use the compiler's canonical decimal byte length.`);
+  }
   const contentStart = reader.offset;
   const contentEnd = contentStart + byteLength;
   if (contentEnd >= reader.bytes.length || reader.bytes[contentEnd] !== 0x0a) {
@@ -414,12 +439,15 @@ function expectBlock(reader, name, path) {
     fail('malformed_envelope', path, `Framed block "${name}" lacks its end marker.`);
   }
   reader.offset = footerStart + footer.length;
-  if (reader.offset < reader.bytes.length) {
-    if (reader.bytes[reader.offset] !== 0x0a) {
-      fail('malformed_envelope', path, `"end-${name}" must terminate its own line.`);
-    }
-    reader.offset += 1;
+  // The end marker must be terminated by exactly one newline. For the final
+  // "end-prompt" this is the envelope's terminal byte: combined with the
+  // trailing-content check in parseChildEnvelopeV1(), an envelope may neither
+  // omit that newline nor carry any extra terminal byte after it.
+  if (reader.bytes[reader.offset] !== 0x0a) {
+    fail('malformed_envelope', path,
+      `"end-${name}" must terminate its own line with exactly one terminal newline.`);
   }
+  reader.offset += 1;
   return Object.freeze({
     content: wellFormedUtf8(reader.bytes.subarray(contentStart, contentEnd), path),
     byte_offset: contentStart,
@@ -521,14 +549,24 @@ export function parseChildEnvelopeV1(envelopeText) {
   if (profileRaw !== '-') {
     expectPatternedValue(profileRaw, PROFILE_NAME_PATTERN, PROFILE_NAME_MAX, 'envelope.execution.profile', 'execution.profile');
   }
+  // The three execution lines must encode exactly one compiler-emittable
+  // semantic state, and every non-"-" routing value must survive into the
+  // parsed form: either an explicit provider + model pair (profile "-") or
+  // one named profile (provider AND model both "-"). Anything else is
+  // rejected instead of silently discarding a routing value.
   const hasExplicit = providerRaw !== '-';
+  const hasModel = modelRaw !== '-';
   const hasProfile = profileRaw !== '-';
   if (hasExplicit === hasProfile) {
     fail('execution_ambiguous', 'envelope.execution.provider',
       'An envelope declares exactly one resolution choice: explicit provider/model or named profile.');
   }
-  if (hasExplicit && modelRaw === '-') {
+  if (hasExplicit && !hasModel) {
     fail('missing_key', 'envelope.execution.model', 'Explicit execution requires an exact model identifier.');
+  }
+  if (!hasExplicit && hasModel) {
+    fail('discarded_model_with_profile', 'envelope.execution.model',
+      'A profile-selected execution must leave execution.model as "-"; a concrete model value here would be silently discarded by the parse.');
   }
   const startingRefRaw = expectLine(reader, 'starting_ref');
   let startingRef = null;
@@ -581,6 +619,7 @@ export function parseChildEnvelopeV1(envelopeText) {
     const parameterCount = decimalInt(expectLine(reader, `${prefix}.parameter.count`), `envelope.${prefix}.parameter.count`, { min: 0, max: PARAMS_MAX_KEYS });
     const parameters = {};
     const parameterPrefix = `${prefix}.parameter.`;
+    let previousParameterKey = null;
     for (let paramIndex = 0; paramIndex < parameterCount; paramIndex += 1) {
       const lineText = readScaffoldLine(reader);
       const parsed = splitScaffoldLine(lineText);
@@ -595,7 +634,12 @@ export function parseChildEnvelopeV1(envelopeText) {
       if (Object.hasOwn(parameters, parameterKey)) {
         fail('duplicate_parameter_key', `envelope.${parsed.key}`, `Parameter "${parameterKey}" repeats within acceptance command "${commandId}".`);
       }
+      if (previousParameterKey !== null && parameterKey < previousParameterKey) {
+        fail('noncanonical_parameter_order', `envelope.${parsed.key}`,
+          `Acceptance parameters must use the compiler's ascending key order; "${parameterKey}" follows "${previousParameterKey}".`);
+      }
       parameters[parameterKey] = parseJsonScalar(parsed.value, `envelope.${parsed.key}`);
+      previousParameterKey = parameterKey;
     }
     acceptance.push(Object.freeze({ command_id: commandId, timeout_ms: timeoutMs, parameters }));
   }

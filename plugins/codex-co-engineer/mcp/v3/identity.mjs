@@ -32,7 +32,12 @@ import {
   utf8ByteLength,
 } from './run-manifest.mjs';
 import { parseRunManifestV1 } from './run-policy.mjs';
-import { CHILD_ENVELOPE_SCHEMA_ID, CHILD_ENVELOPE_VERSION, MAX_ENVELOPE_BYTES } from './prompt-compiler.mjs';
+import {
+  CHILD_ENVELOPE_SCHEMA_ID,
+  CHILD_ENVELOPE_VERSION,
+  MAX_ENVELOPE_BYTES,
+  parseChildEnvelopeV1,
+} from './prompt-compiler.mjs';
 
 export const IDENTITY_DOMAIN = 'codex-co-engineer.identity.v1';
 export const IDENTITY_VERSION = 1;
@@ -71,6 +76,24 @@ function assertWellFormedText(value, path) {
 function toCanonicalBytes(value, path) {
   assertWellFormedText(value, path);
   return Buffer.from(value, 'utf8');
+}
+
+function exactJsonEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left)) {
+    if (!Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!exactJsonEqual(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  if (isPlainObject(left) && isPlainObject(right)) {
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key) => Object.hasOwn(right, key) && exactJsonEqual(left[key], right[key]));
+  }
+  return false;
 }
 
 // Deterministic canonical JSON serialization. The complexity pre-pass
@@ -224,6 +247,10 @@ export function assignmentPromptDigestV1(manifest, assignmentId) {
 // Stable digest of one compiled child envelope over its canonical form.
 export function childEnvelopeDigestV1(envelope) {
   if (!isPlainObject(envelope)) fail('invalid_type', 'envelope', 'A child envelope must be a JSON object.');
+  // Inspect the complete direct-JavaScript data graph before reading even one
+  // caller property. This rejects accessors, symbols, hidden keys, exotic
+  // prototypes, sparse arrays, aliases, and cycles without invoking getters.
+  assertManifestComplexity(envelope);
   if (envelope.schema !== CHILD_ENVELOPE_SCHEMA_ID) {
     fail('invalid_format', 'envelope.schema', `Envelope schema must be exactly "${CHILD_ENVELOPE_SCHEMA_ID}".`);
   }
@@ -236,11 +263,24 @@ export function childEnvelopeDigestV1(envelope) {
     fail('out_of_range', 'envelope.envelope_text',
       `Envelope text is ${textBytes} bytes; allowed range is 1..${MAX_ENVELOPE_BYTES}.`);
   }
-  if (envelope.envelope_byte_length !== undefined && envelope.envelope_byte_length !== textBytes) {
+  if (envelope.envelope_byte_length !== textBytes) {
     fail('invalid_format', 'envelope.envelope_byte_length',
-      'envelope_byte_length must equal the UTF-8 byte length of envelope_text.');
+      'envelope_byte_length must be present and equal the UTF-8 byte length of envelope_text.');
   }
-  const canonical = canonicalJsonStringify(envelope);
+  // The structured form is never trusted on its own: envelope_text is parsed
+  // strictly, the supplied envelope must exactly match the complete parsed
+  // canonical shape (closed keys, IDs, nested acceptance, framing offsets,
+  // byte length), and the digest is then taken over that validated parsed
+  // form. Exact structural comparison distinguishes negative zero from zero
+  // before canonical JSON intentionally normalizes that spelling, while
+  // remaining indifferent to caller key order. identity.mjs -> prompt-compiler.mjs is
+  // the only direction of this dependency; no import cycle exists.
+  const parsed = parseChildEnvelopeV1(envelope.envelope_text);
+  const canonical = canonicalJsonStringify(parsed);
+  if (!exactJsonEqual(envelope, parsed)) {
+    fail('envelope_shape_mismatch', 'envelope',
+      'Supplied child envelope does not exactly match the strict parse of its own envelope_text.');
+  }
   return digestDescriptor(IDENTITY_LABELS.CHILD_ENVELOPE, [Buffer.from(canonical, 'utf8')]);
 }
 

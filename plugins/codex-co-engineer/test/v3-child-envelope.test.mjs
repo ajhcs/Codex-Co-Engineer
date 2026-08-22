@@ -21,6 +21,8 @@ import {
   RunContractV1Error,
   SCOPE_MAX_PATTERNS,
   SCOPE_PATTERN_MAX_BYTES,
+  assertDenseJsonArray,
+  isPlainObject,
 } from '../mcp/v3/run-manifest.mjs';
 import {
   CHILD_ENVELOPE_SCHEMA_ID,
@@ -31,6 +33,7 @@ import {
   envelopeRoutingSurfaceV1,
   parseChildEnvelopeV1,
 } from '../mcp/v3/prompt-compiler.mjs';
+import { childEnvelopeDigestV1 } from '../mcp/v3/identity.mjs';
 
 const BASE_SHA = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
 const POLICY = Object.freeze({
@@ -157,6 +160,62 @@ test('selection by exact id and by lane index agree, and batch equals individual
     assert.deepEqual(compileChildEnvelopeV1(manifest, assignment.assignment_id), batch[index]);
     assert.deepEqual(compileChildEnvelopeV1(manifest, index), batch[index]);
     assert.equal(batch[index].lane_index, index);
+  }
+});
+
+test('numeric selection negative zero canonicalizes across compile parse and digest', () => {
+  const manifest = defaultManifest();
+  const compiled = compileChildEnvelopeV1(manifest, -0);
+  const parsed = parseChildEnvelopeV1(compiled.envelope_text);
+
+  assert.equal(compiled.lane_index, 0);
+  assert.equal(Object.is(compiled.lane_index, -0), false);
+  assert.equal(Object.is(parsed.lane_index, -0), false);
+  assert.deepEqual(compiled, parsed);
+  assert.equal(childEnvelopeDigestV1(compiled).digest, childEnvelopeDigestV1(parsed).digest);
+
+  const forged = { ...compiled, lane_index: -0 };
+  assert.equal(errorOf(() => childEnvelopeDigestV1(forged)).code, 'envelope_shape_mismatch');
+});
+
+test('numeric parameter negative zero canonicalizes across compile parse and digest', () => {
+  const manifest = defaultManifest();
+  manifest.assignments[0].acceptance[0].parameters.negative_zero = -0;
+
+  const compiled = compileChildEnvelopeV1(manifest, 'backend-writer');
+  const parsed = parseChildEnvelopeV1(compiled.envelope_text);
+  const compiledValue = compiled.acceptance[0].parameters.negative_zero;
+  const parsedValue = parsed.acceptance[0].parameters.negative_zero;
+
+  assert.equal(compiledValue, 0);
+  assert.equal(Object.is(compiledValue, -0), false);
+  assert.equal(Object.is(parsedValue, -0), false);
+  assert.deepEqual(compiled, parsed);
+  assert.equal(childEnvelopeDigestV1(compiled).digest, childEnvelopeDigestV1(parsed).digest);
+
+  const forged = {
+    ...compiled,
+    acceptance: compiled.acceptance.map((entry, index) => index === 0
+      ? { ...entry, parameters: { ...entry.parameters, negative_zero: -0 } }
+      : entry),
+  };
+  assert.equal(errorOf(() => childEnvelopeDigestV1(forged)).code, 'envelope_shape_mismatch');
+});
+
+test('digest comparison accepts canonical null-prototype arrays without prototype calls', () => {
+  const compiled = compileChildEnvelopeV1(defaultManifest(), 'backend-writer');
+  const expectedDigest = childEnvelopeDigestV1(compiled).digest;
+  const arrayPaths = [
+    (envelope) => envelope.write_scope,
+    (envelope) => envelope.acceptance,
+    (envelope) => envelope.required_evidence,
+    (envelope) => envelope.framed_blocks,
+  ];
+
+  for (const selectArray of arrayPaths) {
+    const candidate = structuredClone(compiled);
+    Object.setPrototypeOf(selectArray(candidate), null);
+    assert.equal(childEnvelopeDigestV1(candidate).digest, expectedDigest);
   }
 });
 
@@ -329,12 +388,15 @@ test('parser rejects tampered, ambiguous, and unbounded envelopes', () => {
     ['wrong schema', text.replace(`schema: ${CHILD_ENVELOPE_SCHEMA_ID}`, 'schema: codex-co-engineer.child-envelope.v2'), 'invalid_format'],
     ['wrong version', text.replace('version: 1', 'version: 2'), 'out_of_range'],
     ['non-decimal version', text.replace('version: 1', 'version: one'), 'invalid_format'],
+    ['zero-padded version', text.replace('version: 1', 'version: 01'), 'invalid_format'],
+    ['zero-padded lane index', text.replace('lane_index: 0', 'lane_index: 00'), 'invalid_format'],
     ['unknown scaffold key', text.replace('role: implement', 'role_override: implement'), 'malformed_envelope'],
     ['uppercase scaffold key', text.replace('role: implement', 'Role: implement'), 'unknown_envelope_line'],
     ['missing separator', text.replace('role: implement', 'role implement'), 'malformed_envelope'],
     ['reordered lines', text.replace('assignment_id: backend-writer', '~').replace('access: writer', 'assignment_id: backend-writer').replace('~', 'access: writer'), 'malformed_envelope'],
     ['tampered objective count', text.replace('begin-objective ', 'begin-objective 9'), 'envelope_truncated'],
     ['tampered prompt count', text.replace(promptHeader, 'begin-prompt 7 bytes'), 'envelope_truncated'],
+    ['zero-padded prompt count', text.replace(promptHeader, promptHeader.replace('begin-prompt ', 'begin-prompt 0')), 'invalid_format'],
     ['overflowing declared count', text.replace(promptHeader, 'begin-prompt 9999999 bytes'), 'envelope_truncated'],
     ['missing end marker', text.replace(/\nend-prompt\n$/u, '\n'), 'malformed_envelope'],
     ['truncated tail', text.slice(0, text.length - 3), 'malformed_envelope'],
@@ -361,8 +423,10 @@ test('parser rejects tampered, ambiguous, and unbounded envelopes', () => {
     ['duplicate command id', text.replace(/acceptance\.count: 1/u, 'acceptance.count: 2').replace(/(required_evidence\.count)/u, 'acceptance[1].command_id: unit-tests\nacceptance[1].timeout_ms: 600000\nacceptance[1].parameter.count: 0\n$1'), 'duplicate_command_id'],
     ['timeout below minimum', text.replace(/acceptance\[0\]\.timeout_ms: .*/u, 'acceptance[0].timeout_ms: 999'), 'out_of_range'],
     ['timeout above maximum', text.replace(/acceptance\[0\]\.timeout_ms: .*/u, `acceptance[0].timeout_ms: ${MAX_TIMEOUT_MS + 1}`), 'out_of_range'],
+    ['zero-padded timeout', text.replace(/acceptance\[0\]\.timeout_ms: ([0-9]+)/u, 'acceptance[0].timeout_ms: 0$1'), 'invalid_format'],
     ['too many parameters', text.replace(/acceptance\[0\]\.parameter\.count: 3/u, `acceptance[0].parameter.count: ${PARAMS_MAX_KEYS + 1}`), 'out_of_range'],
     ['duplicate parameter key', text.replace(/acceptance\[0\]\.parameter\.count: 3/u, 'acceptance[0].parameter.count: 4').replace(/(required_evidence\.count)/u, 'acceptance[0].parameter.a_first: 43\n$1'), 'duplicate_parameter_key'],
+    ['non-canonical parameter order', text.replace(/(acceptance\[0\]\.parameter\.a_first: [^\n]+)\n(acceptance\[0\]\.parameter\.b_second: [^\n]+)/u, '$2\n$1'), 'noncanonical_parameter_order'],
     ['nested parameter value', text.replace(/acceptance\[0\]\.parameter\.b_second: .*/u, 'acceptance[0].parameter.b_second: {"nested":true}'), 'invalid_type'],
     ['null parameter value', text.replace(/acceptance\[0\]\.parameter\.b_second: .*/u, 'acceptance[0].parameter.b_second: null'), 'invalid_type'],
     ['non-canonical parameter encoding', text.replace(/acceptance\[0\]\.parameter\.b_second: .*/u, 'acceptance[0].parameter.b_second: "v\\u00e4l \\u{1F98A}" '), 'invalid_format'],
@@ -401,6 +465,79 @@ test('compiler rejects invalid selections and never bypasses manifest validation
   assert.equal(errorOf(() => compileChildEnvelopeV1(oversizedKey, 'backend-writer')).code, 'manifest_too_large');
 });
 
+test('compiler and digest reject Proxy surfaces before invoking traps', () => {
+  const trapCounts = { get: 0, getPrototypeOf: 0, ownKeys: 0, descriptor: 0 };
+  const traps = {
+    get() {
+      trapCounts.get += 1;
+      throw new TypeError('get trap must not execute');
+    },
+    getPrototypeOf() {
+      trapCounts.getPrototypeOf += 1;
+      throw new TypeError('getPrototypeOf trap must not execute');
+    },
+    ownKeys() {
+      trapCounts.ownKeys += 1;
+      throw new TypeError('ownKeys trap must not execute');
+    },
+    getOwnPropertyDescriptor() {
+      trapCounts.descriptor += 1;
+      throw new TypeError('descriptor trap must not execute');
+    },
+  };
+
+  const manifestProxy = new Proxy(defaultManifest(), traps);
+  const manifestError = errorOf(() => compileChildEnvelopeV1(manifestProxy, 'backend-writer'));
+  assert.equal(manifestError.code, 'invalid_type');
+
+  const manifest = defaultManifest();
+  manifest.assignments = new Proxy([...manifest.assignments], traps);
+  const arrayError = errorOf(() => compileChildEnvelopesV1(manifest));
+  assert.equal(arrayError.code, 'invalid_array');
+
+  const envelope = compileChildEnvelopeV1(defaultManifest(), 'backend-writer');
+  const envelopeProxy = new Proxy(envelope, traps);
+  const digestError = errorOf(() => childEnvelopeDigestV1(envelopeProxy));
+  assert.equal(digestError.code, 'invalid_type');
+
+  assert.deepEqual(trapCounts, {
+    get: 0,
+    getPrototypeOf: 0,
+    ownKeys: 0,
+    descriptor: 0,
+  });
+});
+
+test('revoked Proxy surfaces fail with typed contract errors', () => {
+  const revokedObject = Proxy.revocable(defaultManifest(), {});
+  revokedObject.revoke();
+  assert.equal(isPlainObject(revokedObject.proxy), false);
+  const manifestError = errorOf(() => compileChildEnvelopeV1(revokedObject.proxy, 'backend-writer'));
+  assert.ok(manifestError instanceof RunContractV1Error);
+  assert.equal(manifestError.code, 'invalid_type');
+
+  const revokedArray = Proxy.revocable([...defaultManifest().assignments], {});
+  revokedArray.revoke();
+  const directArrayError = errorOf(() => assertDenseJsonArray(revokedArray.proxy, 'assignments'));
+  assert.ok(directArrayError instanceof RunContractV1Error);
+  assert.equal(directArrayError.code, 'invalid_array');
+
+  const manifest = defaultManifest();
+  manifest.assignments = revokedArray.proxy;
+  const compilerArrayError = errorOf(() => compileChildEnvelopesV1(manifest));
+  assert.ok(compilerArrayError instanceof RunContractV1Error);
+  assert.equal(compilerArrayError.code, 'invalid_type');
+
+  const envelope = Proxy.revocable(
+    compileChildEnvelopeV1(defaultManifest(), 'backend-writer'),
+    {},
+  );
+  envelope.revoke();
+  const digestError = errorOf(() => childEnvelopeDigestV1(envelope.proxy));
+  assert.ok(digestError instanceof RunContractV1Error);
+  assert.equal(digestError.code, 'invalid_type');
+});
+
 test('resolution state renders exactly as declared, including unresolved profiles', () => {
   const manifest = buildManifest([
     reviewerAssignment('docs-reviewer'),
@@ -429,17 +566,245 @@ test('resolution state renders exactly as declared, including unresolved profile
   assert.match(envelopes[2].envelope_text, /^starting_ref: b0a9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1$/mu);
 });
 
-test('routing-surface elision demands validated framed offsets', () => {
+test('execution lines encode exactly one compiler-emittable semantic state', () => {
+  // Every provider/model/profile combination the byte format can express is
+  // enumerated here. Exactly two states are emittable by the compiler and
+  // acceptable from raw bytes: an explicit provider+model pair (profile "-")
+  // and one named profile (provider AND model both "-"). No accepted parse
+  // may hide a routing value that the structured output then discards.
+  const [profileLane] = compileChildEnvelopesV1(buildManifest([reviewerAssignment('docs-reviewer')]));
+  const textFor = (provider, model, profile) => profileLane.envelope_text
+    .replace('execution.provider: -', `execution.provider: ${provider}`)
+    .replace('execution.model: -', `execution.model: ${model}`)
+    .replace(/execution\.profile: .*/u, `execution.profile: ${profile}`);
+
+  const cases = [
+    ['all three absent', '-', '-', '-', 'execution_ambiguous'],
+    ['model alone', '-', 'stealth/ox-alpha', '-', 'execution_ambiguous'],
+    ['the gap: profile plus hidden model', '-', 'stealth/ox-alpha', 'deep-security-review', 'discarded_model_with_profile'],
+    ['valid profile selection', '-', '-', 'deep-security-review', null],
+    ['partial explicit provider without model', 'dsh', '-', '-', 'missing_key'],
+    ['explicit provider plus profile', 'dsh', '-', 'deep-security-review', 'execution_ambiguous'],
+    ['valid explicit execution', 'dsh', 'stealth/ox-alpha', '-', null],
+    ['fully overloaded routing state', 'dsh', 'stealth/ox-alpha', 'deep-security-review', 'execution_ambiguous'],
+  ];
+  for (const [name, provider, model, profile, code] of cases) {
+    if (code === null) {
+      const parsed = parseChildEnvelopeV1(textFor(provider, model, profile));
+      assert.deepEqual(parsed.execution, {
+        provider: provider === '-' ? null : provider,
+        model: model === '-' ? null : model,
+        profile: profile === '-' ? null : profile,
+      }, `case "${name}" must parse to its exact declared routing state with no discarded value`);
+      continue;
+    }
+    const error = expectParseFailure(textFor(provider, model, profile), code, `case "${name}"`);
+    // Every rejection surfaces on the execution lines themselves: the choice
+    // is semantic, never a side effect of some later scaffold gate.
+    assert.ok(error.path.startsWith('envelope.execution'),
+      `case "${name}" rejected outside the execution surface: ${error.path}`);
+  }
+
+  // The previously silent state is rejected with a dedicated code, and no
+  // parse of its bytes ever exposes the hidden model anywhere.
+  const gapText = textFor('-', 'stealth/ox-alpha', 'deep-security-review');
+  assert.match(gapText, /^execution\.model: stealth\/ox-alpha$/mu);
+  const gapError = expectParseFailure(gapText, 'discarded_model_with_profile');
+  assert.equal(gapError.path, 'envelope.execution.model');
+  assert.ok(gapError.message.includes('silently discarded'));
+
+  // Equivalent parsed-framing surfaces reject the same hidden routing value:
+  // the digest path parses envelope_text strictly before hashing, and the
+  // routing-surface elision parses before any offset is used.
+  const forgedStructured = JSON.parse(JSON.stringify(profileLane));
+  forgedStructured.envelope_text = gapText;
+  // Keep declared framing bookkeeping consistent so the digest reaches its
+  // strict-parse gate rather than failing early on the byte-length check.
+  forgedStructured.envelope_byte_length = Buffer.byteLength(gapText, 'utf8');
+  assert.equal(errorOf(() => childEnvelopeDigestV1(forgedStructured)).code, 'discarded_model_with_profile');
+  assert.equal(errorOf(() => envelopeRoutingSurfaceV1(
+    gapText, JSON.parse(JSON.stringify(profileLane.framed_blocks)),
+  )).code, 'discarded_model_with_profile');
+
+  // The compiler itself cannot emit the ambiguous states: manifest-level
+  // validation rejects profile+model and profile+provider executions before
+  // any envelope exists.
+  const bothManifest = buildManifest([reviewerAssignment('docs-reviewer', {
+    execution: { profile: 'deep-security-review', model: 'stealth/ox-alpha' },
+  })]);
+  assert.equal(errorOf(() => compileChildEnvelopeV1(bothManifest, 'docs-reviewer')).code, 'execution_ambiguous');
+  const providerProfileManifest = buildManifest([writerAssignment('backend-writer', ['src/**'], {
+    execution: { provider: 'dsh', profile: 'deep-security-review' },
+  })]);
+  assert.equal(errorOf(() => compileChildEnvelopeV1(providerProfileManifest, 'backend-writer')).code,
+    'execution_ambiguous');
+
+  // Canonical valid lanes are unchanged: a compiled profile lane still
+  // round-trips through the strict parser byte-identically.
+  const reparsed = parseChildEnvelopeV1(profileLane.envelope_text);
+  assert.deepEqual(reparsed.execution, { provider: null, model: null, profile: 'deep-security-review' });
+  assert.equal(reparsed.envelope_text, profileLane.envelope_text);
+
+  // An unresolved profile may canonically carry the immutable SHA that P05
+  // will require if the profile resolves to Cursor Cloud. This is an authored
+  // field the compiler preserves, not a routing value the parser may discard.
+  const [profileWithFutureCloudPin] = compileChildEnvelopesV1(buildManifest([
+    reviewerAssignment('docs-reviewer', { starting_ref: BASE_SHA }),
+  ]));
+  const pinnedProfileParse = parseChildEnvelopeV1(profileWithFutureCloudPin.envelope_text);
+  assert.deepEqual(pinnedProfileParse.execution,
+    { provider: null, model: null, profile: 'deep-security-review' });
+  assert.equal(pinnedProfileParse.starting_ref, BASE_SHA);
+});
+
+test('routing-surface framed blocks stay closed at the direct-JavaScript boundary', () => {
   const [envelope] = compileChildEnvelopesV1(defaultManifest());
+  const clone = () => JSON.parse(JSON.stringify(envelope.framed_blocks));
+  const rejectsAs = (name, mutate, code) => {
+    const forged = clone();
+    mutate(forged);
+    const error = errorOf(() => envelopeRoutingSurfaceV1(envelope.envelope_text, forged));
+    assert.equal(error.code, code, `case "${name}" should fail with ${code}`);
+  };
+
+  // deepEqualJson() sees only enumerable string keys; the closed-shape
+  // contract therefore rejects everything Object.keys() cannot witness.
+  rejectsAs('non-enumerable extra key on the framing root', (forged) => {
+    Object.defineProperty(forged, 'extra_block', { value: { byte_offset: 0, byte_length: 1 }, enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('non-enumerable extra key inside prompt frame', (forged) => {
+    Object.defineProperty(forged.prompt, 'spoof', { value: 1, enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('symbol-keyed extra on the framing root', (forged) => {
+    forged[Symbol('hidden')] = { byte_offset: 0, byte_length: 1 };
+  }, 'invalid_object');
+  rejectsAs('symbol-keyed extra inside objective frame', (forged) => {
+    forged.objective[Symbol('hidden')] = 1;
+  }, 'invalid_object');
+  rejectsAs('enumerable accessor masquerading as byte_length', (forged) => {
+    Object.defineProperty(forged.prompt, 'byte_length',
+      { get: () => envelope.framed_blocks.prompt.byte_length, enumerable: true });
+  }, 'invalid_object');
+  rejectsAs('non-enumerable accessor inside prompt frame', (forged) => {
+    Object.defineProperty(forged.prompt, 'lazy_offset', { get: () => 0, enumerable: false });
+  }, 'invalid_object');
+  rejectsAs('custom prototype on the framing root', (forged) => {
+    Object.setPrototypeOf(forged, { inherited_block: { byte_offset: 0, byte_length: 1 } });
+  }, 'invalid_type');
+  rejectsAs('custom prototype inside prompt frame', (forged) => {
+    Object.setPrototypeOf(forged.prompt, { evil: true });
+  }, 'invalid_type');
+
+  for (const key of ['objective', 'prompt']) {
+    const forged = clone();
+    let reads = 0;
+    Object.defineProperty(forged, key, {
+      enumerable: true,
+      get() {
+        reads += 1;
+        throw new Error('must not execute');
+      },
+    });
+    assert.equal(errorOf(() => envelopeRoutingSurfaceV1(envelope.envelope_text, forged)).code,
+      'invalid_object');
+    assert.equal(reads, 0, `root ${key} getter must not execute before descriptor validation`);
+  }
+
+  // Null-prototype data remains plain-object data: the contract closes out
+  // *custom* prototypes, not dictionary-mode objects.
+  const dictionary = Object.assign(Object.create(null), clone());
+  dictionary.objective = Object.assign(Object.create(null), clone().objective);
+  dictionary.prompt = Object.assign(Object.create(null), clone().prompt);
+  assert.doesNotThrow(() => envelopeRoutingSurfaceV1(envelope.envelope_text, dictionary));
+
+  // Canonical valid goldens are untouched: the exact parsed framing still
+  // elides to the identical audit surface.
+  assert.equal(envelopeRoutingSurfaceV1(envelope.envelope_text, clone()),
+    envelopeRoutingSurfaceV1(envelope.envelope_text, envelope.framed_blocks));
+});
+
+test('routing-surface elision demands the exact parsed framed offsets', () => {
+  const [envelope] = compileChildEnvelopesV1(defaultManifest());
+  const frames = envelope.framed_blocks;
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const rejectsAs = (name, mutate, code) => {
+    const forged = clone(frames);
+    mutate(forged);
+    const error = errorOf(() => envelopeRoutingSurfaceV1(envelope.envelope_text, forged));
+    assert.equal(error.code, code, `case "${name}" should fail with ${code}`);
+  };
+
   assert.equal(errorOf(() => envelopeRoutingSurfaceV1(envelope.envelope_text, {})).code, 'invalid_type');
   assert.equal(errorOf(() => envelopeRoutingSurfaceV1(envelope.envelope_text, {
-    objective: { byte_offset: 0, byte_length: 1 },
-    prompt: envelope.framed_blocks.prompt,
-  })).code, 'malformed_envelope');
-  const surface = envelopeRoutingSurfaceV1(envelope.envelope_text, envelope.framed_blocks);
+    objective: frames.objective,
+  })).code, 'invalid_type');
+
+  // Every forgery below is structurally plausible yet disagrees with the
+  // strict parse of the same text; each must be rejected before any offset
+  // is used to cut the audit surface.
+  rejectsAs('objective offset shifted forward', (forged) => {
+    forged.objective.byte_offset += 1;
+    forged.objective.byte_length -= 1;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('objective offset shifted backward', (forged) => {
+    forged.objective.byte_offset -= 1;
+    forged.objective.byte_length += 1;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('prompt length shortened into content', (forged) => {
+    forged.prompt.byte_length -= 4;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('prompt length extended past its footer', (forged) => {
+    forged.prompt.byte_length += 1;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('objective and prompt ranges swapped', (forged) => {
+    const objective = forged.objective;
+    forged.objective = forged.prompt;
+    forged.prompt = objective;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('extra scaffold range', (forged) => {
+    forged.acceptance = { byte_offset: 0, byte_length: 1 };
+  }, 'framed_blocks_mismatch');
+  rejectsAs('extra field inside a range', (forged) => {
+    forged.prompt.elided = true;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('missing field inside a range', (forged) => {
+    delete forged.prompt.byte_length;
+  }, 'framed_blocks_mismatch');
+  rejectsAs('non-integer offset', (forged) => {
+    forged.objective.byte_offset = `${forged.objective.byte_offset}`;
+  }, 'framed_blocks_mismatch');
+
+  // The exact parsed framing — in any key order — still yields the full
+  // auditable scaffold with both opaque blocks elided.
+  const surface = envelopeRoutingSurfaceV1(envelope.envelope_text, frames);
+  assert.equal(surface,
+    envelopeRoutingSurfaceV1(envelope.envelope_text, reverseKeyOrder(clone(frames))));
   assert.ok(!surface.includes(envelope.prompt));
   assert.ok(!surface.includes(envelope.objective));
-  assert.ok(surface.includes(envelope.base_sha ?? envelope.repository.base_sha));
+  assert.ok(surface.includes(envelope.repository.base_sha));
+});
+
+test('parser requires exactly one terminal newline after end-prompt and EOF', () => {
+  const [envelope] = compileChildEnvelopesV1(defaultManifest());
+  const text = envelope.envelope_text;
+  // Renderer invariant: the envelope ends with the single newline that
+  // terminates "end-prompt" and nothing else.
+  assert.match(text, /end-prompt\n$/u);
+  assert.doesNotMatch(text, /\n\n$/u);
+  assert.equal(parseChildEnvelopeV1(text).envelope_byte_length, Buffer.byteLength(text, 'utf8'));
+
+  expectParseFailure(text.slice(0, -1), 'malformed_envelope');
+  expectParseFailure(`${text}\n`, 'malformed_envelope');
+  expectParseFailure(`${text}\n\n`, 'malformed_envelope');
+  expectParseFailure(`${text} `, 'malformed_envelope');
+  // A CR never terminates a line: the bounded-text gate rejects the control
+  // character outright (invalid_format) before framing is even considered.
+  expectParseFailure(text.replace(/end-prompt\n$/u, 'end-prompt\r\n'), 'invalid_format');
+  // Mid-envelope end markers must be newline-terminated as well.
+  expectParseFailure(
+    text.replace('end-objective\nassignment_id', 'end-objectiveassignment_id'),
+    'malformed_envelope',
+  );
 });
 
 test('assignment template keys stay closed for envelope compilation', () => {
