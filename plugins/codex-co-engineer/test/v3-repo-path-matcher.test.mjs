@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
+  filterRepoPathsByGlob,
+  GLOB_MATCH_STEP_BUDGET,
   GLOB_PATTERN_MAX_BYTES,
+  REPO_PATH_BATCH_MAX,
+  repoGlobMatchesAnyPath,
   REPO_PATH_MATCHER_ERROR_CODES,
   RepoPathMatcherError,
   assertRepoRelativePath,
@@ -11,6 +17,15 @@ import {
   isRepoRelativePath,
   repoGlobMatchesPath,
 } from '../mcp/v3/repo-path-matcher.mjs';
+import {
+  scopeStaticPrefix,
+  writerScopesOverlap,
+} from '../mcp/v3/run-manifest.mjs';
+
+const FIXTURES = JSON.parse(readFileSync(
+  fileURLToPath(new URL('./fixtures/v3-repo-path-matcher.json', import.meta.url)),
+  'utf8',
+));
 
 function matchError(invoke, expectedCode) {
   try {
@@ -251,4 +266,139 @@ test('a pattern at the exact byte cap is still matchable', () => {
   assert.equal(Buffer.byteLength(atCap, 'utf8'), GLOB_PATTERN_MAX_BYTES);
   assert.equal(matches(atCap, `${left}/${right}/x`), true);
   assert.equal(matches(atCap, 'a/x'), false);
+});
+
+test('every golden fixture entry conforms in file order', () => {
+  assert.equal(FIXTURES.id, 'codex-co-engineer.repo-path-matcher.v1.fixtures');
+  assert.ok(Array.isArray(FIXTURES.matches) && FIXTURES.matches.length >= 30);
+  assert.ok(Array.isArray(FIXTURES.rejections) && FIXTURES.rejections.length >= 15);
+  for (const entry of FIXTURES.matches) {
+    assert.equal(repoGlobMatchesPath(entry.pattern, entry.path), entry.expected,
+      `fixture mismatch for ${JSON.stringify(entry)}`);
+  }
+  for (const entry of FIXTURES.rejections) {
+    matchError(() => repoGlobMatchesPath(entry.pattern, 'probe'), entry.code);
+  }
+});
+
+test('fixtures exercise every pattern-specific typed error code', () => {
+  const covered = new Set(FIXTURES.rejections.map((entry) => entry.code));
+  for (const code of [
+    'pattern_unclosed_class', 'pattern_empty_class', 'pattern_reversed_range',
+    'pattern_class_negation', 'pattern_double_star',
+  ]) {
+    assert.ok(covered.has(code), `fixture set must cover ${code}`);
+    assert.ok(REPO_PATH_MATCHER_ERROR_CODES.includes(code));
+  }
+});
+
+test('filterRepoPathsByGlob preserves input order and fails closed on any bad element', () => {
+  const paths = ['src/a.ts', 'lib/b.ts', 'src/deep/c.ts', 'docs/x.md'];
+  assert.deepEqual(filterRepoPathsByGlob('src/**/*.ts', paths),
+    ['src/a.ts', 'src/deep/c.ts']);
+  assert.deepEqual(filterRepoPathsByGlob('**', paths), paths);
+  assert.deepEqual(filterRepoPathsByGlob('**', []), []);
+  // A trailing invalid element rejects the whole call; no partial answer.
+  matchError(() => filterRepoPathsByGlob('**', ['ok.txt', '/absolute']),
+    'invalid_format');
+  matchError(() => filterRepoPathsByGlob('**', ['ok.txt', 42]), 'invalid_type');
+  matchError(() => filterRepoPathsByGlob('[bad', ['ok.txt']), 'pattern_unclosed_class');
+  // The returned array is fresh data; mutating it cannot alias the input.
+  const filtered = filterRepoPathsByGlob('**', ['a.md']);
+  filtered.push('injected');
+  assert.deepEqual(filterRepoPathsByGlob('**', ['a.md']), ['a.md']);
+});
+
+test('repoGlobMatchesAnyPath validates the whole batch before answering', () => {
+  assert.equal(repoGlobMatchesAnyPath('lib/**', ['src/a.ts', 'lib/b.ts']), true);
+  assert.equal(repoGlobMatchesAnyPath('lib/**', ['src/a.ts', 'docs/c.md']), false);
+  // Early match must not skip validation of later elements.
+  matchError(() => repoGlobMatchesAnyPath('src/*', ['src/a.ts', 'bad//path']),
+    'invalid_format');
+  matchError(() => repoGlobMatchesAnyPath('*', 'not-an-array'), 'invalid_type');
+});
+
+test('batch inputs are plain JSON arrays; traps and exotica are rejected untouched', () => {
+  let trapCount = 0;
+  const handler = {
+    get(target, prop, receiver) {
+      trapCount += 1;
+      return Reflect.get(target, prop, receiver);
+    },
+  };
+  matchError(() => filterRepoPathsByGlob('src/**', new Proxy(['src/a.ts'], handler)),
+    'invalid_array');
+  assert.equal(trapCount, 0); // rejected before a single trap dispatch
+
+  matchError(() => { class Sub extends Array {} ; return filterRepoPathsByGlob('src/**', Sub.from(['src/a.ts'])); },
+    'invalid_array');
+  matchError(() => filterRepoPathsByGlob('src/**', (() => {
+    const array = ['src/a.ts'];
+    Object.defineProperty(array, '0', { get() { throw new Error('trap dispatched'); }, enumerable: true });
+    return array;
+  })()), 'invalid_array');
+  matchError(() => filterRepoPathsByGlob('src/**', (() => {
+    const array = ['src/a.ts'];
+    array[Symbol('extra')] = 1;
+    return array;
+  })()), 'invalid_array');
+  matchError(() => filterRepoPathsByGlob('src/**', (() => {
+    const array = new Array(3);
+    array[2] = 'src/a.ts';
+    return array;
+  })()), 'invalid_array');
+  // Null-prototype dense string arrays are legitimate JSON data.
+  const nullProto = ['src/a.ts'];
+  Object.setPrototypeOf(nullProto, null);
+  assert.deepEqual(filterRepoPathsByGlob('src/**', nullProto), ['src/a.ts']);
+});
+
+test('batch size is bounded', () => {
+  const atCap = Array.from({ length: REPO_PATH_BATCH_MAX }, (_, i) => `dir-${i % 7}/f${i}.txt`);
+  assert.equal(filterRepoPathsByGlob('dir-0/*.txt', atCap).length, Math.ceil(REPO_PATH_BATCH_MAX / 7));
+  const overCap = [...atCap, 'one-more.txt'];
+  matchError(() => filterRepoPathsByGlob('**', overCap), 'out_of_range');
+  matchError(() => repoGlobMatchesAnyPath('**', overCap), 'out_of_range');
+});
+
+test('matching stays bounded on worst-case-shaped inputs under the caps', () => {
+  // A wildcard-heavy 16-segment pattern (the segment cap) against paths at
+  // the byte-cap edge fills the largest legal DP matrix yet completes
+  // promptly with exact answers in both directions.
+  const hostilePattern = Array.from({ length: 16 }, () => '*[a-d]*?').join('/');
+  const wideSegment = 'a'.repeat(60);
+  const fullPath = Array.from({ length: 16 }, () => wideSegment).join('/');
+  const deeperPath = Array.from({ length: 64 }, () => wideSegment).join('/');
+  const startedAt = process.hrtime.bigint();
+  assert.equal(repoGlobMatchesPath(hostilePattern, fullPath), true); // every pair evaluated
+  assert.equal(repoGlobMatchesPath(hostilePattern, deeperPath), false); // full matrix, negative answer
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  assert.ok(elapsedMs < 2_000, `bounded work violated: ${elapsedMs}ms`);
+  // One segment past the pattern's depth still runs the full bounded matrix
+  // and answers false; the depth cap rejection is covered by 65-segment paths.
+  assert.equal(repoGlobMatchesPath(hostilePattern, `${fullPath}/a`), false);
+  // The budget constant exists as defense in depth above the caps' product.
+  assert.ok(GLOB_MATCH_STEP_BUDGET > 33_554_432);
+});
+
+test('matcher authority stays separate from the writer-overlap safety check', () => {
+  // The conservative ASCII-case-folded overlap policy keeps its semantics.
+  assert.deepEqual(scopeStaticPrefix('Foo/Bar'), ['foo', 'bar']);
+  assert.equal(writerScopesOverlap('FOO/bar', 'foo/baz'), false); // distinct comparable prefixes
+  assert.equal(writerScopesOverlap('FOO/bar', 'foo/BAR'), true); // ASCII case folding over-approximates
+  assert.equal(writerScopesOverlap('**/x', 'a/y'), true); // empty prefix matches anywhere
+  assert.equal(writerScopesOverlap('a/x', 'b/y'), false);
+  // The matcher, by contrast, is exact case-sensitive membership: the same
+  // pair the overlap policy calls overlapping does not member-match.
+  assert.equal(repoGlobMatchesPath('FOO/bar', 'foo/BAR'), false);
+  assert.equal(repoGlobMatchesPath('FOO/*', 'foo/bar'), false);
+  assert.equal(repoGlobMatchesPath('foo/bar', 'foo/bar'), true);
+  assert.equal(repoGlobMatchesPath('foo/**', 'foo/bar/baz'), true);
+  // Structural independence: the matcher module never imports run-manifest.
+  const matcherSource = readFileSync(
+    fileURLToPath(new URL('../mcp/v3/repo-path-matcher.mjs', import.meta.url)),
+    'utf8',
+  );
+  assert.ok(!matcherSource.includes("from './run-manifest"));
+  assert.ok(!matcherSource.includes('import('));
 });

@@ -443,6 +443,13 @@ function assertPathBatch(paths, label) {
   if (prototype !== Array.prototype && prototype !== null) {
     fail('invalid_array', location, `${location} must use the standard or null array prototype.`);
   }
+  // Inherited enumerable properties are unreachable from JSON; reject them
+  // without reading any element so accessor traps stay undispatched.
+  for (const key in paths) {
+    if (!Object.hasOwn(paths, key)) {
+      fail('invalid_array', location, `${location} must not inherit enumerable array properties.`);
+    }
+  }
   if (paths.length > REPO_PATH_BATCH_MAX) {
     fail('out_of_range', location, `${location} exceeds the ${REPO_PATH_BATCH_MAX}-path batch limit.`);
   }
@@ -455,9 +462,11 @@ function assertPathBatch(paths, label) {
   let indexCount = 0;
   for (const key of ownKeys) {
     if (key === 'length') continue;
+    if (typeof key !== 'string') {
+      fail('invalid_array', location, `${location} must be a dense JSON array without extra or symbol properties.`);
+    }
     const asNumber = Number(key);
-    if (typeof key !== 'string' || !Number.isInteger(asNumber) || asNumber < 0 || asNumber >= paths.length
-      || String(asNumber) !== key) {
+    if (!Number.isInteger(asNumber) || asNumber < 0 || asNumber >= paths.length || String(asNumber) !== key) {
       fail('invalid_array', location, `${location} must be a dense JSON array without extra or symbol properties.`);
     }
     let descriptor;
