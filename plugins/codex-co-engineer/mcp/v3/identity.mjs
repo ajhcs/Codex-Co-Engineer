@@ -20,11 +20,36 @@
 //     bound to their run and assignment identity. They are never trimmed,
 //     Unicode-normalized, re-encoded, or otherwise interpreted; two prompts
 //     that differ by even one byte digest differently.
+//
+// P02 identity normalization: absent and explicit-false
+// `return_contract.allow_diagnostic_partial_candidate` are semantically
+// equivalent complete-only manifests, so under the P03 rule that equivalent
+// manifests produce identical digests, the RunManifestV1 identity projection
+// (`runManifestCanonicalJsonV1` / `runManifestDigestV1`) omits an exact
+// false exactly as it omits absence. Explicit true remains a distinct
+// authorization and stays in the canonical form. The parser itself still
+// preserves a submitted own false field verbatim for audit/display; only
+// this identity projection normalizes it. Manifests without the flag keep
+// byte-identical canonical bytes, and prompt/envelope/assignment-prompt/
+// child-envelope surfaces stay resolution-inert for absent/false/true.
+// Canonicalization walks a fully validated detached snapshot with captured
+// private reflection; it never consults caller-mutable Object.keys.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 import {
+  capturedCreate,
+  capturedFreeze,
+  capturedHasOwn,
+  capturedObjectIs,
+  capturedOwnKeys,
+  capturedTest,
+  sortedCapturedKeys,
+} from './grammar.mjs';
+import {
+  DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY,
   MAX_MANIFEST_DEPTH,
+  RETURN_CONTRACT_REQUIRED_KEYS,
   RunContractV1Error,
   assertDenseJsonArray,
   assertManifestComplexity,
@@ -43,7 +68,10 @@ export const IDENTITY_DOMAIN = 'codex-co-engineer.identity.v1';
 export const IDENTITY_VERSION = 1;
 export const DIGEST_ALGORITHM = 'sha256';
 export const DIGEST_HEX_LENGTH = 64;
-export const IDENTITY_LABEL_PATTERN = /^[a-z0-9][a-z0-9.-]{0,63}$/u;
+const PRIVATE_IDENTITY_LABEL_PATTERN = /^[a-z0-9][a-z0-9.-]{0,63}$/u;
+export const IDENTITY_LABEL_PATTERN = new RegExp(
+  PRIVATE_IDENTITY_LABEL_PATTERN.source, PRIVATE_IDENTITY_LABEL_PATTERN.flags,
+);
 
 export const IDENTITY_LABELS = Object.freeze({
   RUN_MANIFEST: 'run-manifest.v1',
@@ -79,7 +107,7 @@ function toCanonicalBytes(value, path) {
 }
 
 function exactJsonEqual(left, right) {
-  if (Object.is(left, right)) return true;
+  if (capturedObjectIs(left, right)) return true;
   if (Array.isArray(left)) {
     if (!Array.isArray(right) || left.length !== right.length) return false;
     for (let index = 0; index < left.length; index += 1) {
@@ -88,10 +116,10 @@ function exactJsonEqual(left, right) {
     return true;
   }
   if (isPlainObject(left) && isPlainObject(right)) {
-    const leftKeys = Object.keys(left);
-    const rightKeys = Object.keys(right);
+    const leftKeys = sortedCapturedKeys(left);
+    const rightKeys = sortedCapturedKeys(right);
     return leftKeys.length === rightKeys.length
-      && leftKeys.every((key) => Object.hasOwn(right, key) && exactJsonEqual(left[key], right[key]));
+      && leftKeys.every((key) => capturedHasOwn(right, key) && exactJsonEqual(left[key], right[key]));
   }
   return false;
 }
@@ -147,7 +175,7 @@ function emitCanonical(parts, value, path, depth) {
     parts.push(']');
     return;
   }
-  const keys = Object.keys(value).sort();
+  const keys = sortedCapturedKeys(value);
   parts.push('{');
   for (let index = 0; index < keys.length; index += 1) {
     if (index > 0) parts.push(',');
@@ -169,8 +197,8 @@ function framedUpdate(hash, bytes, path) {
 }
 
 function identityDigestHex(label, parts) {
-  if (typeof label !== 'string' || !IDENTITY_LABEL_PATTERN.test(label)) {
-    fail('invalid_format', 'label', `Identity label must match ${IDENTITY_LABEL_PATTERN.source}.`);
+  if (typeof label !== 'string' || !capturedTest(PRIVATE_IDENTITY_LABEL_PATTERN, label)) {
+    fail('invalid_format', 'label', `Identity label must match ${PRIVATE_IDENTITY_LABEL_PATTERN.source}.`);
   }
   const hash = createHash(DIGEST_ALGORITHM);
   framedUpdate(hash, Buffer.from(IDENTITY_DOMAIN, 'utf8'), 'identity_domain');
@@ -188,7 +216,7 @@ function identityDigestHex(label, parts) {
 
 function digestDescriptor(label, parts) {
   const { digest, input_bytes } = identityDigestHex(label, parts);
-  return Object.freeze({
+  return capturedFreeze({
     algorithm: DIGEST_ALGORITHM,
     domain: IDENTITY_DOMAIN,
     version: IDENTITY_VERSION,
@@ -198,9 +226,50 @@ function digestDescriptor(label, parts) {
   });
 }
 
-// Canonical validated form of one complete run manifest.
+// Identity form of one complete run manifest: the fully validated frozen
+// parse with one normalization applied. An own
+// return_contract.allow_diagnostic_partial_candidate of exactly false is
+// omitted so its canonical bytes equal the absent form byte for byte; any
+// other validated shape (including explicit true) passes through untouched.
+// The snapshot is already validated plain data — own enumerable data
+// properties only, no accessors, symbols, or exotic prototypes — so this
+// rebuild reads no caller-executable surface and dispatches no traps.
+// Keys are taken from captured private reflection, never caller-mutable
+// Object.keys.
+function projectReturnContractForIdentity(contract) {
+  const projected = capturedCreate(null);
+  for (const key of RETURN_CONTRACT_REQUIRED_KEYS) {
+    projected[key] = contract[key];
+  }
+  if (capturedHasOwn(contract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)
+    && contract[DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY] === true) {
+    projected[DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY] = true;
+  }
+  return capturedFreeze(projected);
+}
+
+function manifestIdentityForm(manifest) {
+  const snapshot = parseRunManifestV1(manifest);
+  const contract = snapshot.return_contract;
+  if (!capturedHasOwn(contract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)
+    || contract[DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY] !== false) {
+    return snapshot;
+  }
+  const projected = capturedCreate(null);
+  for (const key of capturedOwnKeys(snapshot)) {
+    if (typeof key !== 'string') continue;
+    projected[key] = key === 'return_contract'
+      ? projectReturnContractForIdentity(contract)
+      : snapshot[key];
+  }
+  return capturedFreeze(projected);
+}
+
+// Canonical validated form of one complete run manifest (P02 normalized:
+// absent and explicit-false diagnostic partial authorization project to
+// identical canonical bytes).
 export function runManifestCanonicalJsonV1(manifest) {
-  return canonicalJsonStringify(parseRunManifestV1(manifest));
+  return canonicalJsonStringify(manifestIdentityForm(manifest));
 }
 
 // Stable digest of one complete run manifest over its canonical JSON form.
@@ -214,7 +283,7 @@ export function runManifestDigestV1(manifest) {
 export function verifyRunManifestDigestV1(manifest, expectedDigestHex) {
   if (typeof expectedDigestHex !== 'string'
     || expectedDigestHex.length !== DIGEST_HEX_LENGTH
-    || !/^[0-9a-f]{64}$/u.test(expectedDigestHex)) {
+    || !capturedTest(/^[0-9a-f]{64}$/u, expectedDigestHex)) {
     return false;
   }
   const actual = runManifestDigestV1(manifest).digest;
@@ -288,18 +357,18 @@ export function childEnvelopeDigestV1(envelope) {
 // plus every child prompt digest in manifest order.
 export function describeRunIdentityV1(manifest) {
   const snapshot = parseRunManifestV1(manifest);
-  const promptDigests = snapshot.assignments.map((assignment) => Object.freeze({
+  const promptDigests = snapshot.assignments.map((assignment) => capturedFreeze({
     assignment_id: assignment.assignment_id,
     digest: promptDigestFromSnapshot(snapshot, assignment.assignment_id).digest,
   }));
-  return Object.freeze({
+  return capturedFreeze({
     run_id: snapshot.run_id,
     assignment_count: snapshot.assignments.length,
-    repository: Object.freeze({
+    repository: capturedFreeze({
       path: snapshot.repository.path,
       base_sha: snapshot.repository.base_sha,
     }),
     manifest_digest: runManifestDigestV1(snapshot),
-    assignment_prompt_digests: Object.freeze(promptDigests),
+    assignment_prompt_digests: capturedFreeze(promptDigests),
   });
 }

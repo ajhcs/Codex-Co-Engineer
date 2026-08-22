@@ -9,7 +9,9 @@
 //   - bounded well-formed UTF-8 prompts;
 //   - execution is exactly one explicit choice: a named profile reference
 //     (data-only name, never an inline profile object) or an exact
-//     provider + model pair from the 3.2.1 provider vocabulary;
+//     provider + model pair from the 3.2.1 provider vocabulary — or it is
+//     truly absent, which marks the lane selection_resolution_required for
+//     P05 (root-profile fill) without relaxing any other field;
 //   - explicit Cursor Cloud lanes must pin one exact 40-hex lowercase starting
 //     SHA; local lanes must not carry one. Unresolved profile lanes may carry
 //     the future pin, and P05 revalidates it after provider resolution;
@@ -23,91 +25,63 @@
 //   duplicate-free required-evidence vocabulary.
 //
 // Validation is fail-fast in a fixed order so identical inputs always raise
-// identical first errors.
+// identical first errors. The public selection classifier reuses this same
+// standalone surface (path prefix `assignment`) before returning a state;
+// run-wide uniqueness and cross-lane writer-scope disjointness stay envelope
+// validation.
 
+import {
+  capturedDescriptor,
+  capturedFreeze,
+  capturedHasOwn,
+  capturedIncludes,
+  capturedIsArray,
+  capturedJoin,
+  isKnownAccess,
+  isKnownProvider,
+  isKnownRole,
+  knownRolesJoined,
+  requiredAccessForRole,
+  sortedCapturedKeys,
+} from './grammar.mjs';
 import {
   ACCEPTANCE_ALLOWED_KEYS,
   ACCEPTANCE_MAX_COMMANDS,
   ASSIGNMENT_ALLOWED_KEYS,
   ASSIGNMENT_ID_PATTERN,
   COMMAND_ID_PATTERN,
-  EVIDENCE_KINDS,
-  EXECUTION_ALLOWED_KEYS,
-  MAX_TIMEOUT_MS,
-  MIN_DURATION_MS,
-  MIN_TIMEOUT_MS,
-  MODEL_ID_MAX,
-  MODEL_ID_PATTERN,
   PARAM_KEY_PATTERN,
+  EVIDENCE_KINDS,
   PARAM_VALUE_MAX_BYTES,
   PARAMS_MAX_KEYS,
-  PROFILE_NAME_MAX,
-  PROFILE_NAME_PATTERN,
   PROMPT_MAX_BYTES,
   PROMPT_MIN_BYTES,
-  PROVIDERS,
-  ROLE_ACCESS,
   RunContractV1Error,
-  SHA40_PATTERN,
   assertAllowedKeys,
   assertBoundedText,
   assertDenseJsonArray,
   assertExpectedDurationMs,
   assertJsonDataObject,
+  assertNoForbiddenKeysDeep,
   assertTimeoutMs,
   assertWriteScopePatterns,
+  isAssignmentId,
+  isCommandId,
+  isParamKey,
   isPlainObject,
-  utf8ByteLength,
+  isSha40,
+  validateExecution,
 } from './run-manifest.mjs';
 
 function fail(code, path, message) {
   throw new RunContractV1Error(code, path, message);
 }
 
-function validateExecution(execution, path) {
-  if (!isPlainObject(execution)) fail('invalid_type', path, `${path} must be an object.`);
-  assertAllowedKeys(execution, EXECUTION_ALLOWED_KEYS, path);
-  const hasProfile = Object.hasOwn(execution, 'profile');
-  const hasProvider = Object.hasOwn(execution, 'provider');
-  const hasModel = Object.hasOwn(execution, 'model');
-  if (hasProfile && (hasProvider || hasModel)) {
-    fail('execution_ambiguous', path,
-      `${path} must carry exactly one resolution choice: a named profile OR an explicit provider/model pair, never both.`);
-  }
-  if (!hasProfile && !hasProvider && !hasModel) {
-    fail('execution_missing', path, `${path} requires either a named profile or an explicit provider/model pair.`);
-  }
-  if (hasProfile) {
-    if (typeof execution.profile !== 'string') {
-      fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
-    }
-    if (!PROFILE_NAME_PATTERN.test(execution.profile)
-      || utf8ByteLength(execution.profile) > PROFILE_NAME_MAX) {
-      fail('invalid_format', `${path}.profile`,
-        `${path}.profile violates the profile-name grammar ${PROFILE_NAME_PATTERN.source}.`);
-    }
-    return Object.freeze({ kind: 'profile', provider: null });
-  }
-  if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
-  if (!hasModel) fail('missing_key', `${path}.model`, `${path}.model is required when no profile is named.`);
-  if (!PROVIDERS.includes(execution.provider)) {
-    fail('unknown_provider', `${path}.provider`,
-      `${path}.provider is not one of ${PROVIDERS.join(', ')}.`);
-  }
-  if (typeof execution.model !== 'string'
-    || !MODEL_ID_PATTERN.test(execution.model)
-    || utf8ByteLength(execution.model) > MODEL_ID_MAX) {
-    fail('invalid_format', `${path}.model`,
-      `${path}.model violates the model grammar ${MODEL_ID_PATTERN.source} (max ${MODEL_ID_MAX} bytes).`);
-  }
-  return Object.freeze({ kind: 'explicit', provider: execution.provider });
-}
-
 export function validateResolvedStartingRefV1(assignment, provider, path = 'assignment') {
-  if (!PROVIDERS.includes(provider)) {
+  if (!isKnownProvider(provider)) {
     fail('unknown_provider', `${path}.execution.provider`, `${path}.execution.provider is not a supported provider.`);
   }
-  const hasStartingRef = Object.hasOwn(assignment, 'starting_ref');
+  const hasStartingRef = capturedHasOwn(assignment, 'starting_ref');
   if (hasStartingRef && provider !== 'cursor-cloud') {
     fail('starting_ref_forbidden_local', `${path}.starting_ref`,
       `${path}.starting_ref is only valid for cursor-cloud lanes; local lanes start at the run's immutable base_sha.`);
@@ -117,7 +91,8 @@ export function validateResolvedStartingRefV1(assignment, provider, path = 'assi
       fail('cloud_starting_ref_required', `${path}.starting_ref`,
         `Every run cursor-cloud lane MUST pin one exact already-pushed provider-visible SHA in ${path}.starting_ref.`);
     }
-    if (typeof assignment.starting_ref !== 'string' || !SHA40_PATTERN.test(assignment.starting_ref)) {
+    const startingRef = capturedDescriptor(assignment, 'starting_ref').value;
+    if (!isSha40(startingRef)) {
       fail('invalid_format', `${path}.starting_ref`,
         `${path}.starting_ref must be an exact 40-character lowercase hex commit SHA already visible to the provider.`);
     }
@@ -129,14 +104,17 @@ function validateStartingRef(assignment, path, executionResolution) {
     validateResolvedStartingRefV1(assignment, executionResolution.provider, path);
     return;
   }
-  // P02 validates the unresolved profile reference, while P05 deterministically
-  // resolves its provider before dispatch and calls validateResolvedStartingRefV1.
-  // A profile lane may carry the future Cloud pin now; if present, its format
-  // is already immutable and exact.
-  if (Object.hasOwn(assignment, 'starting_ref')
-    && (typeof assignment.starting_ref !== 'string' || !SHA40_PATTERN.test(assignment.starting_ref))) {
-    fail('invalid_format', `${path}.starting_ref`,
-      `${path}.starting_ref must be an exact 40-character lowercase hex commit SHA.`);
+  // P02 validates the unresolved profile reference or the omitted execution,
+  // while P05 deterministically resolves each selection_resolution_required
+  // lane before dispatch and calls validateResolvedStartingRefV1. Such a lane
+  // may carry the future Cloud pin now; if present, its format is already
+  // immutable and exact.
+  if (capturedHasOwn(assignment, 'starting_ref')) {
+    const startingRef = capturedDescriptor(assignment, 'starting_ref').value;
+    if (!isSha40(startingRef)) {
+      fail('invalid_format', `${path}.starting_ref`,
+        `${path}.starting_ref must be an exact 40-character lowercase hex commit SHA.`);
+    }
   }
 }
 
@@ -145,16 +123,16 @@ function validateParameters(parameters, path) {
     fail('invalid_type', path, `${path} must be a flat object of scalar parameters.`);
   }
   assertJsonDataObject(parameters, path);
-  const keys = Object.keys(parameters).sort();
+  const keys = sortedCapturedKeys(parameters);
   if (keys.length > PARAMS_MAX_KEYS) {
     fail('out_of_range', path, `${path} exceeds ${PARAMS_MAX_KEYS} parameter keys.`);
   }
   for (const key of keys) {
     const entryPath = `${path}.${key}`;
-    if (!PARAM_KEY_PATTERN.test(key)) {
+    if (!isParamKey(key)) {
       fail('invalid_format', entryPath, `${entryPath} violates the parameter-key grammar ${PARAM_KEY_PATTERN.source}.`);
     }
-    const value = parameters[key];
+    const value = capturedDescriptor(parameters, key).value;
     if (typeof value === 'string') {
       assertBoundedText(value, {
         min: 0, max: PARAM_VALUE_MAX_BYTES, path: entryPath, label: entryPath, allowBlank: true,
@@ -177,25 +155,28 @@ function validateAcceptance(acceptance, path) {
   const seenCommandIds = new Set();
   for (let i = 0; i < acceptance.length; i += 1) {
     const entryPath = `${path}[${i}]`;
-    const entry = acceptance[i];
+    const entry = capturedDescriptor(acceptance, String(i)).value;
     if (!isPlainObject(entry)) fail('invalid_type', entryPath, `${entryPath} must be an object.`);
     assertAllowedKeys(entry, ACCEPTANCE_ALLOWED_KEYS, entryPath);
-    if (!Object.hasOwn(entry, 'command_id')) {
+    if (!capturedHasOwn(entry, 'command_id')) {
       fail('missing_key', `${entryPath}.command_id`, `${entryPath}.command_id is required.`);
     }
-    if (typeof entry.command_id !== 'string' || !COMMAND_ID_PATTERN.test(entry.command_id)) {
+    const commandId = capturedDescriptor(entry, 'command_id').value;
+    if (!isCommandId(commandId)) {
       fail('invalid_format', `${entryPath}.command_id`,
         `${entryPath}.command_id must match ${COMMAND_ID_PATTERN.source}; manifests reference VerificationPolicyV1 commands by ID, never argv.`);
     }
-    if (seenCommandIds.has(entry.command_id)) {
-      fail('duplicate_command_id', `${entryPath}.command_id`, `${entryPath}.command_id "${entry.command_id}" repeats within this assignment.`);
+    if (seenCommandIds.has(commandId)) {
+      fail('duplicate_command_id', `${entryPath}.command_id`, `${entryPath}.command_id "${commandId}" repeats within this assignment.`);
     }
-    seenCommandIds.add(entry.command_id);
-    if (!Object.hasOwn(entry, 'timeout_ms')) {
+    seenCommandIds.add(commandId);
+    if (!capturedHasOwn(entry, 'timeout_ms')) {
       fail('missing_key', `${entryPath}.timeout_ms`, `${entryPath}.timeout_ms is required; acceptance timeouts have no hidden default.`);
     }
-    assertTimeoutMs(entry.timeout_ms, `${entryPath}.timeout_ms`);
-    if (Object.hasOwn(entry, 'parameters')) validateParameters(entry.parameters, `${entryPath}.parameters`);
+    assertTimeoutMs(capturedDescriptor(entry, 'timeout_ms').value, `${entryPath}.timeout_ms`);
+    if (capturedHasOwn(entry, 'parameters')) {
+      validateParameters(capturedDescriptor(entry, 'parameters').value, `${entryPath}.parameters`);
+    }
   }
 }
 
@@ -207,78 +188,138 @@ function validateRequiredEvidence(requiredEvidence, path) {
   const seen = new Set();
   for (let i = 0; i < requiredEvidence.length; i += 1) {
     const entryPath = `${path}[${i}]`;
-    const kind = requiredEvidence[i];
-    if (!EVIDENCE_KINDS.includes(kind)) {
-      fail('unknown_evidence_kind', entryPath, `${entryPath} is not one of ${EVIDENCE_KINDS.join(', ')}.`);
+    const kind = capturedDescriptor(requiredEvidence, String(i)).value;
+    if (!capturedIncludes(EVIDENCE_KINDS, kind)) {
+      fail('unknown_evidence_kind', entryPath, `${entryPath} is not one of ${capturedJoin(EVIDENCE_KINDS, ', ')}.`);
     }
     if (seen.has(kind)) fail('duplicate_evidence_kind', entryPath, `${entryPath} repeats evidence kind "${kind}".`);
     seen.add(kind);
   }
 }
 
-// Validate one AssignmentManifestV1 object at `assignments[<index>]`.
-// Throws RunContractV1Error on the first violation; returns undefined.
-export function validateAssignmentManifestV1(assignment, index = 0) {
-  const path = `assignments[${index}]`;
-  if (!isPlainObject(assignment)) fail('invalid_type', path, `${path} must be an object.`);
-  assertAllowedKeys(assignment, ASSIGNMENT_ALLOWED_KEYS, path);
-
-  if (!Object.hasOwn(assignment, 'role')) fail('missing_key', `${path}.role`, `${path}.role is required.`);
-  const role = assignment.role;
-  if (!ROLE_ACCESS[role]) {
-    fail('unknown_role', `${path}.role`, `${path}.role is not one of ${Object.keys(ROLE_ACCESS).join(', ')}.`);
+function validateAssignmentId(assignment, path) {
+  const idPath = `${path}.assignment_id`;
+  if (!capturedHasOwn(assignment, 'assignment_id')) {
+    fail('missing_key', idPath, `${idPath} is required.`);
   }
-  if (!Object.hasOwn(assignment, 'access')) fail('missing_key', `${path}.access`, `${path}.access is required.`);
-  const access = assignment.access;
-  if (access !== 'writer' && access !== 'read_only') {
+  const assignmentId = capturedDescriptor(assignment, 'assignment_id').value;
+  if (!isAssignmentId(assignmentId)) {
+    fail('invalid_format', idPath, `assignment_id must match ${ASSIGNMENT_ID_PATTERN.source}`);
+  }
+}
+
+function validateRoleAndAccess(assignment, path) {
+  if (!capturedHasOwn(assignment, 'role')) fail('missing_key', `${path}.role`, `${path}.role is required.`);
+  const role = capturedDescriptor(assignment, 'role').value;
+  if (!isKnownRole(role)) {
+    fail('unknown_role', `${path}.role`, `${path}.role is not one of ${knownRolesJoined()}.`);
+  }
+  if (!capturedHasOwn(assignment, 'access')) fail('missing_key', `${path}.access`, `${path}.access is required.`);
+  const access = capturedDescriptor(assignment, 'access').value;
+  if (!isKnownAccess(access)) {
     fail('unknown_access', `${path}.access`, `${path}.access must be "writer" or "read_only".`);
   }
-  if (ROLE_ACCESS[role] !== access) {
+  const requiredAccess = requiredAccessForRole(role);
+  if (requiredAccess !== access) {
     fail('role_access_mismatch', `${path}.access`,
-      `${path}: role "${role}" requires access "${ROLE_ACCESS[role]}", received "${access}".`);
+      `${path}: role "${role}" requires access "${requiredAccess}", received "${access}".`);
   }
+  return access;
+}
 
-  if (!Object.hasOwn(assignment, 'prompt')) {
+function validatePrompt(assignment, path) {
+  if (!capturedHasOwn(assignment, 'prompt')) {
     fail('missing_key', `${path}.prompt`, `${path}.prompt is required; prompts have no hidden default.`);
   }
-  assertBoundedText(assignment.prompt, {
+  assertBoundedText(capturedDescriptor(assignment, 'prompt').value, {
     min: PROMPT_MIN_BYTES,
     max: PROMPT_MAX_BYTES,
     path: `${path}.prompt`,
     label: `${path}.prompt`,
   });
-  if (!Object.hasOwn(assignment, 'execution')) {
-    fail('missing_key', `${path}.execution`, `${path}.execution is required.`);
-  }
-  const executionResolution = validateExecution(assignment.execution, `${path}.execution`);
-  validateStartingRef(assignment, path, executionResolution);
+}
 
+function validateExecutionOrOmission(assignment, path) {
+  // P02R1 reachability prerequisite: execution may be truly absent. The lane
+  // then becomes selection_resolution_required for the P05 resolver (root
+  // profile or explicit failure); nothing is guessed here. Every PRESENT
+  // form keeps the exact prior contract, so null, {}, an own undefined, or a
+  // partial pair still fails closed through validateExecution below.
+  if (!capturedHasOwn(assignment, 'execution')) {
+    return capturedFreeze({ kind: 'omitted', provider: null });
+  }
+  const execution = capturedDescriptor(assignment, 'execution').value;
+  return validateExecution(execution, `${path}.execution`);
+}
+
+function validateWriteScope(assignment, path, access) {
   const scopePath = `${path}.write_scope`;
-  if (!Object.hasOwn(assignment, 'write_scope')) {
+  if (!capturedHasOwn(assignment, 'write_scope')) {
     fail('missing_key', scopePath, `${scopePath} is required; read-only lanes declare [], writers declare their owned paths.`);
   }
+  const writeScope = capturedDescriptor(assignment, 'write_scope').value;
   if (access === 'read_only') {
-    if (Array.isArray(assignment.write_scope) && assignment.write_scope.length > 0) {
+    if (capturedIsArray(writeScope) && writeScope.length > 0) {
       fail('out_of_range', scopePath,
         `${scopePath} must be empty; read-only lanes never own writer paths.`);
     }
-    assertWriteScopePatterns(assignment.write_scope, scopePath, { minPatterns: 0, maxPatterns: 0 });
+    assertWriteScopePatterns(writeScope, scopePath, { minPatterns: 0, maxPatterns: 0 });
   } else {
-    assertWriteScopePatterns(assignment.write_scope, scopePath, { minPatterns: 1 });
+    assertWriteScopePatterns(writeScope, scopePath, { minPatterns: 1 });
   }
+}
 
-  if (!Object.hasOwn(assignment, 'acceptance')) {
+function validateAcceptanceField(assignment, path) {
+  if (!capturedHasOwn(assignment, 'acceptance')) {
     fail('missing_key', `${path}.acceptance`, `${path}.acceptance is required (use [] when a lane runs no approved commands).`);
   }
-  validateAcceptance(assignment.acceptance, `${path}.acceptance`);
+  validateAcceptance(capturedDescriptor(assignment, 'acceptance').value, `${path}.acceptance`);
+}
 
-  if (!Object.hasOwn(assignment, 'expected_duration_ms')) {
+function validateDuration(assignment, path) {
+  if (!capturedHasOwn(assignment, 'expected_duration_ms')) {
     fail('missing_key', `${path}.expected_duration_ms`, `${path}.expected_duration_ms is required; deadlines have no hidden default.`);
   }
-  assertExpectedDurationMs(assignment.expected_duration_ms, `${path}.expected_duration_ms`);
+  assertExpectedDurationMs(
+    capturedDescriptor(assignment, 'expected_duration_ms').value,
+    `${path}.expected_duration_ms`,
+  );
+}
 
-  if (!Object.hasOwn(assignment, 'required_evidence')) {
+function validateEvidence(assignment, path) {
+  if (!capturedHasOwn(assignment, 'required_evidence')) {
     fail('missing_key', `${path}.required_evidence`, `${path}.required_evidence is required; evidence obligations are explicit.`);
   }
-  validateRequiredEvidence(assignment.required_evidence, `${path}.required_evidence`);
+  validateRequiredEvidence(
+    capturedDescriptor(assignment, 'required_evidence').value,
+    `${path}.required_evidence`,
+  );
 }
+
+// Complete standalone AssignmentManifestV1 validation at `path`. Throws
+// RunContractV1Error on the first violation; returns undefined. Does not
+// enforce run-wide assignment-id uniqueness or cross-lane writer-scope
+// disjointness — those remain envelope validation.
+export function validateStandaloneAssignmentV1(assignment, path = 'assignment') {
+  if (!isPlainObject(assignment)) fail('invalid_type', path, `${path} must be an object.`);
+  assertAllowedKeys(assignment, ASSIGNMENT_ALLOWED_KEYS, path);
+  assertNoForbiddenKeysDeep(assignment, path, 1);
+  validateAssignmentId(assignment, path);
+  const access = validateRoleAndAccess(assignment, path);
+  validatePrompt(assignment, path);
+  const executionResolution = validateExecutionOrOmission(assignment, path);
+  validateStartingRef(assignment, path, executionResolution);
+  validateWriteScope(assignment, path, access);
+  validateAcceptanceField(assignment, path);
+  validateDuration(assignment, path);
+  validateEvidence(assignment, path);
+}
+
+// Validate one AssignmentManifestV1 object at `assignments[<index>]`.
+// Throws RunContractV1Error on the first violation; returns undefined.
+export function validateAssignmentManifestV1(assignment, index = 0) {
+  validateStandaloneAssignmentV1(assignment, `assignments[${index}]`);
+}
+
+// Re-export so tests and later phases keep a single execution grammar.
+export { validateExecution };

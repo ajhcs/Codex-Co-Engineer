@@ -68,6 +68,25 @@
   properties, and custom prototypes at the direct-JavaScript boundary, so
   no hidden field can escape the closed shape. Canonical valid goldens are
   unchanged.
+- **RunManifest identity, public classifier, and captured binding grammar.**
+  `classifyAssignmentSelectionV1` now performs complete standalone
+  assignment validation (ID, role/access, prompt, execution/omission,
+  starting ref, scope, acceptance, duration, evidence, closed keys,
+  forbidden-key scan) before returning a selection state; run-wide
+  uniqueness and cross-lane writer-scope disjointness remain envelope
+  validation. Present empty/partial/ambiguous/extra-key execution forms
+  fail closed; only true absence defers selection. Absent and explicit
+  false `return_contract.allow_diagnostic_partial_candidate` share
+  complete-only canonical identity, while exact true stays
+  identity-distinct, resolution-inert, and only a later
+  `incomplete_candidate` authorization — never `ready_for_codex_review`.
+  Identity projection walks a fully validated detached snapshot with
+  captured reflection rather than caller-mutable `Object.keys`. Binding
+  grammar (providers `grok,cursor-local,cursor-cloud,dsh`, roles
+  `implement,review,verify`, profile/model patterns) lives in a private
+  captured leaf; exports are detached informational copies. Write-scope
+  ingress no longer ASCII-prefilters glob segments and delegates
+  matchability to the repository matcher language.
 - Close the direct-JavaScript Proxy boundary on the ProfileV1 data surfaces.
   `validateProfileDefinition`, `canonicalProfileJson`,
   `profileProvenanceDigest`, `profileRoots`, `findProfile`, and

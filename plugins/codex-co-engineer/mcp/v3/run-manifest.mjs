@@ -7,13 +7,19 @@
 // edits no existing runtime surface. This file validates the run ENVELOPE:
 //   - exact schema identity and git-ref-safe run IDs;
 //   - one immutable repository path + 40-hex lowercase base SHA per run;
+//   - an optional root profile NAME (exact assignment profile grammar) that
+//     P05 may later apply only to lanes whose execution was omitted, plus
+//     truly omittable assignment.execution classified as
+//     selection_resolution_required alongside named-profile lanes;
 //   - 1..8 independent assignments (no dependency edges of any shape);
 //   - strict unknown-key rejection at every object depth, with precise
 //     denial codes for dependency, executable-content, credential,
 //     merge/push/create-PR-authority, replay/fallback, and direct-mode keys;
 //   - disjoint writer scopes across assignments (conservative static-prefix
 //     intersection; glob metacharacters terminate the comparable prefix);
-//   - the verified-decision return contract (artifact addressing mandatory);
+//   - the verified-decision return contract (artifact addressing mandatory)
+//     plus its sole optional field, the exact-boolean diagnostic-partial
+//     candidate authorization that is resolution-inert downstream;
 //   - mandatory composition with the deep assignment and policy validators.
 //
 // Deep AssignmentManifestV1 and RunPolicyV1 value semantics live in
@@ -30,6 +36,44 @@ import {
   MAX_TIMEOUT_MS,
   MIN_DURATION_MS,
 } from './contract.mjs';
+import {
+  ACCESS_MODES,
+  ASSIGNMENT_ROLES,
+  MODEL_ID_MAX,
+  MODEL_ID_PATTERN,
+  PROFILE_NAME_MAX,
+  PROFILE_NAME_PATTERN,
+  PROVIDERS,
+  ROLE_ACCESS,
+  capturedDescriptor,
+  capturedFreeze,
+  capturedGetPrototypeOf,
+  capturedHasOwn,
+  capturedIncludes,
+  capturedIsArray,
+  capturedOwnKeys,
+  capturedTest,
+  capturedUtf8ByteLength,
+  isKnownProvider,
+  isModelId,
+  isProfileName,
+  knownProvidersJoined,
+  modelIdGrammarSource,
+  profileNameGrammarSource,
+  sortedCapturedKeys,
+} from './grammar.mjs';
+import { validateStandaloneAssignmentV1 } from './assignment-manifest.mjs';
+
+export {
+  ACCESS_MODES,
+  ASSIGNMENT_ROLES,
+  MODEL_ID_MAX,
+  MODEL_ID_PATTERN,
+  PROFILE_NAME_MAX,
+  PROFILE_NAME_PATTERN,
+  PROVIDERS,
+  ROLE_ACCESS,
+};
 
 export const RUN_MANIFEST_SCHEMA_ID = 'codex-co-engineer.run.v1';
 export const ASSIGNMENT_SCHEMA_ID = 'codex-co-engineer.assignment.v1';
@@ -41,8 +85,6 @@ export const MAX_ASSIGNMENTS = 8;
 export const RUN_ID_MIN = 3;
 export const RUN_ID_MAX = 64;
 export const ASSIGNMENT_ID_MAX = 64;
-export const PROFILE_NAME_MAX = 64;
-export const MODEL_ID_MAX = 128;
 export const COMMAND_ID_MAX = 64;
 
 export const OBJECTIVE_MIN_BYTES = 1;
@@ -67,14 +109,6 @@ export const MAX_MANIFEST_KEY_BYTES = 128;
 export const MIN_TIMEOUT_MS = MIN_DURATION_MS;
 export { MAX_EXPECTED_DURATION_MS, MAX_TIMEOUT_MS, MIN_DURATION_MS };
 
-export const PROVIDERS = Object.freeze(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
-export const ASSIGNMENT_ROLES = Object.freeze(['implement', 'review', 'verify']);
-export const ACCESS_MODES = Object.freeze(['writer', 'read_only']);
-export const ROLE_ACCESS = Object.freeze({
-  implement: 'writer',
-  review: 'read_only',
-  verify: 'read_only',
-});
 export const EVIDENCE_KINDS = Object.freeze([
   'provider_report',
   'git_identity',
@@ -82,14 +116,31 @@ export const EVIDENCE_KINDS = Object.freeze([
   'acceptance_results',
 ]);
 
-export const RUN_ID_PATTERN = /^[a-z][a-z0-9-]{2,63}$/u;
-export const ASSIGNMENT_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
-export const PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
-export const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$/u;
-export const COMMAND_ID_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/u;
-export const SHA40_PATTERN = /^[0-9a-f]{40}$/u;
-export const PARAM_KEY_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/u;
-export const GLOB_SEGMENT_PATTERN = /^\*\*$|^[A-Za-z0-9._*?\[\]-]{1,128}$/u;
+const PRIVATE_RUN_ID_PATTERN = /^[a-z][a-z0-9-]{2,63}$/u;
+const PRIVATE_ASSIGNMENT_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const PRIVATE_COMMAND_ID_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/u;
+const PRIVATE_SHA40_PATTERN = /^[0-9a-f]{40}$/u;
+const PRIVATE_PARAM_KEY_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/u;
+// Informational compatibility snapshot of the retired P02 ASCII glob
+// prefilter. Ingress no longer consults this pattern; matchability belongs
+// to the repository matcher language. Exported so existing readers keep a
+// detached copy they cannot make authoritative.
+const PRIVATE_GLOB_SEGMENT_PATTERN = /^\*\*$|^[A-Za-z0-9._*?\[\]-]{1,128}$/u;
+
+export const RUN_ID_PATTERN = new RegExp(PRIVATE_RUN_ID_PATTERN.source, PRIVATE_RUN_ID_PATTERN.flags);
+export const ASSIGNMENT_ID_PATTERN = new RegExp(
+  PRIVATE_ASSIGNMENT_ID_PATTERN.source, PRIVATE_ASSIGNMENT_ID_PATTERN.flags,
+);
+export const COMMAND_ID_PATTERN = new RegExp(
+  PRIVATE_COMMAND_ID_PATTERN.source, PRIVATE_COMMAND_ID_PATTERN.flags,
+);
+export const SHA40_PATTERN = new RegExp(PRIVATE_SHA40_PATTERN.source, PRIVATE_SHA40_PATTERN.flags);
+export const PARAM_KEY_PATTERN = new RegExp(
+  PRIVATE_PARAM_KEY_PATTERN.source, PRIVATE_PARAM_KEY_PATTERN.flags,
+);
+export const GLOB_SEGMENT_PATTERN = new RegExp(
+  PRIVATE_GLOB_SEGMENT_PATTERN.source, PRIVATE_GLOB_SEGMENT_PATTERN.flags,
+);
 
 // Closed vocabularies. Any key outside them is rejected; keys listed in
 // FORBIDDEN_KEY_CLASSES additionally get a precise denial code wherever they
@@ -97,9 +148,34 @@ export const GLOB_SEGMENT_PATTERN = /^\*\*$|^[A-Za-z0-9._*?\[\]-]{1,128}$/u;
 // RunPolicyV1, where they are required as exact safe literals.
 export const ROOT_ALLOWED_KEYS = Object.freeze([
   'schema', 'run_id', 'repository', 'objective', 'assignments', 'policy', 'return_contract',
+  'profile',
 ]);
+// P05 reachability prerequisite: a run may bind ONE root profile name. It is
+// data-only, validated with the exact assignment execution.profile grammar,
+// and later fills ONLY lanes whose execution was omitted. P02 validates and
+// binds it; it resolves nothing, imports no profile catalog, and makes no
+// other field optional.
+export const ROOT_OPTIONAL_KEYS = Object.freeze(['profile']);
+export const ROOT_REQUIRED_KEYS = Object.freeze(
+  ROOT_ALLOWED_KEYS.filter((key) => !capturedIncludes(ROOT_OPTIONAL_KEYS, key)),
+);
+export const BOUND_ROOT_PROFILE_KEY = 'profile';
 export const REPOSITORY_ALLOWED_KEYS = Object.freeze(['path', 'base_sha']);
-export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
+export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze([
+  'mode', 'include_artifact_refs', 'allow_diagnostic_partial_candidate',
+]);
+// The verified-decision return contract still requires exactly these two
+// keys. allow_diagnostic_partial_candidate is the sole OPTIONAL field: a
+// permission (never an obligation) for a later P35A diagnostic
+// incomplete_candidate, never ready_for_codex_review. Absent and false both
+// keep complete-only behavior, and the submitted frozen form is preserved,
+// so an explicit false remains an own key for audit/display. Identity-wise
+// absent and exact false are equivalent complete-only manifests: the
+// RunIdentityV1 projection in identity.mjs omits an exact false, so both
+// produce identical canonical bytes and digests, while explicit true stays
+// identity-distinct and resolution-inert.
+export const RETURN_CONTRACT_REQUIRED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
+export const DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY = 'allow_diagnostic_partial_candidate';
 export const POLICY_ALLOWED_KEYS = Object.freeze([
   'max_concurrency', 'require_same_base', 'require_disjoint_writer_scopes',
   'allow_post_dispatch_fallback', 'allow_merge', 'allow_create_pr',
@@ -171,15 +247,17 @@ function fail(code, path, message) {
   throw new RunContractV1Error(code, path, message);
 }
 
+const isProxy = utilTypes.isProxy;
+
 export function isPlainObject(value) {
   if (typeof value !== 'object' || value === null) return false;
   // Proxy reflection is trap-dispatched: a Proxy can lie about descriptors or
   // throw from an otherwise side-effect-free inspection. R1 accepts JSON data,
   // never executable Proxy surfaces, so reject them before invoking any trap.
-  if (utilTypes.isProxy(value)) return false;
-  if (Array.isArray(value)) return false;
+  if (isProxy(value)) return false;
+  if (capturedIsArray(value)) return false;
   try {
-    const prototype = Object.getPrototypeOf(value);
+    const prototype = capturedGetPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
   } catch {
     return false;
@@ -187,15 +265,15 @@ export function isPlainObject(value) {
 }
 
 export function utf8ByteLength(text) {
-  return Buffer.byteLength(String(text), 'utf8');
+  return capturedUtf8ByteLength(text);
 }
 
 function sortedKeys(object) {
-  return Object.keys(object).sort();
+  return sortedCapturedKeys(object);
 }
 
 export function hasOwn(object, key) {
-  return Object.hasOwn(object, key);
+  return capturedHasOwn(object, key);
 }
 
 // Direct JavaScript callers can supply values that JSON can never produce.
@@ -208,7 +286,7 @@ export function assertJsonDataObject(object, path) {
   }
   let keys;
   try {
-    keys = Reflect.ownKeys(object);
+    keys = capturedOwnKeys(object);
   } catch {
     fail('invalid_object', path, `${path} keys could not be inspected safely.`);
   }
@@ -234,8 +312,8 @@ export function assertJsonDataObject(object, path) {
         `An object key at ${path} exceeds the ${MAX_MANIFEST_KEY_BYTES}-byte manifest-key limit.`,
       );
     }
-    const descriptor = Object.getOwnPropertyDescriptor(object, key);
-    if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+    const descriptor = capturedDescriptor(object, key);
+    if (!descriptor || !descriptor.enumerable || !capturedHasOwn(descriptor, 'value')) {
       fail('invalid_object', `${path}.${key}`, `${path}.${key} must be an enumerable data property.`);
     }
     entries.push({ key, value: descriptor.value });
@@ -243,8 +321,10 @@ export function assertJsonDataObject(object, path) {
   return entries;
 }
 
+const PRIVATE_ARRAY_INDEX_PATTERN = /^(0|[1-9][0-9]*)$/u;
+
 function isCanonicalArrayIndex(key, length) {
-  if (!/^(0|[1-9][0-9]*)$/u.test(key)) return false;
+  if (!capturedTest(PRIVATE_ARRAY_INDEX_PATTERN, key)) return false;
   const index = Number(key);
   return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
 }
@@ -253,13 +333,13 @@ export function assertDenseJsonArray(value, path) {
   if (typeof value !== 'object' || value === null) {
     fail('invalid_type', path, `${path} must be an array.`);
   }
-  if (utilTypes.isProxy(value)) {
+  if (isProxy(value)) {
     fail('invalid_array', path, `${path} must be a concrete JSON array, not a Proxy.`);
   }
-  if (!Array.isArray(value)) fail('invalid_type', path, `${path} must be an array.`);
+  if (!capturedIsArray(value)) fail('invalid_type', path, `${path} must be an array.`);
   let prototype;
   try {
-    prototype = Object.getPrototypeOf(value);
+    prototype = capturedGetPrototypeOf(value);
   } catch {
     fail('invalid_array', path, `${path} prototype could not be inspected safely.`);
   }
@@ -267,13 +347,13 @@ export function assertDenseJsonArray(value, path) {
     fail('invalid_array', path, `${path} must use the standard or null array prototype.`);
   }
   for (const key in value) {
-    if (!Object.hasOwn(value, key)) {
+    if (!capturedHasOwn(value, key)) {
       fail('invalid_array', path, `${path} must not inherit enumerable array properties.`);
     }
   }
   let keys;
   try {
-    keys = Reflect.ownKeys(value);
+    keys = capturedOwnKeys(value);
   } catch {
     fail('invalid_array', path, `${path} keys could not be inspected safely.`);
   }
@@ -283,8 +363,8 @@ export function assertDenseJsonArray(value, path) {
     if (typeof key !== 'string' || !isCanonicalArrayIndex(key, value.length)) {
       fail('invalid_array', path, `${path} must be a dense JSON array without extra or symbol properties.`);
     }
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+    const descriptor = capturedDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !capturedHasOwn(descriptor, 'value')) {
       fail('invalid_array', `${path}[${key}]`, `${path}[${key}] must be an enumerable data element.`);
     }
     indexCount += 1;
@@ -325,21 +405,21 @@ export function assertManifestComplexity(root) {
     }
     if (seen.has(value)) fail('invalid_json_value', path, `${path} contains a cyclic or aliased object value.`);
     seen.add(value);
-    if (utilTypes.isProxy(value)) {
+    if (isProxy(value)) {
       // Array.isArray performs the ECMAScript IsArray operation, which throws
       // for a revoked Proxy. Normalize every Proxy surface before that native
       // boundary so direct-JavaScript inputs always fail with a bounded
       // RunContractV1Error rather than leaking a raw TypeError.
       let proxyIsArray = false;
       try {
-        proxyIsArray = Array.isArray(value);
+        proxyIsArray = capturedIsArray(value);
       } catch {
         fail('invalid_type', path, `${path} must be concrete JSON data, not a revoked Proxy.`);
       }
       fail(proxyIsArray ? 'invalid_array' : 'invalid_type', path,
         `${path} must be concrete JSON data, not a Proxy.`);
     }
-    if (Array.isArray(value)) {
+    if (capturedIsArray(value)) {
       if (value.length > MAX_MANIFEST_NODES) {
         fail('manifest_too_complex', path,
           `${path} exceeds ${MAX_MANIFEST_NODES} array elements.`);
@@ -399,28 +479,33 @@ export function assertAllowedKeys(object, allowedKeys, path) {
 
 // Recursive forbidden-key scan for payloads whose full schema lives in a
 // sibling module (assignment subtrees before their schema hook runs).
-export function assertNoForbiddenKeysDeep(value, path, depth = 0) {
+export function assertNoForbiddenKeysDeep(value, path, depth = 0, seen = new WeakSet()) {
   if (depth > MAX_MANIFEST_DEPTH) {
     fail('depth_exceeded', path, `${path} exceeds the maximum manifest depth of ${MAX_MANIFEST_DEPTH}.`);
   }
   if ((typeof value === 'object' && value !== null) || typeof value === 'function') {
-    if (utilTypes.isProxy(value)) {
+    if (isProxy(value)) {
       fail('invalid_type', path, `${path} must be concrete JSON data, not a Proxy.`);
     }
   }
-  if (Array.isArray(value)) {
+  if (capturedIsArray(value)) {
+    if (seen.has(value)) return;
+    seen.add(value);
     assertDenseJsonArray(value, path);
     for (let i = 0; i < value.length; i += 1) {
-      assertNoForbiddenKeysDeep(value[i], `${path}[${i}]`, depth + 1);
+      const element = capturedDescriptor(value, String(i))?.value;
+      assertNoForbiddenKeysDeep(element, `${path}[${i}]`, depth + 1, seen);
     }
     return;
   }
   if (!isPlainObject(value)) return;
-  assertJsonDataObject(value, path);
-  for (const key of sortedKeys(value)) {
+  if (seen.has(value)) return;
+  seen.add(value);
+  const entries = assertJsonDataObject(value, path);
+  for (const { key, value: child } of entries) {
     const cls = FORBIDDEN_KEY_CLASSES.get(key);
     if (cls) fail(cls, `${path}.${key}`, `${path}.${key} is forbidden (${cls}).`);
-    assertNoForbiddenKeysDeep(value[key], `${path}.${key}`, depth + 1);
+    assertNoForbiddenKeysDeep(child, `${path}.${key}`, depth + 1, seen);
   }
 }
 
@@ -449,18 +534,48 @@ export function assertBoundedText(value, {
 }
 
 function assertPattern(value, pattern, code, path, label) {
-  if (typeof value !== 'string' || !pattern.test(value)) {
-    fail(code, path, `${label} violates the required grammar ${String(pattern)}.`);
+  if (typeof value !== 'string' || !capturedTest(pattern, value)) {
+    fail(code, path, `${label} violates the required grammar ${pattern.source}.`);
+  }
+}
+
+export function isAssignmentId(value) {
+  return typeof value === 'string' && capturedTest(PRIVATE_ASSIGNMENT_ID_PATTERN, value);
+}
+
+export function isCommandId(value) {
+  return typeof value === 'string' && capturedTest(PRIVATE_COMMAND_ID_PATTERN, value);
+}
+
+export function isSha40(value) {
+  return typeof value === 'string' && capturedTest(PRIVATE_SHA40_PATTERN, value);
+}
+
+export function isParamKey(value) {
+  return typeof value === 'string' && capturedTest(PRIVATE_PARAM_KEY_PATTERN, value);
+}
+
+// The exact bounded profile-name grammar already owned by assignment
+// execution.profile validation, shared with the optional root profile
+// binding. Data-only by construction: a name, never an inline object, and
+// never a P04 catalog lookup at this boundary.
+export function assertProfileName(value, path) {
+  if (typeof value !== 'string') {
+    fail('invalid_type', path, `${path} must be a profile name string.`);
+  }
+  if (!isProfileName(value)) {
+    fail('invalid_format', path,
+      `${path} violates the profile-name grammar ${profileNameGrammarSource()}.`);
   }
 }
 
 export function assertRunId(value, path = 'run_id') {
-  assertPattern(value, RUN_ID_PATTERN, 'invalid_format', path,
-    `run_id must match ${RUN_ID_PATTERN.source} (lowercase, git-ref-safe, ${RUN_ID_MIN}-${RUN_ID_MAX} chars)`);
+  assertPattern(value, PRIVATE_RUN_ID_PATTERN, 'invalid_format', path,
+    `run_id must match ${PRIVATE_RUN_ID_PATTERN.source} (lowercase, git-ref-safe, ${RUN_ID_MIN}-${RUN_ID_MAX} chars)`);
 }
 
 export function assertBaseSha(value, path) {
-  assertPattern(value, SHA40_PATTERN, 'invalid_format', path,
+  assertPattern(value, PRIVATE_SHA40_PATTERN, 'invalid_format', path,
     `${path} must be an exact immutable 40-character lowercase hex commit SHA`);
 }
 
@@ -493,10 +608,12 @@ export function assertRepositoryPath(value, path) {
 // pattern whose prefix is empty (e.g. leading '**') may match anywhere.
 // Prefixes sharing every compared segment are treated as overlapping. The
 // check may over-approximate overlap; it never under-approximates it.
+const PRIVATE_GLOB_META_PATTERN = /[*?[]/u;
+
 export function scopeStaticPrefix(pattern) {
   const prefix = [];
   for (const segment of String(pattern).split('/')) {
-    if (/[*?[]/u.test(segment)) break;
+    if (capturedTest(PRIVATE_GLOB_META_PATTERN, segment)) break;
     prefix.push(segment.toLowerCase());
   }
   return prefix;
@@ -558,6 +675,9 @@ export function assertWriteScopePatterns(value, path, { minPatterns, maxPatterns
       fail('out_of_range', entryPath, `${entryPath} exceeds ${SCOPE_MAX_SEGMENTS} path segments.`);
     }
     for (const segment of segments) {
+      if (segment.length === 0) {
+        fail('invalid_format', entryPath, `${entryPath} contains an empty path segment.`);
+      }
       if (segment === '.' || segment === '..') {
         fail('invalid_format', entryPath, `${entryPath} must not contain '.' or '..' path aliases.`);
       }
@@ -565,9 +685,9 @@ export function assertWriteScopePatterns(value, path, { minPatterns, maxPatterns
         fail('out_of_range', entryPath,
           `${entryPath} contains a segment exceeding ${SCOPE_SEGMENT_MAX_BYTES} bytes.`);
       }
-      if (!GLOB_SEGMENT_PATTERN.test(segment)) {
-        fail('invalid_format', entryPath, `${entryPath} segment "${segment}" violates the glob grammar ${GLOB_SEGMENT_PATTERN.source}.`);
-      }
+      // Pattern language matchability is owned by the repository matcher.
+      // P02 only enforces relative-path structure and byte/segment bounds
+      // here and does not reconstruct matcher internals.
     }
     if (utf8ByteLength(entry) > SCOPE_PATTERN_MAX_BYTES) {
       fail('out_of_range', entryPath, `${entryPath} exceeds ${SCOPE_PATTERN_MAX_BYTES} bytes.`);
@@ -596,12 +716,57 @@ export function assertTimeoutMs(value, path) {
     `${path} must be between ${MIN_DURATION_MS} and ${MAX_TIMEOUT_MS} ms`);
 }
 
+// The single AssignmentManifestV1 execution grammar, owned here beside its
+// closed vocabulary so every consumer shares one contract with no second
+// grammar. Exactly one resolution choice survives: a named profile reference
+// (data-only name, never an inline object) or an exact provider + model pair.
+// Absence is not this function's concern: callers decide what a truly absent
+// execution means (the public classifier treats absence as selection-deferral
+// after complete standalone assignment validation; deep assignment
+// validation never reaches it with execution absent).
+export function validateExecution(execution, path) {
+  if (!isPlainObject(execution)) fail('invalid_type', path, `${path} must be an object.`);
+  assertAllowedKeys(execution, EXECUTION_ALLOWED_KEYS, path);
+  const hasProfile = capturedHasOwn(execution, 'profile');
+  const hasProvider = capturedHasOwn(execution, 'provider');
+  const hasModel = capturedHasOwn(execution, 'model');
+  if (hasProfile && (hasProvider || hasModel)) {
+    fail('execution_ambiguous', path,
+      `${path} must carry exactly one resolution choice: a named profile OR an explicit provider/model pair, never both.`);
+  }
+  if (!hasProfile && !hasProvider && !hasModel) {
+    fail('execution_missing', path, `${path} requires either a named profile or an explicit provider/model pair.`);
+  }
+  if (hasProfile) {
+    const profileDescriptor = capturedDescriptor(execution, 'profile');
+    const profile = profileDescriptor.value;
+    if (typeof profile !== 'string') {
+      fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
+    }
+    assertProfileName(profile, `${path}.profile`);
+    return capturedFreeze({ kind: 'profile', provider: null });
+  }
+  if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
+  if (!hasModel) fail('missing_key', `${path}.model`, `${path}.model is required when no profile is named.`);
+  const provider = capturedDescriptor(execution, 'provider').value;
+  const model = capturedDescriptor(execution, 'model').value;
+  if (!isKnownProvider(provider)) {
+    fail('unknown_provider', `${path}.provider`,
+      `${path}.provider is not one of ${knownProvidersJoined()}.`);
+  }
+  if (!isModelId(model)) {
+    fail('invalid_format', `${path}.model`,
+      `${path}.model violates the model grammar ${modelIdGrammarSource()} (max ${MODEL_ID_MAX} bytes).`);
+  }
+  return capturedFreeze({ kind: 'explicit', provider });
+}
+
 function extractWriterScopes(assignments) {
   const writerScopes = [];
   for (let i = 0; i < assignments.length; i += 1) {
     const assignment = assignments[i];
     const patterns = assignment?.write_scope;
-    let allPatternsAreStrings = Array.isArray(patterns);
+    let allPatternsAreStrings = capturedIsArray(patterns);
     if (allPatternsAreStrings) {
       for (let patternIndex = 0; patternIndex < patterns.length; patternIndex += 1) {
         if (typeof patterns[patternIndex] !== 'string') {
@@ -617,24 +782,62 @@ function extractWriterScopes(assignments) {
   return writerScopes;
 }
 
-function extractUnresolvedProfileAssignmentIds(assignments) {
-  const unresolved = [];
+export const ASSIGNMENT_SELECTION_STATES = Object.freeze([
+  'dispatch_resolved', 'selection_resolution_required',
+]);
+
+// Single source of truth for P02R1 selection classification. The public
+// classifier first performs complete standalone assignment validation
+// (ID, role/access, prompt, execution/omission, starting ref, scope,
+// acceptance, duration, evidence, closed keys, forbidden-key scan). Only
+// after that surface is proven does it return a selection state. Run-wide
+// uniqueness and cross-lane writer-scope disjointness remain envelope
+// validation. Only an exact explicit provider/model pair is
+// dispatch-resolved at submission time. A named-profile reference AND a
+// truly absent execution both remain selection_resolution_required until
+// the P05 resolver produces the effective manifest; explicit lanes stay
+// dispatch-resolved. Profile resolution later binds manifest/catalog/
+// provenance digests and the resolved pair; this classifier resolves
+// nothing.
+export function classifyAssignmentSelectionV1(assignment) {
+  if (!isPlainObject(assignment)) {
+    fail('invalid_type', 'assignment', 'assignment must be a plain JSON data object.');
+  }
+  validateStandaloneAssignmentV1(assignment, 'assignment');
+  const executionDescriptor = capturedDescriptor(assignment, 'execution');
+  if (!executionDescriptor) return 'selection_resolution_required';
+  const resolution = validateExecution(executionDescriptor.value, 'assignment.execution');
+  return resolution.kind === 'explicit' ? 'dispatch_resolved' : 'selection_resolution_required';
+}
+
+function extractSelectionResolution(assignments) {
+  const unresolvedProfileAssignmentIds = [];
+  const selectionResolutionRequiredIds = [];
   for (let index = 0; index < assignments.length; index += 1) {
     const assignment = assignments[index];
-    if (isPlainObject(assignment.execution)
-      && Object.hasOwn(assignment.execution, 'profile')) {
-      unresolved.push(assignment.assignment_id);
+    // Envelope validation has already proven each assignment. Classify the
+    // already-validated execution surface without re-entering the public
+    // classifier (whose path prefix is the standalone `assignment` form).
+    const executionDescriptor = capturedDescriptor(assignment, 'execution');
+    if (!executionDescriptor) {
+      selectionResolutionRequiredIds.push(assignment.assignment_id);
+      continue;
+    }
+    const execution = executionDescriptor.value;
+    if (isPlainObject(execution) && capturedHasOwn(execution, 'profile')) {
+      selectionResolutionRequiredIds.push(assignment.assignment_id);
+      unresolvedProfileAssignmentIds.push(assignment.assignment_id);
     }
   }
-  return unresolved;
+  return { unresolvedProfileAssignmentIds, selectionResolutionRequiredIds };
 }
 
 function validateReturnContract(returnContract) {
   const path = 'return_contract';
   if (!isPlainObject(returnContract)) fail('invalid_type', path, 'return_contract must be an object.');
   assertAllowedKeys(returnContract, RETURN_CONTRACT_ALLOWED_KEYS, path);
-  for (const key of RETURN_CONTRACT_ALLOWED_KEYS) {
-    if (!Object.hasOwn(returnContract, key)) fail('missing_key', `${path}.${key}`, `${path}.${key} is required.`);
+  for (const key of RETURN_CONTRACT_REQUIRED_KEYS) {
+    if (!capturedHasOwn(returnContract, key)) fail('missing_key', `${path}.${key}`, `${path}.${key} is required.`);
   }
   if (returnContract.mode !== 'verified_decision') {
     fail('invalid_format', `${path}.mode`, 'return_contract.mode must be exactly "verified_decision".');
@@ -643,13 +846,38 @@ function validateReturnContract(returnContract) {
     fail('invalid_format', `${path}.include_artifact_refs`,
       'return_contract.include_artifact_refs must be explicitly true; evidence stays artifact-addressable.');
   }
+  assertDiagnosticPartialAuthorization(returnContract);
+}
+
+// Exact primitive boolean, no aliases, no defaults, no coercion. The flag is
+// resolution-inert: it never enters assignment prompts, ChildEnvelopeV1
+// bytes, or child-envelope digests, and P35A/P36 alone own any later
+// candidate status or disposition.
+function assertDiagnosticPartialAuthorization(returnContract) {
+  const path = `return_contract.${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}`;
+  if (!capturedHasOwn(returnContract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)) return;
+  const flag = capturedDescriptor(returnContract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY).value;
+  if (typeof flag !== 'boolean') {
+    fail('invalid_type', path,
+      `${path} must be an exact boolean; absent or false keeps complete-only behavior and no coercion is performed.`);
+  }
+}
+
+// Validate and bind the optional root profile name. Absent means unbound;
+// present means an exact bounded profile-name string. Nothing else about the
+// run changes: no lane becomes resolved, and no required field turns optional.
+function validateRootProfileBinding(manifest) {
+  if (!capturedHasOwn(manifest, BOUND_ROOT_PROFILE_KEY)) return null;
+  const bound = capturedDescriptor(manifest, BOUND_ROOT_PROFILE_KEY).value;
+  assertProfileName(bound, BOUND_ROOT_PROFILE_KEY);
+  return bound;
 }
 
 function validatePolicyEnvelope(policy) {
   const path = 'policy';
   if (!isPlainObject(policy)) fail('invalid_type', path, 'policy must be an object.');
   for (const key of POLICY_ALLOWED_KEYS) {
-    if (!Object.hasOwn(policy, key)) {
+    if (!capturedHasOwn(policy, key)) {
       fail('missing_key', `${path}.${key}`, `policy.${key} is required; run policies have no hidden defaults.`);
     }
   }
@@ -668,15 +896,16 @@ function validateAssignmentsEnvelope(assignments, hooks) {
     const assignment = assignments[i];
     if (!isPlainObject(assignment)) fail('invalid_type', assignmentPath, `${assignmentPath} must be an object.`);
     const idPath = `${assignmentPath}.assignment_id`;
-    if (!Object.hasOwn(assignment, 'assignment_id')) {
+    if (!capturedHasOwn(assignment, 'assignment_id')) {
       fail('missing_key', idPath, `${idPath} is required.`);
     }
-    assertPattern(assignment.assignment_id, ASSIGNMENT_ID_PATTERN, 'invalid_format', idPath,
-      `assignment_id must match ${ASSIGNMENT_ID_PATTERN.source}`);
-    if (seenIds.has(assignment.assignment_id)) {
-      fail('duplicate_assignment_id', idPath, `assignment_id "${assignment.assignment_id}" is not unique within the run.`);
+    const assignmentId = capturedDescriptor(assignment, 'assignment_id').value;
+    assertPattern(assignmentId, PRIVATE_ASSIGNMENT_ID_PATTERN, 'invalid_format', idPath,
+      `assignment_id must match ${PRIVATE_ASSIGNMENT_ID_PATTERN.source}`);
+    if (seenIds.has(assignmentId)) {
+      fail('duplicate_assignment_id', idPath, `assignment_id "${assignmentId}" is not unique within the run.`);
     }
-    seenIds.add(assignment.assignment_id);
+    seenIds.add(assignmentId);
     assertNoForbiddenKeysDeep(assignment, assignmentPath, 1);
     hooks.validateAssignment(assignment, i);
   }
@@ -695,8 +924,8 @@ export function validateRunManifestEnvelopeV1(manifest, hooks) {
   assertManifestComplexity(manifest);
   if (!isPlainObject(manifest)) fail('invalid_type', '$', 'A run manifest must be a JSON object.');
   assertAllowedKeys(manifest, ROOT_ALLOWED_KEYS, '$');
-  for (const key of ROOT_ALLOWED_KEYS) {
-    if (!Object.hasOwn(manifest, key)) {
+  for (const key of ROOT_REQUIRED_KEYS) {
+    if (!capturedHasOwn(manifest, key)) {
       fail('missing_key', `$.${key}`, `$.${key} is required; run manifests have no hidden defaults.`);
     }
   }
@@ -708,25 +937,30 @@ export function validateRunManifestEnvelopeV1(manifest, hooks) {
   if (!isPlainObject(repository)) fail('invalid_type', 'repository', 'repository must be an object.');
   assertAllowedKeys(repository, REPOSITORY_ALLOWED_KEYS, 'repository');
   for (const key of REPOSITORY_ALLOWED_KEYS) {
-    if (!Object.hasOwn(repository, key)) fail('missing_key', `repository.${key}`, `repository.${key} is required.`);
+    if (!capturedHasOwn(repository, key)) fail('missing_key', `repository.${key}`, `repository.${key} is required.`);
   }
   assertRepositoryPath(repository.path, 'repository.path');
   assertBaseSha(repository.base_sha, 'repository.base_sha');
   assertBoundedText(manifest.objective, {
     min: OBJECTIVE_MIN_BYTES, max: OBJECTIVE_MAX_BYTES, path: 'objective', label: 'objective',
   });
+  const boundRootProfile = validateRootProfileBinding(manifest);
   validateReturnContract(manifest.return_contract);
   validatePolicyEnvelope(manifest.policy);
   hooks.validatePolicy(manifest.policy);
   const assignmentIds = validateAssignmentsEnvelope(manifest.assignments, hooks);
   assertDisjointWriterScopes(extractWriterScopes(manifest.assignments));
-  const unresolvedProfileAssignmentIds = extractUnresolvedProfileAssignmentIds(manifest.assignments);
-  return Object.freeze({
+  const { unresolvedProfileAssignmentIds, selectionResolutionRequiredIds }
+    = extractSelectionResolution(manifest.assignments);
+  return capturedFreeze({
     run_id: manifest.run_id,
     assignment_count: manifest.assignments.length,
-    assignment_ids: Object.freeze([...assignmentIds]),
+    assignment_ids: capturedFreeze([...assignmentIds]),
     validation_depth: 'complete',
+    bound_root_profile: boundRootProfile,
     profile_resolution_required: unresolvedProfileAssignmentIds.length > 0,
-    unresolved_profile_assignment_ids: Object.freeze(unresolvedProfileAssignmentIds),
+    unresolved_profile_assignment_ids: capturedFreeze(unresolvedProfileAssignmentIds),
+    selection_resolution_required: selectionResolutionRequiredIds.length > 0,
+    selection_resolution_required_assignment_ids: capturedFreeze(selectionResolutionRequiredIds),
   });
 }
