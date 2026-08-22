@@ -81,6 +81,22 @@
   producers declare references, and only a later storage authority may bind
   them to bytes. Coverage lives in `test/r1-artifact-ref.test.mjs` and
   `test/r1-artifact-ref-adversarial.test.mjs`.
+- **Closed P17 provider-driver envelope and capability contract.** Additive
+  `ProviderDriverV1` owns the preflight/launch/reconcile/cancel lifecycle
+  plus typed results, exact ChildEnvelopeV1 launch proof (text bytes and
+  raw lowercase 64-hex P03 digest; digest-only launches are denied), and
+  honest capability declaration through the accepted P05 13-field
+  `ProviderCapabilitiesV1` bridge rather than a parallel schema.
+  Driver-surface features for same-session-adjacent live progress,
+  reconcile-only restart reattach, cancellation, and detailed events fail
+  closed when unsupported, with no fallback or post-dispatch replay.
+  Process-local status transitions refuse duplicate dispatch, stale
+  envelope correlation, and capability-contradicting launch certainty.
+  Direct-JS inputs use the P05 descriptor-first closure; validated values
+  are detached and deeply frozen. The module claims no provider transport,
+  registry cutover, scheduler, or durable store. Coverage lives in
+  `r1-provider-driver` and `r1-provider-driver-adversarial` tests plus the
+  reusable `provider-driver-contract-suite` harness.
 - **Deterministic P05 resolver and P17 capability bridge.** Additive
   `resolveRunSelectionV1` / `resolveSelectionAnswersV1` bind every
   assignment's provider/model from authored explicit execution, the

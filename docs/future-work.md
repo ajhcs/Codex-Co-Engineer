@@ -6,7 +6,7 @@ Status: specified, not implemented.
 
 Priority: high
 Component: Codex-Co-Engineer
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 The accepted architecture for R1 is
 [ADR 0001](adr/0001-r1-bounded-run-architecture.md). It defines a 3.3.0 run
@@ -15,9 +15,16 @@ identity, with deterministic explicit/profile resolution, no direct mode on
 run submissions, disjoint writers, read-only verification, no post-dispatch
 fallback or replay, and Codex-only final acceptance.
 
-This worktree does not implement the run runtime, candidate composition,
-or `AttentionBatchV1`. Gate A remains the functional release authority;
-Gate B context-efficiency and Gate C credit economics stay advisory.
+The P17 `ProviderDriverV1` envelope/capability contract is in-tree as a
+pure contract and provider-agnostic conformance harness. It validates
+preflight/launch/reconcile/cancel requests and results against the
+accepted P05 13-field capability bridge. It does not implement Grok,
+Cursor Local, DSH, or Cursor Cloud transports, registry cutover,
+scheduler, or durable store; those remain P18/P20/P19/P21 and later
+run-runtime work. This worktree does not implement the run runtime,
+candidate composition, or `AttentionBatchV1`. Gate A remains the
+functional release authority; Gate B context-efficiency and Gate C
+credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
