@@ -31,11 +31,17 @@ ACP lifecycle conformance route must implement the six transport
 operations recorded by `describeGrokAcpAdapterSurfaceV1()` (`preflight`,
 `spawn`, `dispatch`, `observe`, `cancel`, `reattach`) against `grok-build`
 persistent sessions, with the same identity and bound rules. Cursor
-Local, DSH, and Cursor Cloud transports, registry cutover, scheduler, and
-durable store remain P20/P19/P21 and later run-runtime work. This
-worktree does not implement the run runtime, candidate composition, or
-`AttentionBatchV1`. Gate A remains the functional release authority; Gate
-B context-efficiency and Gate C credit economics stay advisory.
+Local and Cursor Cloud transports, registry cutover, scheduler, and
+durable store remain P19/P21 and later run-runtime work. The P20 DSH adapter
+(`DshApxDriverV1`) now drives that contract over an injected bounded
+ACPX one-shot transport port for Muse Spark 1.2 Contributor and Ox
+Alpha, with honest post-spawn uncertainty, unsupported same-session
+reply, bounded recorded-evidence reconcile/restart/cancel behavior, and
+fail-closed identity/correlation drift denials; it qualifies no real
+transport (see `docs/dsh-acpx-driver.md`). This worktree does not implement
+the run runtime, candidate composition, or `AttentionBatchV1`. Gate A
+remains the functional release authority; Gate B context-efficiency and
+Gate C credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
