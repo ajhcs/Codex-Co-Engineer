@@ -112,13 +112,22 @@ the repository's normal access policy.
 
 ### Field validation
 
-Profiles validate against the 3.2.1 provider routes:
+Profiles validate against one bounded run grammar shared with assignment
+manifests. The grammar is mirrored locally in the profile module and guarded
+against drift by shared test fixtures; profile loading imports no
+run-manifest runtime module.
 
 - `provider` is one of `dsh`, `grok`, `cursor-local`, `cursor-cloud`.
-- `model` may be named only beside `provider: "dsh"` and must be
-  `muse-spark-1.2-contributor` or `stealth/ox-alpha`; attestation of the
-  effective model still happens at preflight, not at authoring time.
-- `role` is `review` or `implement`.
+- `model` may be named beside any explicit provider from that list and must
+  match the bounded model identifier grammar
+  `^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$` (at most 128 UTF-8 bytes). The check
+  is syntax and requested-byte size only: profiles carry no model-membership,
+  availability, qualification, resolution, or attestation data, and no
+  advertised-model list is ever enforced against a requested model. Whether a
+  provider actually offers the named model is attested at preflight, not at
+  authoring time. The retired `PROFILE_DSH_MODELS` constant survives as
+  deprecated informational compatibility data only.
+- `role` is `review`, `implement`, or `verify` (read-only verification).
 - `expected_duration_ms` is an integer from 1,000 to 86,400,000.
 - `policy` is data-only selection policy. Today it may contain exactly
   `pre_dispatch_provider_preference`: one to four unique known provider
