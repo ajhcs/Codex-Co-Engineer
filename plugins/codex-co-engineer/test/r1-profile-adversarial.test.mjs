@@ -65,12 +65,15 @@ const cases = [
   ['password key', catalogCases('leak', { password: 'x' }), 'profile_credential_key_rejected'],
   ['private key', catalogCases('leak', { private_key_pem: 'x' }), 'profile_credential_key_rejected'],
   ['authorization key', catalogCases('leak', { Authorization: 'Bearer x' }), 'profile_credential_key_rejected'],
-  ['sk- value', catalogCases('leak', { model: 'sk-proj-abcdefgh' }), 'profile_secret_value_rejected'],
-  ['xox value', catalogCases('leak', { model: 'xoxb-1234567890' }), 'profile_secret_value_rejected'],
-  ['github token value', catalogCases('leak', { model: 'ghp_1234567890abcdef12' }), 'profile_secret_value_rejected'],
-  ['bearer value', catalogCases('leak', { model: 'Bearer abcdefghijklmno' }), 'profile_secret_value_rejected'],
-  ['hex digest value', catalogCases('leak', { model: 'a'.repeat(64) }), 'profile_secret_value_rejected'],
-  ['base64 value', catalogCases('leak', { model: `${'Aa1/'.repeat(15)}Aa1` }), 'profile_secret_value_rejected'],
+  // The top-level `model` identifier is an opaque grammar-governed value and is
+  // exempt from the semantic scans; every OTHER string - here under an unknown
+  // key, which the generic scans still outrank - keeps failing closed.
+  ['sk- value', catalogCases('leak', { note: 'sk-proj-abcdefgh' }), 'profile_secret_value_rejected'],
+  ['xox value', catalogCases('leak', { note: 'xoxb-1234567890' }), 'profile_secret_value_rejected'],
+  ['github token value', catalogCases('leak', { note: 'ghp_1234567890abcdef12' }), 'profile_secret_value_rejected'],
+  ['bearer value', catalogCases('leak', { note: 'Bearer abcdefghijklmno' }), 'profile_secret_value_rejected'],
+  ['hex digest value', catalogCases('leak', { note: 'a'.repeat(64) }), 'profile_secret_value_rejected'],
+  ['base64 value', catalogCases('leak', { note: `${'Aa1/'.repeat(15)}Aa1` }), 'profile_secret_value_rejected'],
   ['nested secret value', catalogCases('leak', { role: 'review', metadata: { token: 'sk-abcdefgh' } }), 'profile_secret_value_rejected'],
   ['nested unknown field', catalogCases('leak', { role: 'review', metadata: { anything: 'x' } }), 'unknown_profile_field'],
 ];
@@ -87,11 +90,11 @@ test('environment interpolation and env catalogs are rejected', async () => {
   const workspace = await rejectingWorkspace();
   try {
 const cases = [
-  ['braced variable', catalogCases('env', { model: '${DSH_MODEL}' })],
-  ['bare variable', catalogCases('env', { model: '$HOME/models' })],
-  ['windows variable', catalogCases('env', { model: '%PATH%models' })],
-  ['command substitution', catalogCases('env', { model: 'a$(whoami)b' })],
-  ['backtick substitution', catalogCases('env', { model: 'a`whoami`b' })],
+  ['braced variable', catalogCases('env', { note: '${DSH_MODEL}' })],
+  ['bare variable', catalogCases('env', { note: '$HOME/models' })],
+  ['windows variable', catalogCases('env', { note: '%PATH%models' })],
+  ['command substitution', catalogCases('env', { note: 'a$(whoami)b' })],
+  ['backtick substitution', catalogCases('env', { note: 'a`whoami`b' })],
   ['env key', catalogCases('env', { env: { MODEL_API_KEY: 'x' } }), 'profile_environment_key_rejected'],
   ['environment key', catalogCases('env', { environment: ['CI'] }), 'profile_environment_key_rejected'],
   ['dotenv key', catalogCases('env', { env_file: '.env' }), 'profile_environment_key_rejected'],
@@ -127,10 +130,10 @@ const cases = [
   ['args key', catalogCases('exec', { args: '--run' }), 'profile_executable_key_rejected'],
   ['argv_template key', catalogCases('exec', { argv_template: ['test', '{file}'] }), 'profile_executable_key_rejected'],
   ['shell key', catalogCases('exec', { shell: true }), 'profile_executable_key_rejected'],
-  ['shell string value', catalogCases('exec', { role: 'review', model: '/bin/bash' }), 'profile_shell_value_rejected'],
+  ['shell string value', catalogCases('exec', { role: 'review', note: '/bin/bash' }), 'profile_shell_value_rejected'],
   ['script key', catalogCases('exec', { script: 'echo hi' }), 'profile_executable_key_rejected'],
   ['entrypoint key', catalogCases('exec', { entrypoint: true }), 'profile_executable_key_rejected'],
-  ['entrypoint shell value', catalogCases('exec', { role: 'review', model: '/bin/sh -c ls' }), 'profile_shell_value_rejected'],
+  ['entrypoint shell value', catalogCases('exec', { role: 'review', note: '/bin/sh -c ls' }), 'profile_shell_value_rejected'],
   ['runner key', catalogCases('exec', { runner_command: ['x'] }), 'profile_executable_key_rejected'],
   ['timeout key', catalogCases('exec', { timeout_ms: 1000 }), 'profile_executable_key_rejected'],
   ['network key', catalogCases('exec', { network: 'allow' }), 'profile_executable_key_rejected'],
@@ -138,12 +141,12 @@ const cases = [
   ['folded VerificationPolicyV1 shape', catalogCases('exec', { 'verification-policy': verificationPolicyShape }), 'profile_executable_key_rejected'],
   ['policy command catalog', catalogCases('exec', { policy: { commands: verificationPolicyShape.commands } }), 'profile_executable_key_rejected'],
   ['policy command id', catalogCases('exec', { policy: { command_catalog: { 'unit-tests': {} } } }), 'profile_executable_key_rejected'],
-  ['shell metachar value', catalogCases('exec', { model: 'a && b' }), 'profile_shell_value_rejected'],
-  ['pipe value', catalogCases('exec', { model: 'a | b' }), 'profile_shell_value_rejected'],
-  ['redirect value', catalogCases('exec', { model: '> /tmp/out' }), 'profile_shell_value_rejected'],
-  ['shell word value', catalogCases('exec', { model: 'run with bash -c' }), 'profile_shell_value_rejected'],
-  ['shebang value', catalogCases('exec', { model: '#!/bin/sh' }), 'profile_shell_value_rejected'],
-  ['sudo value', catalogCases('exec', { model: 'sudo npm i' }), 'profile_shell_value_rejected'],
+  ['shell metachar value', catalogCases('exec', { note: 'a && b' }), 'profile_shell_value_rejected'],
+  ['pipe value', catalogCases('exec', { note: 'a | b' }), 'profile_shell_value_rejected'],
+  ['redirect value', catalogCases('exec', { note: '> /tmp/out' }), 'profile_shell_value_rejected'],
+  ['shell word value', catalogCases('exec', { note: 'run with bash -c' }), 'profile_shell_value_rejected'],
+  ['shebang value', catalogCases('exec', { note: '#!/bin/sh' }), 'profile_shell_value_rejected'],
+  ['sudo value', catalogCases('exec', { note: 'sudo npm i' }), 'profile_shell_value_rejected'],
 ];
 for (const [label, catalog, code] of cases) {
   await workspace.write(catalog);
@@ -183,11 +186,13 @@ test('moving refs and embedded prompt/result content are rejected', async () => 
   const workspace = await rejectingWorkspace();
   try {
 const cases = [
-  ['refs value', catalogCases('ref', { model: 'refs/heads/main' }), 'profile_moving_ref_value_rejected'],
-  ['origin value', catalogCases('ref', { model: 'origin/main' }), 'profile_moving_ref_value_rejected'],
-  ['HEAD value', catalogCases('ref', { model: 'HEAD' }), 'profile_moving_ref_value_rejected'],
-  ['latest value', catalogCases('ref', { model: 'latest' }), 'profile_moving_ref_value_rejected'],
-  ['main value', catalogCases('ref', { model: 'main' }), 'profile_moving_ref_value_rejected'],
+  // Grammar-valid ref-like identifiers stay legal as the opaque model value;
+  // the same shapes on any other string still fail closed.
+  ['refs value', catalogCases('ref', { note: 'refs/heads/main' }), 'profile_moving_ref_value_rejected'],
+  ['origin value', catalogCases('ref', { note: 'origin/main' }), 'profile_moving_ref_value_rejected'],
+  ['HEAD value', catalogCases('ref', { note: 'HEAD' }), 'profile_moving_ref_value_rejected'],
+  ['latest value', catalogCases('ref', { note: 'latest' }), 'profile_moving_ref_value_rejected'],
+  ['main value', catalogCases('ref', { note: 'main' }), 'profile_moving_ref_value_rejected'],
   ['ref key', catalogCases('ref', { starting_ref: 'abc' }), 'profile_moving_ref_key_rejected'],
   ['branch key', catalogCases('ref', { branch: 'release' }), 'profile_moving_ref_key_rejected'],
   ['remote key', catalogCases('ref', { remote: 'origin' }), 'profile_moving_ref_key_rejected'],
@@ -750,4 +755,33 @@ test('the whole Proxy battery observes exactly zero trap calls', () => {
     assert.equal(observedTraps[trap], 0, `${trap} must never be dispatched`);
   }
   assert.equal(proxyCallsObserved, 0);
+});
+
+test('grammar-valid opaque model identifiers load despite hostile-looking shapes', async () => {
+  const workspace = await rejectingWorkspace();
+  try {
+    // Model identifiers are opaque - not paths, refs, commands, or
+    // credentials. Each shape below is grammar-valid, so it must load
+    // end-to-end exactly as the shared assignment grammar accepts it; the
+    // hostile rejection suites above keep covering every other string.
+    const opaqueModels = [
+      'a..b',
+      'x/../escape',
+      'stealth/../../ox',
+      'main',
+      'origin/model',
+      'refs/heads/model',
+      'cmd:model',
+      'zsh/model',
+      'sk-abcdefghijklmnop',
+    ];
+    for (const model of opaqueModels) {
+      await workspace.write(catalogCases('opaque', { role: 'implement', model }));
+      const loaded = await loadProfiles(workspace.options);
+      assert.equal(findProfile(loaded, 'opaque').definition.model, model,
+        `${JSON.stringify(model)} must load as an opaque identifier`);
+    }
+  } finally {
+    await workspace.cleanup();
+  }
 });

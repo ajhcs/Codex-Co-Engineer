@@ -36,12 +36,44 @@ export const MAX_PROFILE_STRUCTURE_NODES = 512;
 export const MAX_PROFILE_STRUCTURE_DEPTH = 16;
 export const MAX_PROFILE_OBJECT_KEYS = 64;
 
-// Mirrors the supervisor provider routes and DSH model identifiers without
-// importing launch logic. Preflight attests the actual provider/model later;
-// a profile only names a data selection.
+// Local ProfileV1 mirror of the bounded run vocabulary: the same four exact
+// provider routes, the same assignment roles (including read-only verify), and
+// the same bounded model identifier grammar. The mirror is deliberately local:
+// this module stays import-free of the P02 run-manifest runtime, and the
+// shared test fixtures fail the suite if either side ever drifts. A profile
+// only names a data selection: it makes no model-membership, availability,
+// qualification, resolution, or attestation claim. Preflight attests the
+// effective provider/model later.
 export const PROFILE_PROVIDERS = Object.freeze(['dsh', 'grok', 'cursor-local', 'cursor-cloud']);
+export const PROFILE_ROLES = Object.freeze(['review', 'implement', 'verify']);
+
+// Bounded requested-bytes model grammar mirrored from the assignment contract:
+// first character alphanumeric, then alphanumerics plus `._/:-`, at most 128
+// encoded UTF-8 bytes. Syntax and size only - no advertised-model membership
+// is enforced here or anywhere else in ProfileV1. A model identifier is an
+// opaque identifier, not a path, ref, command, or credential, so the exact
+// top-level `model` value is exempt from the generic semantic value scanners
+// below; those scanners still cover every other profile string at any depth,
+// and the grammar plus requested-byte bound remain the model's whole safety
+// contract, identical on both sides of the shared run vocabulary.
+export const PROFILE_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$/u;
+export const PROFILE_MODEL_ID_MAX_BYTES = 128;
+
+// The one exempt scan path: the top-level `model` field of a profile under
+// validation (`<prefix>.model`). Deeper or differently named paths never match,
+// so a non-string `model` container and every nested string stay fully scanned.
+const MODEL_SCAN_EXEMPT_PATHS = new Set(['profile.model']);
+
+/**
+ * Deprecated informational compatibility data: the DSH model identifiers that
+ * 3.2.1 setup advertises. Retained only so older catalogs and diagnostics keep
+ * reading one stable constant. ProfileV1 validation never consults this list,
+ * so it cannot authorize or reject any requested model; membership,
+ * availability, qualification, resolution, and attestation stay preflight or
+ * resolver concerns.
+ * @deprecated Informational compatibility data only; not an authorization list.
+ */
 export const PROFILE_DSH_MODELS = Object.freeze(['muse-spark-1.2-contributor', 'stealth/ox-alpha']);
-export const PROFILE_ROLES = Object.freeze(['review', 'implement']);
 export const MIN_PROFILE_EXPECTED_DURATION_MS = MIN_DURATION_MS;
 export const MAX_PROFILE_EXPECTED_DURATION_MS = MAX_EXPECTED_DURATION_MS;
 
@@ -409,10 +441,8 @@ function parseCatalog(text, label) {
   return parsed;
 }
 
-const PROFILE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./:-]{0,127}$/u;
-
 export const ALLOWED_PROFILE_FIELDS = Object.freeze([
-  'schema', 'provider', 'model', 'role', 'expected_duration_ms', 'policy',
+  'schema', 'provider', 'model', 'role', 'expected_duration_ms', 'policy', 'default',
 ]);
 export const ALLOWED_PROFILE_POLICY_FIELDS = Object.freeze(['pre_dispatch_provider_preference']);
 export const MAX_PROVIDER_PREFERENCE_ENTRIES = PROFILE_PROVIDERS.length;
@@ -535,7 +565,12 @@ function scanValue(name, key, value) {
   }
 }
 
-function deepScanStrings(name, container, prefix) {
+// `exemptPaths` skips only the generic semantic value scan for exactly matching
+// field paths (today: the top-level opaque model identifier). It never skips
+// the walk itself: exempt values still count toward every structural bound,
+// still pass through the descriptor snapshot and static-data/identity-graph
+// checks, and any string at any other path is scanned as before.
+function deepScanStrings(name, container, prefix, exemptPaths = MODEL_SCAN_EXEMPT_PATHS) {
   const stack = [{ value: container, depth: 0, field: prefix }];
   const seen = new Set();
   let nodes = 0;
@@ -551,7 +586,7 @@ function deepScanStrings(name, container, prefix) {
       if (stringBytes > MAX_PROFILE_CATALOG_BYTES) {
         fail('profile_structure_too_complex', `Profile "${name}" exceeds the bounded string-data limit.`);
       }
-      scanValue(name, field, value);
+      if (!exemptPaths.has(field)) scanValue(name, field, value);
       continue;
     }
     if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
@@ -589,14 +624,23 @@ function requireProvider(name, provider) {
 }
 
 function requireModel(name, model, provider) {
-  if (provider !== 'dsh') {
-    fail('invalid_profile_model_for_provider', `Profile "${name}" may name a model only for provider "dsh".`);
+  // A model name is meaningful only beside an explicit known provider.
+  if (!PROFILE_PROVIDERS.includes(provider)) {
+    fail('invalid_profile_model_for_provider',
+      `Profile "${name}" may name a model only beside one of ${PROFILE_PROVIDERS.join(', ')}.`);
   }
-  if (typeof model !== 'string' || model.includes('..') || !PROFILE_MODEL_PATTERN.test(model)) {
-    fail('invalid_profile_model', `Profile "${name}" model must match a bounded provider model identifier.`);
-  }
-  if (!PROFILE_DSH_MODELS.includes(model)) {
-    fail('unknown_profile_model', `Profile "${name}" model must be one of ${PROFILE_DSH_MODELS.join(', ')}.`);
+  // One grammar for every exact provider, identical to the shared assignment
+  // authority: syntax and requested-byte size only. No static allowlist and no
+  // extra profile-only clause (such as a '..' traversal guard) is consulted, so
+  // a pattern-valid model is accepted exactly where the shared grammar accepts
+  // it - model identifiers are opaque, never parsed as paths, refs, commands,
+  // or credentials.
+  if (typeof model !== 'string'
+    || !PROFILE_MODEL_ID_PATTERN.test(model)
+    || Buffer.byteLength(model, 'utf8') > PROFILE_MODEL_ID_MAX_BYTES) {
+    fail('invalid_profile_model',
+      `Profile "${name}" model must match the bounded model grammar ${PROFILE_MODEL_ID_PATTERN.source}`
+      + ` (at most ${PROFILE_MODEL_ID_MAX_BYTES} UTF-8 bytes).`);
   }
   return model;
 }
@@ -652,6 +696,19 @@ function requireProviderPreference(name, preference) {
   return [...values];
 }
 
+// Optional prerequisite metadata only: `default: true` marks an
+// owner-authored candidate default for later run-resolution work. Absence is
+// ordinary, the value must be primitive `true` exactly, and the flag confers
+// no authority here - lookup stays exact-name, a profile named "default" has
+// no authority by name, and selection itself stays a resolver concern.
+function requireDefaultFlag(name, value) {
+  if (value !== true) {
+    fail('invalid_profile_default',
+      `Profile "${name}" default must be the primitive boolean true when present.`);
+  }
+  return true;
+}
+
 // Structural validation shared by loading and later linting. Field-level
 // policy/provider/model validation is layered on top of this check.
 export function validateProfileDefinition(name, raw) {
@@ -676,11 +733,12 @@ export function validateProfileDefinition(name, raw) {
   }
   const has = (field) => Object.hasOwn(descriptors, field);
   if (has('provider')) canonical.provider = requireProvider(name, descriptors.provider.value);
-  // A model name is meaningful only beside its dsh provider selection.
+  // A model name is meaningful only beside its explicit provider selection.
   if (has('model')) canonical.model = requireModel(name, descriptors.model.value, canonical.provider);
   if (has('role')) canonical.role = requireRole(name, descriptors.role.value);
   if (has('expected_duration_ms')) canonical.expected_duration_ms = requireExpectedDuration(name, descriptors.expected_duration_ms.value);
   if (has('policy')) canonical.policy = requirePolicy(name, descriptors.policy.value);
+  if (has('default')) canonical.default = requireDefaultFlag(name, descriptors.default.value);
   return deepFreezeData(canonical);
 }
 

@@ -380,7 +380,7 @@ test('definitions must be objects declaring the ProfileV1 schema', async () => {
   }
 });
 
-test('provider, model, and role fields validate against the 3.2.1 routes', async () => {
+test('provider, model, and role fields validate against one bounded run grammar', async () => {
   const { options, repositoryPath, cleanup } = await makeWorkspace();
   try {
     const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
@@ -391,11 +391,26 @@ test('provider, model, and role fields validate against the 3.2.1 routes', async
       const loaded = await loadProfiles(options);
       assert.equal(findProfile(loaded, 'probe').definition.provider, provider);
     }
-    for (const model of ['muse-spark-1.2-contributor', 'stealth/ox-alpha']) {
-      await write({ schema: PROFILE_SCHEMA, provider: 'dsh', model });
-      assert.equal((await loadProfiles(options)).profiles[0].definition.model, model);
+    // Every exact provider accepts any bounded grammar-conforming model:
+    // a profile names a selection only and makes no membership or
+    // availability claim.
+    const providerModels = new Map([
+      // Opaque grammar-valid identifiers load like any other model: model IDs
+      // are not paths, refs, commands, or credentials.
+      ['dsh', ['muse-spark-1.2-contributor', 'stealth/ox-alpha', 'a..b', 'sk-abcdefghijklmnop']],
+      ['grok', ['grok-4', 'grok-code-fast-1', 'refs/heads/model']],
+      ['cursor-local', ['composer-1', 'cursor_smoke_model', 'cmd:model']],
+      ['cursor-cloud', ['claude-sonnet-4-5', 'origin/model']],
+    ]);
+    for (const [provider, models] of providerModels) {
+      for (const model of models) {
+        await write({ schema: PROFILE_SCHEMA, provider, model });
+        const loaded = await loadProfiles(options);
+        assert.equal(findProfile(loaded, 'probe').definition.model, model,
+          `${provider} must accept pattern-valid model ${model}`);
+      }
     }
-    for (const role of ['review', 'implement']) {
+    for (const role of ['review', 'implement', 'verify']) {
       await write({ schema: PROFILE_SCHEMA, provider: 'dsh', role });
       assert.equal((await loadProfiles(options)).profiles[0].definition.role, role);
     }
@@ -403,11 +418,13 @@ test('provider, model, and role fields validate against the 3.2.1 routes', async
     const cases = [
       [{ schema: PROFILE_SCHEMA, provider: 'claude' }, 'unsupported_profile_provider'],
       [{ schema: PROFILE_SCHEMA, provider: 'DSH' }, 'unsupported_profile_provider'],
-      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'gpt-9' }, 'unknown_profile_model'],
-      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'stealth/../../ox' }, 'invalid_profile_model'],
-      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: `${'a'.repeat(60)}!${'a'.repeat(68)}` }, 'invalid_profile_model'],
-      [{ schema: PROFILE_SCHEMA, provider: 'grok', model: 'grok-4' }, 'invalid_profile_model_for_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: '/absolute/model' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: '-leading-hyphen' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'grok', model: '.leading-dot' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'cursor-cloud', model: `${'a_'.repeat(64)}x` }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'cursor-local', model: `${'a'.repeat(60)}!${'a'.repeat(68)}` }, 'invalid_profile_model'],
       [{ schema: PROFILE_SCHEMA, model: 'stealth/ox-alpha' }, 'invalid_profile_model_for_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 7, model: 'stealth/ox-alpha' }, 'unsupported_profile_provider'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'orchestrate' }, 'unsupported_profile_role'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 999 }, 'invalid_profile_expected_duration_ms'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 86_400_001 }, 'invalid_profile_expected_duration_ms'],
@@ -477,6 +494,71 @@ test('policy data stays bounded, non-executable, and deterministic', async () =>
   }
 });
 
+test('the optional default flag is primitive-true metadata with no authority', async () => {
+  const { options, repositoryPath, cleanup } = await makeWorkspace();
+  try {
+    const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
+    const write = (catalog) => writeJson(catalogPath, catalog);
+
+    // Absence is ordinary and leaves the canonical definition untouched.
+    await write({ plain: validDefinition() });
+    const loaded = await loadProfiles(options);
+    assert.equal(findProfile(loaded, 'plain').definition.default, undefined);
+    assert.ok(!Object.hasOwn(findProfile(loaded, 'plain').definition, 'default'));
+
+    // Primitive true exactly is accepted and bound into the validated data.
+    await write({ flagged: { ...validDefinition(), default: true } });
+    const flagged = findProfile(await loadProfiles(options), 'flagged');
+    assert.equal(flagged.definition.default, true);
+    assert.equal(
+      flagged.digest,
+      profileProvenanceDigest({ name: 'flagged', definition: { ...validDefinition(), default: true } }),
+      'the digest must bind the authored flag',
+    );
+    assert.notEqual(
+      flagged.digest,
+      profileProvenanceDigest({ name: 'flagged', definition: validDefinition() }),
+      'flagged and unflagged data must not share one digest',
+    );
+
+    // A profile named "default" has no authority by name: it loads as an
+    // ordinary record resolvable only by exact name.
+    await write({
+      default: { ...validDefinition(), default: true },
+      other: validDefinition(),
+    });
+    const namedCatalog = await loadProfiles(options);
+    assert.equal(findProfile(namedCatalog, 'default').definition.default, true);
+    assert.equal(findProfile(namedCatalog, 'other').definition.default, undefined);
+    assert.equal(findProfile(namedCatalog, 'unrelated'), undefined,
+      'no implicit resolution may follow from the name or the flag');
+
+    const cases = [
+      [false, 'boolean false'],
+      [null, 'null'],
+      [0, 'zero'],
+      ['true', 'string true'],
+      [{}, 'object'],
+      [[], 'array'],
+    ];
+    for (const [value, label] of cases) {
+      await write({ probe: { ...validDefinition(), default: value } });
+      await assert.rejects(() => loadProfiles(options), (error) => error.code === 'invalid_profile_default', label);
+    }
+
+    // Closed schema around the new field: only the exact lowercase key in the
+    // top-level profile vocabulary is accepted.
+    await write({ probe: { ...validDefinition(), Default: true } });
+    await assert.rejects(() => loadProfiles(options), (error) => error.code === 'unknown_profile_field', 'capitalized key');
+    await write({ probe: { ...validDefinition(), defaults: true } });
+    await assert.rejects(() => loadProfiles(options), (error) => error.code === 'unknown_profile_field', 'plural key');
+    await write({ probe: { schema: PROFILE_SCHEMA, policy: { default: true }, provider: 'dsh' } });
+    await assert.rejects(() => loadProfiles(options), (error) => error.code === 'unknown_profile_policy_field', 'inside policy');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('unknown keys are rejected and dangerous values never survive validation', async () => {
   const { options, repositoryPath, cleanup } = await makeWorkspace();
   try {
@@ -486,10 +568,12 @@ test('unknown keys are rejected and dangerous values never survive validation', 
     const cases = [
       ['credential key', { schema: PROFILE_SCHEMA, provider: 'dsh', api_key: 'x' }, 'profile_credential_key_rejected'],
       ['credential token', { schema: PROFILE_SCHEMA, provider: 'dsh', 'access-token': 'x' }, 'profile_credential_key_rejected'],
-      ['secret value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'sk-abcdefghijklmnop' }, 'profile_secret_value_rejected'],
-      ['env interpolation', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: '${DSH_MODEL}' }, 'profile_environment_value_rejected'],
-      ['shell value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'a; rm -rf' }, 'profile_shell_value_rejected'],
-      ['moving ref value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', model: 'refs/heads/main' }, 'profile_moving_ref_value_rejected'],
+      // The top-level model value is an opaque grammar-governed identifier and
+      // is exempt from the semantic scans; every other string stays covered.
+      ['secret value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'sk-abcdefghijklmnop' }, 'profile_secret_value_rejected'],
+      ['env interpolation', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: '${DSH_MODEL}' }, 'profile_environment_value_rejected'],
+      ['shell value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'a; rm -rf' }, 'profile_shell_value_rejected'],
+      ['moving ref value', { schema: PROFILE_SCHEMA, provider: 'dsh', role: 'review', note: 'refs/heads/main' }, 'profile_moving_ref_value_rejected'],
     ];
     for (const [label, definition, code] of cases) {
       await write(definition);

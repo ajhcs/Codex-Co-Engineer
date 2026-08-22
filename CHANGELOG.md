@@ -4,6 +4,19 @@
 
 ### Added
 
+- **ProfileV1 optional primitive-true `default` flag.** Profile definitions
+  accept one optional top-level `default` field as prerequisite metadata for
+  later run-resolution work. When present it must be the primitive boolean
+  `true` exactly: every JSON-representable non-`true` value fails closed -
+  `false`, `null`, numbers, strings, objects, and arrays fail typed with
+  `invalid_profile_default`, except that hostile-shaped strings inside the
+  field fail earlier with their dedicated data-value scan codes. Direct-JS
+  inputs outside JSON (boxed primitives, `undefined`, functions) fail earlier
+  still with the generic `invalid_profile_data_value`; production behavior is
+  unchanged for them. Absence is ordinary and changes nothing. The flag is bound into validated canonical data and provenance
+  digests but confers no authority in this release: exact-name lookup,
+  precedence, digests, and error ordering are unchanged, a profile named
+  `default` has no authority by name, and P05 selection remains out of scope.
 - **ProfileV1 owner and project profile loading.** Adds the data-only
   profile catalog: explicit project
   (`<repository>/.codex/co-engineer-profiles.json`) and owner
@@ -57,6 +70,26 @@
 
 ### Fixed
 
+- **ProfileV1 accepts a bounded model beside every provider under one shared
+  grammar.** Profile definitions now validate `model` beside any of the four
+  exact providers (`grok`, `cursor-local`, `cursor-cloud`, `dsh`) whenever it
+  matches the bounded model identifier grammar
+  `^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$` (at most 128 UTF-8 bytes), replacing
+  the DSH-only pairing that enforced two advertised model names. The static
+  membership check is removed and the `PROFILE_DSH_MODELS` constant remains
+  only as deprecated informational compatibility data that can never authorize
+  or reject a requested model; the role vocabulary gains read-only `verify`.
+  Provider, role, and model grammars are local mirrors of the assignment
+  vocabulary guarded by shared test fixtures, so the profile module imports no
+  run-manifest runtime module. The mirrored model grammar is exact on both
+  sides: no profile-only extra clause remains (the former `..` traversal guard
+  is retired), and the top-level `model` identifier is an opaque identifier -
+  never parsed as a path, ref, command, or credential - validated by that
+  grammar alone and therefore exempt from the generic secret/interpolation/
+  shell/moving-ref value scans, while every other profile string at any depth
+  stays fully scanned. Profiles still make no model-membership,
+  availability, qualification, resolution, or attestation claim: attestation
+  stays a preflight concern and selection stays with the resolver.
 - **ChildEnvelopeV1 strict parse closes the profile-plus-model routing gap.**
   `parseChildEnvelopeV1` now rejects any `execution.model` other than `-`
   on a profile-selected execution, and symmetrically every provider/model/
