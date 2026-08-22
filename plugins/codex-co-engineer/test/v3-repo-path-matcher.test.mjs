@@ -10,6 +10,7 @@ import {
   GLOB_PATTERN_MAX_SEGMENTS,
   REPO_PATH_BATCH_MAX,
   repoGlobMatchesAnyPath,
+  REPO_PATH_MAX_BYTES,
   REPO_PATH_MATCHER_ERROR_CODES,
   REPO_PATH_MATCHER_ID,
   RepoPathMatcherError,
@@ -620,4 +621,552 @@ test('matcher authority stays separate from the writer-overlap safety check', ()
   );
   assert.ok(!matcherSource.includes("from './run-manifest"));
   assert.ok(!matcherSource.includes('import('));
+});
+
+// ---- P02R9 repair: focused hostile regression matrix. ---------------------
+
+test('matcher authority stays module-private; the export surface leaks nothing', async () => {
+  const matcher = await import('../mcp/v3/repo-path-matcher.mjs');
+  const exportNames = Object.keys(matcher).sort();
+  // The public surface stays closed: no IR, segments, ranges, sets, maps, and
+  // no cardinality/role authority ever leaks out of the module.
+  assert.deepEqual(exportNames, [
+    'GLOB_MATCH_STEP_BUDGET',
+    'GLOB_PATTERN_MAX_BYTES',
+    'GLOB_PATTERN_MAX_SEGMENTS',
+    'GLOB_PATTERN_SEGMENT_MAX_BYTES',
+    'REPO_PATH_BATCH_MAX',
+    'REPO_PATH_MATCHER_ERROR_CODES',
+    'REPO_PATH_MATCHER_ID',
+    'REPO_PATH_MAX_BYTES',
+    'REPO_PATH_MAX_SEGMENTS',
+    'REPO_PATH_SEGMENT_MAX_BYTES',
+    'RepoPathMatcherError',
+    'assertRepoRelativePath',
+    'compileRepoGlob',
+    'compiledRepoGlobMatchesPath',
+    'filterRepoPathsByGlob',
+    'isRepoRelativePath',
+    'repoGlobMatchesAnyPath',
+    'repoGlobMatchesPath',
+    'utf8ByteLength',
+  ]);
+  // No export is an authority handle: no IR, atom arrays, sets, maps, or
+  // cardinality/role surface ever leaves the module.
+  for (const name of exportNames) {
+    assert.ok(!/^(?:ir|irByHandle|byHandle|segments?|atoms?|singles|ranges?|classMembers|weakMap|.*(?:Role|Cardinality).*)$/i.test(name),
+      `leaky export: ${name}`);
+  }
+});
+
+test('copied, serialized, cloned, or derived handle shapes have zero authority', () => {
+  const compiled = compileRepoGlob('src/**/*.ts');
+  assert.equal(compiledRepoGlobMatchesPath(compiled, 'src/a.ts'), true);
+  // Field-identical copies confer nothing: authority is the private WeakMap
+  // object identity, not the visible id/pattern data.
+  const spreadCopy = { ...compiled };
+  assert.equal(spreadCopy.id, compiled.id);
+  assert.equal(spreadCopy.pattern, compiled.pattern);
+  matchError(() => compiledRepoGlobMatchesPath(spreadCopy, 'src/a.ts'), 'invalid_type');
+  const jsonCopy = JSON.parse(JSON.stringify(compiled));
+  matchError(() => compiledRepoGlobMatchesPath(jsonCopy, 'src/a.ts'), 'invalid_type');
+  const structuredCopy = structuredClone(compiled);
+  matchError(() => compiledRepoGlobMatchesPath(structuredCopy, 'src/a.ts'), 'invalid_type');
+  const derived = Object.create(compiled);
+  matchError(() => compiledRepoGlobMatchesPath(derived, 'src/a.ts'), 'invalid_type');
+  // A mutated copy is equally powerless.
+  const mutatedCopy = { ...compiled, pattern: '**' };
+  matchError(() => compiledRepoGlobMatchesPath(mutatedCopy, 'src/a.ts'), 'invalid_type');
+});
+
+test('mutating a genuine handle cannot disturb matching; its fields are inert', () => {
+  const compiled = compileRepoGlob('src/*.ts');
+  // The handle is deeply frozen: mutation attempts throw in strict mode...
+  assert.throws(() => { compiled.id = 'forged'; }, TypeError);
+  assert.throws(() => { compiled.pattern = '**'; }, TypeError);
+  assert.equal(compiled.id, REPO_PATH_MATCHER_ID);
+  assert.equal(compiled.pattern, 'src/*.ts');
+  // ...and matching is untouched either way.
+  assert.equal(compiledRepoGlobMatchesPath(compiled, 'src/a.ts'), true);
+  assert.equal(compiledRepoGlobMatchesPath(compiled, 'lib/a.ts'), false);
+});
+
+test('matching never rereads public handle fields: forged getters stay unread', () => {
+  let reads = 0;
+  const forge = {};
+  for (const field of ['id', 'pattern', 'segments', 'atoms', 'singles', 'ranges']) {
+    Object.defineProperty(forge, field, {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return field === 'id' ? REPO_PATH_MATCHER_ID : [{ type: 'star' }];
+      },
+    });
+  }
+  forge.toString = () => { throw new Error('coercion must never run'); };
+  matchError(() => compiledRepoGlobMatchesPath(forge, 'anything/at/all'), 'invalid_type');
+  assert.equal(reads, 0); // provenance was decided before a single field read
+});
+
+test('the matcher module source stays free of mutable dynamic surfaces', () => {
+  const source = readFileSync(
+    fileURLToPath(new URL('../mcp/v3/repo-path-matcher.mjs', import.meta.url)),
+    'utf8',
+  );
+  for (const forbidden of [
+    '.test(', '.exec(', 'new RegExp', 'new Set', 'new Map', 'SAFE_LABEL_PATTERN',
+    '.push(', '.map(', '.fill(', '.sort(', '.splice(',
+    '.split(', '.includes(', '.startsWith(', '.endsWith(', '.codePointAt(',
+    'for (const ', 'Symbol.iterator', 'JSON.', 'Object.assign', 'structuredClone',
+    'globalThis.', 'eval(',
+  ]) {
+    assert.ok(!source.includes(forbidden), `matcher source must not use ${forbidden}`);
+  }
+  // The capture block, the shared parity pipeline, and the charged budget
+  // must exist verbatim.
+  for (const required of [
+    'callBound(', 'IR_BY_HANDLE', 'chargedPatternSteps', 'reflectApply(functionProtoBind',
+    'snapshotPathBatch', 'assertValidatedOffsets', 'next[0] = current[0]',
+  ]) {
+    assert.ok(source.includes(required), `matcher source must contain ${required}`);
+  }
+});
+
+test('patched intrinsics after import cannot alter acceptance or bounds', async (t) => {
+  const m = await import('../mcp/v3/repo-path-matcher.mjs');
+  const { Buffer: NodeBuffer } = await import('node:buffer');
+  // Captured BEFORE any poisoning so install/restore always work.
+  const realDefineProperty = Object.defineProperty;
+  const realGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+
+  const patch = (owner, prop, replacement) => {
+    const original = realGetOwnPropertyDescriptor(owner, prop);
+    realDefineProperty(owner, prop, {
+      value: replacement, writable: true, enumerable: false, configurable: true,
+    });
+    return () => {
+      if (original) realDefineProperty(owner, prop, original);
+      else delete owner[prop];
+    };
+  };
+
+  // Everything here runs inside a patch window; only plain values leave it.
+  const standardProbe = () => {
+    const codeOf = (invoke) => {
+      try {
+        invoke();
+        return 'accepted';
+      } catch (error) {
+        return error instanceof RepoPathMatcherError ? error.code : `foreign:${error.name}`;
+      }
+    };
+    return {
+      literal: m.repoGlobMatchesPath('café.md', 'café.md'),
+      star: m.repoGlobMatchesPath('src/*.ts', 'src/a.ts'),
+      starNegative: m.repoGlobMatchesPath('src/*.ts', 'src/deep/b.ts'),
+      cls: m.repoGlobMatchesPath('[a-c]t', 'bt'),
+      doubleStar: m.repoGlobMatchesPath('src/**/*.ts', 'src/x/y.ts'),
+      astral: m.repoGlobMatchesPath('?.md', '\u{1F600}.md'),
+      batch: m.filterRepoPathsByGlob('**', ['x.md', 'y.ts']),
+      nfdCode: codeOf(() => m.repoGlobMatchesPath('a', 'cafe\u0301')),
+      aliasCode: codeOf(() => m.repoGlobMatchesPath('a', 'a//b')),
+      escapeCode: codeOf(() => m.compileRepoGlob('a\\b')),
+      proxyCode: codeOf(() => m.filterRepoPathsByGlob('**', new Proxy([], {}))),
+    };
+  };
+
+  const cases = [
+    ['String.prototype.normalize lies about NFC',
+      () => patch(String.prototype, 'normalize', () => 'XX')],
+    ['String.prototype.charCodeAt collapses every unit',
+      () => patch(String.prototype, 'charCodeAt', () => 65)],
+    ['String.prototype.slice blanks every read',
+      () => patch(String.prototype, 'slice', () => '')],
+    ['String.prototype.split is poisoned',
+      () => patch(String.prototype, 'split', () => ['pwned'])],
+    ['String.prototype.includes lies true',
+      () => patch(String.prototype, 'includes', () => true)],
+    ['String.prototype.startsWith/endsWith lie true', () => {
+      const undoStart = patch(String.prototype, 'startsWith', () => true);
+      const undoEnd = patch(String.prototype, 'endsWith', () => true);
+      return () => { undoEnd(); undoStart(); };
+    }],
+    ['string @@iterator throws', () => patch(String.prototype, Symbol.iterator,
+      () => { throw new Error('iteration must not run'); })],
+    ['array @@iterator throws', () => patch(Array.prototype, Symbol.iterator,
+      () => { throw new Error('iteration must not run'); })],
+    ['Array.prototype mutators are poisoned', () => {
+      const undoPush = patch(Array.prototype, 'push', () => 0);
+      const undoMap = patch(Array.prototype, 'map', () => { throw new Error('ran'); });
+      const undoSort = patch(Array.prototype, 'sort', () => { throw new Error('ran'); });
+      return () => { undoSort(); undoMap(); undoPush(); };
+    }],
+    ['Array.isArray lies true', () => patch(Array, 'isArray', () => true)],
+    ['Object.getOwnPropertyDescriptor lies benignly', () => patch(Object,
+      'getOwnPropertyDescriptor',
+      () => ({ value: 'pwned', enumerable: true, writable: true, configurable: true }))],
+    ['Object.hasOwn denies everything', () => patch(Object, 'hasOwn', () => false)],
+    ['Object.getPrototypeOf hides the array prototype',
+      () => patch(Object, 'getPrototypeOf', () => ({}))],
+    ['Object.freeze is a no-op', () => patch(Object, 'freeze', (value) => value)],
+    ['Object.defineProperty throws', () => patch(Object, 'defineProperty',
+      () => { throw new Error('defineProperty must not run'); })],
+    ['RegExp.prototype.test/exec throw', () => {
+      const undoTest = patch(RegExp.prototype, 'test',
+        () => { throw new Error('regexp must not run'); });
+      const undoExec = patch(RegExp.prototype, 'exec',
+        () => { throw new Error('regexp must not run'); });
+      return () => { undoExec(); undoTest(); };
+    }],
+    ['Set membership and Map reads lie', () => {
+      const undoHas = patch(Set.prototype, 'has', () => true);
+      const undoGet = patch(Map.prototype, 'get', () => ({ segments: [] }));
+      return () => { undoGet(); undoHas(); };
+    }],
+    ['WeakMap.get hands out forged IR to any key', () => patch(WeakMap.prototype, 'get',
+      () => ({ segments: [{ kind: 'segment', atoms: [{ type: 'star' }] }] }))],
+    ['WeakMap.set drops every registration',
+      () => patch(WeakMap.prototype, 'set', () => null)],
+    ['Function.prototype.call/bind and Reflect.apply throw', () => {
+      const undoCall = patch(Function.prototype, 'call',
+        () => { throw new Error('call must not run'); });
+      const undoBind = patch(Function.prototype, 'bind',
+        () => { throw new Error('bind must not run'); });
+      const undoApply = patch(Reflect, 'apply',
+        () => { throw new Error('apply must not run'); });
+      return () => { undoApply(); undoBind(); undoCall(); };
+    }],
+    ['Uint8Array constructor is poisoned', () => patch(globalThis, 'Uint8Array',
+      class Broken { constructor() { throw new Error('ctor must not run'); } })],
+    ['Buffer.byteLength inflates every count',
+      () => patch(NodeBuffer, 'byteLength', () => 999_999)],
+  ];
+
+  for (const [name, applyPatch] of cases) {
+    await t.test(`hostile patch: ${name}`, () => {
+      let probe;
+      let extra;
+      const undo = applyPatch();
+      try {
+        probe = standardProbe();
+        if (name.includes('getOwnPropertyDescriptor')) {
+          const getterArray = ['ok.txt'];
+          Object.defineProperty(getterArray, '1', { get: () => '/abs', enumerable: true });
+          getterArray.length = 2;
+          extra = {
+            accessorCode: (() => {
+              try { m.filterRepoPathsByGlob('**', getterArray); return 'accepted'; }
+              catch (error) { return error.code; }
+            })(),
+          };
+        } else if (name === 'Object.hasOwn denies everything'
+          || name === 'Object.getPrototypeOf hides the array prototype') {
+          class Sub extends Array {}
+          extra = {
+            subclassCode: (() => {
+              try { m.filterRepoPathsByGlob('**', Sub.from(['src/a.ts'])); return 'accepted'; }
+              catch (error) { return error.code; }
+            })(),
+          };
+        } else if (name === 'Object.freeze is a no-op') {
+          const patchProbe = {};
+          Object.freeze(patchProbe); // patched freeze: silently does nothing
+          const handle = m.compileRepoGlob('a/b');
+          extra = {
+            patchActive: !Object.isFrozen(patchProbe),
+            // The captured freeze ignores the patch, so IR/handles stay frozen.
+            handleFrozen: Object.isFrozen(handle),
+            answer: m.compiledRepoGlobMatchesPath(handle, 'a/b'),
+          };
+        } else if (name === 'Object.defineProperty throws') {
+          let shape;
+          try {
+            m.repoGlobMatchesPath('[bad', 'probe');
+            shape = 'accepted';
+          } catch (error) {
+            shape = `${error.name}:${error.code}:${typeof error.location}`;
+          }
+          extra = { typedShape: shape };
+        } else if (name === 'RegExp.prototype.test/exec throw') {
+          const hostileLabel = `${'L'.repeat(100_000)}secret`;
+          const labelError = (() => {
+            try { m.repoGlobMatchesPath('[bad', 'probe', hostileLabel); return null; }
+            catch (caught) { return caught; }
+          })();
+          const safeLabel = (() => {
+            try { m.repoGlobMatchesPath('src/x.ts', '/abs', 'scope-a'); return 'accepted'; }
+            catch (caught) { return caught.location; }
+          })();
+          extra = { labelFallback: labelError?.location, safeLabel };
+        } else if (name.startsWith('WeakMap.get')) {
+          const forged = { id: REPO_PATH_MATCHER_ID, pattern: '**' };
+          const forgedOutcome = (() => {
+            try { m.compiledRepoGlobMatchesPath(forged, 'x'); return 'accepted'; }
+            catch (error) { return error.code; }
+          })();
+          extra = {
+            forgedOutcome,
+            genuineStillExact: [
+              m.compiledRepoGlobMatchesPath(m.compileRepoGlob('src/*.ts'), 'src/a.ts'),
+              m.compiledRepoGlobMatchesPath(m.compileRepoGlob('src/*.ts'), 'lib/a.ts'),
+            ],
+          };
+        } else if (name.startsWith('WeakMap.set')) {
+          const handle = m.compileRepoGlob('a/b');
+          extra = { registeredAnswer: m.compiledRepoGlobMatchesPath(handle, 'a/b') };
+        } else if (name === 'Buffer.byteLength inflates every count') {
+          const segmentCap = (() => {
+            try { m.compileRepoGlob(`${'q'.repeat(129)}/b`); return 'accepted'; }
+            catch (error) { return error.code; }
+          })();
+          extra = { cafeBytes: m.utf8ByteLength('café'), segmentCap };
+        }
+      } finally {
+        undo();
+      }
+
+      // Standard expectations hold under every patch: the captured
+      // intrinsics win, the manual scans win, bounds stay enforced.
+      assert.equal(probe.literal, true);
+      assert.equal(probe.star, true);
+      assert.equal(probe.starNegative, false);
+      assert.equal(probe.cls, true);
+      assert.equal(probe.doubleStar, true);
+      assert.equal(probe.astral, true);
+      assert.deepEqual(probe.batch, ['x.md', 'y.ts']);
+      assert.equal(probe.nfdCode, 'invalid_format');
+      assert.equal(probe.aliasCode, 'invalid_format');
+      assert.equal(probe.escapeCode, 'invalid_format');
+      assert.equal(probe.proxyCode, 'invalid_array');
+
+      if (extra?.accessorCode !== undefined) assert.equal(extra.accessorCode, 'invalid_array');
+      if (extra?.subclassCode !== undefined) assert.equal(extra.subclassCode, 'invalid_array');
+      if (extra?.patchActive !== undefined) {
+        assert.equal(extra.patchActive, true); // the patch really was active...
+        assert.equal(extra.handleFrozen, true); // ...the captured freeze ignored it...
+        assert.equal(extra.answer, true); // ...and matching stayed correct anyway
+      }
+      if (extra?.typedShape !== undefined) {
+        assert.equal(extra.typedShape, 'RepoPathMatcherError:pattern_unclosed_class:string');
+      }
+      if (extra?.labelFallback !== undefined) {
+        assert.equal(extra.labelFallback, 'pattern.segments[0]');
+        assert.equal(extra.safeLabel, 'scope-a');
+      }
+      if (extra?.forgedOutcome !== undefined) {
+        assert.equal(extra.forgedOutcome, 'invalid_type');
+        assert.deepEqual(extra.genuineStillExact, [true, false]);
+      }
+      if (extra?.registeredAnswer !== undefined) assert.equal(extra.registeredAnswer, true);
+      if (extra?.cafeBytes !== undefined) {
+        assert.equal(extra.cafeBytes, 5); // captured byteLength ignores the lie
+        assert.equal(extra.segmentCap, 'out_of_range');
+      }
+    });
+  }
+
+  await t.test('restoration left no residue', () => {
+    assert.equal(m.repoGlobMatchesPath('*', 'plain.txt'), true);
+    assert.deepEqual(m.filterRepoPathsByGlob('**', ['a.md']), ['a.md']);
+  });
+});
+
+test('character-class singles and ranges are charged before matching', () => {
+  // 25 ranges per class, two classes per pattern: the charged pattern work is
+  // 2 * (1 + 25 * 2) = 102 steps, not the naive 2 * 26 = 52 atom steps.
+  const denseSegment = '[a-c]'.repeat(25);
+  const densePattern = `${denseSegment}/${denseSegment}`;
+  assert.equal(Buffer.byteLength(densePattern), GLOB_PATTERN_MAX_BYTES - 5);
+  // Each segment carries exactly one code point per class atom: 25 of them,
+  // all inside [a-c]. Charging never bends semantics either way.
+  const member25 = 'abc'.repeat(8) + 'a'; // exactly 25 code points
+  assert.equal(matches(densePattern, `${member25}/${member25}`), true);
+  assert.equal(matches(densePattern, `${member25}/d${'abc'.repeat(8)}`), false); // 'd' outside [a-c]
+  assert.equal(matches(densePattern, member25), false); // segment count differs
+  // A legal-cap path (16 x 255 bytes = 4095 < the 4096-byte path cap) still
+  // answers normally under charged accounting.
+  const widePath = Array.from({ length: 16 }, () => 'a'.repeat(255)).join('/');
+  assert.equal(Buffer.byteLength(widePath), REPO_PATH_MAX_BYTES - 1);
+  assert.equal(matches(densePattern, widePath), false); // 16 segments vs 2
+});
+
+test('hostile range-count amplification is rejected deterministically before matching', () => {
+  // Same shape as the legal-cap stress, but the pattern's work is hidden in
+  // class ranges: naive atom counting would let the batch through (52 x
+  // 999424 = 51,970,048 < budget), while charged counting rejects it (102 x
+  // 999424 = 101,941,248 > budget). Every individual input is legal.
+  const denseSegment = '[a-c]'.repeat(25);
+  const densePattern = `${denseSegment}/${denseSegment}`;
+  const stressPath = Array.from({ length: 16 }, () => 'a'.repeat(60)).join('/');
+  const batch = Array.from({ length: REPO_PATH_BATCH_MAX }, () => stressPath);
+  const naiveSteps = 2 * 26;
+  const chargedSteps = 2 * (1 + 25 * 2);
+  const totalPathWork = REPO_PATH_BATCH_MAX * (16 * 61);
+  assert.ok(naiveSteps * totalPathWork < GLOB_MATCH_STEP_BUDGET,
+    'test lost its point: naive accounting would now reject too');
+  assert.ok(chargedSteps * totalPathWork > GLOB_MATCH_STEP_BUDGET,
+    'test lost its point: charged accounting no longer rejects');
+
+  const startedAt = process.hrtime.bigint();
+  const first = matchError(() => filterRepoPathsByGlob(densePattern, batch), 'match_work_exceeded');
+  const second = matchError(() => repoGlobMatchesAnyPath(densePattern, batch), 'match_work_exceeded');
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  assert.ok(elapsedMs < 500, `amplification rejection was not fast: ${elapsedMs}ms`);
+  assert.equal(second.code, first.code);
+  assert.equal(second.location, first.location);
+  assert.equal(second.message, first.message);
+  assert.equal(first.location, 'paths');
+  // The same inputs stay answerable when the charged product fits: a small
+  // batch of genuinely matching paths is returned intact.
+  const member25 = 'abc'.repeat(8) + 'a'; // exactly one code point per class
+  const matchingBatch = Array.from({ length: 64 }, () => `${member25}/${member25}`);
+  assert.deepEqual(filterRepoPathsByGlob(densePattern, matchingBatch), matchingBatch);
+  assert.equal(repoGlobMatchesAnyPath(densePattern, matchingBatch), true);
+});
+
+test('additional hostile grammar forms fail closed exactly', async (t) => {
+  const grammarCases = [
+    // '[' as a class member is an ordinary single.
+    ['[[]', '[', true, null],
+    // '-' between ranges degrades to singles; ranges stay strictly increasing.
+    ['[a-b-c]', '-', true, null],
+    ['[a-b-c]', 'c', true, null],
+    ['[a-b-c]', 'd', false, null],
+    // Astral code points are single class members and legal range bounds.
+    ['[\u{1F600}-\u{1F601}]', '\u{1F600}', true, null],
+    ['[\u{1F600}-\u{1F601}]', '\u{1F602}', false, null],
+    ['[\u{1F601}-\u{1F600}]', '\u{1F601}', null, 'pattern_reversed_range'],
+    ['[\u{1F600}', '\u{1F600}', null, 'pattern_unclosed_class'],
+    // Negation is checked before closure, so '[!' negates first.
+    ['[!', 'x', null, 'pattern_class_negation'],
+    // '[]]' is an empty class in this grammar, not a literal ']'.
+    ['[]]', ']', null, 'pattern_empty_class'],
+    // extglob detection is code-point based, after any literal prefix.
+    ['x/\u00e9?(y)', 'x/\u00e9y', null, 'pattern_extglob'],
+    ['\u{1F600}*(y)', '\u{1F600}y', null, 'pattern_extglob'],
+    // Embedded '**' between astral literals is still embedded.
+    ['\u{1F600}**\u{1F600}', '\u{1F600}x\u{1F600}', null, 'pattern_double_star'],
+    // Dots are literals except the exact '.' and '..' aliases.
+    ['...', '...', true, null],
+    ['a..b', 'a..b', true, null],
+    ['....a', '....a', true, null],
+    // Leading empty segments are structural rejections.
+    ['//x', 'x', null, 'invalid_format'],
+    ['x//', 'x', null, 'invalid_format'],
+    // extglob openers stay literal unless immediately followed by '('.
+    ['a+b', 'a+b', true, null],
+    ['x@y', 'x@y', true, null],
+    // Bare '|' is a literal, including inside a class.
+    ['[a|b]', '|', true, null],
+    ['a|b', 'a|b', true, null],
+    ['a|b', 'a', false, null],
+  ];
+  for (const [pattern, value, expected, code] of grammarCases) {
+    await t.test(`grammar: ${JSON.stringify(pattern)} vs ${JSON.stringify(value)}`, () => {
+      if (code !== null) {
+        matchError(() => matches(pattern, value), code);
+        return;
+      }
+      assert.equal(matches(pattern, value), expected);
+    });
+  }
+});
+
+test('ingress validation and compilation share one grammar: three-direction parity', () => {
+  // [text, validAsPath, patternOutcome] — patternOutcome is 'ok' or a code.
+  // Strings within the shared caps must classify identically through the
+  // ingress validator, the pattern compiler, and the matcher's path ingress;
+  // the only permitted directional difference is pattern-specific syntax.
+  const corpus = [
+    ['README.md', true, 'ok'],
+    ['{a,b}.txt', true, 'ok'],
+    ['x|y', true, 'ok'],
+    ['-', true, 'ok'],
+    ['#', true, 'ok'],
+    ['a b', true, 'ok'],
+    ['.hidden', true, 'ok'],
+    ['a..b', true, 'ok'],
+    ['...', true, 'ok'],
+    ['\u{1F600}.md', true, 'ok'],
+    ['caf\u00e9', true, 'ok'],
+    ['\u65e5\u4ec8/2026.log', true, 'ok'],
+    // Valid paths whose text is pattern-hostile: the directional difference.
+    ['[ab', true, 'pattern_unclosed_class'],
+    ['a**b', true, 'pattern_double_star'],
+    ['***', true, 'pattern_double_star'],
+    ['@(x)', true, 'pattern_extglob'],
+    ['[!a]', true, 'pattern_class_negation'],
+    ['[^a]', true, 'pattern_class_negation'],
+    ['[z-a]', true, 'pattern_reversed_range'],
+    ['[a-a]', true, 'pattern_reversed_range'],
+    ['[]', true, 'pattern_empty_class'],
+    // Shared structural gates reject all three directions identically.
+    ['', false, 'invalid_format'],
+    ['.', false, 'invalid_format'],
+    ['..', false, 'invalid_format'],
+    ['a//b', false, 'invalid_format'],
+    ['/abs', false, 'invalid_format'],
+    ['trailing/', false, 'invalid_format'],
+    ['a\\b', false, 'invalid_format'],
+    ['cafe\u0301', false, 'invalid_format'], // NFD
+    ['bad\uD800path', false, 'invalid_format'], // lone surrogate
+    ['a\u0000b', false, 'invalid_format'], // NUL
+    ['a\u001Fb', false, 'invalid_format'], // C0
+    ['a\u007Fb', false, 'invalid_format'], // DEL
+    ['a\u0085b', false, 'invalid_format'], // C1
+    ['a\u202Eb', false, 'invalid_format'], // bidi override
+    ['a\u2066b', false, 'invalid_format'], // bidi isolate
+  ];
+  for (const [text, validAsPath, patternOutcome] of corpus) {
+    assert.equal(isRepoRelativePath(text), validAsPath, `ingress: ${JSON.stringify(text)}`);
+    let compileCode = 'ok';
+    try {
+      compileRepoGlob(text);
+    } catch (error) {
+      compileCode = error.code;
+    }
+    assert.equal(compileCode, patternOutcome, `compile: ${JSON.stringify(text)}`);
+    let matcherPathCode = 'ok';
+    try {
+      repoGlobMatchesPath('**', text);
+    } catch (error) {
+      matcherPathCode = error.code;
+    }
+    if (!validAsPath) {
+      assert.equal(matcherPathCode, compileCode === 'ok' ? 'invalid_format' : compileCode,
+        `matcher path ingress: ${JSON.stringify(text)}`);
+      assert.equal(isRepoRelativePath(text), false);
+    } else {
+      assert.equal(matcherPathCode, 'ok', `matcher path ingress: ${JSON.stringify(text)}`);
+    }
+  }
+});
+
+test('wildcard-free valid paths literally self-match under their own grammar', () => {
+  const literals = [
+    'README.md', '{a,b}.txt', 'x|y', '-', '#', 'a b', '.hidden', 'a..b', '...',
+    '\u{1F600}.md', 'caf\u00e9', '\u65e5\u4ec8/2026.log', '(a)', 'a+b', 'x@y',
+  ];
+  for (const text of literals) {
+    assert.equal(matches(text, text), true, `self-match: ${JSON.stringify(text)}`);
+  }
+  // NFC-equivalent but byte-different text never cross-matches.
+  matchError(() => matches('caf\u00e9', 'cafe\u0301'), 'invalid_format');
+  matchError(() => matches('cafe\u0301', 'caf\u00e9'), 'invalid_format');
+});
+
+test('NFC is enforced symmetrically in every direction with one typed code', () => {
+  const nfd = 'cafe\u0301';
+  const nfc = 'caf\u00e9';
+  for (const invoke of [
+    () => assertRepoRelativePath(nfd),
+    () => compileRepoGlob(nfd),
+    () => repoGlobMatchesPath('**', nfd),
+    () => repoGlobMatchesPath(nfd, nfc),
+    () => repoGlobMatchesPath(nfc, nfd),
+  ]) {
+    matchError(invoke, 'invalid_format');
+  }
+  assert.equal(isRepoRelativePath(nfc), true);
+  assert.equal(matches(nfc, nfc), true);
 });
