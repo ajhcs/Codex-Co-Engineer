@@ -4,6 +4,32 @@
 
 ### Added
 
+- **Durable local run store and idempotent submission.** Additive
+  `run-store.mjs` persists one bounded canonical record per run in an
+  explicit caller-supplied existing private directory. The store fails
+  closed on symlink, non-directory, and unsafe ownership or mode
+  surfaces, uses strict no-follow opens, and never derives child paths
+  from untrusted strings. Records bind the accepted P06 run identity,
+  Git repository/base authority, initial dispatch provenance and
+  telemetry facts, and request idempotency key. Exact same key plus
+  canonical body returns the existing record without mutation; same
+  key with a different body, same run with a different body or key,
+  and mismatched protected identity fail closed with typed constant
+  errors. Creates use private same-directory temporary files, complete
+  writes, fsync of file and directory, and exclusive link/rename
+  without overwriting an authoritative record. Restore audits
+  canonical bytes and recomputes every accepted P06 digest, and
+  rejects hardlinked or non-regular files, malformed JSON, duplicate
+  or foreign entries, truncation, oversized records, excess entries,
+  and leftover temporary files without following them. Enumeration,
+  bytes, record counts, filename lengths, and diagnostics are bounded
+  and never echo record contents or credentials. Concurrent duplicate
+  submissions keep one authoritative mapping from run id and request
+  idempotency key to the identical stored record. There is no journal
+  or reducer, scheduler, provider driver, artifact store, workspace
+  provisioning, cleanup, MCP wiring, or protected-ref implementation.
+  Coverage lives in `r1-run-store` and `r1-run-store-adversarial`
+  tests.
 - **Protected identity and monotonic telemetry schemas.** Additive
   `protected-identity.mjs` / `protected-telemetry.mjs` close exact run,
   child, provider-run, workspace, and Git identities plus a content-free
