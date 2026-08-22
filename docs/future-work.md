@@ -18,13 +18,24 @@ fallback or replay, and Codex-only final acceptance.
 The P17 `ProviderDriverV1` envelope/capability contract is in-tree as a
 pure contract and provider-agnostic conformance harness. It validates
 preflight/launch/reconcile/cancel requests and results against the
-accepted P05 13-field capability bridge. It does not implement Grok,
-Cursor Local, DSH, or Cursor Cloud transports, registry cutover,
-scheduler, or durable store; those remain P18/P20/P19/P21 and later
-run-runtime work. This worktree does not implement the run runtime,
-candidate composition, or `AttentionBatchV1`. Gate A remains the
-functional release authority; Gate B context-efficiency and Gate C
-credit economics stay advisory.
+accepted P05 13-field capability bridge.
+
+The P18 Grok ACP adapter is in-tree as a Grok-specific binding of that
+contract onto an injected bounded ACP transport. It hard-binds provider
+`grok`, the exact selected model, exact ChildEnvelopeV1 text+digest, local
+managed-worktree/run-base semantics, and no merge/PR authority. Launch
+confirms only after an authoritative ACP acknowledgement; post-spawn
+loss is `dispatch_uncertain` and is never replayed. This is not live Grok
+ACP qualification and does not cut the supervisor over. A later real Grok
+ACP lifecycle conformance route must implement the six transport
+operations recorded by `describeGrokAcpAdapterSurfaceV1()` (`preflight`,
+`spawn`, `dispatch`, `observe`, `cancel`, `reattach`) against `grok-build`
+persistent sessions, with the same identity and bound rules. Cursor
+Local, DSH, and Cursor Cloud transports, registry cutover, scheduler, and
+durable store remain P20/P19/P21 and later run-runtime work. This
+worktree does not implement the run runtime, candidate composition, or
+`AttentionBatchV1`. Gate A remains the functional release authority; Gate
+B context-efficiency and Gate C credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
