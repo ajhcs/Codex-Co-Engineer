@@ -1,18 +1,24 @@
 // Whole-catalog snapshot port tests (P04 follow-up, additive).
 //
 // loadProfileCatalogSnapshot must hand the run resolver one safe, immutable
-// catalog snapshot: a single read of both scopes, deterministic name order,
-// per-record provenance plus one whole-catalog digest binding, deep closure
+// catalog snapshot: a single read of both scopes, a whole-catalog TOCTOU
+// re-observation before parse/digest, deterministic name order, per-record
+// provenance plus one whole-catalog digest binding, deep JSON-only closure
 // with no mutable Map/object escape, typed rejection of hostile direct-JS
-// options, and zero filesystem rereads during resolution. Legacy
-// loadProfiles/findProfile surfaces stay byte-compatible.
+// options, loader branding for resolver authority, and zero filesystem
+// rereads during resolution. Legacy loadProfiles/findProfile surfaces stay
+// byte-compatible.
 
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { Hash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, open, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
+import * as profileApi from '../mcp/v3/profile.mjs';
 import {
   PROFILE_SCHEMA,
   findProfile,
@@ -62,6 +68,97 @@ const expectCode = (code, label) => (error) => {
   assert.equal(error.code, code, `${label}: expected ${code}, got ${error.code}: ${error.message}`);
   return true;
 };
+
+async function runRepairCase(name) {
+  const projectCatalog = { alpha: validDefinition({ role: 'implement' }) };
+  const ownerCatalog = { omega: validDefinition({ role: 'verify' }) };
+  const mutatedProject = { alpha: validDefinition({ role: 'review' }) };
+  const projectFileOf = (workspace) => path.join(workspace.repositoryPath, '.codex', 'co-engineer-profiles.json');
+
+  if (name === 'intrinsic-monkeypatch') {
+    const workspace = await makeWorkspace({
+      project: { keep: validDefinition({ role: 'implement' }) },
+      owner: { keep: validDefinition({ role: 'verify' }), extra: validDefinition() },
+    });
+    const freeze = Object.freeze;
+    const isFrozen = Object.isFrozen;
+    const stringify = JSON.stringify;
+    try {
+      Object.freeze = (value) => value;
+      Object.isFrozen = () => false;
+      Array.isArray = () => { throw new Error('patched Array.isArray'); };
+      Array.from = () => { throw new Error('patched Array.from'); };
+      Object.keys = () => [];
+      Object.values = () => [];
+      Object.getOwnPropertyDescriptors = () => { throw new Error('patched descriptors'); };
+      JSON.stringify = () => '[]';
+      JSON.parse = () => { throw new Error('patched JSON.parse'); };
+      Buffer.byteLength = () => 0;
+      Number.isInteger = () => false;
+      Number.isFinite = () => false;
+      Reflect.ownKeys = () => [];
+      Array.prototype.sort = function patchedSort() { return this.reverse(); };
+      Array.prototype.includes = () => false;
+      Hash.prototype.update = function patchedUpdate() { return this; };
+      Hash.prototype.digest = () => 'ff'.repeat(32);
+      const snapshot = await loadProfileCatalogSnapshot(workspace.options);
+      assert.equal(isFrozen(snapshot), true);
+      assert.equal(isFrozen(snapshot.profiles), true);
+      assert.equal(isFrozen(snapshot.profiles[0].definition), true);
+      assert.match(snapshot.catalog_digest, /^sha256:[0-9a-f]{64}$/u);
+      assert.notEqual(snapshot.catalog_digest, `sha256:${'ff'.repeat(32)}`);
+      assert.equal(findProfile(snapshot, 'keep').scope, 'project');
+      assert.equal(findProfile(snapshot, 'extra').scope, 'owner');
+      assert.equal(snapshot.shadowed.length, 1);
+      assert.equal(stringify(snapshot).includes('function'), false);
+    } finally {
+      await workspace.cleanup();
+    }
+    return;
+  }
+
+  const withOwner = name !== 'toctou-missing-to-present';
+  const workspace = await makeWorkspace({
+    project: withOwner ? projectCatalog : undefined,
+    owner: ownerCatalog,
+  });
+  const probe = await open(new URL(import.meta.url), 'r');
+  const proto = Object.getPrototypeOf(probe);
+  const originalStat = proto.stat;
+  await probe.close();
+  let fileStats = 0;
+  let mutated = false;
+  const mutateAt = name === 'toctou-missing-to-present' ? 1 : 3;
+  proto.stat = async function patchedStat(...args) {
+    fileStats += 1;
+    if (!mutated && fileStats === mutateAt) {
+      mutated = true;
+      const file = projectFileOf(workspace);
+      if (name === 'toctou-inplace') await writeJson(file, mutatedProject);
+      else if (name === 'toctou-delete') await unlink(file);
+      else if (name === 'toctou-replace') {
+        await unlink(file);
+        await writeJson(file, mutatedProject);
+      } else if (name === 'toctou-missing-to-present') await writeJson(file, projectCatalog);
+    }
+    return originalStat.apply(this, args);
+  };
+  try {
+    await assert.rejects(
+      () => loadProfileCatalogSnapshot(workspace.options),
+      (error) => error.code === 'profile_catalog_changed_during_read',
+      name,
+    );
+  } finally {
+    proto.stat = originalStat;
+    await workspace.cleanup();
+  }
+}
+
+if (process.env.R1_PROFILE_REPAIR_CASE) {
+  await runRepairCase(process.env.R1_PROFILE_REPAIR_CASE);
+  process.exit(0);
+}
 
 // Independent test-side closure audit (mirrors and exceeds the production
 // proof): frozen everywhere, standard prototypes only, enumerable data
@@ -311,4 +408,121 @@ test('legacy loadProfiles/findProfile surfaces stay unchanged beside the snapsho
   } finally {
     await workspace.cleanup();
   }
+});
+
+function runIsolatedRepairCase(name) {
+  const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), `--repair-case=${name}`], {
+    encoding: 'utf8',
+    env: { ...process.env, R1_PROFILE_REPAIR_CASE: name },
+  });
+  assert.equal(result.status, 0, `${name} failed:\n${result.stdout}\n${result.stderr}`);
+}
+
+test('cross-scope TOCTOU fails typed before parse or digest', () => {
+  for (const name of ['toctou-inplace', 'toctou-delete', 'toctou-replace', 'toctou-missing-to-present']) {
+    runIsolatedRepairCase(name);
+  }
+});
+
+test('resolver authority rejects unbranded snapshot-shaped caller data', async () => {
+  const workspace = await makeWorkspace({
+    project: { branded: validDefinition({ role: 'review' }) },
+    owner: { branded: validDefinition({ role: 'verify' }) },
+  });
+  try {
+    const snapshot = await loadProfileCatalogSnapshot(workspace.options);
+    assert.equal(findProfile(snapshot, 'branded').scope, 'project');
+
+    const lookalike = JSON.parse(JSON.stringify(snapshot));
+    assert.throws(
+      () => findProfile(lookalike, 'branded'),
+      expectCode('invalid_profile_snapshot', 'JSON-copied snapshot'),
+    );
+
+    const frozenLookalike = Object.freeze({
+      schema: snapshot.schema,
+      catalog_digest: snapshot.catalog_digest,
+      roots: snapshot.roots,
+      sources: snapshot.sources,
+      profiles: snapshot.profiles,
+      shadowed: snapshot.shadowed,
+    });
+    assert.notEqual(frozenLookalike, snapshot);
+    assert.throws(
+      () => findProfile(frozenLookalike, 'branded'),
+      expectCode('invalid_profile_snapshot', 'frozen lookalike sharing nested identity'),
+    );
+
+    const loaded = await loadProfiles(workspace.options);
+    assert.equal(findProfile(loaded, 'branded').scope, 'project',
+      'legacy findProfile stays a data utility over loadProfiles() results');
+
+    assert.equal(profileApi.assertCatalogObservationsStable, undefined);
+    assert.equal(profileApi.assertSnapshotClosure, undefined);
+    assert.equal(profileApi.assertProfileCatalogSourcesStable, undefined);
+    assert.ok(Object.isFrozen(loadProfileCatalogSnapshot));
+    assert.ok(Object.isFrozen(findProfile));
+    assert.throws(() => { loadProfileCatalogSnapshot.extra = true; }, TypeError);
+  } finally {
+    await workspace.cleanup();
+  }
+});
+
+test('function, accessor, proxy, exotic, alias, and cycle views cannot become snapshots', async () => {
+  const digest = `sha256:${'ab'.repeat(32)}`;
+  const baseLookalike = () => ({
+    schema: PROFILE_SCHEMA,
+    catalog_digest: digest,
+    roots: { project: { scope: 'project', dir: '/repo/.codex', file: '/repo/.codex/co-engineer-profiles.json' },
+      owner: { scope: 'owner', dir: '/owner/codex-co-engineer', file: '/owner/codex-co-engineer/profiles.json' } },
+    sources: [],
+    profiles: [],
+    shadowed: [],
+  });
+
+  const functionBearing = baseLookalike();
+  functionBearing.run = function hostile() { return 'no'; };
+  assert.throws(() => findProfile(functionBearing, 'x'),
+    expectCode('invalid_profile_snapshot', 'function-bearing lookalike'));
+
+  let accessorReads = 0;
+  const accessorLookalike = {};
+  Object.defineProperty(accessorLookalike, 'catalog_digest', {
+    enumerable: true,
+    get() { accessorReads += 1; return digest; },
+  });
+  assert.throws(() => findProfile(accessorLookalike, 'x'),
+    expectCode('invalid_profile_load_result', 'accessor snapshot'));
+  assert.equal(accessorReads, 0);
+
+  const liveProxy = new Proxy(baseLookalike(), {});
+  assert.throws(() => findProfile(liveProxy, 'x'),
+    expectCode('profile_proxy_rejected', 'proxy snapshot'));
+  const revoked = Proxy.revocable(baseLookalike(), {});
+  revoked.revoke();
+  assert.throws(() => findProfile(revoked.proxy, 'x'),
+    expectCode('profile_proxy_rejected', 'revoked proxy snapshot'));
+
+  assert.throws(() => findProfile(new Map([['catalog_digest', digest]]), 'x'),
+    expectCode('invalid_profile_load_result', 'Map snapshot'));
+  assert.throws(() => findProfile(new Set([digest]), 'x'),
+    expectCode('invalid_profile_load_result', 'Set snapshot'));
+  assert.throws(() => findProfile(/sha256:/u, 'x'),
+    expectCode('invalid_profile_load_result', 'RegExp snapshot'));
+
+  const aliased = baseLookalike();
+  const shared = { name: 'shared', scope: 'project', source: '/repo/.codex/co-engineer-profiles.json',
+    definition: validDefinition(), digest };
+  aliased.profiles = [shared, shared];
+  assert.throws(() => findProfile(aliased, 'shared'),
+    expectCode('invalid_profile_snapshot', 'aliased snapshot'));
+
+  const cyclic = baseLookalike();
+  cyclic.profiles = cyclic;
+  assert.throws(() => findProfile(cyclic, 'x'),
+    expectCode('invalid_profile_snapshot', 'cyclic snapshot'));
+});
+
+test('snapshot loading and closure keep captured intrinsics against monkeypatches', () => {
+  runIsolatedRepairCase('intrinsic-monkeypatch');
 });
