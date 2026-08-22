@@ -68,6 +68,16 @@
   properties, and custom prototypes at the direct-JavaScript boundary, so
   no hidden field can escape the closed shape. Canonical valid goldens are
   unchanged.
+- **RunManifest identity normalization for the diagnostic-partial flag.**
+  `return_contract.allow_diagnostic_partial_candidate` absent and explicit
+  false are equivalent complete-only manifests and now produce identical
+  normalized canonical identity bytes and `RunManifestV1` digests: the
+  identity projection omits an exact false exactly as it omits absence,
+  while explicit true stays identity-distinct. The frozen parse keeps a
+  submitted own false field verbatim for audit/display; pre-flag manifest
+  digests are byte-identical, verification follows the same normalization,
+  and prompt/envelope/assignment-prompt/child-envelope bytes and digests
+  stay resolution-inert for absent/false/true.
 - Close the direct-JavaScript Proxy boundary on the ProfileV1 data surfaces.
   `validateProfileDefinition`, `canonicalProfileJson`,
   `profileProvenanceDigest`, `profileRoots`, `findProfile`, and

@@ -20,10 +20,23 @@
 //     bound to their run and assignment identity. They are never trimmed,
 //     Unicode-normalized, re-encoded, or otherwise interpreted; two prompts
 //     that differ by even one byte digest differently.
+//
+// P02R1 identity normalization: absent and explicit-false
+// `return_contract.allow_diagnostic_partial_candidate` are semantically
+// equivalent complete-only manifests, so under the P03 rule that equivalent
+// manifests produce identical digests, the RunManifestV1 identity projection
+// (`runManifestCanonicalJsonV1` / `runManifestDigestV1`) omits an exact
+// false exactly as it omits absence. Explicit true remains a distinct
+// authorization and stays in the canonical form. The parser itself still
+// preserves a submitted own false field verbatim for audit/display; only
+// this identity projection normalizes it. Manifests without the flag keep
+// byte-identical canonical bytes, and prompt/envelope/assignment-prompt/
+// child-envelope surfaces stay resolution-inert for absent/false/true.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 import {
+  DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY,
   MAX_MANIFEST_DEPTH,
   RunContractV1Error,
   assertDenseJsonArray,
@@ -198,9 +211,33 @@ function digestDescriptor(label, parts) {
   });
 }
 
-// Canonical validated form of one complete run manifest.
+// Identity form of one complete run manifest: the fully validated frozen
+// parse with one normalization applied. An own
+// return_contract.allow_diagnostic_partial_candidate of exactly false is
+// omitted so its canonical bytes equal the absent form byte for byte; any
+// other validated shape (including explicit true) passes through untouched.
+// The snapshot is already validated plain data — own enumerable data
+// properties only, no accessors, symbols, or exotic prototypes — so this
+// rebuild reads no caller-executable surface and dispatches no traps.
+function manifestIdentityForm(manifest) {
+  const snapshot = parseRunManifestV1(manifest);
+  const contract = snapshot.return_contract;
+  if (!Object.hasOwn(contract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)
+    || contract[DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY] !== false) {
+    return snapshot;
+  }
+  const projected = {};
+  for (const key of Object.keys(contract)) {
+    if (key !== DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY) projected[key] = contract[key];
+  }
+  return { ...snapshot, return_contract: Object.freeze(projected) };
+}
+
+// Canonical validated form of one complete run manifest (P02R1 normalized:
+// absent and explicit-false diagnostic partial authorization project to
+// identical canonical bytes).
 export function runManifestCanonicalJsonV1(manifest) {
-  return canonicalJsonStringify(parseRunManifestV1(manifest));
+  return canonicalJsonStringify(manifestIdentityForm(manifest));
 }
 
 // Stable digest of one complete run manifest over its canonical JSON form.

@@ -10,6 +10,9 @@
 //     deeply frozen manifest snapshot returned by parseRunManifestV1().
 //     Identical manifests render byte-identical UTF-8 text; JSON key order
 //     in the caller's object cannot leak into the rendering.
+//   - Fail-closed on unresolved selections: a lane whose execution was
+//     omitted (selection_resolution_required) can never be compiled into a
+//     worker envelope; only P05-resolved lanes render bytes.
 //   - Isolated: an envelope embeds its own lane's objective and prompt as
 //     opaque, byte-counted blocks plus run-level facts only. Sibling
 //     prompts, results, IDs, and provider choices are never rendered, and
@@ -173,6 +176,16 @@ function sortedParameters(parameters, path) {
 
 function buildLaneFields(snapshot, index) {
   const assignment = snapshot.assignments[index];
+  // Fail closed before any routing field is read. A lane whose execution was
+  // omitted at submission has no compiler-emittable selection: guessing a
+  // provider/model or rendering an unresolved worker prompt is forbidden,
+  // and the strict parser would reject such bytes anyway. The P05 resolver
+  // must produce the effective manifest first; named-profile lanes keep
+  // compiling because their data-only reference is emittable state.
+  if (!Object.hasOwn(assignment, 'execution')) {
+    fail('selection_resolution_required', `assignments[${index}].execution`,
+      `assignments[${index}] omits execution; resolve the lane's exact provider/model pair or named profile before compiling a child envelope.`);
+  }
   const execution = assignment.execution;
   return {
     schema: CHILD_ENVELOPE_SCHEMA_ID,

@@ -7,13 +7,19 @@
 // edits no existing runtime surface. This file validates the run ENVELOPE:
 //   - exact schema identity and git-ref-safe run IDs;
 //   - one immutable repository path + 40-hex lowercase base SHA per run;
+//   - an optional root profile NAME (exact assignment profile grammar) that
+//     P05 may later apply only to lanes whose execution was omitted, plus
+//     truly omittable assignment.execution classified as
+//     selection_resolution_required alongside named-profile lanes;
 //   - 1..8 independent assignments (no dependency edges of any shape);
 //   - strict unknown-key rejection at every object depth, with precise
 //     denial codes for dependency, executable-content, credential,
 //     merge/push/create-PR-authority, replay/fallback, and direct-mode keys;
 //   - disjoint writer scopes across assignments (conservative static-prefix
 //     intersection; glob metacharacters terminate the comparable prefix);
-//   - the verified-decision return contract (artifact addressing mandatory);
+//   - the verified-decision return contract (artifact addressing mandatory)
+//     plus its sole optional field, the exact-boolean diagnostic-partial
+//     candidate authorization that is resolution-inert downstream;
 //   - mandatory composition with the deep assignment and policy validators.
 //
 // Deep AssignmentManifestV1 and RunPolicyV1 value semantics live in
@@ -97,9 +103,33 @@ export const GLOB_SEGMENT_PATTERN = /^\*\*$|^[A-Za-z0-9._*?\[\]-]{1,128}$/u;
 // RunPolicyV1, where they are required as exact safe literals.
 export const ROOT_ALLOWED_KEYS = Object.freeze([
   'schema', 'run_id', 'repository', 'objective', 'assignments', 'policy', 'return_contract',
+  'profile',
 ]);
+// P05 reachability prerequisite: a run may bind ONE root profile name. It is
+// data-only, validated with the exact assignment execution.profile grammar,
+// and later fills ONLY lanes whose execution was omitted. P02 validates and
+// binds it; it resolves nothing, imports no profile catalog, and makes no
+// other field optional.
+export const ROOT_OPTIONAL_KEYS = Object.freeze(['profile']);
+export const ROOT_REQUIRED_KEYS = Object.freeze(
+  ROOT_ALLOWED_KEYS.filter((key) => !ROOT_OPTIONAL_KEYS.includes(key)),
+);
+export const BOUND_ROOT_PROFILE_KEY = 'profile';
 export const REPOSITORY_ALLOWED_KEYS = Object.freeze(['path', 'base_sha']);
-export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
+export const RETURN_CONTRACT_ALLOWED_KEYS = Object.freeze([
+  'mode', 'include_artifact_refs', 'allow_diagnostic_partial_candidate',
+]);
+// The verified-decision return contract still requires exactly these two
+// keys. allow_diagnostic_partial_candidate is the sole OPTIONAL field: a
+// permission (never an obligation) for a later P35A diagnostic
+// incomplete_candidate. Absent and false both keep complete-only behavior,
+// and the submitted frozen form is preserved, so an explicit false remains
+// an own key for audit/display. Identity-wise (P02R1) absent and false are
+// equivalent complete-only manifests: the RunIdentityV1 projection in
+// identity.mjs omits an exact false, so both produce identical canonical
+// bytes and digests, while explicit true stays identity-distinct.
+export const RETURN_CONTRACT_REQUIRED_KEYS = Object.freeze(['mode', 'include_artifact_refs']);
+export const DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY = 'allow_diagnostic_partial_candidate';
 export const POLICY_ALLOWED_KEYS = Object.freeze([
   'max_concurrency', 'require_same_base', 'require_disjoint_writer_scopes',
   'allow_post_dispatch_fallback', 'allow_merge', 'allow_create_pr',
@@ -454,6 +484,20 @@ function assertPattern(value, pattern, code, path, label) {
   }
 }
 
+// The exact bounded profile-name grammar already owned by assignment
+// execution.profile validation, shared with the optional root profile
+// binding. Data-only by construction: a name, never an inline object, and
+// never a P04 catalog lookup at this boundary.
+export function assertProfileName(value, path) {
+  if (typeof value !== 'string') {
+    fail('invalid_type', path, `${path} must be a profile name string.`);
+  }
+  if (!PROFILE_NAME_PATTERN.test(value) || utf8ByteLength(value) > PROFILE_NAME_MAX) {
+    fail('invalid_format', path,
+      `${path} violates the profile-name grammar ${PROFILE_NAME_PATTERN.source}.`);
+  }
+}
+
 export function assertRunId(value, path = 'run_id') {
   assertPattern(value, RUN_ID_PATTERN, 'invalid_format', path,
     `run_id must match ${RUN_ID_PATTERN.source} (lowercase, git-ref-safe, ${RUN_ID_MIN}-${RUN_ID_MAX} chars)`);
@@ -596,6 +640,49 @@ export function assertTimeoutMs(value, path) {
     `${path} must be between ${MIN_DURATION_MS} and ${MAX_TIMEOUT_MS} ms`);
 }
 
+// The single AssignmentManifestV1 execution grammar, owned here beside its
+// closed vocabulary (EXECUTION_ALLOWED_KEYS, PROVIDERS, the model grammar)
+// so every consumer shares one contract with no second grammar. Exactly one
+// resolution choice survives: a named profile reference (data-only name,
+// never an inline object) or an exact provider + model pair. Absence is not
+// this function's concern: callers decide what a truly absent execution
+// means (the P02R3 classifier treats absence as selection-deferral; deep
+// assignment validation never reaches it with execution absent).
+export function validateExecution(execution, path) {
+  if (!isPlainObject(execution)) fail('invalid_type', path, `${path} must be an object.`);
+  assertAllowedKeys(execution, EXECUTION_ALLOWED_KEYS, path);
+  const hasProfile = Object.hasOwn(execution, 'profile');
+  const hasProvider = Object.hasOwn(execution, 'provider');
+  const hasModel = Object.hasOwn(execution, 'model');
+  if (hasProfile && (hasProvider || hasModel)) {
+    fail('execution_ambiguous', path,
+      `${path} must carry exactly one resolution choice: a named profile OR an explicit provider/model pair, never both.`);
+  }
+  if (!hasProfile && !hasProvider && !hasModel) {
+    fail('execution_missing', path, `${path} requires either a named profile or an explicit provider/model pair.`);
+  }
+  if (hasProfile) {
+    if (typeof execution.profile !== 'string') {
+      fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
+    }
+    assertProfileName(execution.profile, `${path}.profile`);
+    return Object.freeze({ kind: 'profile', provider: null });
+  }
+  if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
+  if (!hasModel) fail('missing_key', `${path}.model`, `${path}.model is required when no profile is named.`);
+  if (!PROVIDERS.includes(execution.provider)) {
+    fail('unknown_provider', `${path}.provider`,
+      `${path}.provider is not one of ${PROVIDERS.join(', ')}.`);
+  }
+  if (typeof execution.model !== 'string'
+    || !MODEL_ID_PATTERN.test(execution.model)
+    || utf8ByteLength(execution.model) > MODEL_ID_MAX) {
+    fail('invalid_format', `${path}.model`,
+      `${path}.model violates the model grammar ${MODEL_ID_PATTERN.source} (max ${MODEL_ID_MAX} bytes).`);
+  }
+  return Object.freeze({ kind: 'explicit', provider: execution.provider });
+}
+
 function extractWriterScopes(assignments) {
   const writerScopes = [];
   for (let i = 0; i < assignments.length; i += 1) {
@@ -617,23 +704,61 @@ function extractWriterScopes(assignments) {
   return writerScopes;
 }
 
-function extractUnresolvedProfileAssignmentIds(assignments) {
-  const unresolved = [];
+export const ASSIGNMENT_SELECTION_STATES = Object.freeze([
+  'dispatch_resolved', 'selection_resolution_required',
+]);
+
+// Single source of truth for P02R1 selection classification. Only an exact
+// explicit provider/model pair is dispatch-resolved at submission time. A
+// named-profile reference AND a truly absent execution both remain
+// selection_resolution_required until the P05 resolver produces the
+// effective manifest; explicit lanes stay dispatch-resolved.
+export function classifyAssignmentSelectionV1(assignment) {
+  if (!isPlainObject(assignment)) {
+    fail('invalid_type', 'assignment', 'assignment must be a plain JSON data object.');
+  }
+  // This public classifier accepts an assignment-shaped data snapshot, never
+  // a reflective object surface. Validate the assignment's complete closed
+  // own-key shape before deciding whether execution is absent, then read the
+  // already-proven enumerable data property through its descriptor. This
+  // keeps an accessor from firing and prevents a hidden or symbol-keyed
+  // execution value from being mistaken for true absence.
+  assertAllowedKeys(assignment, ASSIGNMENT_ALLOWED_KEYS, 'assignment');
+  const executionDescriptor = Object.getOwnPropertyDescriptor(assignment, 'execution');
+  // A truly absent execution remains the documented P05 selection deferral.
+  // Every PRESENT execution object is first validated through the exact
+  // shared validateExecution grammar: null, own undefined, empty, partial
+  // pairs, profile ambiguity, and unknown grammars fail closed at this
+  // public boundary instead of ever being classified. Deep assignment
+  // validation runs the identical contract before its summary reaches this
+  // classifier, so direct callers can no longer observe a state that the
+  // manifest boundary itself would have rejected.
+  if (!executionDescriptor) return 'selection_resolution_required';
+  const resolution = validateExecution(executionDescriptor.value, 'assignment.execution');
+  return resolution.kind === 'explicit' ? 'dispatch_resolved' : 'selection_resolution_required';
+}
+
+function extractSelectionResolution(assignments) {
+  const unresolvedProfileAssignmentIds = [];
+  const selectionResolutionRequiredIds = [];
   for (let index = 0; index < assignments.length; index += 1) {
     const assignment = assignments[index];
-    if (isPlainObject(assignment.execution)
-      && Object.hasOwn(assignment.execution, 'profile')) {
-      unresolved.push(assignment.assignment_id);
+    if (classifyAssignmentSelectionV1(assignment) === 'selection_resolution_required') {
+      selectionResolutionRequiredIds.push(assignment.assignment_id);
+    }
+    const execution = assignment.execution;
+    if (isPlainObject(execution) && Object.hasOwn(execution, 'profile')) {
+      unresolvedProfileAssignmentIds.push(assignment.assignment_id);
     }
   }
-  return unresolved;
+  return { unresolvedProfileAssignmentIds, selectionResolutionRequiredIds };
 }
 
 function validateReturnContract(returnContract) {
   const path = 'return_contract';
   if (!isPlainObject(returnContract)) fail('invalid_type', path, 'return_contract must be an object.');
   assertAllowedKeys(returnContract, RETURN_CONTRACT_ALLOWED_KEYS, path);
-  for (const key of RETURN_CONTRACT_ALLOWED_KEYS) {
+  for (const key of RETURN_CONTRACT_REQUIRED_KEYS) {
     if (!Object.hasOwn(returnContract, key)) fail('missing_key', `${path}.${key}`, `${path}.${key} is required.`);
   }
   if (returnContract.mode !== 'verified_decision') {
@@ -643,6 +768,29 @@ function validateReturnContract(returnContract) {
     fail('invalid_format', `${path}.include_artifact_refs`,
       'return_contract.include_artifact_refs must be explicitly true; evidence stays artifact-addressable.');
   }
+  assertDiagnosticPartialAuthorization(returnContract);
+}
+
+// Exact primitive boolean, no aliases, no defaults, no coercion. The flag is
+// resolution-inert: it never enters assignment prompts, ChildEnvelopeV1
+// bytes, or child-envelope digests, and P35A/P36 alone own any later
+// candidate status or disposition.
+function assertDiagnosticPartialAuthorization(returnContract) {
+  const path = `return_contract.${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}`;
+  if (!Object.hasOwn(returnContract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)) return;
+  if (typeof returnContract[DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY] !== 'boolean') {
+    fail('invalid_type', path,
+      `${path} must be an exact boolean; absent or false keeps complete-only behavior and no coercion is performed.`);
+  }
+}
+
+// Validate and bind the optional root profile name. Absent means unbound;
+// present means an exact bounded profile-name string. Nothing else about the
+// run changes: no lane becomes resolved, and no required field turns optional.
+function validateRootProfileBinding(manifest) {
+  if (!Object.hasOwn(manifest, BOUND_ROOT_PROFILE_KEY)) return null;
+  assertProfileName(manifest[BOUND_ROOT_PROFILE_KEY], BOUND_ROOT_PROFILE_KEY);
+  return manifest[BOUND_ROOT_PROFILE_KEY];
 }
 
 function validatePolicyEnvelope(policy) {
@@ -695,7 +843,7 @@ export function validateRunManifestEnvelopeV1(manifest, hooks) {
   assertManifestComplexity(manifest);
   if (!isPlainObject(manifest)) fail('invalid_type', '$', 'A run manifest must be a JSON object.');
   assertAllowedKeys(manifest, ROOT_ALLOWED_KEYS, '$');
-  for (const key of ROOT_ALLOWED_KEYS) {
+  for (const key of ROOT_REQUIRED_KEYS) {
     if (!Object.hasOwn(manifest, key)) {
       fail('missing_key', `$.${key}`, `$.${key} is required; run manifests have no hidden defaults.`);
     }
@@ -715,18 +863,23 @@ export function validateRunManifestEnvelopeV1(manifest, hooks) {
   assertBoundedText(manifest.objective, {
     min: OBJECTIVE_MIN_BYTES, max: OBJECTIVE_MAX_BYTES, path: 'objective', label: 'objective',
   });
+  const boundRootProfile = validateRootProfileBinding(manifest);
   validateReturnContract(manifest.return_contract);
   validatePolicyEnvelope(manifest.policy);
   hooks.validatePolicy(manifest.policy);
   const assignmentIds = validateAssignmentsEnvelope(manifest.assignments, hooks);
   assertDisjointWriterScopes(extractWriterScopes(manifest.assignments));
-  const unresolvedProfileAssignmentIds = extractUnresolvedProfileAssignmentIds(manifest.assignments);
+  const { unresolvedProfileAssignmentIds, selectionResolutionRequiredIds }
+    = extractSelectionResolution(manifest.assignments);
   return Object.freeze({
     run_id: manifest.run_id,
     assignment_count: manifest.assignments.length,
     assignment_ids: Object.freeze([...assignmentIds]),
     validation_depth: 'complete',
+    bound_root_profile: boundRootProfile,
     profile_resolution_required: unresolvedProfileAssignmentIds.length > 0,
     unresolved_profile_assignment_ids: Object.freeze(unresolvedProfileAssignmentIds),
+    selection_resolution_required: selectionResolutionRequiredIds.length > 0,
+    selection_resolution_required_assignment_ids: Object.freeze(selectionResolutionRequiredIds),
   });
 }
