@@ -4,6 +4,36 @@
 
 ### Added
 
+- **ArtifactRefV1 and the strict relative artifact path policy.** Adds two
+  additive, pure v3 modules for W3-P07. `artifact-path.mjs` owns one
+  deterministic fail-closed question - is this string a strict portable
+  run-relative artifact path? - accepting only NFC, well-formed,
+  forward-slash, relative paths of 1..16 segments (128 UTF-8 bytes each,
+  1024 total) with no backslashes, leading/trailing/doubled slashes, empty
+  or dot-only segments, colons (foreclosing drive, UNC, alternate-data-
+  stream, and scheme spellings in one rule), Windows reserved device stems
+  (`con`, `CON.txt`, `com1`, `lpt0`, `clock$`), edge dots/spaces Windows
+  strips, C0/C1 controls, invisible/format/bidi/tag code points, or solidus
+  look-alikes; the fixed validation pipeline raises identical first typed
+  errors from a closed 17-code vocabulary and never echoes hostile bytes.
+  `artifact-ref.mjs` binds the closed ten-key ArtifactRefV1 schema - exact
+  run/child identifiers reusing the accepted manifest grammars, artifact
+  kind bound to the P17 capability vocabulary, raw-vs-sanitized class with
+  class-dependent bounded-evidence caps (sanitized 256 KiB, raw 32 MiB),
+  declared byte length, lowercase-hex SHA-256, and closed media-type and
+  content-encoding enums - behind hostile-container hardening that rejects
+  live/revoked Proxies with zero traps, accessors without invoking them,
+  symbol keys, exotic prototypes, own undefined, sparse/extended arrays,
+  aliases/cycles, depth, and size before any effect, returns deep-frozen
+  detached snapshots, and frames SHA-256 digests over validator-owned
+  canonical JSON with explicit domain/version/label separation so key order
+  cannot change a digest while any value change must; ordering is a fixed
+  tuple comparator plus a bounded (64), duplicate-free batch orderer. Both
+  modules are pure schema/path policy only - no filesystem, network, or
+  process I/O - and neither claims that P08 artifact storage exists:
+  producers declare references, and only a later storage authority may bind
+  them to bytes. Coverage lives in `test/r1-artifact-ref.test.mjs` and
+  `test/r1-artifact-ref-adversarial.test.mjs`.
 - **Deterministic P05 resolver and P17 capability bridge.** Additive
   `resolveRunSelectionV1` / `resolveSelectionAnswersV1` bind every
   assignment's provider/model from authored explicit execution, the
