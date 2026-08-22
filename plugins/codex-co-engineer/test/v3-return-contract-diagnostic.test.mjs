@@ -2,10 +2,11 @@
 // (`return_contract.allow_diagnostic_partial_candidate`): the sole optional
 // return-contract key, an exact primitive boolean whose absence or false
 // keeps complete-only behavior and whose true only PERMITS a later P35A
-// diagnostic `incomplete_candidate`. The submitted frozen form is preserved,
-// so an explicit false stays an own key with its own raw RunManifestV1
-// digest, while the flag stays resolution-inert: it never reaches assignment
-// prompts, ChildEnvelopeV1 bytes, or child-envelope digests.
+// diagnostic `incomplete_candidate` (never ready_for_codex_review). The
+// submitted frozen parse keeps an own false verbatim for audit/display;
+// RunIdentityV1 projects absent and exact false to identical complete-only
+// canonical bytes. The flag stays resolution-inert: it never reaches
+// assignment prompts, ChildEnvelopeV1 bytes, or child-envelope digests.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -19,9 +20,11 @@ import {
 } from '../mcp/v3/run-manifest.mjs';
 import { parseRunManifestV1 } from '../mcp/v3/run-policy.mjs';
 import {
+  DIGEST_HEX_LENGTH,
   assignmentPromptDigestV1,
   canonicalJsonStringify,
   childEnvelopeDigestV1,
+  runManifestCanonicalJsonV1,
   runManifestDigestV1,
   verifyRunManifestDigestV1,
 } from '../mcp/v3/identity.mjs';
@@ -151,7 +154,7 @@ test('aliases and duplicates under other vocabularies stay unknown keys', () => 
   assert.equal(assignmentError.path, `assignments[0].${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}`);
 });
 
-test('explicit false has a distinct raw RunManifest digest from absence; true differs again', () => {
+test('absent and explicit false share complete-only identity; exact true is distinct', () => {
   const absent = run(ABSENT);
   const falseForm = run(false);
   const trueForm = run(true);
@@ -160,11 +163,11 @@ test('explicit false has a distinct raw RunManifest digest from absence; true di
   const falseDescriptor = runManifestDigestV1(falseForm);
   const trueDescriptor = runManifestDigestV1(trueForm);
 
-  assert.notEqual(absentDescriptor.digest, falseDescriptor.digest);
+  assert.equal(absentDescriptor.digest, falseDescriptor.digest);
   assert.notEqual(falseDescriptor.digest, trueDescriptor.digest);
   assert.notEqual(absentDescriptor.digest, trueDescriptor.digest);
 
-  // Canonical bytes witness exactly the submitted shape.
+  // Audit/display form (frozen parse) keeps a submitted own false verbatim.
   assert.equal(canonicalJsonStringify(parseRunManifestV1(absent)).includes(
     `"${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}"`), false);
   assert.ok(canonicalJsonStringify(parseRunManifestV1(falseForm))
@@ -172,8 +175,26 @@ test('explicit false has a distinct raw RunManifest digest from absence; true di
   assert.ok(canonicalJsonStringify(parseRunManifestV1(trueForm))
     .includes(`"${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}":true`));
 
-  assert.equal(verifyRunManifestDigestV1(falseForm, absentDescriptor.digest), false);
-  assert.equal(verifyRunManifestDigestV1(absent, falseDescriptor.digest), false);
+  // Identity projection omits exact false so it matches absence byte for byte.
+  assert.equal(runManifestCanonicalJsonV1(absent).includes(
+    `"${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}"`), false);
+  assert.equal(runManifestCanonicalJsonV1(falseForm).includes(
+    `"${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}"`), false);
+  assert.ok(runManifestCanonicalJsonV1(trueForm)
+    .includes(`"${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}":true`));
+
+  // Verification follows the same normalization: absent and false accept
+  // each other's recorded digest; true verifies against neither; malformed
+  // expectations return false without throwing.
+  assert.equal(verifyRunManifestDigestV1(falseForm, absentDescriptor.digest), true);
+  assert.equal(verifyRunManifestDigestV1(absent, falseDescriptor.digest), true);
+  assert.equal(verifyRunManifestDigestV1(trueForm, absentDescriptor.digest), false);
+  assert.equal(verifyRunManifestDigestV1(absent, trueDescriptor.digest), false);
+  assert.equal(verifyRunManifestDigestV1(falseForm, trueDescriptor.digest), false);
+  for (const malformed of ['', 'ABC', absentDescriptor.digest.slice(0, 63),
+    `${absentDescriptor.digest}0`, null, 7]) {
+    assert.equal(verifyRunManifestDigestV1(absent, malformed), false);
+  }
 });
 
 test('the flag is resolution-inert: envelopes and child digests ignore it completely', () => {
@@ -182,7 +203,7 @@ test('the flag is resolution-inert: envelopes and child digests ignore it comple
     run(false),
     run(true),
   ];
-  
+
   const compiled = variants.map((manifest) => compileChildEnvelopesV1(manifest));
   const baselineTexts = compiled[0].map((envelope) => envelope.envelope_text);
   for (let v = 1; v < variants.length; v += 1) {
@@ -224,15 +245,103 @@ test('hostile direct-JavaScript surfaces on the new field fail closed without ex
   symbolKeyed.return_contract[Symbol(DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)] = true;
   assert.equal(errorOf(() => parseRunManifestV1(symbolKeyed)).code, 'invalid_object');
 
-  const proxied = run(true);
-  proxied.return_contract = new Proxy(proxied.return_contract, {});
+  // The instrumented hostile object is what the parser receives: a Proxy
+  // wrapper under a trap-counting outer Proxy. Rejection must come from
+  // reflection alone, so no get trap may fire while it is inspected.
   let trapCalls = 0;
-  const watched = new Proxy(proxied.return_contract, {
-    get() { trapCalls += 1; return true; },
+  const watched = new Proxy(new Proxy(run(true).return_contract, {}), {
+    get(target, key) { trapCalls += 1; return target[key]; },
   });
-  assert.ok(utilTypes.isProxy(watched));
-  assert.equal(errorOf(() => parseRunManifestV1(proxied)).code, 'invalid_type');
+  const proxied = run(true);
+  proxied.return_contract = watched;
+  assert.ok(utilTypes.isProxy(proxied.return_contract));
+  assert.equal(utilTypes.isProxy(watched), true);
+  const proxiedError = errorOf(() => parseRunManifestV1(proxied));
+  assert.equal(proxiedError.code, 'invalid_type');
+  assert.equal(proxiedError.path, '$.return_contract');
   assert.equal(trapCalls, 0);
+});
+
+test('identity projection rejects revoked proxies, getters, symbols, and hidden keys directly', () => {
+  // Revoked Proxy standing in for return_contract: normalized to a typed
+  // rejection before any native boundary can leak, and a revoked proxy
+  // cannot dispatch a handler trap by construction (counter stays zero).
+  let revokedTrapReads = 0;
+  const { proxy: revoked, revoke } = Proxy.revocable(
+    { mode: 'verified_decision', include_artifact_refs: true },
+    { get() { revokedTrapReads += 1; return 'verified_decision'; } },
+  );
+  revoke();
+  const revokedManifest = run(ABSENT);
+  revokedManifest.return_contract = revoked;
+  assert.ok(utilTypes.isProxy(revoked));
+  const revokedError = errorOf(() => runManifestDigestV1(revokedManifest));
+  assert.equal(revokedError.code, 'invalid_type');
+  // The pre-validation complexity guard normalizes every Proxy surface
+  // before envelope validation, so the reported path is the full graph path.
+  assert.equal(revokedError.path, '$.return_contract');
+  assert.match(revokedError.message, /revoked Proxy/u);
+  assert.equal(revokedTrapReads, 0);
+
+  // Getter masquerading as the optional flag on a digest-bound manifest:
+  // inspected by descriptor only, never invoked.
+  let getterCalls = 0;
+  const getterManifest = run(ABSENT);
+  Object.defineProperty(getterManifest.return_contract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY, {
+    enumerable: true,
+    get() { getterCalls += 1; return false; },
+  });
+  const getterError = errorOf(() => runManifestCanonicalJsonV1(getterManifest));
+  assert.equal(getterError.code, 'invalid_object');
+  assert.equal(getterError.path, `$.return_contract.${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}`);
+  assert.equal(getterCalls, 0);
+
+  // Symbol-keyed flag trace: rejected before any value would be read.
+  const symbolKeyed = run(ABSENT);
+  symbolKeyed.return_contract[Symbol(DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY)] = false;
+  const symbolError = errorOf(() => runManifestDigestV1(symbolKeyed));
+  assert.equal(symbolError.code, 'invalid_object');
+  // Symbol-keyed containers are rejected at the container path itself,
+  // before any per-key descent.
+  assert.equal(symbolError.path, '$.return_contract');
+
+  // Hidden non-enumerable flag: same typed rejection on both identity
+  // surfaces, including constant-time verification.
+  const hidden = run(ABSENT);
+  Object.defineProperty(hidden.return_contract, DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY, {
+    value: true, enumerable: false, writable: false, configurable: false,
+  });
+  const hiddenError = errorOf(() => runManifestDigestV1(hidden));
+  assert.equal(hiddenError.code, 'invalid_object');
+  assert.equal(hiddenError.path, `$.return_contract.${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}`);
+  assert.equal(errorOf(
+    () => verifyRunManifestDigestV1(hidden, '0'.repeat(DIGEST_HEX_LENGTH)),
+  ).code, 'invalid_object');
+
+  // The valid baseline still digests after all of the above rejections.
+  assert.equal(runManifestDigestV1(run(ABSENT)).digest.length, DIGEST_HEX_LENGTH);
+});
+
+test('identity projection survives Object.keys monkeypatching', () => {
+  const absent = run(ABSENT);
+  const falseForm = run(false);
+  const trueForm = run(true);
+  const baselineAbsent = runManifestDigestV1(absent).digest;
+  const baselineTrue = runManifestDigestV1(trueForm).digest;
+
+  const originalKeys = Object.keys;
+  Object.keys = () => {
+    throw new Error('TOP_SECRET_OBJECT_KEYS');
+  };
+  try {
+    assert.equal(runManifestDigestV1(absent).digest, baselineAbsent);
+    assert.equal(runManifestDigestV1(falseForm).digest, baselineAbsent);
+    assert.equal(runManifestDigestV1(trueForm).digest, baselineTrue);
+    assert.equal(runManifestCanonicalJsonV1(falseForm).includes(
+      `"${DIAGNOSTIC_PARTIAL_AUTHORIZATION_KEY}"`), false);
+  } finally {
+    Object.keys = originalKeys;
+  }
 });
 
 test('first-error ordering inside return_contract is fixed and deterministic', () => {
