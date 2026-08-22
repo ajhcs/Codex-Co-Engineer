@@ -8,8 +8,10 @@ import test from 'node:test';
 import {
   MAX_PROFILES_PER_CATALOG,
   MAX_PROFILE_CATALOG_BYTES,
+  MAX_PROFILE_STRUCTURE_DEPTH,
   MAX_PROFILE_STRUCTURE_NODES,
   PROFILE_SCHEMA,
+  assertNoDuplicateCatalogKeys,
   canonicalProfileJson,
   findProfile,
   loadProfiles,
@@ -231,6 +233,25 @@ test('canonical profile JSON enforces exact total node and encoded-byte budgets'
   );
 });
 
+test('canonical profile JSON enforces the exact nesting-depth boundary', () => {
+  const nestedArrays = (count) => {
+    let value = null;
+    for (let index = 0; index < count; index += 1) value = [value];
+    return value;
+  };
+
+  assert.doesNotThrow(
+    () => canonicalProfileJson(nestedArrays(MAX_PROFILE_STRUCTURE_DEPTH)),
+    `a leaf at depth ${MAX_PROFILE_STRUCTURE_DEPTH} must be accepted`,
+  );
+  assert.throws(
+    () => canonicalProfileJson(nestedArrays(MAX_PROFILE_STRUCTURE_DEPTH + 1)),
+    (error) => error.code === 'invalid_profile_canonical_data'
+      && error.message.includes('nesting depth'),
+    `a leaf at depth ${MAX_PROFILE_STRUCTURE_DEPTH + 1} must be rejected`,
+  );
+});
+
 test('catalog files must be regular, bounded, and structurally sound', async () => {
   const base = await makeWorkspace();
   try {
@@ -280,6 +301,27 @@ test('catalog files must be regular, bounded, and structurally sound', async () 
   } finally {
     await base.cleanup();
   }
+});
+
+test('duplicate-key scanning has a typed non-reflective public boundary', () => {
+  for (const value of [undefined, null, 0, false, {}, []]) {
+    assert.throws(
+      () => assertNoDuplicateCatalogKeys(value),
+      (error) => error.code === 'invalid_profile_catalog_json'
+        && error.message === 'Profile catalog JSON must be text.',
+      `non-text value ${String(value)} must fail with a typed error`,
+    );
+  }
+
+  const hostileKey = 'secret-marker\nforged-log-line';
+  const encodedKey = JSON.stringify(hostileKey);
+  assert.throws(
+    () => assertNoDuplicateCatalogKeys(`{${encodedKey}:1,${encodedKey}:2}`),
+    (error) => error.code === 'duplicate_profile_key'
+      && !error.message.includes('secret-marker')
+      && !error.message.includes('\n'),
+    'duplicate-key errors must not reflect attacker-controlled key text',
+  );
 });
 
 test('catalog special files are rejected without blocking before fstat', {
@@ -424,6 +466,7 @@ test('policy data stays bounded, non-executable, and deterministic', async () =>
       [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 'claude'] } }, 'unsupported_profile_provider'],
       [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 'dsh'] } }, 'duplicate_profile_preference_provider'],
       [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: ['dsh', 'grok', 'cursor-local', 'cursor-cloud', 'dsh'] } }, 'invalid_profile_provider_preference'],
+      [{ schema: PROFILE_SCHEMA, policy: { pre_dispatch_provider_preference: Array(65).fill('dsh') } }, 'profile_structure_too_complex'],
     ];
     for (const [definition, code] of cases) {
       await write(definition);
