@@ -9,7 +9,9 @@
 //   - bounded well-formed UTF-8 prompts;
 //   - execution is exactly one explicit choice: a named profile reference
 //     (data-only name, never an inline profile object) or an exact
-//     provider + model pair from the 3.2.1 provider vocabulary;
+//     provider + model pair from the 3.2.1 provider vocabulary — or it is
+//     truly absent, which marks the lane selection_resolution_required for
+//     P05 (root-profile fill) without relaxing any other field;
 //   - explicit Cursor Cloud lanes must pin one exact 40-hex lowercase starting
 //     SHA; local lanes must not carry one. Unresolved profile lanes may carry
 //     the future pin, and P05 revalidates it after provider resolution;
@@ -41,8 +43,6 @@ import {
   PARAM_KEY_PATTERN,
   PARAM_VALUE_MAX_BYTES,
   PARAMS_MAX_KEYS,
-  PROFILE_NAME_MAX,
-  PROFILE_NAME_PATTERN,
   PROMPT_MAX_BYTES,
   PROMPT_MIN_BYTES,
   PROVIDERS,
@@ -51,6 +51,7 @@ import {
   SHA40_PATTERN,
   assertAllowedKeys,
   assertBoundedText,
+  assertProfileName,
   assertDenseJsonArray,
   assertExpectedDurationMs,
   assertJsonDataObject,
@@ -81,11 +82,7 @@ function validateExecution(execution, path) {
     if (typeof execution.profile !== 'string') {
       fail('invalid_type', `${path}.profile`, `${path}.profile must be a profile name string; profiles are data references, never inline objects.`);
     }
-    if (!PROFILE_NAME_PATTERN.test(execution.profile)
-      || utf8ByteLength(execution.profile) > PROFILE_NAME_MAX) {
-      fail('invalid_format', `${path}.profile`,
-        `${path}.profile violates the profile-name grammar ${PROFILE_NAME_PATTERN.source}.`);
-    }
+    assertProfileName(execution.profile, `${path}.profile`);
     return Object.freeze({ kind: 'profile', provider: null });
   }
   if (!hasProvider) fail('missing_key', `${path}.provider`, `${path}.provider is required when no profile is named.`);
@@ -129,10 +126,11 @@ function validateStartingRef(assignment, path, executionResolution) {
     validateResolvedStartingRefV1(assignment, executionResolution.provider, path);
     return;
   }
-  // P02 validates the unresolved profile reference, while P05 deterministically
-  // resolves its provider before dispatch and calls validateResolvedStartingRefV1.
-  // A profile lane may carry the future Cloud pin now; if present, its format
-  // is already immutable and exact.
+  // P02 validates the unresolved profile reference or the omitted execution,
+  // while P05 deterministically resolves each selection_resolution_required
+  // lane before dispatch and calls validateResolvedStartingRefV1. Such a lane
+  // may carry the future Cloud pin now; if present, its format is already
+  // immutable and exact.
   if (Object.hasOwn(assignment, 'starting_ref')
     && (typeof assignment.starting_ref !== 'string' || !SHA40_PATTERN.test(assignment.starting_ref))) {
     fail('invalid_format', `${path}.starting_ref`,
@@ -247,10 +245,17 @@ export function validateAssignmentManifestV1(assignment, index = 0) {
     path: `${path}.prompt`,
     label: `${path}.prompt`,
   });
+  // P02R1 reachability prerequisite: execution may be truly absent. The lane
+  // then becomes selection_resolution_required for the P05 resolver (root
+  // profile or explicit failure); nothing is guessed here. Every PRESENT
+  // form keeps the exact prior contract, so null, {}, an own undefined, or a
+  // partial pair still fails closed through validateExecution below.
+  let executionResolution;
   if (!Object.hasOwn(assignment, 'execution')) {
-    fail('missing_key', `${path}.execution`, `${path}.execution is required.`);
+    executionResolution = Object.freeze({ kind: 'omitted', provider: null });
+  } else {
+    executionResolution = validateExecution(assignment.execution, `${path}.execution`);
   }
-  const executionResolution = validateExecution(assignment.execution, `${path}.execution`);
   validateStartingRef(assignment, path, executionResolution);
 
   const scopePath = `${path}.write_scope`;
