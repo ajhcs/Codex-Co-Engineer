@@ -4,6 +4,35 @@
 
 ### Added
 
+- **Append-only run journal, deterministic reducer, and run-bound cursor.**
+  Additive `run-reducer.mjs` / `run-journal.mjs` persist one bounded
+  append-only canonical JSONL event chain per run inside a private per-run
+  directory of a separate caller-supplied existing private journal root.
+  Every create/open/append/read first binds an exact validated accepted-P24
+  durable run record (the `openRunStore(...)` handle and its `getByRunId`
+  result) by run identity and canonical digest, never writes into the P24
+  root (sharing it fails closed), and re-verifies a creation stamp bound to
+  that record on every operation, so inode-reuse directory swaps fail hard.
+  Entries carry dense sequences over closed event and content-addressed
+  artifact-ref shapes chained by a domain-separated SHA-256 hash; appends
+  serialize in-process and cross-process through an exclusive lock with
+  bounded dead-owner and age-capped stale recovery, support compare-and-swap
+  `expected_seq`, exact head dedupe, typed replay/dedupe conflicts, and full
+  lattice validation before any byte is written. Publication uses
+  same-directory temporaries with file fsync, atomic rename, and directory
+  fsync for the journal first and the atomically published derived state
+  second, so crashes leave only unpublished temporaries or a stale cache
+  that exact replay rebuilds. A torn unterminated final line is the only
+  healable damage; committed corruption or regression, malformed or foreign
+  entries, symlinks, hardlinks, floods, oversized files, and path attacks
+  fail closed with typed constant errors. The pure deterministic
+  terminal-absorbing reducer projects monotonic child/run state, and opaque
+  run-bound checksummed cursors page bounded event windows whose
+  diagnostics stay content-free counts. There is no artifact verification,
+  scheduler or provider invocation, attention reduction, supervisor/server
+  wiring, cleanup/GC, semantic memory, merge authority, or protected-ref
+  implementation. Coverage lives in `r1-run-journal` and
+  `r1-run-journal-adversarial` tests.
 - **Durable local run store and idempotent submission.** Additive
   `run-store.mjs` persists one bounded canonical record per run in an
   explicit caller-supplied existing private directory. The store fails

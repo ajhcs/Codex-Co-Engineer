@@ -15,13 +15,15 @@ identity, with deterministic explicit/profile resolution, no direct mode on
 run submissions, disjoint writers, read-only verification, no post-dispatch
 fallback or replay, and Codex-only final acceptance.
 
-A library-only durable run store now accepts an existing private directory
-and persists identity-bound, idempotent submission records. It does not
-implement the rest of the run runtime: there is no atomic journal or
-reducer, scheduler, provider dispatch, workspace provisioning, cleanup,
-candidate composition, `AttentionBatchV1`, or MCP wiring. Gate A remains
-the functional release authority; Gate B context-efficiency and Gate C
-credit economics stay advisory.
+Library-only P24/P25 run persistence now accepts an existing private
+directory, persists identity-bound idempotent submission records, and
+appends a hash-chained per-run event journal with a deterministic
+terminal-absorbing reducer and run-bound cursors. It does not implement the
+rest of the run runtime: there is no scheduler, provider dispatch,
+workspace provisioning, cleanup, candidate composition, `AttentionBatchV1`,
+supervisor/server journal wiring, or MCP surface above the library layer.
+Gate A remains the functional release authority; Gate B context-efficiency
+and Gate C credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
