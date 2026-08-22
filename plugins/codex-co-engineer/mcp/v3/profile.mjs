@@ -36,12 +36,34 @@ export const MAX_PROFILE_STRUCTURE_NODES = 512;
 export const MAX_PROFILE_STRUCTURE_DEPTH = 16;
 export const MAX_PROFILE_OBJECT_KEYS = 64;
 
-// Mirrors the supervisor provider routes and DSH model identifiers without
-// importing launch logic. Preflight attests the actual provider/model later;
-// a profile only names a data selection.
+// Local ProfileV1 mirror of the bounded run vocabulary: the same four exact
+// provider routes, the same assignment roles (including read-only verify), and
+// the same bounded model identifier grammar. The mirror is deliberately local:
+// this module stays import-free of the P02 run-manifest runtime, and the
+// shared test fixtures fail the suite if either side ever drifts. A profile
+// only names a data selection: it makes no model-membership, availability,
+// qualification, resolution, or attestation claim. Preflight attests the
+// effective provider/model later.
 export const PROFILE_PROVIDERS = Object.freeze(['dsh', 'grok', 'cursor-local', 'cursor-cloud']);
+export const PROFILE_ROLES = Object.freeze(['review', 'implement', 'verify']);
+
+// Bounded requested-bytes model grammar mirrored from the assignment contract:
+// first character alphanumeric, then alphanumerics plus `._/:-`, at most 128
+// encoded UTF-8 bytes. Syntax and size only - no advertised-model membership
+// is enforced here or anywhere else in ProfileV1.
+export const PROFILE_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$/u;
+export const PROFILE_MODEL_ID_MAX_BYTES = 128;
+
+/**
+ * Deprecated informational compatibility data: the DSH model identifiers that
+ * 3.2.1 setup advertises. Retained only so older catalogs and diagnostics keep
+ * reading one stable constant. ProfileV1 validation never consults this list,
+ * so it cannot authorize or reject any requested model; membership,
+ * availability, qualification, resolution, and attestation stay preflight or
+ * resolver concerns.
+ * @deprecated Informational compatibility data only; not an authorization list.
+ */
 export const PROFILE_DSH_MODELS = Object.freeze(['muse-spark-1.2-contributor', 'stealth/ox-alpha']);
-export const PROFILE_ROLES = Object.freeze(['review', 'implement']);
 export const MIN_PROFILE_EXPECTED_DURATION_MS = MIN_DURATION_MS;
 export const MAX_PROFILE_EXPECTED_DURATION_MS = MAX_EXPECTED_DURATION_MS;
 
@@ -409,8 +431,6 @@ function parseCatalog(text, label) {
   return parsed;
 }
 
-const PROFILE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./:-]{0,127}$/u;
-
 export const ALLOWED_PROFILE_FIELDS = Object.freeze([
   'schema', 'provider', 'model', 'role', 'expected_duration_ms', 'policy',
 ]);
@@ -589,14 +609,20 @@ function requireProvider(name, provider) {
 }
 
 function requireModel(name, model, provider) {
-  if (provider !== 'dsh') {
-    fail('invalid_profile_model_for_provider', `Profile "${name}" may name a model only for provider "dsh".`);
+  // A model name is meaningful only beside an explicit known provider.
+  if (!PROFILE_PROVIDERS.includes(provider)) {
+    fail('invalid_profile_model_for_provider',
+      `Profile "${name}" may name a model only beside one of ${PROFILE_PROVIDERS.join(', ')}.`);
   }
-  if (typeof model !== 'string' || model.includes('..') || !PROFILE_MODEL_PATTERN.test(model)) {
-    fail('invalid_profile_model', `Profile "${name}" model must match a bounded provider model identifier.`);
-  }
-  if (!PROFILE_DSH_MODELS.includes(model)) {
-    fail('unknown_profile_model', `Profile "${name}" model must be one of ${PROFILE_DSH_MODELS.join(', ')}.`);
+  // One grammar for every exact provider: syntax and requested-byte size only.
+  // No static allowlist is consulted, so a pattern-valid model is accepted on
+  // every route even when no advertisement lists it yet.
+  if (typeof model !== 'string' || model.includes('..')
+    || !PROFILE_MODEL_ID_PATTERN.test(model)
+    || Buffer.byteLength(model, 'utf8') > PROFILE_MODEL_ID_MAX_BYTES) {
+    fail('invalid_profile_model',
+      `Profile "${name}" model must match the bounded model grammar ${PROFILE_MODEL_ID_PATTERN.source}`
+      + ` (at most ${PROFILE_MODEL_ID_MAX_BYTES} UTF-8 bytes).`);
   }
   return model;
 }
@@ -676,7 +702,7 @@ export function validateProfileDefinition(name, raw) {
   }
   const has = (field) => Object.hasOwn(descriptors, field);
   if (has('provider')) canonical.provider = requireProvider(name, descriptors.provider.value);
-  // A model name is meaningful only beside its dsh provider selection.
+  // A model name is meaningful only beside its explicit provider selection.
   if (has('model')) canonical.model = requireModel(name, descriptors.model.value, canonical.provider);
   if (has('role')) canonical.role = requireRole(name, descriptors.role.value);
   if (has('expected_duration_ms')) canonical.expected_duration_ms = requireExpectedDuration(name, descriptors.expected_duration_ms.value);

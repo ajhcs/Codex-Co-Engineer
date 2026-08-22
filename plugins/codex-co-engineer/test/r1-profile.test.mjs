@@ -380,7 +380,7 @@ test('definitions must be objects declaring the ProfileV1 schema', async () => {
   }
 });
 
-test('provider, model, and role fields validate against the 3.2.1 routes', async () => {
+test('provider, model, and role fields validate against one bounded run grammar', async () => {
   const { options, repositoryPath, cleanup } = await makeWorkspace();
   try {
     const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
@@ -391,11 +391,24 @@ test('provider, model, and role fields validate against the 3.2.1 routes', async
       const loaded = await loadProfiles(options);
       assert.equal(findProfile(loaded, 'probe').definition.provider, provider);
     }
-    for (const model of ['muse-spark-1.2-contributor', 'stealth/ox-alpha']) {
-      await write({ schema: PROFILE_SCHEMA, provider: 'dsh', model });
-      assert.equal((await loadProfiles(options)).profiles[0].definition.model, model);
+    // Every exact provider accepts any bounded grammar-conforming model:
+    // a profile names a selection only and makes no membership or
+    // availability claim.
+    const providerModels = new Map([
+      ['dsh', ['muse-spark-1.2-contributor', 'stealth/ox-alpha']],
+      ['grok', ['grok-4', 'grok-code-fast-1']],
+      ['cursor-local', ['composer-1', 'cursor_smoke_model']],
+      ['cursor-cloud', ['claude-sonnet-4-5']],
+    ]);
+    for (const [provider, models] of providerModels) {
+      for (const model of models) {
+        await write({ schema: PROFILE_SCHEMA, provider, model });
+        const loaded = await loadProfiles(options);
+        assert.equal(findProfile(loaded, 'probe').definition.model, model,
+          `${provider} must accept pattern-valid model ${model}`);
+      }
     }
-    for (const role of ['review', 'implement']) {
+    for (const role of ['review', 'implement', 'verify']) {
       await write({ schema: PROFILE_SCHEMA, provider: 'dsh', role });
       assert.equal((await loadProfiles(options)).profiles[0].definition.role, role);
     }
@@ -403,11 +416,13 @@ test('provider, model, and role fields validate against the 3.2.1 routes', async
     const cases = [
       [{ schema: PROFILE_SCHEMA, provider: 'claude' }, 'unsupported_profile_provider'],
       [{ schema: PROFILE_SCHEMA, provider: 'DSH' }, 'unsupported_profile_provider'],
-      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'gpt-9' }, 'unknown_profile_model'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: 'stealth/../../ox' }, 'invalid_profile_model'],
-      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: `${'a'.repeat(60)}!${'a'.repeat(68)}` }, 'invalid_profile_model'],
-      [{ schema: PROFILE_SCHEMA, provider: 'grok', model: 'grok-4' }, 'invalid_profile_model_for_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 'dsh', model: '-leading-hyphen' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'grok', model: '.leading-dot' }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'cursor-cloud', model: `${'a_'.repeat(64)}x` }, 'invalid_profile_model'],
+      [{ schema: PROFILE_SCHEMA, provider: 'cursor-local', model: `${'a'.repeat(60)}!${'a'.repeat(68)}` }, 'invalid_profile_model'],
       [{ schema: PROFILE_SCHEMA, model: 'stealth/ox-alpha' }, 'invalid_profile_model_for_provider'],
+      [{ schema: PROFILE_SCHEMA, provider: 7, model: 'stealth/ox-alpha' }, 'unsupported_profile_provider'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', role: 'orchestrate' }, 'unsupported_profile_role'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 999 }, 'invalid_profile_expected_duration_ms'],
       [{ schema: PROFILE_SCHEMA, provider: 'dsh', expected_duration_ms: 86_400_001 }, 'invalid_profile_expected_duration_ms'],

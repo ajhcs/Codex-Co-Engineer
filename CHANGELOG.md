@@ -57,6 +57,20 @@
 
 ### Fixed
 
+- **ProfileV1 accepts a bounded model beside every provider under one shared
+  grammar.** Profile definitions now validate `model` beside any of the four
+  exact providers (`grok`, `cursor-local`, `cursor-cloud`, `dsh`) whenever it
+  matches the bounded model identifier grammar
+  `^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$` (at most 128 UTF-8 bytes), replacing
+  the DSH-only pairing that enforced two advertised model names. The static
+  membership check is removed and the `PROFILE_DSH_MODELS` constant remains
+  only as deprecated informational compatibility data that can never authorize
+  or reject a requested model; the role vocabulary gains read-only `verify`.
+  Provider, role, and model grammars are local mirrors of the assignment
+  vocabulary guarded by shared test fixtures, so the profile module imports no
+  run-manifest runtime module. Profiles still make no model-membership,
+  availability, qualification, resolution, or attestation claim: attestation
+  stays a preflight concern and selection stays with the resolver.
 - **ChildEnvelopeV1 strict parse closes the profile-plus-model routing gap.**
   `parseChildEnvelopeV1` now rejects any `execution.model` other than `-`
   on a profile-selected execution, and symmetrically every provider/model/
