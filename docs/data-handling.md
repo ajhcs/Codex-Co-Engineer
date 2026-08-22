@@ -2,10 +2,12 @@
 
 Codex-Co-Engineer starts trusted peer coding agents. Selecting Grok, Cursor
 Local, Cursor Cloud, or DSH authorizes that provider to receive the task
-prompt and the repository material needed for the task. Providers may run
-shell commands, install dependencies, and modify their assigned workspace or
-remote branch. Do not delegate a repository or prompt that the selected
-provider is not authorized to process.
+prompt and the full repository material needed for the task, including files
+accidentally committed there. Platform-protected credentials, protected refs,
+and control tokens remain excluded. Providers may run shell commands, install
+dependencies, and modify their assigned workspace or remote branch. Do not
+delegate a repository or prompt that the selected provider is not authorized
+to process. The 3.3.0 authority split is [threat-model.md](threat-model.md).
 
 ## Workspace boundary
 

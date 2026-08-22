@@ -22,6 +22,30 @@ Include the affected version, impact, a minimal reproduction, and the
 smallest safe log excerpt. Never attach credentials, full prompts, private
 repository contents, or unredacted provider payloads.
 
+## Codex and worker authority
+
+Codex is the only final acceptance and integration authority. Selected
+provider workers are trusted peer coding agents for one assigned lane; they
+are not merge authorities. Selecting a provider authorizes that provider to
+receive the task prompt and the **authorized full repository and history**
+reachable from the assigned workspace, including committed secrets.
+Platform/Git/hosting write credentials, unrelated environment secrets,
+control tokens, owner-only raw evidence, and unauthorized refs/remotes
+remain excluded from provider payloads. Because Cursor Cloud receives a
+caller-provided origin, grant only origins and refs authorized for that
+provider; do not assume arbitrary origin refs are stripped automatically.
+
+Cgroups are lifecycle control, not a sandbox. Raw evidence is owner-only
+and local; sanitized bounded evidence is the model-facing projection.
+Profiles are data-only. `VerificationPolicyV1` is the only executable
+command catalog for verification lanes; provider-reported or requested
+commands are evidence/attention and are never automatically executed.
+Manual run cleanup is proof-bound; there is no automatic garbage
+collection.
+
+The 3.3.0 authority split and honest threat model are
+[docs/threat-model.md](docs/threat-model.md).
+
 ## Trust and execution boundary
 
 - Selecting a provider authorizes that provider to receive the task prompt and

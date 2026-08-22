@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- **R1 bounded-run architecture ADR.** Documents the accepted 3.3.0 run
+  model: 1–8 independent assignments, one immutable repository/base
+  identity, deterministic explicit/profile resolution, data-only profiles
+  with `VerificationPolicyV1` as the sole executable command catalog, no
+  direct mode for run submissions, disjoint writer scopes, read-only
+  verification, no post-dispatch fallback or replay, bounded evidence,
+  Codex-only final acceptance, and additive 3.2.1 compatibility. Frozen
+  verified child deltas may be composed into one run-owned, single-parent,
+  non-authoritative candidate; required writer lanes block a complete
+  candidate when rejected or unresolved. Gate A is the full functional
+  qualification contract (exact-tree/package checks necessary but not
+  sufficient); Gate B/C stay advisory. Individual 3.2.1 Cloud
+  `starting_ref` remains optional; every 3.3.0 run Cloud lane must pin one
+  exact already-pushed provider-visible SHA.
+- **Codex and worker authority threat model.** Records that selected
+  providers receive the authorized full repository/history, including
+  committed secrets, while platform/Git/hosting write credentials,
+  unrelated environment secrets, control tokens, owner-only raw evidence,
+  and unauthorized refs/remotes stay excluded; that Cursor Cloud origin
+  grants are operator-authorized and not overclaimed as automatic ref
+  stripping; that cgroups are lifecycle control rather than a sandbox;
+  that raw evidence is owner-only/local and sanitized bounded evidence is
+  model-facing; that verification may execute only `VerificationPolicyV1`
+  selections; and that cleanup is manual and proof-bound, with no
+  automatic GC.
+
 ## [3.2.1] - 2026-08-21
 
 Optional Ox Alpha support for DSH without changing the default Muse route or

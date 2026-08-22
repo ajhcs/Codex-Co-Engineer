@@ -1,5 +1,24 @@
 # Future Work
 
+## R1 bounded-run architecture (3.3.0)
+
+Status: specified, not implemented.
+
+Priority: high
+Component: Codex-Co-Engineer
+Last updated: 2026-08-21
+
+The accepted architecture for R1 is
+[ADR 0001](adr/0001-r1-bounded-run-architecture.md). It defines a 3.3.0 run
+as 1–8 independent assignments against one immutable repository/base
+identity, with deterministic explicit/profile resolution, no direct mode on
+run submissions, disjoint writers, read-only verification, no post-dispatch
+fallback or replay, and Codex-only final acceptance.
+
+This worktree does not implement the run runtime, candidate composition,
+or `AttentionBatchV1`. Gate A remains the functional release authority;
+Gate B context-efficiency and Gate C credit economics stay advisory.
+
 ## Durable, low-token agent completion waits
 
 Status: implemented in 3.1.0 with remaining real-host MCP pending-call
