@@ -105,10 +105,14 @@ the repository's normal access policy.
     "provider": "dsh",
     "model": "stealth/ox-alpha",
     "role": "implement",
-    "expected_duration_ms": 1200000
+    "expected_duration_ms": 1200000,
+    "default": true
   }
 }
 ```
+
+The optional `default: true` flag is prerequisite metadata only; omitting it
+is ordinary and confers no resolution behavior by itself.
 
 ### Field validation
 
@@ -129,6 +133,11 @@ run-manifest runtime module.
   deprecated informational compatibility data only.
 - `role` is `review`, `implement`, or `verify` (read-only verification).
 - `expected_duration_ms` is an integer from 1,000 to 86,400,000.
+- `default` is optional prerequisite metadata. When present it must be the
+  primitive boolean `true` exactly; absence is ordinary. The flag marks an
+  owner-authored candidate default for later run-resolution work and carries
+  no authority in this release: lookup stays exact-name, a profile named
+  `default` has no authority by name, and selection stays a resolver concern.
 - `policy` is data-only selection policy. Today it may contain exactly
   `pre_dispatch_provider_preference`: one to four unique known provider
   names in the owner's deterministic pre-dispatch preference order.

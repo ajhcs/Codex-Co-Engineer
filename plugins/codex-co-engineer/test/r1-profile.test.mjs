@@ -492,6 +492,71 @@ test('policy data stays bounded, non-executable, and deterministic', async () =>
   }
 });
 
+test('the optional default flag is primitive-true metadata with no authority', async () => {
+  const { options, repositoryPath, cleanup } = await makeWorkspace();
+  try {
+    const catalogPath = path.join(repositoryPath, '.codex', 'co-engineer-profiles.json');
+    const write = (catalog) => writeJson(catalogPath, catalog);
+
+    // Absence is ordinary and leaves the canonical definition untouched.
+    await write({ plain: validDefinition() });
+    const loaded = await loadProfiles(options);
+    assert.equal(findProfile(loaded, 'plain').definition.default, undefined);
+    assert.ok(!Object.hasOwn(findProfile(loaded, 'plain').definition, 'default'));
+
+    // Primitive true exactly is accepted and bound into the validated data.
+    await write({ flagged: { ...validDefinition(), default: true } });
+    const flagged = findProfile(await loadProfiles(options), 'flagged');
+    assert.equal(flagged.definition.default, true);
+    assert.equal(
+      flagged.digest,
+      profileProvenanceDigest({ name: 'flagged', definition: { ...validDefinition(), default: true } }),
+      'the digest must bind the authored flag',
+    );
+    assert.notEqual(
+      flagged.digest,
+      profileProvenanceDigest({ name: 'flagged', definition: validDefinition() }),
+      'flagged and unflagged data must not share one digest',
+    );
+
+    // A profile named "default" has no authority by name: it loads as an
+    // ordinary record resolvable only by exact name.
+    await write({
+      default: { ...validDefinition(), default: true },
+      other: validDefinition(),
+    });
+    const namedCatalog = await loadProfiles(options);
+    assert.equal(findProfile(namedCatalog, 'default').definition.default, true);
+    assert.equal(findProfile(namedCatalog, 'other').definition.default, undefined);
+    assert.equal(findProfile(namedCatalog, 'unrelated'), undefined,
+      'no implicit resolution may follow from the name or the flag');
+
+    const cases = [
+      [false, 'boolean false'],
+      [null, 'null'],
+      [0, 'zero'],
+      ['true', 'string true'],
+      [{}, 'object'],
+      [[], 'array'],
+    ];
+    for (const [value, label] of cases) {
+      await write({ probe: { ...validDefinition(), default: value } });
+      await assert.rejects(() => loadProfiles(options), (error) => error.code === 'invalid_profile_default', label);
+    }
+
+    // Closed schema around the new field: only the exact lowercase key in the
+    // top-level profile vocabulary is accepted.
+    await write({ probe: { ...validDefinition(), Default: true } });
+    await assert.rejects(() => loadProfiles(options), (error) => error.code === 'unknown_profile_field', 'capitalized key');
+    await write({ probe: { ...validDefinition(), defaults: true } });
+    await assert.rejects(() => loadProfiles(options), (error) => error.code === 'unknown_profile_field', 'plural key');
+    await write({ probe: { schema: PROFILE_SCHEMA, policy: { default: true }, provider: 'dsh' } });
+    await assert.rejects(() => loadProfiles(options), (error) => error.code === 'unknown_profile_policy_field', 'inside policy');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('unknown keys are rejected and dangerous values never survive validation', async () => {
   const { options, repositoryPath, cleanup } = await makeWorkspace();
   try {
