@@ -10,6 +10,7 @@ import {
   MAX_PROFILE_CATALOG_BYTES,
   MAX_PROFILE_STRUCTURE_NODES,
   PROFILE_SCHEMA,
+  assertNoDuplicateCatalogKeys,
   canonicalProfileJson,
   findProfile,
   loadProfiles,
@@ -280,6 +281,27 @@ test('catalog files must be regular, bounded, and structurally sound', async () 
   } finally {
     await base.cleanup();
   }
+});
+
+test('duplicate-key scanning has a typed non-reflective public boundary', () => {
+  for (const value of [undefined, null, 0, false, {}, []]) {
+    assert.throws(
+      () => assertNoDuplicateCatalogKeys(value),
+      (error) => error.code === 'invalid_profile_catalog_json'
+        && error.message === 'Profile catalog JSON must be text.',
+      `non-text value ${String(value)} must fail with a typed error`,
+    );
+  }
+
+  const hostileKey = 'secret-marker\nforged-log-line';
+  const encodedKey = JSON.stringify(hostileKey);
+  assert.throws(
+    () => assertNoDuplicateCatalogKeys(`{${encodedKey}:1,${encodedKey}:2}`),
+    (error) => error.code === 'duplicate_profile_key'
+      && !error.message.includes('secret-marker')
+      && !error.message.includes('\n'),
+    'duplicate-key errors must not reflect attacker-controlled key text',
+  );
 });
 
 test('catalog special files are rejected without blocking before fstat', {

@@ -252,6 +252,9 @@ export function isValidProfileName(value) {
 // silently keeps the last duplicate, which could quietly change selection
 // data such as the provider named by a profile.
 export function assertNoDuplicateCatalogKeys(text) {
+  if (typeof text !== 'string') {
+    fail('invalid_profile_catalog_json', 'Profile catalog JSON must be text.');
+  }
   const scopes = [{ object: false, keys: new Set() }];
   let inString = false;
   let escaped = false;
@@ -275,7 +278,7 @@ export function assertNoDuplicateCatalogKeys(text) {
               fail('invalid_profile_catalog_json', 'Profile catalog contains an invalid key string.');
             }
             if (scope.keys.has(key)) {
-              fail('duplicate_profile_key', `Profile catalog defines "${key}" more than once.`);
+              fail('duplicate_profile_key', 'Profile catalog defines the same object key more than once.');
             }
             scope.keys.add(key);
           }
