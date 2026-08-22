@@ -18,9 +18,10 @@ import { MAX_EXPECTED_DURATION_MS, MIN_DURATION_MS } from './contract.mjs';
 // Every exported direct-JS surface consumes static data only: live Proxy
 // views are rejected before a single handler trap fires, revoked Proxy views
 // are rejected before Array.isArray or any other target-inspecting builtin
-// can raise a native TypeError, and all nested data is read through one
-// descriptor snapshot per container so no view can hide keys, forge
-// descriptors, or answer two observations differently.
+// can raise a native TypeError. Nested profile data is read through one
+// descriptor snapshot per container; the two optional environment trust-path
+// values are each read once from their own descriptor. No accepted view can
+// hide keys, forge active descriptors, or answer two observations differently.
 
 export const PROFILE_SCHEMA = 'codex-co-engineer.profile.v1';
 export const PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
@@ -160,19 +161,33 @@ function requireNormalizedAbsolute(value, code, label) {
   return value;
 }
 
-// Environment values are read from one descriptor snapshot per key, never by
-// property access, so an accessor-bearing or hostile view cannot execute or
-// answer differently between reads.
+// Environment values are read from one own descriptor per consumed key, never
+// by property access or a whole-object descriptor expansion. This keeps the
+// work constant even when the ambient environment contains many unrelated
+// variables, while accessors and inherited trust-path values still fail
+// closed. Node's process.env has a host-provided exotic prototype and is the
+// sole non-plain object accepted here.
 function readEnvironment(env, label) {
   assertStaticData(env, `The ${label} environment`);
-  const descriptors = snapshotOwnDescriptors(env, 'invalid_profile_environment',
-    `The ${label} environment`);
-  if (Reflect.ownKeys(descriptors).some((key) => typeof key !== 'string')) {
-    fail('invalid_profile_environment', `The ${label} environment must define string keys only.`);
+  let prototype;
+  try {
+    prototype = Object.getPrototypeOf(env);
+  } catch {
+    fail('invalid_profile_environment', `The ${label} environment could not be inspected safely.`);
+  }
+  if (env !== process.env && prototype !== Object.prototype && prototype !== null) {
+    fail('invalid_profile_environment',
+      `The ${label} environment must be a plain data object.`);
   }
   const read = (key) => {
-    if (!Object.hasOwn(descriptors, key)) return undefined;
-    const descriptor = descriptors[key];
+    let descriptor;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(env, key);
+    } catch {
+      fail('invalid_profile_environment',
+        `The ${label} environment could not be inspected safely.`);
+    }
+    if (descriptor === undefined) return undefined;
     if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
       fail('invalid_profile_environment',
         `The ${label} environment must expose ${key} as a static data value.`);
@@ -206,13 +221,14 @@ export function profileRoots(options = {}) {
     'The profile root arguments');
   const argument = (key) => (Object.hasOwn(arguments_, key) ? arguments_[key].value : undefined);
   const envArgument = argument('env');
-  const environment = readEnvironment(envArgument === undefined ? process.env : envArgument,
-    'profile root');
   const repositoryPath = argument('repositoryPath');
   const ownerConfigDir = argument('ownerConfigDir');
   const repo = requireNormalizedAbsolute(repositoryPath, 'invalid_profile_repository_path', 'repositoryPath');
   const ownerDir = ownerConfigDir === undefined
-    ? defaultOwnerConfigDir(environment)
+    ? defaultOwnerConfigDir(readEnvironment(
+      envArgument === undefined ? process.env : envArgument,
+      'profile root',
+    ))
     : requireNormalizedAbsolute(ownerConfigDir, 'invalid_profile_owner_config_dir', 'ownerConfigDir');
   return Object.freeze({
     project: Object.freeze({
@@ -674,12 +690,43 @@ export function validateProfileDefinition(name, raw) {
   return deepFreezeData(canonical);
 }
 
-function canonicalProfileJsonInner(value, seen, depth) {
+function appendCanonicalToken(state, token) {
+  const tokenBytes = Buffer.byteLength(token, 'utf8');
+  if (state.bytes + tokenBytes > MAX_PROFILE_CATALOG_BYTES) {
+    fail('invalid_profile_canonical_data',
+      `Canonical profile data exceeds ${MAX_PROFILE_CATALOG_BYTES} encoded bytes.`);
+  }
+  state.bytes += tokenBytes;
+  return token;
+}
+
+function canonicalStringToken(value, state) {
+  // JSON escaping can expand one input code point into six encoded bytes.
+  // Reject an already-over-budget raw string before asking JSON.stringify to
+  // allocate that expansion, then charge the exact encoded token.
+  if (Buffer.byteLength(value, 'utf8') > MAX_PROFILE_CATALOG_BYTES) {
+    fail('invalid_profile_canonical_data',
+      `Canonical profile data exceeds ${MAX_PROFILE_CATALOG_BYTES} encoded bytes.`);
+  }
+  return appendCanonicalToken(state, JSON.stringify(value));
+}
+
+function canonicalProfileJsonInner(value, seen, depth, state) {
   if (depth > MAX_PROFILE_STRUCTURE_DEPTH) {
     fail('invalid_profile_canonical_data', 'Canonical profile data exceeds the bounded nesting depth.');
   }
-  if (typeof value === 'string' || typeof value === 'boolean' || value === null) return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  state.nodes += 1;
+  if (state.nodes > MAX_PROFILE_STRUCTURE_NODES) {
+    fail('invalid_profile_canonical_data',
+      `Canonical profile data exceeds ${MAX_PROFILE_STRUCTURE_NODES} structure nodes.`);
+  }
+  if (typeof value === 'string') return canonicalStringToken(value, state);
+  if (typeof value === 'boolean' || value === null) {
+    return appendCanonicalToken(state, JSON.stringify(value));
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return appendCanonicalToken(state, JSON.stringify(value));
+  }
   if (typeof value !== 'object') {
     fail('invalid_profile_canonical_data', 'Canonical profile data contains an unsupported value.');
   }
@@ -688,16 +735,31 @@ function canonicalProfileJsonInner(value, seen, depth) {
   seen.add(value);
   if (Array.isArray(value)) {
     const values = dataArrayValues(value, 'invalid_profile_canonical_data', 'Canonical profile array');
-    return `[${values.map((entry) => canonicalProfileJsonInner(entry, seen, depth + 1)).join(',')}]`;
+    const output = [appendCanonicalToken(state, '[')];
+    for (let index = 0; index < values.length; index += 1) {
+      if (index > 0) output.push(appendCanonicalToken(state, ','));
+      output.push(canonicalProfileJsonInner(values[index], seen, depth + 1, state));
+    }
+    output.push(appendCanonicalToken(state, ']'));
+    return output.join('');
   }
   const descriptors = dataObjectDescriptors(value, 'invalid_profile_canonical_data', 'Canonical profile object');
   const keys = Object.keys(descriptors).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalProfileJsonInner(descriptors[key].value, seen, depth + 1)}`).join(',')}}`;
+  const output = [appendCanonicalToken(state, '{')];
+  for (let index = 0; index < keys.length; index += 1) {
+    if (index > 0) output.push(appendCanonicalToken(state, ','));
+    const key = keys[index];
+    output.push(canonicalStringToken(key, state));
+    output.push(appendCanonicalToken(state, ':'));
+    output.push(canonicalProfileJsonInner(descriptors[key].value, seen, depth + 1, state));
+  }
+  output.push(appendCanonicalToken(state, '}'));
+  return output.join('');
 }
 
 export function canonicalProfileJson(value) {
   assertStaticData(value, 'Canonical profile data');
-  return canonicalProfileJsonInner(value, new Set(), 0);
+  return canonicalProfileJsonInner(value, new Set(), 0, { nodes: 0, bytes: 0 });
 }
 
 // Stable provenance digest over validated canonical data. Scope and source
@@ -811,9 +873,6 @@ export function findProfile(loaded, name) {
   if (loaded === undefined || loaded === null || !isPlainObject(loaded)) {
     fail('invalid_profile_load_result', 'loadProfiles() result is required.');
   }
-  if (!isValidProfileName(name)) {
-    fail('invalid_profile_name', `Profile name must match ${PROFILE_NAME_PATTERN.source}.`);
-  }
   const descriptors = dataObjectDescriptors(loaded, 'invalid_profile_load_result',
     'The loadProfiles() result');
   if (!Object.hasOwn(descriptors, 'profiles')) {
@@ -821,6 +880,9 @@ export function findProfile(loaded, name) {
   }
   const list = dataArrayValues(descriptors.profiles.value, 'invalid_profile_load_result',
     'The loadProfiles() profile list', MAX_LOADED_PROFILES);
+  if (!isValidProfileName(name)) {
+    fail('invalid_profile_name', `Profile name must match ${PROFILE_NAME_PATTERN.source}.`);
+  }
   for (const record of list) {
     assertStaticData(record, 'The loaded profile record');
     const recordDescriptors = dataObjectDescriptors(record, 'invalid_profile_load_result',
@@ -829,10 +891,35 @@ export function findProfile(loaded, name) {
       fail('invalid_profile_load_result', 'The loaded profile record is missing its name.');
     }
     const recordName = recordDescriptors.name.value;
-    if (typeof recordName !== 'string') {
-      fail('invalid_profile_load_result', 'The loaded profile record name must be a string.');
+    if (!isValidProfileName(recordName)) {
+      fail('invalid_profile_load_result', 'The loaded profile record name is invalid.');
     }
-    if (recordName === name) return record;
+    if (recordName === name) {
+      const expectedFields = ['name', 'scope', 'source', 'definition', 'digest'];
+      const recordFields = Object.keys(recordDescriptors);
+      if (recordFields.length !== expectedFields.length
+        || expectedFields.some((field) => !Object.hasOwn(recordDescriptors, field))) {
+        fail('invalid_profile_load_result',
+          'The matching loaded profile record must contain exactly the loadProfiles() record fields.');
+      }
+      const scope = recordDescriptors.scope.value;
+      if (!SCOPES.includes(scope)) {
+        fail('invalid_profile_load_result', 'The matching loaded profile record scope is invalid.');
+      }
+      const source = requireNormalizedAbsolute(recordDescriptors.source.value,
+        'invalid_profile_load_result', 'loaded profile source');
+      const definition = validateProfileDefinition(recordName, recordDescriptors.definition.value);
+      const digest = profileProvenanceDigest({ name: recordName, definition });
+      if (recordDescriptors.digest.value !== digest) {
+        fail('invalid_profile_load_result',
+          'The matching loaded profile record digest does not bind its validated definition.');
+      }
+      // Never return caller-owned record or definition identity. The
+      // validator-created definition and this closed frozen record are safe
+      // for downstream consumers even if the supplied load view is mutated
+      // immediately after lookup.
+      return Object.freeze({ name: recordName, scope, source, definition, digest });
+    }
   }
   return undefined;
 }

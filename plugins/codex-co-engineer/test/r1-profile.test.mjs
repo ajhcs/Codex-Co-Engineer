@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   MAX_PROFILES_PER_CATALOG,
   MAX_PROFILE_CATALOG_BYTES,
+  MAX_PROFILE_STRUCTURE_NODES,
   PROFILE_SCHEMA,
   canonicalProfileJson,
   findProfile,
@@ -189,6 +190,45 @@ test('provenance digest is stable over canonical data', async () => {
   const parsed = JSON.parse(canonicalProfileJson({ z: [1, { b: 2, a: 1 }], a: 1 }));
   assert.deepEqual(parsed, { a: 1, z: [1, { a: 1, b: 2 }] });
   assert.equal(canonicalProfileJson({ b: 1, a: 2 }), '{"a":2,"b":1}');
+});
+
+test('canonical profile JSON enforces exact total node and encoded-byte budgets', () => {
+  const exactNodeTree = Array.from(
+    { length: 8 },
+    (_unused, index) => Array.from({ length: index === 7 ? 62 : 63 }, () => null),
+  );
+  assert.equal(1 + exactNodeTree.length
+    + exactNodeTree.reduce((total, entries) => total + entries.length, 0),
+  MAX_PROFILE_STRUCTURE_NODES);
+  assert.doesNotThrow(() => canonicalProfileJson(exactNodeTree));
+
+  exactNodeTree[7].push(null);
+  assert.throws(
+    () => canonicalProfileJson(exactNodeTree),
+    (error) => error.code === 'invalid_profile_canonical_data',
+    'the 513th total node must fail even though every individual array is bounded',
+  );
+  assert.throws(
+    () => canonicalProfileJson(Array.from(
+      { length: 64 },
+      () => Array.from({ length: 64 }, () => null),
+    )),
+    (error) => error.code === 'invalid_profile_canonical_data',
+    'a 4,161-node bounded-fanout graph must not evade the aggregate node cap',
+  );
+
+  const exactByteText = canonicalProfileJson('a'.repeat(MAX_PROFILE_CATALOG_BYTES - 2));
+  assert.equal(Buffer.byteLength(exactByteText, 'utf8'), MAX_PROFILE_CATALOG_BYTES);
+  assert.throws(
+    () => canonicalProfileJson('a'.repeat(MAX_PROFILE_CATALOG_BYTES - 1)),
+    (error) => error.code === 'invalid_profile_canonical_data',
+    'encoded output one byte over the catalog budget must fail',
+  );
+  assert.throws(
+    () => canonicalProfileJson('\u0000'.repeat(12_000)),
+    (error) => error.code === 'invalid_profile_canonical_data',
+    'JSON escaping expansion is charged against the encoded output budget',
+  );
 });
 
 test('catalog files must be regular, bounded, and structurally sound', async () => {
@@ -524,17 +564,34 @@ test('findProfile and profileRoots consume arguments as one static snapshot', as
   );
   assert.equal(getterReads, 0);
 
-  // A well-formed static result still resolves by exact name and preserves
-  // record identity.
-  const record = Object.freeze({
+  // A well-formed static result resolves by exact name into a detached,
+  // validator-owned frozen record rather than preserving attacker-controlled
+  // record or definition identity.
+  const definition = validDefinition();
+  const record = {
     name: 'probe',
     scope: 'project',
-    definition: Object.freeze(validDefinition()),
-    digest: `sha256:${'0'.repeat(64)}`,
-  });
+    source: '/repo/.codex/co-engineer-profiles.json',
+    definition,
+    digest: profileProvenanceDigest({ name: 'probe', definition }),
+  };
   const loaded = Object.freeze({ profiles: Object.freeze([record]), shadowed: [], sources: [] });
-  assert.equal(findProfile(loaded, 'probe'), record);
+  const found = findProfile(loaded, 'probe');
+  assert.notEqual(found, record);
+  assert.notEqual(found.definition, definition);
+  assert.deepEqual(found, record);
+  assert.ok(Object.isFrozen(found));
+  assert.ok(Object.isFrozen(found.definition));
+  record.scope = 'owner';
+  definition.role = 'review';
+  assert.equal(found.scope, 'project');
+  assert.equal(found.definition.role, 'implement');
   assert.equal(findProfile(loaded, 'missing'), undefined);
+  assert.throws(
+    () => findProfile({}, 'Not-A-Name'),
+    (error) => error.code === 'invalid_profile_load_result',
+    'malformed load results retain precedence over malformed lookup names',
+  );
 
   // Malformed records fail closed instead of returning partial matches.
   for (const badList of [[{ provider: 'dsh' }], [{ name: 7 }], new Array(8)]) {
@@ -544,6 +601,17 @@ test('findProfile and profileRoots consume arguments as one static snapshot', as
       `malformed list ${JSON.stringify(badList)} must be rejected`,
     );
   }
+  assert.throws(
+    () => findProfile({ profiles: [{
+      name: 'probe',
+      scope: 'project',
+      source: '/repo/.codex/co-engineer-profiles.json',
+      definition: validDefinition(),
+      digest: `sha256:${'0'.repeat(64)}`,
+    }] }, 'probe'),
+    (error) => error.code === 'invalid_profile_load_result',
+    'matching records with an unbound digest must fail closed',
+  );
 
   // Argument objects are inspected as snapshots, never dereferenced.
   let optionReads = 0;
@@ -586,5 +654,55 @@ test('environment views are snapshotted per key without changing fallback order'
     path.join(homedir(), '.config', 'codex-co-engineer', 'profiles.json'));
   assert.equal(profileRoots({ repositoryPath: '/repo', env: { XDG_CONFIG_HOME: '/xdg' } }).owner.file,
     path.join('/xdg', 'codex-co-engineer', 'profiles.json'));
+  assert.throws(
+    () => profileRoots({
+      repositoryPath: '/repo',
+      env: Object.create({ HOME: '/inherited-home' }),
+    }),
+    (error) => error.code === 'invalid_profile_environment',
+    'prototype-inherited trust-path values must fail instead of silently changing roots',
+  );
+
+  let unusedReads = 0;
+  const wideEnvironment = Object.fromEntries(Array.from(
+    { length: 4096 },
+    (_unused, index) => [`IGNORED_${index}`, String(index)],
+  ));
+  Object.defineProperty(wideEnvironment, 'UNUSED_ACCESSOR', {
+    enumerable: true,
+    get() {
+      unusedReads += 1;
+      return '/unused';
+    },
+  });
+  wideEnvironment.HOME = '/wide-home';
+  assert.equal(
+    profileRoots({ repositoryPath: '/repo', env: wideEnvironment }).owner.file,
+    path.join('/wide-home', '.config', 'codex-co-engineer', 'profiles.json'),
+    'only the two consumed environment descriptors are inspected',
+  );
+  assert.equal(unusedReads, 0);
+
+  let unusedProxyTraps = 0;
+  const unusedEnvironment = new Proxy({}, {
+    get() {
+      unusedProxyTraps += 1;
+      return undefined;
+    },
+    ownKeys() {
+      unusedProxyTraps += 1;
+      return [];
+    },
+  });
+  assert.equal(
+    profileRoots({
+      repositoryPath: '/repo',
+      ownerConfigDir: '/explicit-owner',
+      env: unusedEnvironment,
+    }).owner.file,
+    path.join('/explicit-owner', 'codex-co-engineer', 'profiles.json'),
+    'an explicitly selected owner root does not inspect an unused environment',
+  );
+  assert.equal(unusedProxyTraps, 0);
   assert.equal(envReads, 0, 'environment fallback must not rely on property access');
 });

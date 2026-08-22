@@ -494,11 +494,35 @@ test('throwing-trap and revoked Proxies fail typed, and never reach native TypeE
   })), 'revoked nested array');
   rejectTyped(() => findProfile(Object.freeze({ profiles: revokedArray.proxy }), 'any'),
     'revoked profile list');
-  // Lookup consumes only the snapshotted name of each static record; fields it
-  // does not read (definition was validated at load time, not lookup time) are
-  // returned untouched rather than traversed.
-  const fabricatedRecord = Object.freeze({ name: 'any', definition: revokedObject.proxy });
-  assert.equal(findProfile({ profiles: [fabricatedRecord] }, 'any'), fabricatedRecord);
+  // Matching lookup records are revalidated and detached; a caller cannot
+  // smuggle a revoked or live nested definition through a fabricated
+  // loadProfiles-shaped record and trigger it downstream.
+  const fabricatedRecord = Object.freeze({
+    name: 'any',
+    scope: 'project',
+    source: '/repo/.codex/co-engineer-profiles.json',
+    definition: revokedObject.proxy,
+    digest: `sha256:${'0'.repeat(64)}`,
+  });
+  rejectTyped(() => findProfile({ profiles: [fabricatedRecord] }, 'any'),
+    'revoked matching record definition');
+
+  let nestedDefinitionTraps = 0;
+  const trappedDefinition = new Proxy(withSchema({}), {
+    getPrototypeOf() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+    ownKeys() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+    getOwnPropertyDescriptor() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+    get() { nestedDefinitionTraps += 1; throw new Error('trap-boom'); },
+  });
+  rejectTyped(() => findProfile({ profiles: [{
+    name: 'any',
+    scope: 'project',
+    source: '/repo/.codex/co-engineer-profiles.json',
+    definition: trappedDefinition,
+    digest: `sha256:${'0'.repeat(64)}`,
+  }] }, 'any'), 'live matching record definition');
+  assert.equal(nestedDefinitionTraps, 0,
+    'nested definition rejection must occur before a single handler trap fires');
   rejectTyped(() => profileRoots((() => {
     const options = Proxy.revocable({ repositoryPath: '/repo' }, {});
     options.revoke();
@@ -658,6 +682,14 @@ test('findProfile consumes load results as one bounded static snapshot', async (
     // At the bound, lookup still works on static records.
     const atBound = Array.from({ length: MAX_PROFILES_PER_CATALOG * 2 },
       (_unused, index) => ({ name: `filler-${index}` }));
+    const terminalDefinition = withSchema({ role: 'review' });
+    atBound[127] = {
+      name: 'filler-127',
+      scope: 'project',
+      source: '/repo/.codex/co-engineer-profiles.json',
+      definition: terminalDefinition,
+      digest: profileProvenanceDigest({ name: 'filler-127', definition: terminalDefinition }),
+    };
     assert.equal(findProfile({ profiles: atBound }, 'missing'), undefined);
     assert.equal(findProfile({ profiles: atBound }, 'filler-127').name, 'filler-127');
   } finally {
