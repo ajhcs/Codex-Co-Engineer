@@ -1049,11 +1049,17 @@ async function readSanitizedRangePrepared(root, snapshot, offset, maxBytes) {
       failStore('artifact_digest_mismatch', 'content',
         'Stored content does not hash to the declared SHA-256 digest.');
     }
-    const after = await opened.handle.stat();
-    if (!sameIdentity(before, after)
-      || Number(after.size) !== Number(before.size)
-      || Number(after.nlink) !== Number(before.nlink)
-      || Number(after.mode) !== Number(before.mode)) {
+    const afterHandle = await opened.handle.stat();
+    const afterPath = await lstat(locations.contentTarget).catch(() => undefined);
+    if (afterPath === undefined
+      || !sameIdentity(before, afterHandle)
+      || !sameIdentity(before, afterPath)
+      || Number(afterHandle.size) !== Number(before.size)
+      || Number(afterPath.size) !== Number(before.size)
+      || Number(afterHandle.nlink) !== Number(before.nlink)
+      || Number(afterPath.nlink) !== 1
+      || Number(afterHandle.mode) !== Number(before.mode)
+      || Number(afterPath.mode) !== Number(before.mode)) {
       failStore('artifact_torn_publication', 'content',
         'The stored document changed while it was read.');
     }
