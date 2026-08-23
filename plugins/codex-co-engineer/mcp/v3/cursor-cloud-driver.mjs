@@ -27,6 +27,12 @@
 //   - same-session reply is unsupported_unresolved_attention, never a new run;
 //   - result/event/error data is bounded and content-free; hostile JSON,
 //     proxies, accessors, caps, secrets, and prompt text fail closed.
+//   - post-transport receipt validation is quarantined locally: thrown
+//     diagnostics keep only a closed local code and a fixed operation path,
+//     message, and name. Provider-authored identity values, unknown keys,
+//     detail pairs, raw errors, stacks, causes, and expected canonical
+//     path/model/branch/run/request values never appear on public errors,
+//     results, or evidence. Caller-request validation is not collapsed.
 //
 // Capability posture is honest: remote managed workspace starting at a pinned
 // pushed SHA, exact-model selection only when attested, merge none, create PR
@@ -67,6 +73,7 @@ import {
 import { DIGEST_HEX_LENGTH, IDENTITY_LABELS } from './identity.mjs';
 import {
   SHA40_PATTERN,
+  RunContractV1Error,
   assertAllowedKeys,
   assertBoundedText,
   assertDenseJsonArray,
@@ -108,6 +115,7 @@ export const MAX_CURSOR_CLOUD_EVENT_PAGE = 32;
 export const MAX_CURSOR_CLOUD_EVENT_BYTES = 32 * 1024;
 export const MAX_CURSOR_CLOUD_EVENT_COUNT = 1_000_000;
 export const MAX_CURSOR_CLOUD_TIMING_MS = 86_400_000;
+export const MAX_CURSOR_CLOUD_CURSOR_BYTES = 16;
 export const MAX_CURSOR_CLOUD_QUESTION_ID_BYTES = 80;
 
 export const CURSOR_CLOUD_OBSERVE_STATUSES = capturedFreeze([
@@ -181,7 +189,7 @@ const OBSERVE_RECEIPT_KEYS = capturedFreeze([
   'event_count',
 ]);
 const CANCEL_RECEIPT_KEYS = capturedFreeze([
-  'outcome', 'archived', 'agent_id', 'provider_run_id', 'request_id', 'provider',
+  'outcome', 'archived', 'agent_id', 'provider_run_id', 'request_id', 'branch', 'provider',
   'model', 'run_id', 'assignment_id', 'lane_index', 'base_sha',
   'child_envelope_digest', 'starting_sha', 'repository_identity',
 ]);
@@ -207,6 +215,58 @@ const CONTENT_FORBIDDEN_KEYS = capturedFreeze([
 ]);
 const POST_INTENT_ERROR_CODES = capturedFreeze([
   'send_ack_missing', 'transport_exception', 'transport_lost', 'transport_timeout',
+]);
+const TRANSPORT_COLLAPSE_CODES = capturedFreeze([
+  'send_ack_missing', 'transport_exception', 'transport_lost', 'transport_timeout',
+]);
+const TRANSPORT_COLLAPSE_MESSAGES = capturedFreeze({
+  send_ack_missing: 'cursor cloud send acknowledgement missing',
+  transport_exception: 'cursor cloud transport failed',
+  transport_lost: 'cursor cloud transport lost',
+  transport_timeout: 'cursor cloud transport timed out',
+});
+const CLOSED_RECEIPT_ERROR_CODES = capturedFreeze([
+  'accessor_property_denied', 'aliased_reference_denied', 'content_key_denied',
+  'credential_content_denied', 'dependency_not_allowed', 'detail_pair_denied',
+  'direct_mode_rejected', 'duplicate_identity', 'executable_content_denied',
+  'exotic_prototype_denied', 'invalid_exact_model_selection', 'invalid_format',
+  'invalid_json_type', 'invalid_json_value', 'invalid_object', 'invalid_type',
+  'malformed_receipt', 'merge_authority_denied', 'own_undefined_denied',
+  'proxy_denied', 'replay_or_fallback_denied', 'repository_credentials',
+  'stale_identity_denied', 'unknown_key', 'value_depth_exceeded',
+]);
+const CLOSED_RECEIPT_PATHS = capturedFreeze({
+  preflight: 'cursor_cloud_transport.preflight',
+  create: 'cursor_cloud_transport.create',
+  send: 'cursor_cloud_transport.send',
+  observe: 'cursor_cloud_transport.observe',
+  cancel: 'cursor_cloud_transport.cancel',
+  reattach: 'cursor_cloud_transport.reattach',
+});
+const CLOSED_RECEIPT_MESSAGES = capturedFreeze({
+  preflight: 'Cursor Cloud preflight receipt failed closed validation; transport detail is omitted.',
+  create: 'Cursor Cloud create receipt failed closed validation; transport detail is omitted.',
+  send: 'Cursor Cloud send receipt failed closed validation; transport detail is omitted.',
+  observe: 'Cursor Cloud observe receipt failed closed validation; transport detail is omitted.',
+  cancel: 'Cursor Cloud cancel receipt failed closed validation; transport detail is omitted.',
+  reattach: 'Cursor Cloud reattach receipt failed closed validation; transport detail is omitted.',
+});
+const CLOSED_RECEIPT_VALIDATION_MESSAGES = capturedFreeze({
+  unknown_key: 'contains a key outside the closed Cursor Cloud receipt vocabulary.',
+  replay_or_fallback_denied: 'must not enable replay or fallback.',
+  credential_content_denied: 'must not carry credential material.',
+  merge_authority_denied: 'must not enable merge or create-PR authority.',
+  executable_content_denied: 'must not carry executable content.',
+  dependency_not_allowed: 'must not carry dependency edges.',
+  direct_mode_rejected: 'must not select direct workspace mode.',
+  content_key_denied: 'must not carry forbidden content keys.',
+  malformed_receipt: 'must be a plain closed Cursor Cloud receipt.',
+  invalid_type: 'must be a plain closed Cursor Cloud receipt.',
+  proxy_denied: 'must be concrete JSON data, not a Proxy.',
+});
+const CURSOR_CLOUD_PROGRESS_STATUSES = capturedFreeze([
+  ...CURSOR_CLOUD_OBSERVE_STATUSES,
+  'truncated',
 ]);
 const TERMINAL_OBSERVE_STATUSES = capturedFreeze(['completed', 'failed', 'cancelled']);
 const TERMINAL_CANCEL_OUTCOMES = capturedFreeze(['cancel_confirmed', 'already_terminal']);
@@ -403,24 +463,155 @@ function identityFromEnvelope(envelope, childEnvelopeDigest) {
   });
 }
 
-function assertReceiptIdentity(receipt, identity, path) {
+function assertRequiredFalse(receipt, key, path, code, message) {
+  if (!hasOwn(receipt, key) || optOwn(receipt, key) !== false) {
+    fail(code, `${path}.${key}`, message);
+  }
+}
+
+function assertCursorToken(value, path) {
+  if (typeof value !== 'string') {
+    fail('invalid_type', path, `${path} must be a cursor string.`);
+  }
+  if (capturedUtf8ByteLength(value) > MAX_CURSOR_CLOUD_CURSOR_BYTES) {
+    fail('invalid_format', path, `${path} exceeds the cursor byte cap.`);
+  }
+  return assertPatternedId(value, CURSOR_CLOUD_CURSOR_PATTERN, path, 'event cursor');
+}
+
+function assertBoundedCount(value, path, max) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > max) {
+    fail('invalid_format', path, `${path} must be a bounded non-negative integer.`);
+  }
+  return value;
+}
+
+function assertBoundRepositoryAndSha(receipt, identity, boundRepository, path) {
+  if (!hasOwn(receipt, 'starting_sha')) {
+    fail('malformed_receipt', `${path}.starting_sha`,
+      `${path}.starting_sha must echo the immutable pinned starting SHA.`);
+  }
+  const startingSha = assertCommitSha(optOwn(receipt, 'starting_sha'), `${path}.starting_sha`);
+  if (startingSha !== identity.starting_sha) {
+    fail('stale_identity_denied', `${path}.starting_sha`,
+      'Transport starting SHA does not match the immutable pinned commit.');
+  }
+  if (!hasOwn(receipt, 'repository_identity')) {
+    fail('malformed_receipt', `${path}.repository_identity`,
+      `${path}.repository_identity must echo the bound provider repository identity.`);
+  }
+  const repositoryIdentity = assertRepositoryIdentity(
+    optOwn(receipt, 'repository_identity'), `${path}.repository_identity`,
+  );
+  if (boundRepository !== undefined && repositoryIdentity !== boundRepository) {
+    fail('stale_identity_denied', `${path}.repository_identity`,
+      'Transport repository identity drifted from the bound provider repository.');
+  }
+  return repositoryIdentity;
+}
+
+function assertReceiptIdentity(receipt, identity, path, boundRepository) {
   for (const key of IDENTITY_ECHO_KEYS) {
     if (!hasOwn(receipt, key)) {
-      fail('malformed_receipt', `${path}.${key}`,
-        `${path}.${key} must echo the exact Cursor Cloud lane identity.`);
+      fail('malformed_receipt', path,
+        `${path} must echo the exact Cursor Cloud lane identity.`);
     }
     const actual = optOwn(receipt, key);
     const value = identity[key];
     const equal = key === 'child_envelope_digest' ? digestsEqual(actual, value) : actual === value;
     if (!equal) {
-      fail('stale_identity_denied', `${path}.${key}`,
-        `${path}.${key} must echo ${truncateForMessage(value)}; received ${truncateForMessage(actual)}.`);
+      fail('stale_identity_denied', path,
+        `${path} identity does not match the bound Cursor Cloud lane.`);
     }
   }
-  if (hasOwn(receipt, 'starting_sha') && optOwn(receipt, 'starting_sha') !== identity.starting_sha) {
-    fail('stale_identity_denied', `${path}.starting_sha`,
-      'Transport starting SHA does not match the immutable pinned commit.');
+  return assertBoundRepositoryAndSha(receipt, identity, boundRepository, path);
+}
+
+function collapsedTransportError(operation, error) {
+  let code = 'transport_exception';
+  try {
+    if (error !== null && typeof error === 'object' && !IS_PROXY(error)
+      && typeof error.code === 'string'
+      && capturedIncludes(TRANSPORT_COLLAPSE_CODES, error.code)) {
+      code = error.code;
+    }
+  } catch {
+    code = 'transport_exception';
   }
+  return new RunContractV1Error(
+    code,
+    `cursor_cloud_transport.${operation}`,
+    optOwn(TRANSPORT_COLLAPSE_MESSAGES, code),
+  );
+}
+
+function closedReceiptCode(error) {
+  try {
+    if (error instanceof RunContractV1Error && typeof error.code === 'string'
+      && capturedIncludes(CLOSED_RECEIPT_ERROR_CODES, error.code)) {
+      return error.code;
+    }
+  } catch {
+    return 'malformed_receipt';
+  }
+  return 'malformed_receipt';
+}
+
+function closedReceiptError(operation, error) {
+  return new RunContractV1Error(
+    closedReceiptCode(error),
+    optOwn(CLOSED_RECEIPT_PATHS, operation),
+    optOwn(CLOSED_RECEIPT_MESSAGES, operation),
+  );
+}
+
+function inspectProviderReceipt(operation, fn) {
+  try {
+    return fn();
+  } catch (error) {
+    throw closedReceiptError(operation, error);
+  }
+}
+
+function closedReceiptValidationMessage(code, path) {
+  const suffix = optOwn(CLOSED_RECEIPT_VALIDATION_MESSAGES, code)
+    ?? 'failed closed Cursor Cloud receipt validation.';
+  return `${path} ${suffix}`;
+}
+
+function invokeTransport(store, operation, request) {
+  try {
+    return callTransport(store, operation, request);
+  } catch (error) {
+    throw collapsedTransportError(operation, error);
+  }
+}
+
+function guardLifecycle(operation, fn) {
+  try {
+    return fn();
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    throw collapsedTransportError(operation, error);
+  }
+}
+
+function hasExactRecordedRunIdentity(record) {
+  return record !== undefined
+    && typeof record.agent_id === 'string'
+    && typeof record.provider_run_id === 'string'
+    && typeof record.request_id === 'string'
+    && typeof record.branch === 'string';
+}
+
+function evidenceTruncatedFlag(events, progress, status, priorTruncated) {
+  if (priorTruncated === true) return true;
+  if (status === 'truncated') return true;
+  if (progress !== undefined && progress.status === 'truncated') return true;
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index].kind === 'truncated') return true;
+  }
+  return false;
 }
 
 function assertClosedReceipt(receipt, allowedKeys, path) {
@@ -429,7 +620,12 @@ function assertClosedReceipt(receipt, allowedKeys, path) {
   }
   assertDirectJsonClosure(receipt, path);
   assertPlainObject(receipt, 'malformed_receipt', path, path);
-  assertAllowedKeys(receipt, allowedKeys, path);
+  try {
+    assertAllowedKeys(receipt, allowedKeys, path);
+  } catch (error) {
+    const code = closedReceiptCode(error);
+    fail(code, path, closedReceiptValidationMessage(code, path));
+  }
 }
 
 function assertNoContentKeys(value, path) {
@@ -641,31 +837,22 @@ function markUncertain(store, identity, extras = {}) {
 }
 
 function assertExactRunBinding(receipt, record, path) {
-  if (record.agent_id !== undefined) {
-    const agentId = assertPatternedId(
-      optOwn(receipt, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN, `${path}.agent_id`, 'agent_id',
-    );
-    if (agentId !== record.agent_id) {
-      fail('stale_identity_denied', `${path}.agent_id`,
-        'Receipt agent_id must match the exact recorded Cursor Cloud agent.');
+  const checks = capturedFreeze([
+    ['agent_id', CURSOR_CLOUD_AGENT_ID_PATTERN, 'agent_id'],
+    ['provider_run_id', CURSOR_CLOUD_RUN_ID_PATTERN, 'provider_run_id'],
+    ['request_id', CURSOR_CLOUD_REQUEST_ID_PATTERN, 'request_id'],
+    ['branch', CURSOR_CLOUD_BRANCH_PATTERN, 'branch'],
+  ]);
+  for (const [key, pattern, label] of checks) {
+    if (record[key] === undefined) continue;
+    if (!hasOwn(receipt, key)) {
+      fail('stale_identity_denied', `${path}.${key}`,
+        `${path}.${key} must echo the exact recorded Cursor Cloud ${label}.`);
     }
-  }
-  if (record.provider_run_id !== undefined && hasOwn(receipt, 'provider_run_id')) {
-    const runId = assertPatternedId(
-      optOwn(receipt, 'provider_run_id'), CURSOR_CLOUD_RUN_ID_PATTERN, `${path}.provider_run_id`, 'provider_run_id',
-    );
-    if (runId !== record.provider_run_id) {
-      fail('stale_identity_denied', `${path}.provider_run_id`,
-        'Receipt provider_run_id must match the exact recorded Cursor Cloud run.');
-    }
-  }
-  if (record.request_id !== undefined && hasOwn(receipt, 'request_id')) {
-    const requestId = assertPatternedId(
-      optOwn(receipt, 'request_id'), CURSOR_CLOUD_REQUEST_ID_PATTERN, `${path}.request_id`, 'request_id',
-    );
-    if (requestId !== record.request_id) {
-      fail('stale_identity_denied', `${path}.request_id`,
-        'Receipt request_id must match the exact recorded Cursor Cloud request identity.');
+    const actual = assertPatternedId(optOwn(receipt, key), pattern, `${path}.${key}`, label);
+    if (actual !== record[key]) {
+      fail('stale_identity_denied', `${path}.${key}`,
+        `Receipt ${key} must match the exact recorded Cursor Cloud ${label}.`);
     }
   }
 }
@@ -704,7 +891,29 @@ function projectProgress(progress, path) {
   assertDirectJsonClosure(progress, path);
   assertPlainObject(progress, 'malformed_receipt', path, path);
   assertAllowedKeys(progress, PROGRESS_KEYS, path);
-  return detachFrozenJson(progress);
+  const projected = {};
+  if (hasOwn(progress, 'cursor')) {
+    projected.cursor = assertCursorToken(optOwn(progress, 'cursor'), `${path}.cursor`);
+  }
+  if (hasOwn(progress, 'event_count')) {
+    projected.event_count = assertBoundedCount(
+      optOwn(progress, 'event_count'), `${path}.event_count`, MAX_CURSOR_CLOUD_EVENT_COUNT,
+    );
+  }
+  if (hasOwn(progress, 'elapsed_ms')) {
+    projected.elapsed_ms = assertBoundedCount(
+      optOwn(progress, 'elapsed_ms'), `${path}.elapsed_ms`, MAX_CURSOR_CLOUD_TIMING_MS,
+    );
+  }
+  if (hasOwn(progress, 'status')) {
+    const status = optOwn(progress, 'status');
+    if (!capturedIncludes(CURSOR_CLOUD_PROGRESS_STATUSES, status)) {
+      fail('invalid_format', `${path}.status`,
+        `${path}.status must be a closed Cursor Cloud progress status.`);
+    }
+    projected.status = status;
+  }
+  return freezeData(projected);
 }
 
 function projectAttention(attention, path) {
@@ -720,11 +929,16 @@ function projectAttention(attention, path) {
 }
 
 function projectGitEvidence(receipt, identity, path) {
-  const startingSha = hasOwn(receipt, 'starting_sha')
-    ? assertCommitSha(optOwn(receipt, 'starting_sha'), `${path}.starting_sha`)
-    : identity.starting_sha;
+  const startingSha = assertCommitSha(optOwn(receipt, 'starting_sha'), `${path}.starting_sha`);
+  if (startingSha !== identity.starting_sha) {
+    fail('stale_identity_denied', `${path}.starting_sha`,
+      'Git evidence starting SHA does not match the immutable pinned commit.');
+  }
   const evidence = {
     starting_sha: startingSha,
+    repository_identity: assertRepositoryIdentity(
+      optOwn(receipt, 'repository_identity'), `${path}.repository_identity`,
+    ),
   };
   if (hasOwn(receipt, 'head_sha')) {
     evidence.head_sha = assertCommitSha(optOwn(receipt, 'head_sha'), `${path}.head_sha`);
@@ -744,11 +958,6 @@ function projectGitEvidence(receipt, identity, path) {
         `${path}.linear_history must be an exact boolean when present.`);
     }
     evidence.linear_history = linear;
-  }
-  if (hasOwn(receipt, 'repository_identity')) {
-    evidence.repository_identity = assertRepositoryIdentity(
-      optOwn(receipt, 'repository_identity'), `${path}.repository_identity`,
-    );
   }
   return freezeData(evidence);
 }
@@ -780,26 +989,27 @@ function runPreflight(store, request) {
   assertNoContentKeys(probe, 'cursor_cloud_transport.preflight.request');
   let receipt;
   try {
-    receipt = callTransport(store, 'preflight', probe);
+    receipt = invokeTransport(store, 'preflight', probe);
   } catch (error) {
     void error;
     putLane(store, identity, { state: 'blocked', model: identity.model });
     return driverResult('preflight', identity, 'blocked', blockedPreflightDetail('transport_unavailable'));
   }
+  return inspectProviderReceipt('preflight', () => {
   assertClosedReceipt(receipt, PREFLIGHT_RECEIPT_KEYS, 'transport.preflight.result');
-  assertReceiptIdentity(receipt, identity, 'transport.preflight.result');
-  if (optOwn(receipt, 'credential_bearing') === true) {
-    fail('repository_credentials', 'transport.preflight.result.credential_bearing',
-      'Cursor Cloud repository identity must not carry credentials, query, or fragment data.');
-  }
-  if (optOwn(receipt, 'duplicate_identities') === true) {
-    fail('duplicate_identity', 'transport.preflight.result.duplicate_identities',
-      'Cursor Cloud preflight reported ambiguous duplicate agent or run identities.');
-  }
-  if (optOwn(receipt, 'auto_create_pr') === true) {
-    fail('merge_authority_denied', 'transport.preflight.result.auto_create_pr',
-      'Cursor Cloud preflight must not authorize automatic PR creation.');
-  }
+  const repositoryIdentity = assertReceiptIdentity(receipt, identity, 'transport.preflight.result');
+  assertRequiredFalse(
+    receipt, 'credential_bearing', 'transport.preflight.result', 'repository_credentials',
+    'transport.preflight.result.credential_bearing must be exactly false.',
+  );
+  assertRequiredFalse(
+    receipt, 'duplicate_identities', 'transport.preflight.result', 'duplicate_identity',
+    'transport.preflight.result.duplicate_identities must be exactly false.',
+  );
+  assertRequiredFalse(
+    receipt, 'auto_create_pr', 'transport.preflight.result', 'merge_authority_denied',
+    'transport.preflight.result.auto_create_pr must be exactly false.',
+  );
   const ok = optOwn(receipt, 'ok');
   if (ok === true) {
     if (hasOwn(receipt, 'detail_code') || hasOwn(receipt, 'detail_message')) {
@@ -835,9 +1045,6 @@ function runPreflight(store, request) {
       putLane(store, identity, { state: 'blocked', model: identity.model });
       return driverResult('preflight', identity, 'blocked', blockedPreflightDetail('starting_ref_invisible'));
     }
-    const repositoryIdentity = assertRepositoryIdentity(
-      optOwn(receipt, 'repository_identity'), 'transport.preflight.result.repository_identity',
-    );
     assertRepositoryUrl(optOwn(receipt, 'repository_url'), 'transport.preflight.result.repository_url');
     putLane(store, identity, {
       state: 'ready',
@@ -860,6 +1067,7 @@ function runPreflight(store, request) {
   }
   putLane(store, identity, { state: 'blocked', model: identity.model });
   return driverResult('preflight', identity, 'blocked', blockedPreflightDetail(blockedCode));
+  });
 }
 
 function runLaunch(store, request) {
@@ -888,6 +1096,7 @@ function runLaunch(store, request) {
     const createRequest = transportIdentityRequest(identity, {
       proposed_agent_id: proposed,
       repository_url: prior.repository_url,
+      repository_identity: prior.repository_identity,
       auto_create_pr: false,
     });
     assertNoContentKeys(createRequest, 'cursor_cloud_transport.create.request');
@@ -896,29 +1105,35 @@ function runLaunch(store, request) {
         'Cursor Cloud create must send auto_create_pr false; automatic PR creation is prohibited.');
     }
     createInvoked = true;
-    const created = callTransport(store, 'create', createRequest);
-    assertClosedReceipt(created, CREATE_RECEIPT_KEYS, 'transport.create.result');
-    if (optOwn(created, 'created') !== true) {
-      fail('malformed_receipt', 'transport.create.result.created',
-        'transport.create.result.created must be exactly true.');
-    }
-    assertReceiptIdentity(created, identity, 'transport.create.result');
-    agentId = assertPatternedId(
-      optOwn(created, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN, 'transport.create.result.agent_id', 'agent_id',
-    );
-    if (hasOwn(created, 'repository_identity')) {
-      repositoryIdentity = assertRepositoryIdentity(
-        optOwn(created, 'repository_identity'), 'transport.create.result.repository_identity',
-      );
-    }
+    const created = invokeTransport(store, 'create', createRequest);
+    const createdView = inspectProviderReceipt('create', () => {
+      assertClosedReceipt(created, CREATE_RECEIPT_KEYS, 'transport.create.result');
+      if (optOwn(created, 'created') !== true) {
+        fail('malformed_receipt', 'transport.create.result.created',
+          'transport.create.result.created must be exactly true.');
+      }
+      return {
+        repositoryIdentity: assertReceiptIdentity(
+          created, identity, 'transport.create.result', prior.repository_identity,
+        ),
+        agentId: assertPatternedId(
+          optOwn(created, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN,
+          'transport.create.result.agent_id', 'agent_id',
+        ),
+      };
+    });
+    repositoryIdentity = createdView.repositoryIdentity;
+    agentId = createdView.agentId;
   } catch (error) {
+    if (error instanceof RunContractV1Error && createInvoked !== true && !isPostIntentFailure(error)) {
+      throw error;
+    }
     if (createInvoked || isPostIntentFailure(error)) {
       return markUncertain(store, identity, { repository_identity: repositoryIdentity });
     }
     putLane(store, identity, { state: 'not_sent', model: identity.model });
     return driverResult('launch', identity, 'not_sent', {
-      detail_code: typeof error?.code === 'string' && capturedTest(DETAIL_CODE_PATTERN, error.code)
-        ? error.code : 'transport_unavailable',
+      detail_code: 'transport_unavailable',
       detail_message: boundedDiagnosticMessage('transport_unavailable',
         'Cursor Cloud create failed before intent; no prompt was dispatched.'),
     });
@@ -939,55 +1154,57 @@ function runLaunch(store, request) {
       ...transportIdentityRequest(identity, {
         agent_id: agentId,
         request_id: requestId,
+        repository_identity: repositoryIdentity,
         auto_create_pr: false,
       }),
       envelope_text: view.request.envelope_text,
     });
-    const ack = callTransport(store, 'send', sendRequest);
-    assertClosedReceipt(ack, SEND_RECEIPT_KEYS, 'transport.send.result');
-    if (optOwn(ack, 'acknowledged') !== true) {
-      return markUncertain(store, identity, {
-        agent_id: agentId, request_id: requestId, repository_identity: repositoryIdentity,
+    const ack = invokeTransport(store, 'send', sendRequest);
+    return inspectProviderReceipt('send', () => {
+      assertClosedReceipt(ack, SEND_RECEIPT_KEYS, 'transport.send.result');
+      if (optOwn(ack, 'acknowledged') !== true) {
+        return markUncertain(store, identity, {
+          agent_id: agentId, request_id: requestId, repository_identity: repositoryIdentity,
+        });
+      }
+      const ackRepo = assertReceiptIdentity(
+        ack, identity, 'transport.send.result', repositoryIdentity,
+      );
+      const ackAgent = assertPatternedId(
+        optOwn(ack, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN, 'transport.send.result.agent_id', 'agent_id',
+      );
+      if (ackAgent !== agentId) {
+        fail('stale_identity_denied', 'transport.send.result.agent_id',
+          'Send acknowledgement agent_id must match the created Cursor Cloud agent.');
+      }
+      const ackRequestId = assertPatternedId(
+        optOwn(ack, 'request_id'), CURSOR_CLOUD_REQUEST_ID_PATTERN, 'transport.send.result.request_id', 'request_id',
+      );
+      if (ackRequestId !== requestId) {
+        fail('stale_identity_denied', 'transport.send.result.request_id',
+          'Send acknowledgement request_id must match the exact dispatch attempt.');
+      }
+      const providerRunId = assertPatternedId(
+        optOwn(ack, 'provider_run_id'), CURSOR_CLOUD_RUN_ID_PATTERN,
+        'transport.send.result.provider_run_id', 'provider_run_id',
+      );
+      const branch = assertPatternedId(
+        optOwn(ack, 'branch'), CURSOR_CLOUD_BRANCH_PATTERN, 'transport.send.result.branch', 'branch',
+      );
+      putLane(store, identity, {
+        state: 'dispatched',
+        model: identity.model,
+        agent_id: ackAgent,
+        provider_run_id: providerRunId,
+        request_id: ackRequestId,
+        branch,
+        repository_identity: ackRepo,
+        created: true,
+        dispatch_intent: true,
+        acknowledged: true,
       });
-    }
-    assertReceiptIdentity(ack, identity, 'transport.send.result');
-    const ackAgent = assertPatternedId(
-      optOwn(ack, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN, 'transport.send.result.agent_id', 'agent_id',
-    );
-    if (ackAgent !== agentId) {
-      fail('stale_identity_denied', 'transport.send.result.agent_id',
-        'Send acknowledgement agent_id must match the created Cursor Cloud agent.');
-    }
-    const ackRequestId = assertPatternedId(
-      optOwn(ack, 'request_id'), CURSOR_CLOUD_REQUEST_ID_PATTERN, 'transport.send.result.request_id', 'request_id',
-    );
-    if (ackRequestId !== requestId) {
-      fail('stale_identity_denied', 'transport.send.result.request_id',
-        'Send acknowledgement request_id must match the exact dispatch attempt.');
-    }
-    const providerRunId = assertPatternedId(
-      optOwn(ack, 'provider_run_id'), CURSOR_CLOUD_RUN_ID_PATTERN,
-      'transport.send.result.provider_run_id', 'provider_run_id',
-    );
-    const branch = assertPatternedId(
-      optOwn(ack, 'branch'), CURSOR_CLOUD_BRANCH_PATTERN, 'transport.send.result.branch', 'branch',
-    );
-    const ackRepo = hasOwn(ack, 'repository_identity')
-      ? assertRepositoryIdentity(optOwn(ack, 'repository_identity'), 'transport.send.result.repository_identity')
-      : repositoryIdentity;
-    putLane(store, identity, {
-      state: 'dispatched',
-      model: identity.model,
-      agent_id: ackAgent,
-      provider_run_id: providerRunId,
-      request_id: ackRequestId,
-      branch,
-      repository_identity: ackRepo,
-      created: true,
-      dispatch_intent: true,
-      acknowledged: true,
+      return driverResult('launch', identity, 'dispatched');
     });
-    return driverResult('launch', identity, 'dispatched');
   } catch (error) {
     void error;
     return markUncertain(store, identity, {
@@ -997,15 +1214,20 @@ function runLaunch(store, request) {
 }
 
 function observeLane(store, identity, record, include) {
-  const extras = { include: [...include] };
-  if (record.agent_id !== undefined) extras.agent_id = record.agent_id;
-  if (record.provider_run_id !== undefined) extras.provider_run_id = record.provider_run_id;
-  if (record.request_id !== undefined) extras.request_id = record.request_id;
+  const extras = {
+    include: [...include],
+    agent_id: record.agent_id,
+    provider_run_id: record.provider_run_id,
+    request_id: record.request_id,
+    branch: record.branch,
+    repository_identity: record.repository_identity,
+  };
   const observeRequest = transportIdentityRequest(identity, extras);
   assertNoContentKeys(observeRequest, 'cursor_cloud_transport.observe.request');
-  const receipt = callTransport(store, 'observe', observeRequest);
+  const receipt = invokeTransport(store, 'observe', observeRequest);
+  return inspectProviderReceipt('observe', () => {
   assertClosedReceipt(receipt, OBSERVE_RECEIPT_KEYS, 'transport.observe.result');
-  assertReceiptIdentity(receipt, identity, 'transport.observe.result');
+  assertReceiptIdentity(receipt, identity, 'transport.observe.result', record.repository_identity);
   assertExactRunBinding(receipt, record, 'transport.observe.result');
   const status = optOwn(receipt, 'status');
   if (!capturedIncludes(CURSOR_CLOUD_OBSERVE_STATUSES, status)) {
@@ -1013,22 +1235,17 @@ function observeLane(store, identity, record, include) {
       `transport.observe.result.status must be one of ${capturedJoin(CURSOR_CLOUD_OBSERVE_STATUSES, ', ')}.`);
   }
   if (hasOwn(receipt, 'elapsed_ms')) {
-    const elapsed = optOwn(receipt, 'elapsed_ms');
-    if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed > MAX_CURSOR_CLOUD_TIMING_MS) {
-      fail('invalid_format', 'transport.observe.result.elapsed_ms',
-        'elapsed_ms must be a bounded millisecond timing.');
-    }
+    assertBoundedCount(
+      optOwn(receipt, 'elapsed_ms'), 'transport.observe.result.elapsed_ms', MAX_CURSOR_CLOUD_TIMING_MS,
+    );
   }
   if (hasOwn(receipt, 'event_count')) {
-    const count = optOwn(receipt, 'event_count');
-    if (!Number.isSafeInteger(count) || count < 0 || count > MAX_CURSOR_CLOUD_EVENT_COUNT) {
-      fail('invalid_format', 'transport.observe.result.event_count',
-        'event_count must be a bounded integer count.');
-    }
+    assertBoundedCount(
+      optOwn(receipt, 'event_count'), 'transport.observe.result.event_count', MAX_CURSOR_CLOUD_EVENT_COUNT,
+    );
   }
   if (hasOwn(receipt, 'cursor')) {
-    assertPatternedId(optOwn(receipt, 'cursor'), CURSOR_CLOUD_CURSOR_PATTERN,
-      'transport.observe.result.cursor', 'event cursor');
+    assertCursorToken(optOwn(receipt, 'cursor'), 'transport.observe.result.cursor');
   }
   const git = projectGitEvidence(receipt, identity, 'transport.observe.result');
   const events = capturedIncludes(include, 'detailed_events')
@@ -1051,7 +1268,8 @@ function observeLane(store, identity, record, include) {
     agent_id: optOwn(receipt, 'agent_id'),
     provider_run_id: optOwn(receipt, 'provider_run_id'),
     request_id: optOwn(receipt, 'request_id'),
-    branch: hasOwn(receipt, 'branch') ? optOwn(receipt, 'branch') : record.branch,
+    branch: optOwn(receipt, 'branch'),
+  });
   });
 }
 
@@ -1082,28 +1300,33 @@ function runReconcile(store, request) {
   const latched = hasTerminalLatch(prior);
 
   if (view.intent === 'restart_reattach' && !latched) {
-    if (prior.agent_id === undefined || prior.request_id === undefined) {
-      fail('stale_identity_denied', 'driver.reconcile.request.intent',
-        'restart_reattach requires the exact recorded agent and request identity and never relaunches.');
+    if (!hasExactRecordedRunIdentity(prior)) {
+      putLane(store, identity, { ...prior, state: 'dispatch_uncertain' });
+      return driverResult('reconcile', identity, 'dispatch_uncertain');
     }
     const reattachRequest = transportIdentityRequest(identity, {
       agent_id: prior.agent_id,
       provider_run_id: prior.provider_run_id,
       request_id: prior.request_id,
+      branch: prior.branch,
+      repository_identity: prior.repository_identity,
     });
     assertNoContentKeys(reattachRequest, 'cursor_cloud_transport.reattach.request');
-    const reattached = callTransport(store, 'reattach', reattachRequest);
-    assertClosedReceipt(reattached, REATTACH_RECEIPT_KEYS, 'transport.reattach.result');
-    if (optOwn(reattached, 'reattached') !== true) {
-      fail('stale_identity_denied', 'transport.reattach.result.reattached',
-        'restart_reattach recovered no live Cursor Cloud run; the lane fails closed and is never relaunched.');
-    }
-    assertReceiptIdentity(reattached, identity, 'transport.reattach.result');
-    assertExactRunBinding(reattached, prior, 'transport.reattach.result');
-    const agentId = assertPatternedId(
-      optOwn(reattached, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN, 'transport.reattach.result.agent_id', 'agent_id',
-    );
-    putLane(store, identity, { ...prior, agent_id: agentId, reattached: true });
+    const reattached = invokeTransport(store, 'reattach', reattachRequest);
+    inspectProviderReceipt('reattach', () => {
+      assertClosedReceipt(reattached, REATTACH_RECEIPT_KEYS, 'transport.reattach.result');
+      if (optOwn(reattached, 'reattached') !== true) {
+        fail('stale_identity_denied', 'transport.reattach.result.reattached',
+          'restart_reattach recovered no live Cursor Cloud run; the lane fails closed and is never relaunched.');
+      }
+      assertReceiptIdentity(reattached, identity, 'transport.reattach.result', prior.repository_identity);
+      assertExactRunBinding(reattached, prior, 'transport.reattach.result');
+      const agentId = assertPatternedId(
+        optOwn(reattached, 'agent_id'), CURSOR_CLOUD_AGENT_ID_PATTERN,
+        'transport.reattach.result.agent_id', 'agent_id',
+      );
+      putLane(store, identity, { ...prior, agent_id: agentId, reattached: true });
+    });
   }
 
   if (latched) {
@@ -1115,7 +1338,13 @@ function runReconcile(store, request) {
     return latchedTerminalResult('reconcile', identity, prior);
   }
 
-  const observed = observeLane(store, identity, getLane(store, identity), include);
+  const currentBeforeObserve = getLane(store, identity);
+  if (!hasExactRecordedRunIdentity(currentBeforeObserve)) {
+    putLane(store, identity, { ...currentBeforeObserve, state: 'dispatch_uncertain' });
+    return driverResult('reconcile', identity, 'dispatch_uncertain');
+  }
+
+  const observed = observeLane(store, identity, currentBeforeObserve, include);
   const current = getLane(store, identity);
   const disposition = current.state === 'dispatch_uncertain' && observed.status === 'lost'
     ? 'dispatch_uncertain'
@@ -1138,6 +1367,7 @@ function runReconcile(store, request) {
         'same-session reply is unsupported; the question remains unresolved evidence'),
     })
     : undefined;
+  const priorTruncated = current.evidence !== undefined && current.evidence.evidence_truncated === true;
   putLane(store, identity, {
     ...current,
     state: nextState,
@@ -1155,7 +1385,9 @@ function runReconcile(store, request) {
       progress: observed.progress ?? null,
       attention: observed.attention ?? null,
       status: observed.status,
-      evidence_truncated: false,
+      evidence_truncated: evidenceTruncatedFlag(
+        observed.events, observed.progress, observed.status, priorTruncated,
+      ),
     }),
     last_status: observed.status,
     agent_id: observed.agent_id ?? current.agent_id,
@@ -1197,19 +1429,22 @@ function runCancel(store, request) {
       detail_message: boundedDiagnosticMessage('already_terminal', 'outcome=already_terminal'),
     });
   }
-  if (prior.agent_id === undefined) {
+  if (!hasExactRecordedRunIdentity(prior)) {
     fail('stale_identity_denied', 'driver.cancel.request',
-      'Cursor Cloud cancellation requires the exact recorded agent identity; refusing to cancel an arbitrary run.');
+      'Cursor Cloud cancellation requires the exact recorded agent, run, request, and branch identity; refusing to cancel an arbitrary run.');
   }
   const cancelRequest = transportIdentityRequest(identity, {
     agent_id: prior.agent_id,
     provider_run_id: prior.provider_run_id,
     request_id: prior.request_id,
+    branch: prior.branch,
+    repository_identity: prior.repository_identity,
   });
   assertNoContentKeys(cancelRequest, 'cursor_cloud_transport.cancel.request');
-  const receipt = callTransport(store, 'cancel', cancelRequest);
+  const receipt = invokeTransport(store, 'cancel', cancelRequest);
+  return inspectProviderReceipt('cancel', () => {
   assertClosedReceipt(receipt, CANCEL_RECEIPT_KEYS, 'transport.cancel.result');
-  assertReceiptIdentity(receipt, identity, 'transport.cancel.result');
+  assertReceiptIdentity(receipt, identity, 'transport.cancel.result', prior.repository_identity);
   assertExactRunBinding(receipt, prior, 'transport.cancel.result');
   const outcome = optOwn(receipt, 'outcome');
   if (!capturedIncludes(CURSOR_CLOUD_CANCEL_OUTCOMES, outcome)) {
@@ -1246,6 +1481,7 @@ function runCancel(store, request) {
     detail_code: outcome === 'already_terminal' ? 'already_terminal' : archiveCode,
     detail_message: boundedDiagnosticMessage(archiveCode, `outcome=${outcome} archived=${archived}`),
   });
+  });
 }
 
 export function createCursorCloudDriverV1(transport) {
@@ -1268,19 +1504,19 @@ export function createCursorCloudDriverV1(transport) {
   };
   const driver = capturedCreate(null);
   capturedDefineProperty(driver, 'preflight', {
-    value: (request) => runPreflight(store, request),
+    value: (request) => guardLifecycle('preflight', () => runPreflight(store, request)),
     enumerable: true, configurable: false, writable: false,
   });
   capturedDefineProperty(driver, 'launch', {
-    value: (request) => runLaunch(store, request),
+    value: (request) => guardLifecycle('launch', () => runLaunch(store, request)),
     enumerable: true, configurable: false, writable: false,
   });
   capturedDefineProperty(driver, 'reconcile', {
-    value: (request) => runReconcile(store, request),
+    value: (request) => guardLifecycle('reconcile', () => runReconcile(store, request)),
     enumerable: true, configurable: false, writable: false,
   });
   capturedDefineProperty(driver, 'cancel', {
-    value: (request) => runCancel(store, request),
+    value: (request) => guardLifecycle('cancel', () => runCancel(store, request)),
     enumerable: true, configurable: false, writable: false,
   });
   OBJECT_FREEZE(driver);
@@ -1369,6 +1605,7 @@ export function describeCursorCloudDriverV1() {
       event_bytes: MAX_CURSOR_CLOUD_EVENT_BYTES,
       event_count: MAX_CURSOR_CLOUD_EVENT_COUNT,
       timing_ms: MAX_CURSOR_CLOUD_TIMING_MS,
+      cursor_bytes: MAX_CURSOR_CLOUD_CURSOR_BYTES,
       cursor_pattern: CURSOR_CLOUD_CURSOR_PATTERN.source,
     }),
     identities: capturedFreeze([

@@ -199,6 +199,7 @@ export function createScriptedCursorCloudTransportV1(script = {}) {
         agent_id: request.agent_id ?? CLOUD_FIXTURE_AGENT_ID,
         provider_run_id: request.provider_run_id ?? CLOUD_FIXTURE_PROVIDER_RUN_ID,
         request_id: request.request_id,
+        branch: request.branch ?? CLOUD_FIXTURE_BRANCH,
         ...identityFromRequest(request),
         starting_sha: request.starting_sha,
         repository_identity: CLOUD_FIXTURE_REPO_IDENTITY,
