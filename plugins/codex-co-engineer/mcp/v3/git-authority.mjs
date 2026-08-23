@@ -24,7 +24,6 @@ import { capturedFreeze, capturedIncludes, capturedTest, isKnownProvider } from 
 import { canonicalJsonStringify } from './identity.mjs';
 import {
   RunContractV1Error,
-  assertAllowedKeys,
   assertBaseSha,
   assertRepositoryPath,
   assertRunId,
@@ -121,6 +120,7 @@ export const RECEIPT_KEYS = capturedFreeze([
   'message', 'operation', 'path', 'ref_class', 'run_id', 'schema',
   'verdict', 'version',
 ]);
+export const RECEIPT_REQUIRED_KEYS = RECEIPT_KEYS;
 
 export const GIT_AUTHORITY_ERROR_CODES = capturedFreeze([
   'accessor_property_denied', 'aliased_reference_denied',
@@ -145,6 +145,10 @@ const SET_CTOR = Set;
 const HASH = createHash;
 const HASH_DIGEST = Object.getPrototypeOf(HASH('sha256')).digest;
 const HASH_UPDATE = Object.getPrototypeOf(HASH('sha256')).update;
+const WEAKSET_CTOR = WeakSet;
+const TRUSTED_POLICY_RECEIPTS = new WEAKSET_CTOR();
+const WEAKSET_ADD = WEAKSET_CTOR.prototype.add;
+const WEAKSET_HAS = WEAKSET_CTOR.prototype.has;
 
 const DENIED_OPERATION_CODES = capturedFreeze({
   create_pr: 'merge_authority_denied',
@@ -211,34 +215,56 @@ function deny(code, path) {
   fail(code, path, MSG[code] ?? MSG.invalid_format);
 }
 
+function publicCode(error) {
+  if (error instanceof RunContractV1Error && capturedIncludes(GIT_AUTHORITY_ERROR_CODES, error.code)) {
+    return error.code;
+  }
+  return 'invalid_type';
+}
+
+function remap(error, path) {
+  deny(publicCode(error), path);
+}
+
 function assertClosedObject(input, allowed, path) {
   if (input === undefined || input === null) deny('invalid_type', path);
-  assertDirectJsonClosure(input, path);
-  assertPlainObject(input, 'invalid_type', path, path);
+  if (typeof input === 'object' || typeof input === 'function') {
+    try { assertNotProxy(input, path); } catch (error) { remap(error, path); }
+  }
+  if (typeof input !== 'object') deny('invalid_type', path);
+  try {
+    assertPlainObject(input, 'invalid_type', path, path);
+  } catch (error) { remap(error, path); }
   let keys;
   try { keys = OWN_KEYS(input); } catch { deny('invalid_type', path); }
   if (keys.length > MAX_AUTHORITY_OBJECT_KEYS) deny('out_of_range', path);
+  const allowedSet = new SET_CTOR(allowed);
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[i];
     if (typeof key === 'symbol') deny('symbol_key_denied', path);
     if (typeof key !== 'string' || BYTE_LENGTH(key, 'utf8') > MAX_AUTHORITY_KEY_BYTES) deny('out_of_range', path);
+    if (!allowedSet.has(key)) deny('unknown_key', path);
   }
-  assertAllowedKeys(input, allowed, path);
+  try {
+    assertDirectJsonClosure(input, path);
+  } catch (error) { remap(error, path); }
   return input;
 }
 
 function requireKeys(input, keys, path) {
   for (let i = 0; i < keys.length; i += 1) {
-    if (!hasOwn(input, keys[i])) deny('missing_key', `${path}.${keys[i]}`);
+    if (!hasOwn(input, keys[i])) deny('missing_key', path);
   }
 }
 
 function assertExact(value, expected, path) {
   if (IS_ARRAY(expected)) {
-    assertNotProxy(value, path);
+    try { assertNotProxy(value, path); } catch (error) { remap(error, path); }
     if (!IS_ARRAY(value) || value.length !== expected.length) deny('invalid_format', path);
     for (let i = 0; i < expected.length; i += 1) {
-      if (ownDataValue(value, STRING(i), `${path}[${i}]`) !== expected[i]) deny('invalid_format', path);
+      let item;
+      try { item = ownDataValue(value, STRING(i), path); } catch (error) { remap(error, path); }
+      if (item !== expected[i]) deny('invalid_format', path);
     }
     return;
   }
@@ -277,10 +303,7 @@ function assertAsciiSegment(value, path) {
 }
 
 function bindOrThrow(label, path, fn) {
-  try { return fn(); } catch (error) {
-    if (error instanceof RunContractV1Error) deny(label, path);
-    throw error;
-  }
+  try { return fn(); } catch { deny(label, path); }
 }
 
 function optionalSegment(input, key, path) {
@@ -533,7 +556,7 @@ function classifyRefFromOperation(object, identity) {
 }
 
 function receipt(values) {
-  return freezeRecord(RECEIPT_KEYS, {
+  const minted = freezeRecord(RECEIPT_KEYS, {
     schema: GIT_AUTHORITY_SCHEMA_ID,
     version: GIT_AUTHORITY_VERSION,
     message: MSG[values.code] ?? MSG.invalid_format,
@@ -541,6 +564,64 @@ function receipt(values) {
     default_branch_target: false,
     ...values,
   });
+  WEAKSET_ADD.call(TRUSTED_POLICY_RECEIPTS, minted);
+  return minted;
+}
+
+function assertReceiptIdentity(object, path) {
+  const runId = optOwn(object, 'run_id');
+  bindOrThrow('authority_identity_invalid', path, () => assertRunId(runId, path));
+  const assignmentId = optOwn(object, 'assignment_id');
+  if (!isAssignmentId(assignmentId)) deny('authority_identity_invalid', path);
+  const baseSha = optOwn(object, 'base_sha');
+  bindOrThrow('authority_identity_invalid', path, () => assertBaseSha(baseSha, path));
+  return { runId, assignmentId, baseSha };
+}
+
+function assertTrustedPolicyReceipt(verdict, path) {
+  const object = assertClosedObject(verdict, RECEIPT_KEYS, path);
+  requireKeys(object, RECEIPT_REQUIRED_KEYS, path);
+  if (optOwn(object, 'schema') !== GIT_AUTHORITY_SCHEMA_ID) deny('invalid_format', path);
+  if (optOwn(object, 'version') !== GIT_AUTHORITY_VERSION) deny('invalid_format', path);
+  const actor = optOwn(object, 'actor');
+  if (!capturedIncludes(ACTOR_VALUES, actor)) deny('invalid_format', path);
+  const operation = optOwn(object, 'operation');
+  if (!capturedIncludes(GIT_OPERATIONS, operation)) deny('invalid_format', path);
+  const verdictValue = optOwn(object, 'verdict');
+  if (!capturedIncludes(AUTHORITY_VERDICTS, verdictValue)) deny('invalid_format', path);
+  const code = optOwn(object, 'code');
+  if (typeof code !== 'string' || !hasOwn(MSG, code)) deny('invalid_format', path);
+  if (optOwn(object, 'message') !== MSG[code]) deny('invalid_format', path);
+  const refClass = optOwn(object, 'ref_class');
+  if (refClass !== null && !capturedIncludes(REF_CLASS_VALUES, refClass)) deny('invalid_format', path);
+  const defaultTarget = optOwn(object, 'default_branch_target');
+  if (typeof defaultTarget !== 'boolean') deny('invalid_type', path);
+  const receiptPath = optOwn(object, 'path');
+  if (typeof receiptPath !== 'string' || BYTE_LENGTH(receiptPath, 'utf8') > MAX_AUTHORITY_KEY_BYTES) {
+    deny('invalid_format', path);
+  }
+  const identity = assertReceiptIdentity(object, path);
+  let trusted = false;
+  try { trusted = WEAKSET_HAS.call(TRUSTED_POLICY_RECEIPTS, object); } catch { deny('invalid_type', path); }
+  if (trusted !== true) deny('invalid_type', path);
+  return {
+    actor, operation, verdict: verdictValue, code, ref_class: refClass, ...identity,
+  };
+}
+
+function assertEvidenceContext(context, path) {
+  const object = assertClosedObject(context, EVIDENCE_CONTEXT_ALLOWED_KEYS, path);
+  const factId = hasOwn(object, 'fact_id') ? optOwn(object, 'fact_id') : 'f-authority';
+  const discrepancyId = hasOwn(object, 'discrepancy_id') ? optOwn(object, 'discrepancy_id') : 'd-authority';
+  const sequence = hasOwn(object, 'sequence') ? optOwn(object, 'sequence') : 0;
+  if (typeof factId !== 'string' || !capturedTest(RECORD_ID_PATTERN, factId)) deny('invalid_format', path);
+  if (typeof discrepancyId !== 'string' || !capturedTest(RECORD_ID_PATTERN, discrepancyId)) {
+    deny('invalid_format', path);
+  }
+  if (typeof sequence !== 'number' || !IS_INT(sequence) || sequence < 0 || sequence > 65535) {
+    deny('out_of_range', path);
+  }
+  return { factId, discrepancyId, sequence };
 }
 
 export function classifyGitOperationV1(input) {
@@ -629,70 +710,54 @@ function evidenceMethod(code) {
 
 export function projectAuthorityEvidenceV1(verdict, context = {}) {
   const path = 'evidence';
-  if (verdict === undefined || verdict === null) deny('invalid_type', path);
-  assertDirectJsonClosure(verdict, path);
-  assertPlainObject(verdict, 'invalid_type', path, path);
-  assertAllowedKeys(verdict, RECEIPT_KEYS, path);
-  const ctx = context === undefined ? {} : context;
-  if (ctx !== undefined && ctx !== null && typeof ctx === 'object') {
-    assertClosedObject(ctx, EVIDENCE_CONTEXT_ALLOWED_KEYS, `${path}.context`);
+  try {
+    const receipt = assertTrustedPolicyReceipt(verdict, path);
+    const { factId, discrepancyId, sequence } = assertEvidenceContext(context, `${path}.context`);
+    const denied = receipt.verdict === 'denied';
+    const payload = { base_sha: receipt.baseSha, head_sha: receipt.baseSha };
+    const fact = freezeData({
+      fact_id: factId,
+      fact_kind: 'git_identity',
+      status: denied ? 'failed' : 'verified',
+      code: 'host_observed',
+      run_id: receipt.runId,
+      assignment_id: receipt.assignmentId,
+      sequence,
+      subject: 'git-authority',
+      authority: 'platform_git',
+      method: evidenceMethod(receipt.code),
+      input_digest: digestOf({
+        actor: receipt.actor, operation: receipt.operation, ref_class: receipt.ref_class,
+      }),
+      output_digest: digestOf({ verdict: receipt.verdict, code: receipt.code }),
+      exit_code: denied ? 1 : 0,
+      duration_ms: 0,
+      truncated: false,
+      payload,
+      artifact_digests: [],
+    });
+    const discrepancy = denied ? freezeData({
+      discrepancy_id: discrepancyId,
+      discrepancy_kind: 'security',
+      status: 'recorded',
+      code: 'security_boundary',
+      run_id: receipt.runId,
+      assignment_id: receipt.assignmentId,
+      sequence,
+      claim_ids: [],
+      fact_ids: [factId],
+      artifact_digests: [],
+    }) : null;
+    return freezeData({
+      schema: GIT_AUTHORITY_SCHEMA_ID,
+      version: GIT_AUTHORITY_VERSION,
+      facts: [fact],
+      discrepancies: discrepancy === null ? [] : [discrepancy],
+    });
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    deny('invalid_type', path);
   }
-  const factId = hasOwn(ctx, 'fact_id') ? optOwn(ctx, 'fact_id') : 'f-authority';
-  const discrepancyId = hasOwn(ctx, 'discrepancy_id') ? optOwn(ctx, 'discrepancy_id') : 'd-authority';
-  const sequence = hasOwn(ctx, 'sequence') ? optOwn(ctx, 'sequence') : 0;
-  if (typeof factId !== 'string' || !capturedTest(RECORD_ID_PATTERN, factId)) deny('invalid_format', `${path}.fact_id`);
-  if (typeof discrepancyId !== 'string' || !capturedTest(RECORD_ID_PATTERN, discrepancyId)) {
-    deny('invalid_format', `${path}.discrepancy_id`);
-  }
-  if (typeof sequence !== 'number' || !IS_INT(sequence) || sequence < 0 || sequence > 65535) {
-    deny('out_of_range', `${path}.sequence`);
-  }
-  const denied = optOwn(verdict, 'verdict') === 'denied';
-  const code = optOwn(verdict, 'code');
-  const runId = optOwn(verdict, 'run_id');
-  const assignmentId = optOwn(verdict, 'assignment_id');
-  const baseSha = optOwn(verdict, 'base_sha');
-  const payload = { base_sha: baseSha, head_sha: baseSha };
-  const fact = freezeData({
-    fact_id: factId,
-    fact_kind: 'git_identity',
-    status: denied ? 'failed' : 'verified',
-    code: 'host_observed',
-    run_id: runId,
-    assignment_id: assignmentId,
-    sequence,
-    subject: 'git-authority',
-    authority: 'platform_git',
-    method: evidenceMethod(typeof code === 'string' ? code : 'authority_ok'),
-    input_digest: digestOf({
-      actor: optOwn(verdict, 'actor'), operation: optOwn(verdict, 'operation'),
-      ref_class: optOwn(verdict, 'ref_class'),
-    }),
-    output_digest: digestOf({ verdict: optOwn(verdict, 'verdict'), code }),
-    exit_code: denied ? 1 : 0,
-    duration_ms: 0,
-    truncated: false,
-    payload,
-    artifact_digests: [],
-  });
-  const discrepancy = denied ? freezeData({
-    discrepancy_id: discrepancyId,
-    discrepancy_kind: 'security',
-    status: 'recorded',
-    code: 'security_boundary',
-    run_id: runId,
-    assignment_id: assignmentId,
-    sequence,
-    claim_ids: [],
-    fact_ids: [factId],
-    artifact_digests: [],
-  }) : null;
-  return freezeData({
-    schema: GIT_AUTHORITY_SCHEMA_ID,
-    version: GIT_AUTHORITY_VERSION,
-    facts: [fact],
-    discrepancies: discrepancy === null ? [] : [discrepancy],
-  });
 }
 
 capturedFreeze(parseGitAuthorityPolicyV1);
