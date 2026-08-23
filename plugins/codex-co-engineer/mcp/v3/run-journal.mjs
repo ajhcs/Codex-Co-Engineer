@@ -125,7 +125,8 @@ export const MAX_RUN_JOURNAL_TEMPORARIES = 8;
 export const MAX_RUN_JOURNAL_DIRECTORY_ENTRIES = 16;
 export const MAX_RUN_JOURNAL_ROOT_ENTRIES = 8;
 export const MAX_RUN_JOURNAL_LOCK_BYTES = 160;
-export const MAX_RUN_JOURNAL_STAMP_BYTES = 384;
+export const MAX_RUN_JOURNAL_STAMP_BYTES = 256;
+export const MAX_AGGREGATE_RUN_JOURNAL_STAMP_BYTES = 384;
 export const MAX_RUN_JOURNAL_DIAGNOSTIC_BYTES = 160;
 export const RUN_JOURNAL_LOCK_WAIT_MS = 2_000;
 export const RUN_JOURNAL_LOCK_POLL_MS = 10;
@@ -172,6 +173,7 @@ const FILE_WRITE_FLAGS = fsConstants.O_RDWR
   | (fsConstants.O_NOFOLLOW ?? 0);
 
 const MAX_AUDIT_ATTEMPTS = 24;
+const MAX_DIRECTORY_ANCESTRY_WALK = 96;
 
 const JOURNAL_CHAINS = new Map();
 
@@ -795,7 +797,7 @@ function validateDurableMarker(parsed) {
   return snapshotRecord(fields);
 }
 
-function validateDurableClaim(parsed, runId) {
+function validateDurableClaim(parsed, runId, observed, marker) {
   let fields;
   try {
     fields = closedObject(parsed, 'claim', AGGREGATE_CLAIM_KEYS);
@@ -811,6 +813,14 @@ function validateDurableClaim(parsed, runId) {
   const digest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RUN_CLAIM, claimDigestPayload(fields));
   if (digest !== fields.canonical_digest) {
     failAggregateMismatch('claim', 'The aggregate claim digest does not match.');
+  }
+  if (fields.run_id !== observed.run_id
+    || fields.anchor_digest !== observed.anchor_digest
+    || fields.submission_idempotency_key !== observed.submission_idempotency_key
+    || fields.root_marker_digest !== observed.marker_digest
+    || fields.root_marker_digest !== marker.canonical_digest
+    || fields.root_marker_nonce !== marker.nonce) {
+    failAggregateMismatch('claim', 'The aggregate claim does not bind this marker and anchor.');
   }
   return snapshotRecord(fields);
 }
@@ -896,6 +906,7 @@ async function observeAggregateResolution(anchor, runId) {
     run_id: runId,
     marker_digest: anchor.marker_digest,
     anchor_digest: validated.canonical_digest,
+    submission_idempotency_key: validated.submission_idempotency_key,
     coordination_digest: coord.state_digest,
     resolved_plan_digest: coord.resolved_plan_digest,
     phase: coord.phase,
@@ -903,15 +914,22 @@ async function observeAggregateResolution(anchor, runId) {
   };
 }
 
+function snapshotFsIdentity(stat) {
+  return { dev: Number(stat.dev), ino: Number(stat.ino) };
+}
+
 async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
+  const identities = {};
   const rootToken = await openDirectoryHandle(anchorRoot, 'anchor');
   try {
+    identities.root = snapshotFsIdentity(rootToken);
     const markerOpened = await readBoundedFile(
       rootToken, AGGREGATE_MARKER_NAME, MAX_AGGREGATE_MARKER_BYTES, AGGREGATE_MARKER_NAME,
     );
     const marker = validateDurableMarker(parseCanonicalStoredBytes(
       markerOpened === null ? null : markerOpened.bytes, AGGREGATE_MARKER_NAME,
     ));
+    identities.marker = snapshotFsIdentity(markerOpened.stat);
     if (marker.canonical_digest !== observed.marker_digest) {
       failJournal('run_journal_aggregate_swapped', AGGREGATE_MARKER_NAME,
         'The aggregate root marker changed during binding.');
@@ -921,6 +939,7 @@ async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
     );
     let claim;
     try {
+      identities.claims = snapshotFsIdentity(claimsToken);
       const claimName = `${runId}.json`;
       const claimOpened = await readBoundedFile(
         claimsToken, claimName, MAX_AGGREGATE_CLAIM_BYTES, 'claim',
@@ -928,21 +947,21 @@ async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
       claim = validateDurableClaim(
         parseCanonicalStoredBytes(claimOpened === null ? null : claimOpened.bytes, 'claim'),
         runId,
+        observed,
+        marker,
       );
+      identities.claim = snapshotFsIdentity(claimOpened.stat);
     } finally {
       await claimsToken.handle.close().catch(() => {});
-    }
-    if (claim.anchor_digest !== observed.anchor_digest
-      || claim.root_marker_digest !== marker.canonical_digest
-      || claim.root_marker_nonce !== marker.nonce) {
-      failAggregateMismatch('claim', 'The aggregate claim does not bind this marker and anchor.');
     }
     const runsToken = await openDirectoryHandle(
       childPath(rootToken.path, AGGREGATE_RUNS_NAME), 'runs',
     );
     try {
+      identities.runs = snapshotFsIdentity(runsToken);
       const runToken = await openDirectoryHandle(childPath(runsToken.path, runId), 'directory');
       try {
+        identities.run = snapshotFsIdentity(runToken);
         const planOpened = await readBoundedFile(
           runToken, AGGREGATE_PLAN_RECORD_NAME, MAX_AGGREGATE_RECORD_BYTES, AGGREGATE_PLAN_RECORD_NAME,
         );
@@ -952,6 +971,7 @@ async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
           ),
           runId,
         );
+        identities.plan = snapshotFsIdentity(planOpened.stat);
         if (plan.canonical_digest !== observed.resolved_plan_digest) {
           failJournal('run_journal_aggregate_swapped', AGGREGATE_PLAN_RECORD_NAME,
             'The resolved-plan record changed during binding.');
@@ -967,6 +987,7 @@ async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
           observed.anchor_digest,
           claim.nonce,
         );
+        identities.stamp = snapshotFsIdentity(stampOpened.stat);
       } finally {
         await runToken.handle.close().catch(() => {});
       }
@@ -976,34 +997,43 @@ async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
     return {
       ...observed,
       claim_digest: claim.canonical_digest,
+      identities,
     };
   } finally {
     await rootToken.handle.close().catch(() => {});
   }
 }
 
+async function observeCompleteAggregateBinding(anchor, runId) {
+  const observed = await observeAggregateResolution(anchor, runId);
+  return readDurableAggregateIdentity(anchor.root, runId, observed);
+}
+
+function aggregateObservationChanged(first, second) {
+  const firstProj = projectAggregateBinding(first);
+  const secondProj = projectAggregateBinding(second);
+  return canonicalJsonStringify(firstProj) !== canonicalJsonStringify(secondProj)
+    || first.marker_digest !== second.marker_digest
+    || first.anchor_digest !== second.anchor_digest
+    || first.submission_idempotency_key !== second.submission_idempotency_key
+    || first.claim_digest !== second.claim_digest
+    || first.coordination_digest !== second.coordination_digest
+    || first.resolved_plan_digest !== second.resolved_plan_digest
+    || first.phase !== second.phase
+    || first.revision !== second.revision
+    || canonicalJsonStringify(first.identities) !== canonicalJsonStringify(second.identities);
+}
+
 export async function bindAggregateResolution(anchor, runId) {
   assertRunId(runId, 'run_id');
   const bound = assertAnchorHandle(anchor);
-  const first = await observeAggregateResolution(bound.handle, runId);
-  const durable = await readDurableAggregateIdentity(bound.root, runId, first);
-  const second = await observeAggregateResolution(bound.handle, runId);
-  const firstProj = projectAggregateBinding(durable);
-  const secondProj = {
-    ...projectAggregateBinding({
-      ...second,
-      claim_digest: durable.claim_digest,
-    }),
-  };
-  if (canonicalJsonStringify(firstProj) !== canonicalJsonStringify(secondProj)
-    || first.marker_digest !== second.marker_digest
-    || first.anchor_digest !== second.anchor_digest
-    || first.coordination_digest !== second.coordination_digest
-    || first.resolved_plan_digest !== second.resolved_plan_digest
-    || first.revision !== second.revision) {
+  const first = await observeCompleteAggregateBinding(bound.handle, runId);
+  const second = await observeCompleteAggregateBinding(bound.handle, runId);
+  if (aggregateObservationChanged(first, second)) {
     failJournal('run_journal_aggregate_swapped', 'anchor',
       'The aggregate resolution identity changed during binding.');
   }
+  const firstProj = projectAggregateBinding(first);
   const bindingDigest = computeAggregateBindingDigest(firstProj);
   return validateBoundAggregateResolution({
     ...firstProj,
@@ -1011,25 +1041,59 @@ export async function bindAggregateResolution(anchor, runId) {
   });
 }
 
+async function directoryIdentity(dirPath) {
+  let handle;
+  try {
+    handle = await open(assertSafeRootPath(dirPath), ROOT_OPEN_FLAGS);
+  } catch {
+    return null;
+  }
+  try {
+    const stat = await handle.stat();
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+    return snapshotFsIdentity(stat);
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+async function ancestorIdentities(dirPath) {
+  const chain = [];
+  let current = dirPath;
+  for (let depth = 0; depth < MAX_DIRECTORY_ANCESTRY_WALK; depth += 1) {
+    const ident = await directoryIdentity(current);
+    if (ident === null) break;
+    if (chain.some((entry) => entry.dev === ident.dev && entry.ino === ident.ino)) break;
+    chain.push(ident);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return chain;
+}
+
+function chainContains(chain, ident) {
+  if (ident === null || ident === undefined) return false;
+  return chain.some((entry) => entry.dev === Number(ident.dev) && entry.ino === Number(ident.ino));
+}
+
 async function verifyAggregateRootSeparation(anchor, rootToken) {
-  const names = [anchor.root];
-  names.push(path.join(anchor.root, AGGREGATE_CLAIMS_NAME));
-  names.push(path.join(anchor.root, AGGREGATE_RUNS_NAME));
-  for (const candidate of names) {
-    let handle;
-    try {
-      handle = await open(assertSafeRootPath(candidate), ROOT_OPEN_FLAGS);
-    } catch {
-      continue;
-    }
-    try {
-      const stat = await handle.stat();
-      if (sameIdentity(stat, rootToken)) {
-        failJournal('run_journal_root_shared', 'root',
-          'The journal root must be separate from the R24A aggregate root.');
-      }
-    } finally {
-      await handle.close().catch(() => {});
+  const journalIdent = snapshotFsIdentity(rootToken);
+  const journalChain = await ancestorIdentities(rootToken.path);
+  const forbidden = [
+    anchor.root,
+    path.join(anchor.root, AGGREGATE_CLAIMS_NAME),
+    path.join(anchor.root, AGGREGATE_RUNS_NAME),
+  ];
+  for (const candidate of forbidden) {
+    const ident = await directoryIdentity(candidate);
+    if (ident === null) continue;
+    const candidateChain = await ancestorIdentities(candidate);
+    if (sameIdentity(ident, journalIdent)
+      || chainContains(journalChain, ident)
+      || chainContains(candidateChain, journalIdent)) {
+      failJournal('run_journal_root_shared', 'root',
+        'The journal root must be separate from the R24A aggregate root.');
     }
   }
 }
@@ -1176,8 +1240,14 @@ async function auditStateCache(dirToken, entries, replayedState, volatile = fals
 // Verifies this directory is exactly the private journal created for the
 // bound record. Survives inode reuse: a deleted-and-recreated or foreign
 // substituted directory cannot carry the creation stamp of this binding.
+function stampByteLimit(journalMode) {
+  return journalMode === JOURNAL_MODE_AGGREGATE
+    ? MAX_AGGREGATE_RUN_JOURNAL_STAMP_BYTES
+    : MAX_RUN_JOURNAL_STAMP_BYTES;
+}
+
 async function verifyCreationStamp(dirToken, binding, journalMode = JOURNAL_MODE_LEGACY) {
-  const opened = await readBoundedFile(dirToken, STAMP_NAME, MAX_RUN_JOURNAL_STAMP_BYTES, STAMP_NAME);
+  const opened = await readBoundedFile(dirToken, STAMP_NAME, stampByteLimit(journalMode), STAMP_NAME);
   const rebound = () => failJournal('run_journal_dir_rebound', STAMP_NAME,
     'The run directory is not the private journal created for this bound record.');
   if (opened === null) rebound();
@@ -1238,9 +1308,10 @@ async function writeCreationStamp(dirToken, binding, nonceHex, journalMode = JOU
       nonce: nonceHex,
     };
   const body = `${canonicalJsonStringify(record)}\n`;
-  if (NodeBuffer.byteLength(body, 'utf8') > MAX_RUN_JOURNAL_STAMP_BYTES) {
+  if (journalMode === JOURNAL_MODE_AGGREGATE
+    && NodeBuffer.byteLength(body, 'utf8') > MAX_AGGREGATE_RUN_JOURNAL_STAMP_BYTES) {
     failJournal('run_journal_file_too_large', STAMP_NAME,
-      `Journal files must not exceed ${MAX_RUN_JOURNAL_STAMP_BYTES} bytes.`);
+      `Journal files must not exceed ${MAX_AGGREGATE_RUN_JOURNAL_STAMP_BYTES} bytes.`);
   }
   await atomicPublish(dirToken, STAMP_NAME, NodeBuffer.from(body, 'utf8'), STAMP_NAME);
 }
@@ -1632,10 +1703,31 @@ async function buildHandle(parsed, binding, mode) {
   try {
     if (journalMode === JOURNAL_MODE_AGGREGATE) {
       await verifyAggregateRootSeparation(parsed.anchor, rootToken);
-    } else {
-      await verifyRootSeparation(store, rootToken);
+      return await withRunChain(rootToken, async () => {
+        const pinned = await reopenAndVerify(rootToken, 'root');
+        try {
+          const fresh = await bindAggregateResolution(parsed.anchor, parsed.runId);
+          if (fresh.binding_digest !== binding.binding_digest) {
+            failJournal('run_journal_aggregate_swapped', 'anchor',
+              'The aggregate resolution identity changed during binding.');
+          }
+          return await materializeJournalHandle(parsed, binding, mode, digest, pinned);
+        } finally {
+          await pinned.handle.close().catch(() => {});
+        }
+      });
     }
-    const rootNames = await enumerateDirectory(rootToken, MAX_RUN_JOURNAL_ROOT_ENTRIES, 'root');
+    await verifyRootSeparation(store, rootToken);
+    return await materializeJournalHandle(parsed, binding, mode, digest, rootToken);
+  } finally {
+    await rootToken.handle.close().catch(() => {});
+  }
+}
+
+async function materializeJournalHandle(parsed, binding, mode, digest, rootToken) {
+  const { root, store, runId } = parsed;
+  const journalMode = parsed.journalMode ?? JOURNAL_MODE_LEGACY;
+  const rootNames = await enumerateDirectory(rootToken, MAX_RUN_JOURNAL_ROOT_ENTRIES, 'root');
     if (!rootNames.includes('runs')) {
       if (mode !== 'create') {
         failJournal('run_journal_not_found', 'root',
@@ -1714,9 +1806,6 @@ async function buildHandle(parsed, binding, mode) {
     } finally {
       await runsToken.handle.close().catch(() => {});
     }
-  } finally {
-    await rootToken.handle.close().catch(() => {});
-  }
 }
 
 async function mkdirExclusive(target, field) {

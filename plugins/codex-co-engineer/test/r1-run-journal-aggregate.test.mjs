@@ -9,6 +9,7 @@ import test from 'node:test';
 import { initializeAggregateRunAnchorRoot } from '../mcp/v3/aggregate-run-anchor.mjs';
 import { canonicalJsonStringify } from '../mcp/v3/identity.mjs';
 import {
+  MAX_RUN_JOURNAL_STAMP_BYTES,
   RUN_JOURNAL_CURSOR_DOMAIN,
   RUN_JOURNAL_STAMP_SCHEMA_ID,
   RUN_JOURNAL_STAMP_SCHEMA_ID_V2,
@@ -153,6 +154,34 @@ test('legacy stamp, fingerprint, six events, reducer, cursor, and entrypoints st
     assert.equal(reopened.record_canonical_digest, journal.record_canonical_digest);
     assert.equal(reopened.run_fingerprint, journal.run_fingerprint);
     assert.equal((await reopened.currentState()).head_hash, GOLDEN.runOpenedHash);
+  } finally {
+    await rm(storeRoot, { recursive: true, force: true });
+    await rm(journalRoot, { recursive: true, force: true });
+  }
+});
+
+test('legacy stamp cap stays 256 and a max-valid 64-char run id keeps P25 open rejection', async () => {
+  assert.equal(MAX_RUN_JOURNAL_STAMP_BYTES, 256);
+
+  const runId = `a${'b'.repeat(63)}`;
+  assert.equal(runId.length, 64);
+  const storeRoot = await makeStoreRoot('r1-r25b-legacy-maxid-store-');
+  const journalRoot = await makePrivateRoot('r1-r25b-legacy-maxid-journal-');
+  try {
+    const store = await openRunStore(storeRoot);
+    await store.submit(makeSubmission({ runId }));
+    const created = await errorOf(() => createRunJournal({
+      root: journalRoot, store, run_id: runId,
+    }));
+    assert.equal(created.code, 'run_journal_file_too_large');
+    const stampPath = path.join(journalRoot, 'runs', runId, 'created.json');
+    const stampBytes = await readFile(stampPath);
+    assert.ok(stampBytes.byteLength > MAX_RUN_JOURNAL_STAMP_BYTES,
+      `legacy 64-char stamp is ${stampBytes.byteLength} bytes and must exceed the v1 cap`);
+    const opened = await errorOf(() => openRunJournal({
+      root: journalRoot, store, run_id: runId,
+    }));
+    assert.equal(opened.code, 'run_journal_file_too_large');
   } finally {
     await rm(storeRoot, { recursive: true, force: true });
     await rm(journalRoot, { recursive: true, force: true });

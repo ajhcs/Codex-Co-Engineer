@@ -16,7 +16,7 @@ import {
 import path from 'node:path';
 import test from 'node:test';
 
-import { canonicalJsonStringify } from '../mcp/v3/identity.mjs';
+import { IDENTITY_LABELS, canonicalJsonStringify } from '../mcp/v3/identity.mjs';
 import {
   RUN_JOURNAL_LOCK_SCHEMA_ID,
   RUN_JOURNAL_STAMP_SCHEMA_ID,
@@ -24,6 +24,7 @@ import {
   createAggregateRunJournal,
   openAggregateRunJournal,
 } from '../mcp/v3/run-journal.mjs';
+import { identityBoundDigest } from '../mcp/v3/selection-json.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import {
   AGGREGATE_RUN_ID,
@@ -45,6 +46,45 @@ function assertNoSecret(error) {
   assert.doesNotMatch(error.message, /ATTACKER-SECRET/u);
   assert.doesNotMatch(error.message, /sk-live/u);
   assert.doesNotMatch(error.message, /sel-[0-9a-f]{32}/u);
+}
+
+function redigestMarker(fields) {
+  const payload = { schema: fields.schema, kind: fields.kind, nonce: fields.nonce };
+  return {
+    ...payload,
+    canonical_digest: identityBoundDigest(IDENTITY_LABELS.STORAGE_ROOT, payload),
+  };
+}
+
+function redigestClaim(fields) {
+  const payload = {
+    schema: fields.schema,
+    run_id: fields.run_id,
+    anchor_digest: fields.anchor_digest,
+    submission_idempotency_key: fields.submission_idempotency_key,
+    root_marker_nonce: fields.root_marker_nonce,
+    root_marker_digest: fields.root_marker_digest,
+    nonce: fields.nonce,
+  };
+  return {
+    ...payload,
+    canonical_digest: identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RUN_CLAIM, payload),
+  };
+}
+
+function wrapAnchor(anchor, afterCoordination) {
+  let calls = 0;
+  return {
+    root: anchor.root,
+    marker_digest: anchor.marker_digest,
+    getByRunId: (runId) => anchor.getByRunId(runId),
+    async getCoordination(runId) {
+      const record = await anchor.getCoordination(runId);
+      calls += 1;
+      if (afterCoordination !== undefined) await afterCoordination(calls, record);
+      return record;
+    },
+  };
 }
 
 async function withReady(fn, options) {
@@ -366,5 +406,85 @@ test('journal root foreign files, group-readable roots, and shared runs dirs fai
       root: journalRoot, anchor, run_id: runId,
     }));
     assert.equal(foreignRoot.code, 'run_journal_foreign_entry');
+  });
+});
+
+test('ancestor and descendant R24A journal roots fail closed before mutation', async () => {
+  await withReady(async ({ root, anchor, journalRoot, runId }) => {
+    const spare = path.join(root, 'runs', 'spare-run');
+    await mkdir(spare, { mode: 0o700 });
+    const nested = await errorOf(() => createAggregateRunJournal({
+      root: spare, anchor, run_id: runId,
+    }));
+    assert.equal(nested.code, 'run_journal_root_shared');
+    assert.deepEqual(await readdir(spare), []);
+    assert.deepEqual(await readdir(journalRoot), []);
+
+    const ownedRun = path.join(root, 'runs', runId);
+    const beforeOwned = await readdir(ownedRun);
+    const descendant = await errorOf(() => createAggregateRunJournal({
+      root: ownedRun, anchor, run_id: runId,
+    }));
+    assert.equal(descendant.code, 'run_journal_root_shared');
+    assert.deepEqual(await readdir(ownedRun), beforeOwned);
+    assert.ok(!beforeOwned.includes('runs'));
+  });
+});
+
+test('a redigested claim with a mismatched submission key fails closed', async () => {
+  await withReady(async ({ root, anchor, journalRoot, runId }) => {
+    const claimPath = path.join(root, 'claims', `${runId}.json`);
+    const honest = JSON.parse(await readFile(claimPath, 'utf8'));
+    const mutated = redigestClaim({
+      ...honest,
+      submission_idempotency_key: `sha256:${'e'.repeat(64)}`,
+    });
+    assert.notEqual(mutated.submission_idempotency_key, honest.submission_idempotency_key);
+    assert.notEqual(mutated.canonical_digest, honest.canonical_digest);
+    await writeFile(claimPath, `${canonicalJsonStringify(mutated)}\n`);
+    const mismatched = await errorOf(() => createAggregateRunJournal({
+      root: journalRoot, anchor, run_id: runId,
+    }));
+    assert.equal(mismatched.code, 'run_journal_aggregate_mismatch');
+    assertNoSecret(mismatched);
+    assert.deepEqual(await readdir(journalRoot), []);
+  });
+});
+
+test('pre-publication claim/marker/plan swap fails with zero journal artifacts', async () => {
+  await withReady(async ({ root, anchor, journalRoot, runId }) => {
+    const markerPath = path.join(root, 'storage-root.v1');
+    const claimPath = path.join(root, 'claims', `${runId}.json`);
+    const planPath = path.join(root, 'runs', runId, 'resolved-plan.record.json');
+    const honestMarker = JSON.parse(await readFile(markerPath, 'utf8'));
+    const honestClaim = JSON.parse(await readFile(claimPath, 'utf8'));
+    const honestPlan = await readFile(planPath);
+
+    async function swapValidBinding() {
+      const marker = redigestMarker({ ...honestMarker, nonce: 'c'.repeat(32) });
+      const claim = redigestClaim({
+        ...honestClaim,
+        root_marker_nonce: marker.nonce,
+        root_marker_digest: marker.canonical_digest,
+        nonce: 'd'.repeat(32),
+      });
+      await writeFile(markerPath, `${canonicalJsonStringify(marker)}\n`);
+      await writeFile(claimPath, `${canonicalJsonStringify(claim)}\n`);
+      await unlink(planPath);
+      await writeFile(planPath, honestPlan);
+    }
+
+    const wrapped = wrapAnchor(anchor, async (calls) => {
+      if (calls >= 2) await swapValidBinding();
+    });
+    const swapped = await errorOf(() => createAggregateRunJournal({
+      root: journalRoot, anchor: wrapped, run_id: runId,
+    }));
+    assert.ok([
+      'run_journal_aggregate_swapped',
+      'run_journal_aggregate_mismatch',
+    ].includes(swapped.code), swapped.code);
+    assertNoSecret(swapped);
+    assert.deepEqual(await readdir(journalRoot), []);
   });
 });
