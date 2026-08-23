@@ -1309,7 +1309,8 @@ async function auditNamespace(claimsToken, runsToken) {
 
 function allowedRunFile(name) {
   return name === ANCHOR_NAME || name === COORDINATION_NAME || name === STAMP_NAME
-    || name === LOCK_NAME
+    || name === LOCK_NAME || name === REQUEST_RECORD_NAME || name === REPLY_RECORD_NAME
+    || name === PLAN_RECORD_NAME
     || capturedTest(TEMP_NAME_PATTERN, name)
     || capturedTest(LOCK_OWNER_NAME_PATTERN, name);
 }
@@ -1521,6 +1522,222 @@ async function completeSubmit(ctx, prepared) {
   }
 }
 
+function parseRequestIdentity(value, runId, field) {
+  const fields = closedObject(value, field, AGGREGATE_REQUEST_IDENTITY_KEYS);
+  assertRunId(fields.run_id, `${field}.run_id`);
+  if (fields.run_id !== runId) {
+    failAnchor('aggregate_run_identity_mismatch', `${field}.run_id`,
+      'Request identity must name the bound run.');
+  }
+  if (typeof fields.request_id !== 'string' || !capturedTest(REQUEST_ID_PATTERN, fields.request_id)) {
+    failAnchor('invalid_format', `${field}.request_id`, 'Request identity id must match sel-<32hex>.');
+  }
+  assertBoundDigest(fields.digest, `${field}.digest`);
+  return snapshotRecord(fields);
+}
+
+function bindSelectionRequestRecord(runId, requestIdentity, record) {
+  if (record === undefined || record === null) {
+    failAnchor('invalid_type', 'record', 'Selection request record must be a plain JSON data object.');
+  }
+  assertDirectJsonClosure(record, 'record');
+  validateSelectionRequestV1(record);
+  const identity = selectionRequestIdentity(record);
+  if (identity.run_id !== runId || requestIdentity.run_id !== runId) {
+    failAnchor('aggregate_run_identity_mismatch', 'request_identity.run_id',
+      'Selection request record must bind the aggregate run id.');
+  }
+  if (identity.request_id !== requestIdentity.request_id || identity.digest !== requestIdentity.digest) {
+    failAnchor('aggregate_run_identity_mismatch', 'request_identity',
+      'Request identity does not match the canonical selection request record.');
+  }
+  const bytes = encodeRecord(record, MAX_AGGREGATE_RECORD_BYTES, REQUEST_RECORD_NAME);
+  const recordDigest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RUN_ANCHOR, {
+    schema: 'codex-co-engineer.aggregate-request-record.v1',
+    run_id: runId,
+    request_id: identity.request_id,
+    digest: identity.digest,
+    body: record,
+  });
+  return {
+    record: snapshotRecord(record),
+    bytes,
+    identity,
+    recordDigest,
+    binding: snapshotRecord({
+      run_id: runId,
+      request_id: identity.request_id,
+      digest: identity.digest,
+      record_digest: recordDigest,
+    }),
+  };
+}
+
+function bindReplyRecord(runId, requestIdentity, record) {
+  if (record === undefined || record === null) {
+    failAnchor('invalid_type', 'reply_record', 'Selection reply record must be a plain JSON data object.');
+  }
+  assertDirectJsonClosure(record, 'reply_record');
+  const fields = closedObject(record, 'reply_record', AGGREGATE_SELECTION_REPLY_INPUT_KEYS);
+  if (fields.schema !== AGGREGATE_SELECTION_REPLY_SCHEMA_ID) {
+    failAnchor('invalid_format', 'reply_record.schema',
+      `Selection reply schema must be exactly "${AGGREGATE_SELECTION_REPLY_SCHEMA_ID}".`);
+  }
+  assertRunId(fields.run_id, 'reply_record.run_id');
+  if (fields.run_id !== runId) {
+    failAnchor('aggregate_run_identity_mismatch', 'reply_record.run_id',
+      'Selection reply record must bind the aggregate run id.');
+  }
+  if (fields.request_id !== requestIdentity.request_id) {
+    failAnchor('aggregate_run_identity_mismatch', 'reply_record.request_id',
+      'Selection reply record must bind the committed request id.');
+  }
+  if (!Array.isArray(fields.answers)) {
+    failAnchor('invalid_type', 'reply_record.answers', 'Selection reply answers must be a dense JSON array.');
+  }
+  const answers = [];
+  for (let index = 0; index < fields.answers.length; index += 1) {
+    const answer = closedObject(fields.answers[index], `reply_record.answers[${index}]`,
+      SELECTION_ANSWER_KEYS);
+    answers.push(snapshotRecord(answer));
+  }
+  const payload = {
+    schema: AGGREGATE_SELECTION_REPLY_SCHEMA_ID,
+    run_id: fields.run_id,
+    request_id: fields.request_id,
+    answers,
+  };
+  const canonicalDigest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_SELECTION_REPLY, payload);
+  const stored = snapshotRecord({ ...payload, canonical_digest: canonicalDigest });
+  return { record: stored, bytes: encodeRecord(stored, MAX_AGGREGATE_RECORD_BYTES, REPLY_RECORD_NAME) };
+}
+
+function bindPlanRecord(runId, record) {
+  if (record === undefined || record === null) {
+    failAnchor('invalid_type', 'resolved_plan_record',
+      'Resolved plan record must be a plain JSON data object.');
+  }
+  assertDirectJsonClosure(record, 'resolved_plan_record');
+  const fields = closedObject(record, 'resolved_plan_record', AGGREGATE_RESOLVED_PLAN_INPUT_KEYS);
+  if (fields.schema !== AGGREGATE_RESOLVED_PLAN_SCHEMA_ID) {
+    failAnchor('invalid_format', 'resolved_plan_record.schema',
+      `Resolved plan schema must be exactly "${AGGREGATE_RESOLVED_PLAN_SCHEMA_ID}".`);
+  }
+  assertRunId(fields.run_id, 'resolved_plan_record.run_id');
+  if (fields.run_id !== runId) {
+    failAnchor('aggregate_run_identity_mismatch', 'resolved_plan_record.run_id',
+      'Resolved plan record must bind the aggregate run id.');
+  }
+  if (fields.complete !== true) {
+    failAnchor('aggregate_run_phase_conflict', 'resolved_plan_record.complete',
+      'Resolved plan records must be complete.');
+  }
+  const payload = {
+    schema: AGGREGATE_RESOLVED_PLAN_SCHEMA_ID,
+    run_id: fields.run_id,
+    complete: true,
+  };
+  const canonicalDigest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RESOLVED_PLAN, payload);
+  const stored = snapshotRecord({ ...payload, canonical_digest: canonicalDigest });
+  return { record: stored, bytes: encodeRecord(stored, MAX_AGGREGATE_RECORD_BYTES, PLAN_RECORD_NAME) };
+}
+
+async function adoptOrPublishRecord(dirToken, name, prepared, field) {
+  const existing = await readBoundedFile(dirToken, name, MAX_AGGREGATE_RECORD_BYTES, field);
+  if (existing === null) {
+    const published = await exclusivePublish(dirToken, name, prepared.bytes, field);
+    if (published.published) return { created: true, record: prepared.record };
+    const raced = await readBoundedFile(dirToken, name, MAX_AGGREGATE_RECORD_BYTES, field);
+    if (raced === null) {
+      failAnchor('aggregate_run_record_corruption', field, 'A committed record could not be read.');
+    }
+    if (!equalBytes(raced.bytes, prepared.bytes)) {
+      failAnchor('aggregate_run_orphan_conflict', field,
+        'A differing orphan record conflicts permanently.');
+    }
+    return { created: false, record: prepared.record };
+  }
+  if (!equalBytes(existing.bytes, prepared.bytes)) {
+    failAnchor('aggregate_run_orphan_conflict', field,
+      'A differing orphan record conflicts permanently.');
+  }
+  return { created: false, record: prepared.record };
+}
+
+function assertExpectedRevision(value, expected, field) {
+  if (!capturedHasOwn({ expected_revision: value }, 'expected_revision') && value === undefined) {
+    failAnchor('missing_key', field, 'expected_revision is mandatory.');
+  }
+  if (!NUMBER_IS_SAFE_INTEGER(value)) {
+    failAnchor('invalid_format', field, 'expected_revision must be an exact safe integer.');
+  }
+  if (value !== expected) {
+    failAnchor('aggregate_run_revision_conflict', field,
+      'The expected revision does not match the committed coordination head.');
+  }
+}
+
+async function verifyCommittedRecord(dirToken, name, digest, field, kind) {
+  const opened = await readBoundedFile(dirToken, name, MAX_AGGREGATE_RECORD_BYTES, field);
+  if (opened === null) {
+    failAnchor('aggregate_run_record_corruption', field,
+      'A committed aggregate record is missing.');
+  }
+  let parsed;
+  try {
+    parsed = parseCanonicalObject(opened.bytes, field, MAX_AGGREGATE_RECORD_BYTES);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) {
+      failAnchor('aggregate_run_record_corruption', field,
+        'A committed aggregate record is malformed.');
+    }
+    throw error;
+  }
+  if (kind === 'request') {
+    try {
+      validateSelectionRequestV1(parsed);
+    } catch (error) {
+      failAnchor('aggregate_run_record_corruption', field,
+        'A committed selection request record failed verification.');
+    }
+    const identity = selectionRequestIdentity(parsed);
+    const recordDigest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RUN_ANCHOR, {
+      schema: 'codex-co-engineer.aggregate-request-record.v1',
+      run_id: identity.run_id,
+      request_id: identity.request_id,
+      digest: identity.digest,
+      body: parsed,
+    });
+    if (recordDigest !== digest) {
+      failAnchor('aggregate_run_record_corruption', field,
+        'A committed selection request record digest does not match.');
+    }
+    return;
+  }
+  if (kind === 'reply') {
+    const rebuilt = bindReplyRecord(parsed.run_id, { request_id: parsed.request_id }, {
+      schema: parsed.schema,
+      run_id: parsed.run_id,
+      request_id: parsed.request_id,
+      answers: parsed.answers,
+    });
+    if (rebuilt.record.canonical_digest !== digest || !equalBytes(rebuilt.bytes, opened.bytes)) {
+      failAnchor('aggregate_run_record_corruption', field,
+        'A committed selection reply record digest does not match.');
+    }
+    return;
+  }
+  const rebuilt = bindPlanRecord(parsed.run_id, {
+    schema: parsed.schema,
+    run_id: parsed.run_id,
+    complete: parsed.complete,
+  });
+  if (rebuilt.record.canonical_digest !== digest || !equalBytes(rebuilt.bytes, opened.bytes)) {
+    failAnchor('aggregate_run_record_corruption', field,
+      'A committed resolved plan record digest does not match.');
+  }
+}
+
 async function mutateRun(ctx, runId, mutator) {
   const { root, marker, claims, runs } = ctx;
   const namespace = await auditNamespace(claims, runs);
@@ -1552,6 +1769,22 @@ async function mutateRun(ctx, runId, mutator) {
     if (loaded.anchor.record.canonical_digest !== claim.record.anchor_digest) {
       failAnchor('aggregate_run_identity_mismatch', 'claim',
         'The durable claim does not match the stored aggregate anchor.');
+    }
+    if (loaded.coordination.record.phase === 'awaiting_selection') {
+      await verifyCommittedRecord(dirToken, REQUEST_RECORD_NAME,
+        loaded.coordination.record.selection_request_binding.record_digest,
+        REQUEST_RECORD_NAME, 'request');
+    }
+    if (loaded.coordination.record.phase === 'resolution_ready') {
+      if (loaded.coordination.record.selection_request_binding !== null) {
+        await verifyCommittedRecord(dirToken, REQUEST_RECORD_NAME,
+          loaded.coordination.record.selection_request_binding.record_digest,
+          REQUEST_RECORD_NAME, 'request');
+        await verifyCommittedRecord(dirToken, REPLY_RECORD_NAME,
+          loaded.coordination.record.selection_reply_digest, REPLY_RECORD_NAME, 'reply');
+      }
+      await verifyCommittedRecord(dirToken, PLAN_RECORD_NAME,
+        loaded.coordination.record.resolved_plan_digest, PLAN_RECORD_NAME, 'plan');
     }
     const result = await mutator(dirToken, loaded);
     await reverifyDirectory(root, 'root');
@@ -1677,6 +1910,148 @@ function assembleHandle(rootToken, auditedOpen) {
         const loaded = await mutateRun(ctx, runId, async (_dir, current) => current);
         return loaded.coordination.record;
       });
+    },
+    async commitSelectionRequest(input) {
+      if (input === undefined || input === null) {
+        failAnchor('invalid_type', 'commit', 'commitSelectionRequest requires a plain JSON object.');
+      }
+      assertDirectJsonClosure(input, 'commit');
+      const fields = closedObject(input, 'commit', AGGREGATE_COMMIT_REQUEST_KEYS);
+      assertRunId(fields.run_id, 'run_id');
+      const requestIdentity = parseRequestIdentity(fields.request_identity, fields.run_id, 'request_identity');
+      const prepared = bindSelectionRequestRecord(fields.run_id, requestIdentity, fields.record);
+      return operate((ctx) => mutateRun(ctx, fields.run_id, async (dirToken, loaded) => {
+        assertExpectedRevision(fields.expected_revision, 0, 'expected_revision');
+        const current = loaded.coordination.record;
+        if (current.phase === 'awaiting_selection' && sameBinding(current.selection_request_binding, prepared.binding)) {
+          await verifyCommittedRecord(dirToken, REQUEST_RECORD_NAME, prepared.recordDigest,
+            REQUEST_RECORD_NAME, 'request');
+          return snapshotRecord({
+            created: false,
+            record: loaded.anchor.record,
+            coordination: current,
+          });
+        }
+        if (current.phase !== 'submitted' || current.revision !== 0) {
+          failAnchor('aggregate_run_revision_conflict', 'expected_revision',
+            'commitSelectionRequest requires submitted@0.');
+        }
+        await adoptOrPublishRecord(dirToken, REQUEST_RECORD_NAME, prepared, REQUEST_RECORD_NAME);
+        const next = bindCoordinationPayload({
+          schema: AGGREGATE_RUN_COORDINATION_SCHEMA_ID,
+          run_id: current.run_id,
+          anchor_digest: current.anchor_digest,
+          revision: 1,
+          phase: 'awaiting_selection',
+          selection_request_binding: prepared.binding,
+          selection_reply_digest: null,
+          resolved_plan_digest: null,
+        });
+        const coordination = await publishCoordination(dirToken, next);
+        return snapshotRecord({
+          created: true,
+          record: loaded.anchor.record,
+          coordination: coordination.record,
+        });
+      }));
+    },
+    async commitSelectionResolution(input) {
+      if (input === undefined || input === null) {
+        failAnchor('invalid_type', 'commit', 'commitSelectionResolution requires a plain JSON object.');
+      }
+      assertDirectJsonClosure(input, 'commit');
+      const fields = closedObject(input, 'commit', AGGREGATE_COMMIT_RESOLUTION_KEYS);
+      assertRunId(fields.run_id, 'run_id');
+      const requestIdentity = parseRequestIdentity(fields.request_identity, fields.run_id, 'request_identity');
+      const reply = bindReplyRecord(fields.run_id, requestIdentity, fields.reply_record);
+      const plan = bindPlanRecord(fields.run_id, fields.resolved_plan_record);
+      return operate((ctx) => mutateRun(ctx, fields.run_id, async (dirToken, loaded) => {
+        assertExpectedRevision(fields.expected_revision, 1, 'expected_revision');
+        const current = loaded.coordination.record;
+        if (current.phase === 'resolution_ready' && current.revision === 2
+          && current.selection_reply_digest === reply.record.canonical_digest
+          && current.resolved_plan_digest === plan.record.canonical_digest
+          && current.selection_request_binding !== null
+          && current.selection_request_binding.request_id === requestIdentity.request_id
+          && current.selection_request_binding.digest === requestIdentity.digest) {
+          return snapshotRecord({
+            created: false,
+            record: loaded.anchor.record,
+            coordination: current,
+          });
+        }
+        if (current.phase !== 'awaiting_selection' || current.revision !== 1) {
+          failAnchor('aggregate_run_revision_conflict', 'expected_revision',
+            'commitSelectionResolution requires awaiting_selection@1.');
+        }
+        if (current.selection_request_binding.request_id !== requestIdentity.request_id
+          || current.selection_request_binding.digest !== requestIdentity.digest
+          || current.selection_request_binding.run_id !== requestIdentity.run_id) {
+          failAnchor('aggregate_run_binding_conflict', 'request_identity',
+            'Resolution must bind the committed selection request identity.');
+        }
+        await adoptOrPublishRecord(dirToken, REPLY_RECORD_NAME, reply, REPLY_RECORD_NAME);
+        await adoptOrPublishRecord(dirToken, PLAN_RECORD_NAME, plan, PLAN_RECORD_NAME);
+        const next = bindCoordinationPayload({
+          schema: AGGREGATE_RUN_COORDINATION_SCHEMA_ID,
+          run_id: current.run_id,
+          anchor_digest: current.anchor_digest,
+          revision: 2,
+          phase: 'resolution_ready',
+          selection_request_binding: current.selection_request_binding,
+          selection_reply_digest: reply.record.canonical_digest,
+          resolved_plan_digest: plan.record.canonical_digest,
+        });
+        const coordination = await publishCoordination(dirToken, next);
+        return snapshotRecord({
+          created: true,
+          record: loaded.anchor.record,
+          coordination: coordination.record,
+        });
+      }));
+    },
+    async commitResolvedPlan(input) {
+      if (input === undefined || input === null) {
+        failAnchor('invalid_type', 'commit', 'commitResolvedPlan requires a plain JSON object.');
+      }
+      assertDirectJsonClosure(input, 'commit');
+      const fields = closedObject(input, 'commit', AGGREGATE_COMMIT_PLAN_KEYS);
+      assertRunId(fields.run_id, 'run_id');
+      const plan = bindPlanRecord(fields.run_id, fields.resolved_plan_record);
+      return operate((ctx) => mutateRun(ctx, fields.run_id, async (dirToken, loaded) => {
+        assertExpectedRevision(fields.expected_revision, 0, 'expected_revision');
+        const current = loaded.coordination.record;
+        if (current.phase === 'resolution_ready' && current.revision === 1
+          && current.resolved_plan_digest === plan.record.canonical_digest
+          && current.selection_request_binding === null) {
+          return snapshotRecord({
+            created: false,
+            record: loaded.anchor.record,
+            coordination: current,
+          });
+        }
+        if (current.phase !== 'submitted' || current.revision !== 0) {
+          failAnchor('aggregate_run_revision_conflict', 'expected_revision',
+            'commitResolvedPlan requires submitted@0.');
+        }
+        await adoptOrPublishRecord(dirToken, PLAN_RECORD_NAME, plan, PLAN_RECORD_NAME);
+        const next = bindCoordinationPayload({
+          schema: AGGREGATE_RUN_COORDINATION_SCHEMA_ID,
+          run_id: current.run_id,
+          anchor_digest: current.anchor_digest,
+          revision: 1,
+          phase: 'resolution_ready',
+          selection_request_binding: null,
+          selection_reply_digest: null,
+          resolved_plan_digest: plan.record.canonical_digest,
+        });
+        const coordination = await publishCoordination(dirToken, next);
+        return snapshotRecord({
+          created: true,
+          record: loaded.anchor.record,
+          coordination: coordination.record,
+        });
+      }));
     },
   });
 }
