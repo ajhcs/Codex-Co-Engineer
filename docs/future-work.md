@@ -18,10 +18,16 @@ fallback or replay, and Codex-only final acceptance.
 Library-only P24/P25 run persistence now accepts an existing private
 directory, persists identity-bound idempotent submission records, and
 appends a hash-chained per-run event journal with a deterministic
-terminal-absorbing reducer and run-bound cursors. It does not implement the
-rest of the run runtime: there is no scheduler, provider dispatch,
-workspace provisioning, cleanup, candidate composition, `AttentionBatchV1`,
-supervisor/server journal wiring, or MCP surface above the library layer.
+terminal-absorbing reducer and run-bound cursors. A separate R24A
+aggregate pre-dispatch run anchor accepts its own existing private root
+marked `storage-root.v1` kind `aggregate_run_anchor`, binds identity with
+durable claims before run directories, and publishes full selection
+request/reply/resolved-plan records before absorbing coordination
+references; it does not migrate or write into P24/P25. None of these
+library layers implement the rest of the run runtime: there is no
+scheduler, provider dispatch, workspace provisioning, cleanup, candidate
+composition, `AttentionBatchV1`, supervisor/server journal wiring, or MCP
+surface above the library layer.
 Gate A remains the functional release authority; Gate B context-efficiency
 and Gate C credit economics stay advisory.
 

@@ -4,6 +4,34 @@
 
 ### Added
 
+- **Aggregate pre-dispatch run anchor for unresolved P05 selection.** Additive
+  `aggregate-run-anchor.mjs` persists one immutable AggregateRunAnchorV1 plus
+  absorbing coordination state for runs whose P05 provider/model selection is
+  still unresolved, inside a caller-supplied existing private root distinct
+  from accepted P24/P25. The P03 registry gains closed labels `storage-root.v1`,
+  `aggregate-run-anchor.v1`, `aggregate-run-coordination.v1`,
+  `aggregate-submission-idempotency.v1`, `aggregate-run-claim.v1`,
+  `aggregate-selection-reply.v1`, and `aggregate-resolved-plan.v1`.
+  `initializeAggregateRunAnchorRoot` publishes an atomic owner-only
+  `storage-root.v1` marker of kind `aggregate_run_anchor` plus a nonce, and
+  only onto an existing private completely empty root. Open rejects unmarked
+  empty roots and nonempty P24, P25, or foreign layouts, and every operation
+  reverifies root and marker identity. `claims/<run_id>.json` is durable
+  before `runs/<run_id>`: a claim binds run, anchor, submission key, marker,
+  and claim nonce/digest. Namespace lock then per-run lock. An empty directory
+  without the exact claim is never adopted; the exact claim recovers the same
+  identity; a mismatch conflicts; losers never remove winner paths. High-level
+  `commitSelectionRequest`, `commitSelectionResolution`, and
+  `commitResolvedPlan` publish bounded canonical JSON records at fixed names,
+  fsync, and verify the full record before coordination references it. Exact
+  orphan records are adopted; differing orphans conflict; committed missing,
+  malformed, or digest-mismatched files are corruption. The lattice is
+  `submitted@0` → `awaiting_selection@1` → `resolution_ready@2`, or
+  `submitted@0` → `resolution_ready@1`; revisions are exact, the terminal
+  phase is absorbing, and identical retries are idempotent. There is no public
+  digest CAS, journal, reducer, scheduler, provider, workspace, server, or MCP
+  wiring, and no migration of P24/P25. Coverage lives in
+  `r1-aggregate-run-anchor` and `r1-aggregate-run-anchor-adversarial` tests.
 - **Append-only run journal, deterministic reducer, and run-bound cursor.**
   Additive `run-reducer.mjs` / `run-journal.mjs` persist one bounded
   append-only canonical JSONL event chain per run inside a private per-run

@@ -1124,21 +1124,28 @@ function stampRecord(runId, anchorDigest, nonceHex) {
   };
 }
 
-async function verifyCreationStamp(dirToken, binding) {
-  const opened = await readBoundedFile(dirToken, STAMP_NAME, MAX_AGGREGATE_STAMP_BYTES, STAMP_NAME);
+function bindStampPayload(runId, anchorDigest, nonceHex) {
+  assertRunId(runId, 'run_id');
+  assertBoundDigest(anchorDigest, 'record_canonical_digest');
+  if (typeof nonceHex !== 'string' || !capturedTest(NONCE_PATTERN, nonceHex)) {
+    failAnchor('invalid_format', 'nonce', 'Creation stamp nonce must be 32 lowercase hex characters.');
+  }
+  const record = stampRecord(runId, anchorDigest, nonceHex);
+  return { record, bytes: encodeRecord(record, MAX_AGGREGATE_STAMP_BYTES, STAMP_NAME) };
+}
+
+async function verifyCreationStamp(dirToken, binding, claimNonce) {
   const rebound = () => failAnchor('aggregate_run_dir_swapped', STAMP_NAME,
     'The run directory is not the private aggregate run created for this claim.');
-  if (opened === null) rebound();
-  const parsed = parseCanonicalObject(opened.bytes, STAMP_NAME, MAX_AGGREGATE_STAMP_BYTES);
-  const keys = sortedCapturedKeys(parsed);
-  if (keys.length !== 4
-    || parsed.schema !== AGGREGATE_RUN_STAMP_SCHEMA_ID
-    || parsed.run_id !== binding.run_id
-    || parsed.record_canonical_digest !== binding.canonical_digest
-    || typeof parsed.nonce !== 'string'
-    || !capturedTest(NONCE_PATTERN, parsed.nonce)) {
-    rebound();
+  let expected;
+  try {
+    expected = bindStampPayload(binding.run_id, binding.canonical_digest, claimNonce);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) rebound();
+    throw error;
   }
+  const opened = await readBoundedFile(dirToken, STAMP_NAME, MAX_AGGREGATE_STAMP_BYTES, STAMP_NAME);
+  if (opened === null || !equalBytes(opened.bytes, expected.bytes)) rebound();
 }
 
 function classifyRootName(name) {
@@ -1331,11 +1338,46 @@ async function auditRunLayout(dirToken) {
   return { names, temporaries };
 }
 
-async function loadCompleteRun(dirToken, runId) {
+function durableRunFileNames(names) {
+  return names.filter((name) => !capturedTest(TEMP_NAME_PATTERN, name)
+    && !capturedTest(LOCK_OWNER_NAME_PATTERN, name) && name !== LOCK_NAME);
+}
+
+function classifyExactSubmitPrefix(names) {
+  const durable = durableRunFileNames(names);
+  if (durable.length === 0) return 'empty';
+  const set = new Set(durable);
+  if (durable.length === 1 && set.has(ANCHOR_NAME)) return 'anchor';
+  if (durable.length === 2 && set.has(ANCHOR_NAME) && set.has(COORDINATION_NAME)) {
+    return 'anchor_coordination';
+  }
+  return null;
+}
+
+async function publishExactIfAbsent(dirToken, name, bytes, maxBytes, field, mismatchCode, mismatchMessage) {
+  const existing = await readBoundedFile(dirToken, name, maxBytes, field);
+  if (existing !== null) {
+    if (!equalBytes(existing.bytes, bytes)) {
+      failAnchor(mismatchCode, field, mismatchMessage);
+    }
+    return { published: false };
+  }
+  const published = await exclusivePublish(dirToken, name, bytes, field);
+  if (published.published) return { published: true };
+  const raced = await readBoundedFile(dirToken, name, maxBytes, field);
+  if (raced === null) {
+    failAnchor('aggregate_run_unreadable', field, 'An existing aggregate run file could not be verified.');
+  }
+  if (!equalBytes(raced.bytes, bytes)) {
+    failAnchor(mismatchCode, field, mismatchMessage);
+  }
+  return { published: false };
+}
+
+async function loadCompleteRun(dirToken, runId, claimRecord) {
   const cleaned = await auditRunLayout(dirToken);
   await removeStaleTemporaries(dirToken, cleaned.temporaries);
-  const names = cleaned.names.filter((name) => !capturedTest(TEMP_NAME_PATTERN, name)
-    && !capturedTest(LOCK_OWNER_NAME_PATTERN, name) && name !== LOCK_NAME);
+  const names = durableRunFileNames(cleaned.names);
   if (!names.includes(ANCHOR_NAME) || !names.includes(COORDINATION_NAME) || !names.includes(STAMP_NAME)) {
     return { complete: false, names };
   }
@@ -1356,7 +1398,13 @@ async function loadCompleteRun(dirToken, runId) {
     failAnchor('aggregate_run_identity_mismatch', 'anchor_digest',
       'Coordination does not bind the stored anchor digest.');
   }
-  await verifyCreationStamp(dirToken, anchor.record);
+  if (claimRecord.anchor_digest !== anchor.record.canonical_digest
+    || claimRecord.run_id !== runId) {
+    failAnchor('aggregate_run_identity_mismatch', 'claim',
+      'The durable claim does not match the stored aggregate anchor.');
+  }
+  await verifyCreationStamp(dirToken, anchor.record, claimRecord.nonce);
+  await verifyReferencedRecords(dirToken, coordination.record);
   return {
     complete: true,
     names,
@@ -1366,8 +1414,35 @@ async function loadCompleteRun(dirToken, runId) {
   };
 }
 
-async function publishInitialRunFiles(dirToken, prepared) {
-  const existing = await loadCompleteRun(dirToken, prepared.record.run_id);
+async function assertExactSubmitPrefix(dirToken, prepared, prefixKind) {
+  if (prefixKind === 'empty') return;
+  const anchorOpened = await readBoundedFile(dirToken, ANCHOR_NAME, MAX_AGGREGATE_ANCHOR_BYTES, ANCHOR_NAME);
+  if (anchorOpened === null) {
+    failAnchor('aggregate_run_unreadable', ANCHOR_NAME,
+      'An existing aggregate run file could not be verified.');
+  }
+  parseStoredAnchor(anchorOpened.bytes);
+  if (!equalBytes(anchorOpened.bytes, prepared.bytes)) {
+    failAnchor('aggregate_run_identity_conflict', ANCHOR_NAME,
+      'Run id already binds a different aggregate anchor.');
+  }
+  if (prefixKind !== 'anchor_coordination') return;
+  const expectedCoord = initialCoordination(prepared.record);
+  const coordOpened = await readBoundedFile(dirToken, COORDINATION_NAME, MAX_AGGREGATE_COORDINATION_BYTES,
+    COORDINATION_NAME);
+  if (coordOpened === null) {
+    failAnchor('aggregate_run_unreadable', COORDINATION_NAME,
+      'An existing coordination file could not be verified.');
+  }
+  parseStoredCoordination(coordOpened.bytes);
+  if (!equalBytes(coordOpened.bytes, expectedCoord.bytes)) {
+    failAnchor('aggregate_run_unreadable', COORDINATION_NAME,
+      'An existing coordination file could not be verified.');
+  }
+}
+
+async function publishInitialRunFiles(dirToken, prepared, claimRecord) {
+  const existing = await loadCompleteRun(dirToken, prepared.record.run_id, claimRecord);
   if (existing.complete) {
     if (existing.anchor.record.canonical_digest !== prepared.record.canonical_digest) {
       failAnchor('aggregate_run_identity_conflict', 'run_id',
@@ -1375,39 +1450,32 @@ async function publishInitialRunFiles(dirToken, prepared) {
     }
     return { created: false, anchor: existing.anchor, coordination: existing.coordination };
   }
+  const prefixKind = classifyExactSubmitPrefix(existing.names);
+  if (prefixKind === null) {
+    failAnchor('aggregate_run_unreadable', 'directory',
+      'The claimed run directory is not a complete aggregate run.');
+  }
+  await assertExactSubmitPrefix(dirToken, prepared, prefixKind);
   const coord = initialCoordination(prepared.record);
-  const stamp = encodeRecord(
-    stampRecord(prepared.record.run_id, prepared.record.canonical_digest, RANDOM_BYTES(16).toString('hex')),
-    MAX_AGGREGATE_STAMP_BYTES,
-    STAMP_NAME,
+  const stamp = bindStampPayload(
+    prepared.record.run_id,
+    prepared.record.canonical_digest,
+    claimRecord.nonce,
   );
-  const publishedAnchor = await exclusivePublish(dirToken, ANCHOR_NAME, prepared.bytes, ANCHOR_NAME);
-  if (!publishedAnchor.published) {
-    const loaded = await loadCompleteRun(dirToken, prepared.record.run_id);
-    if (!loaded.complete) {
-      failAnchor('aggregate_run_unreadable', ANCHOR_NAME,
-        'An existing aggregate run file could not be verified.');
-    }
-    if (loaded.anchor.record.canonical_digest !== prepared.record.canonical_digest) {
-      failAnchor('aggregate_run_identity_conflict', 'run_id',
-        'Run id already binds a different aggregate anchor.');
-    }
-    return { created: false, anchor: loaded.anchor, coordination: loaded.coordination };
+  if (prefixKind === 'empty') {
+    await publishExactIfAbsent(dirToken, ANCHOR_NAME, prepared.bytes, MAX_AGGREGATE_ANCHOR_BYTES,
+      ANCHOR_NAME, 'aggregate_run_identity_conflict',
+      'Run id already binds a different aggregate anchor.');
   }
-  const publishedCoord = await exclusivePublish(dirToken, COORDINATION_NAME, coord.bytes, COORDINATION_NAME);
-  if (!publishedCoord.published) {
-    const loaded = await loadCompleteRun(dirToken, prepared.record.run_id);
-    if (!loaded.complete) {
-      failAnchor('aggregate_run_unreadable', COORDINATION_NAME,
-        'An existing coordination file could not be verified.');
-    }
-    return { created: false, anchor: loaded.anchor, coordination: loaded.coordination };
+  if (prefixKind === 'empty' || prefixKind === 'anchor') {
+    await publishExactIfAbsent(dirToken, COORDINATION_NAME, coord.bytes, MAX_AGGREGATE_COORDINATION_BYTES,
+      COORDINATION_NAME, 'aggregate_run_unreadable',
+      'An existing coordination file could not be verified.');
   }
-  const publishedStamp = await exclusivePublish(dirToken, STAMP_NAME, stamp, STAMP_NAME);
-  if (!publishedStamp.published) {
-    await verifyCreationStamp(dirToken, prepared.record);
-  }
-  const loaded = await loadCompleteRun(dirToken, prepared.record.run_id);
+  await publishExactIfAbsent(dirToken, STAMP_NAME, stamp.bytes, MAX_AGGREGATE_STAMP_BYTES,
+    STAMP_NAME, 'aggregate_run_dir_swapped',
+    'The run directory is not the private aggregate run created for this claim.');
+  const loaded = await loadCompleteRun(dirToken, prepared.record.run_id, claimRecord);
   if (!loaded.complete) {
     failAnchor('aggregate_run_unreadable', 'directory', 'Published aggregate run files did not verify.');
   }
@@ -1498,7 +1566,7 @@ async function completeSubmit(ctx, prepared) {
   let runLock = null;
   try {
     runLock = await acquireLock(dirToken, AGGREGATE_RUN_LOCK_SCHEMA_ID);
-    const result = await publishInitialRunFiles(dirToken, prepared);
+    const result = await publishInitialRunFiles(dirToken, prepared, claimRecord);
     await reverifyDirectory(root, 'root');
     await reverifyDirectory(claims, 'claims');
     await reverifyDirectory(runs, 'runs');
@@ -1677,19 +1745,21 @@ function assertExpectedRevision(value, expected, field) {
   }
 }
 
+function corruptCommitted(field, message) {
+  failAnchor('aggregate_run_record_corruption', field, message);
+}
+
 async function verifyCommittedRecord(dirToken, name, digest, field, kind) {
   const opened = await readBoundedFile(dirToken, name, MAX_AGGREGATE_RECORD_BYTES, field);
   if (opened === null) {
-    failAnchor('aggregate_run_record_corruption', field,
-      'A committed aggregate record is missing.');
+    corruptCommitted(field, 'A committed aggregate record is missing.');
   }
   let parsed;
   try {
     parsed = parseCanonicalObject(opened.bytes, field, MAX_AGGREGATE_RECORD_BYTES);
   } catch (error) {
     if (error instanceof RunContractV1Error) {
-      failAnchor('aggregate_run_record_corruption', field,
-        'A committed aggregate record is malformed.');
+      corruptCommitted(field, 'A committed aggregate record is malformed.');
     }
     throw error;
   }
@@ -1697,8 +1767,10 @@ async function verifyCommittedRecord(dirToken, name, digest, field, kind) {
     try {
       validateSelectionRequestV1(parsed);
     } catch (error) {
-      failAnchor('aggregate_run_record_corruption', field,
-        'A committed selection request record failed verification.');
+      if (error instanceof RunContractV1Error) {
+        corruptCommitted(field, 'A committed selection request record failed verification.');
+      }
+      throw error;
     }
     const identity = selectionRequestIdentity(parsed);
     const recordDigest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RUN_ANCHOR, {
@@ -1708,33 +1780,61 @@ async function verifyCommittedRecord(dirToken, name, digest, field, kind) {
       digest: identity.digest,
       body: parsed,
     });
-    if (recordDigest !== digest) {
-      failAnchor('aggregate_run_record_corruption', field,
-        'A committed selection request record digest does not match.');
+    if (recordDigest !== digest || !equalBytes(encodeRecord(parsed, MAX_AGGREGATE_RECORD_BYTES, field), opened.bytes)) {
+      corruptCommitted(field, 'A committed selection request record digest does not match.');
     }
     return;
   }
   if (kind === 'reply') {
-    const rebuilt = bindReplyRecord(parsed.run_id, { request_id: parsed.request_id }, {
-      schema: parsed.schema,
-      run_id: parsed.run_id,
-      request_id: parsed.request_id,
-      answers: parsed.answers,
-    });
+    let rebuilt;
+    try {
+      rebuilt = bindReplyRecord(parsed.run_id, { request_id: parsed.request_id }, {
+        schema: parsed.schema,
+        run_id: parsed.run_id,
+        request_id: parsed.request_id,
+        answers: parsed.answers,
+      });
+    } catch (error) {
+      if (error instanceof RunContractV1Error) {
+        corruptCommitted(field, 'A committed selection reply record is malformed.');
+      }
+      throw error;
+    }
     if (rebuilt.record.canonical_digest !== digest || !equalBytes(rebuilt.bytes, opened.bytes)) {
-      failAnchor('aggregate_run_record_corruption', field,
-        'A committed selection reply record digest does not match.');
+      corruptCommitted(field, 'A committed selection reply record digest does not match.');
     }
     return;
   }
-  const rebuilt = bindPlanRecord(parsed.run_id, {
-    schema: parsed.schema,
-    run_id: parsed.run_id,
-    complete: parsed.complete,
-  });
+  let rebuilt;
+  try {
+    rebuilt = bindPlanRecord(parsed.run_id, {
+      schema: parsed.schema,
+      run_id: parsed.run_id,
+      complete: parsed.complete,
+    });
+  } catch (error) {
+    if (error instanceof RunContractV1Error) {
+      corruptCommitted(field, 'A committed resolved plan record is malformed.');
+    }
+    throw error;
+  }
   if (rebuilt.record.canonical_digest !== digest || !equalBytes(rebuilt.bytes, opened.bytes)) {
-    failAnchor('aggregate_run_record_corruption', field,
-      'A committed resolved plan record digest does not match.');
+    corruptCommitted(field, 'A committed resolved plan record digest does not match.');
+  }
+}
+
+async function verifyReferencedRecords(dirToken, coordination) {
+  if (coordination.selection_request_binding !== null) {
+    await verifyCommittedRecord(dirToken, REQUEST_RECORD_NAME,
+      coordination.selection_request_binding.record_digest, REQUEST_RECORD_NAME, 'request');
+  }
+  if (coordination.selection_reply_digest !== null) {
+    await verifyCommittedRecord(dirToken, REPLY_RECORD_NAME,
+      coordination.selection_reply_digest, REPLY_RECORD_NAME, 'reply');
+  }
+  if (coordination.resolved_plan_digest !== null) {
+    await verifyCommittedRecord(dirToken, PLAN_RECORD_NAME,
+      coordination.resolved_plan_digest, PLAN_RECORD_NAME, 'plan');
   }
 }
 
@@ -1761,30 +1861,10 @@ async function mutateRun(ctx, runId, mutator) {
   let runLock = null;
   try {
     runLock = await acquireLock(dirToken, AGGREGATE_RUN_LOCK_SCHEMA_ID);
-    const loaded = await loadCompleteRun(dirToken, runId);
+    const loaded = await loadCompleteRun(dirToken, runId, claim.record);
     if (!loaded.complete) {
       failAnchor('aggregate_run_unreadable', 'directory',
         'The claimed run directory is not a complete aggregate run.');
-    }
-    if (loaded.anchor.record.canonical_digest !== claim.record.anchor_digest) {
-      failAnchor('aggregate_run_identity_mismatch', 'claim',
-        'The durable claim does not match the stored aggregate anchor.');
-    }
-    if (loaded.coordination.record.phase === 'awaiting_selection') {
-      await verifyCommittedRecord(dirToken, REQUEST_RECORD_NAME,
-        loaded.coordination.record.selection_request_binding.record_digest,
-        REQUEST_RECORD_NAME, 'request');
-    }
-    if (loaded.coordination.record.phase === 'resolution_ready') {
-      if (loaded.coordination.record.selection_request_binding !== null) {
-        await verifyCommittedRecord(dirToken, REQUEST_RECORD_NAME,
-          loaded.coordination.record.selection_request_binding.record_digest,
-          REQUEST_RECORD_NAME, 'request');
-        await verifyCommittedRecord(dirToken, REPLY_RECORD_NAME,
-          loaded.coordination.record.selection_reply_digest, REPLY_RECORD_NAME, 'reply');
-      }
-      await verifyCommittedRecord(dirToken, PLAN_RECORD_NAME,
-        loaded.coordination.record.resolved_plan_digest, PLAN_RECORD_NAME, 'plan');
     }
     const result = await mutator(dirToken, loaded);
     await reverifyDirectory(root, 'root');
