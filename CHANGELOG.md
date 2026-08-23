@@ -20,7 +20,9 @@
   refs, grafts, hostile names, extra keys, proxies/accessors, and bounds
   abuse. It does not own P15 scope/read-only/merge-commit checks, P16A
   trusted command policy, P28 Git mutation, or provider/workspace
-  dispatch.
+  dispatch. Coverage lives in `r1-git-identity` and
+  `r1-git-identity-adversarial` tests plus disposable forged/stale/
+  rewritten fixtures.
 - **ArtifactRefV1 and the strict relative artifact path policy.** Adds two
   additive, pure v3 modules for W3-P07. `artifact-path.mjs` owns one
   deterministic fail-closed question - is this string a strict portable
