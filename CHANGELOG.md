@@ -4,6 +4,27 @@
 
 ### Added
 
+- **Approved verification-command resolver.** Adds additive
+  `approved-verification-command.mjs` for W15-P16B. The module consumes an
+  immutable trusted `VerificationPolicyV1` from P16A plus a closed
+  Codex/owner selection of `command_id` and typed parameter values, and
+  returns a fresh frozen ExecutionIntent / ApprovedCommand receipt. Every
+  parameter is checked against the owner-authored domain (exact name set,
+  required semantics, types, enums, ranges, length, and path-segment
+  grammar). Expansion substitutes only whole-token `{name}` placeholders
+  from the owner argv template; there is no shell string, PATH lookup,
+  executable override, interpolation, substitution, globbing, or option
+  smuggling. Provider, profile, and manifest reported commands remain
+  evidence only: matching command-id or argv text does not authorize
+  resolution. Receipts bind policy identity, command-descriptor identity,
+  canonical parameters, executable path, exact argv, and inherited P16A
+  constraints without executing. Hostile containers fail closed with typed
+  content-free errors. Callers' objects are neither mutated nor frozen.
+  The module never invokes a shell, resolves PATH, opens a network socket,
+  reads arbitrary workspace files, mutates a candidate, or implements the
+  later P16C runner. Coverage lives in
+  `test/r1-approved-verification-command.test.mjs` and
+  `test/r1-approved-verification-command-adversarial.test.mjs`.
 - **Trusted VerificationPolicyV1 schema and owner-authored policy loader.**
   Adds additive `trusted-verification-policy.mjs` for W14-P16A. The module
   owns a versioned immutable command catalog: each stable command ID binds

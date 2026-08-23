@@ -17,10 +17,10 @@ fallback or replay, and Codex-only final acceptance.
 
 This worktree does not implement the run runtime, candidate composition,
 or `AttentionBatchV1`. The P16A VerificationPolicyV1 schema and owner
-loader exist as data validation only; approved-command resolution and
-execution remain later work. Gate A remains the functional release
-authority; Gate B context-efficiency and Gate C credit economics stay
-advisory.
+loader plus the P16B approved-command resolver exist as data validation
+and resolution only; P16C trusted-policy command execution remains later
+work. Gate A remains the functional release authority; Gate B
+context-efficiency and Gate C credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 

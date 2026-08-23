@@ -4,6 +4,9 @@ Codex-Co-Engineer has no executable project policy file. The only
 project-scoped configuration data is the data-only ProfileV1 catalog
 described in [Profiles](#profiles); verification commands never come from
 profiles and remain a separate owner-maintained `VerificationPolicyV1`.
+The approved-command resolver consumes that owner policy plus a closed
+Codex/owner `command_id` selection and returns a frozen ExecutionIntent
+receipt; it does not execute the command.
 Provider authentication is normal persistent login/session state or an
 owner-only key file. The setup command installs the pinned local composition
 and creates the default DSH configuration; it never performs login on the
