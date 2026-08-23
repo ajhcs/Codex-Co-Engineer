@@ -6,9 +6,10 @@
 // Additive v3 module for W13-P14. It observes Git from the local repository
 // through argv execution and never from provider claims. It binds repository
 // path identity, expected base ref/name, exact base SHA, candidate head SHA,
-// and object types into P13 VerifiedFactV1 / EvidenceDiscrepancyV1 snapshots.
-// It does not own P15 scope/read-only/merge-commit checks, P16A trusted
-// command policy, P28 Git mutation, or provider/workspace dispatch.
+// object types, reachability, ancestry, merge-base identity, and
+// rewritten/stale history into P13 VerifiedFactV1 / EvidenceDiscrepancyV1
+// snapshots. It does not own P15 scope/read-only/merge-commit checks, P16A
+// trusted command policy, P28 Git mutation, or provider/workspace dispatch.
 //
 // Observation is fail-closed: spawn is argv-only (no shell), the child
 // environment is a closed map that cannot inherit GIT_* / config / replace /
@@ -75,7 +76,8 @@ export const GIT_IDENTITY_RESULT_ALLOWED_KEYS = capturedFreeze([
 ]);
 export const GIT_IDENTITY_OBSERVATION_ALLOWED_KEYS = capturedFreeze([
   'repository_path', 'git_dir', 'base_ref', 'base_sha', 'head_sha',
-  'base_object_type', 'head_object_type', 'worktree_head_ref', 'duration_ms',
+  'merge_base_sha', 'base_object_type', 'head_object_type',
+  'worktree_head_ref', 'ancestor', 'duration_ms',
 ]);
 export const GIT_IDENTITY_OPTIONS_ALLOWED_KEYS = capturedFreeze(['spawn']);
 export const GIT_IDENTITY_STATUSES = capturedFreeze(['failed', 'verified']);
@@ -722,6 +724,57 @@ async function observeHeadSha(session, flags, candidateHeadSha, path) {
   return { sha: observedHeadSha, object_type: objectType };
 }
 
+async function observeAncestry(session, flags, expectedBaseSha, observedBaseSha, headSha, path) {
+  const ancestorResult = await gitMaybe(
+    session,
+    [...flags, 'merge-base', '--is-ancestor', '--', expectedBaseSha, headSha],
+    `${path}.ancestry`,
+  );
+  if (ancestorResult.exit_code !== 0 && ancestorResult.exit_code !== 1) {
+    fail('git_execution_failed', `${path}.ancestry`,
+      `${path}.ancestry could not complete a merge-base ancestor check.`);
+  }
+  const ancestor = ancestorResult.exit_code === 0;
+  const mergeBaseResult = await gitMaybe(
+    session,
+    [...flags, 'merge-base', '--all', '--', expectedBaseSha, headSha],
+    `${path}.merge_base`,
+  );
+  let mergeBaseSha = '';
+  if (mergeBaseResult.exit_code === 0) {
+    const lines = mergeBaseResult.stdout.endsWith('\n')
+      ? mergeBaseResult.stdout.slice(0, -1).split('\n')
+      : mergeBaseResult.stdout.split('\n');
+    if (lines.length !== 1 || !isSha40(lines[0])) {
+      mergeBaseSha = '';
+    } else {
+      mergeBaseSha = lines[0];
+    }
+  }
+  const baseMoved = observedBaseSha !== expectedBaseSha;
+  let staleBase = false;
+  let rewrittenBase = false;
+  if (baseMoved) {
+    const expectedStillAncestor = await gitMaybe(
+      session,
+      [...flags, 'merge-base', '--is-ancestor', '--', expectedBaseSha, observedBaseSha],
+      `${path}.stale_base`,
+    );
+    if (expectedStillAncestor.exit_code === 0) staleBase = true;
+    else rewrittenBase = true;
+  }
+  const wrongMergeBase = !isSha40(mergeBaseSha) || mergeBaseSha !== expectedBaseSha;
+  const unreachableHead = ancestor !== true;
+  return {
+    ancestor,
+    merge_base_sha: isSha40(mergeBaseSha) ? mergeBaseSha : '',
+    stale_base: staleBase,
+    rewritten_base: rewrittenBase,
+    wrong_merge_base: wrongMergeBase,
+    unreachable_head: unreachableHead,
+  };
+}
+
 function durationOf(session) {
   return MATH_MAX(0, MATH_FLOOR(Date.now() - session.startedAt));
 }
@@ -780,6 +833,9 @@ export async function verifyGitIdentityV1(input, options) {
   const head = await observeHeadSha(
     session, flags, request.candidate_head_sha, pathLabel,
   );
+  const ancestry = await observeAncestry(
+    session, flags, request.repository.base_sha, base.sha, head.sha, pathLabel,
+  );
   const durationMs = durationOf(session);
   const observation = freezeRecord(GIT_IDENTITY_OBSERVATION_ALLOWED_KEYS, {
     repository_path: repositoryPath,
@@ -787,9 +843,11 @@ export async function verifyGitIdentityV1(input, options) {
     base_ref: request.expected_base_ref,
     base_sha: base.sha,
     head_sha: head.sha,
+    merge_base_sha: ancestry.merge_base_sha,
     base_object_type: base.object_type,
     head_object_type: head.object_type,
     worktree_head_ref: worktreeHeadRef,
+    ancestor: ancestry.ancestor,
     duration_ms: durationMs,
   });
   const inputDigest = digestCanonical({
@@ -811,12 +869,15 @@ export async function verifyGitIdentityV1(input, options) {
       emitDiscrepancy(id, request, factIds, request.sequence + discrepancies.length),
     ]);
   };
-  if (base.sha !== request.repository.base_sha) {
-    pushDiscrepancy('stale-base', ['git-identity']);
-  }
+  if (ancestry.stale_base) pushDiscrepancy('stale-base', ['git-identity']);
+  if (ancestry.rewritten_base) pushDiscrepancy('rewritten-history', ['git-identity', 'head-sha']);
+  if (ancestry.unreachable_head) pushDiscrepancy('unreachable-head', ['head-sha']);
+  if (ancestry.wrong_merge_base) pushDiscrepancy('wrong-merge-base', ['git-identity', 'head-sha']);
   const verified = discrepancies.length === 0
     && base.sha === request.repository.base_sha
-    && head.sha === request.candidate_head_sha;
+    && head.sha === request.candidate_head_sha
+    && ancestry.ancestor === true
+    && ancestry.merge_base_sha === request.repository.base_sha;
   const status = verified ? 'verified' : 'failed';
   const facts = capturedFreeze([
     emitFact(
