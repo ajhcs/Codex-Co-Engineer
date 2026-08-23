@@ -4,6 +4,28 @@
 
 ### Added
 
+- **Local provider result sink.** Adds additive v3
+  `local-provider-result-sink.mjs` (P11) that routes final local Grok ACP,
+  Cursor Local ACP, and DSH ACPX/CLI provider output into the accepted
+  P08/P09 raw+sanitized artifact store through one provider-neutral sink,
+  binding exact `run_id` / `assignment_id` / `provider` / `model` / optional
+  child-envelope digest identity into the ArtifactRefV1 path. The complete
+  transport-available result is stored up to the existing class cap; older
+  output is never silently discarded, empty results stay unpublished, and a
+  source that the upstream already clipped is persisted with truthful
+  `source_truncated` / `complete` provenance. Only sanitized artifacts are
+  model-readable. The receipt is detached deep-frozen content-free
+  metadata (raw/sanitized refs, P09 provenance, digests, counts,
+  truncation) plus a default inline tail of at most 4,096 UTF-8 bytes
+  derived through the accepted P10 sanitized reader and aligned on a valid
+  UTF-8 boundary, with inline clipping recorded separately from upstream
+  truncation. The ACP worker is the only serialized seam: it preserves
+  3.2.1 `task.result` / `result_*` and event/terminal shapes, attaches
+  optional `provider_result_sink` metadata only after provider terminal
+  publication, and records typed content-free evidence on sink failure
+  without inventing completion or replaying provider work. Coverage lives
+  in `test/r1-local-provider-result-sink.test.mjs` and
+  `test/r1-local-provider-result-sink-adversarial.test.mjs`.
 - **Atomic raw/sanitized artifact store.** Adds the additive v3
   `artifact-store.mjs` module for W4-P08: it binds validated ArtifactRefV1
   declarations to real bytes under one caller-supplied existing private store

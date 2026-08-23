@@ -21,10 +21,23 @@ preflight/launch/reconcile/cancel requests and results against the
 accepted P05 13-field capability bridge. It does not implement Grok,
 Cursor Local, DSH, or Cursor Cloud transports, registry cutover,
 scheduler, or durable store; those remain P18/P20/P19/P21 and later
-run-runtime work. This worktree does not implement the run runtime,
-candidate composition, or `AttentionBatchV1`. Gate A remains the
-functional release authority; Gate B context-efficiency and Gate C
-credit economics stay advisory.
+run-runtime work.
+
+The P11 local provider result sink is in-tree as an additive
+provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
+ACPX/CLI output is published through the accepted P09 sanitizer and P08
+store, with a P10-derived sanitized inline tail. It does not implement
+P12 evidence bundles, supervisor/server MCP registration, cloud-worker
+sinks, cleanup, or run runtime. `acp-worker.mjs` is the only serialized
+seam; 3.2.1 `task.result` bounding is unchanged. Ambient umask variance
+for P08 store-root `mkdtemp` privacy is recorded here and is not
+runtime-changed: P11 fixtures `chmod 0700` after creating their own
+roots and do not include optional P08 umask test-fixture
+determinization.
+
+This worktree does not implement the run runtime, candidate composition,
+or `AttentionBatchV1`. Gate A remains the functional release authority;
+Gate B context-efficiency and Gate C credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
