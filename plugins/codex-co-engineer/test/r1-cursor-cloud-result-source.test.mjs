@@ -4,6 +4,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { isArtifactRelativePathV1 } from '../mcp/v3/artifact-path.mjs';
+import { MAX_RAW_ARTIFACT_BYTE_LENGTH } from '../mcp/v3/artifact-ref.mjs';
 import { readSanitizedArtifactV1 } from '../mcp/v3/artifact-reader.mjs';
 import { openArtifactStoreV1 } from '../mcp/v3/artifact-store.mjs';
 import {
@@ -38,10 +39,13 @@ import {
   REPO_URL,
   REQUEST_ID,
   RUN_ID,
+  INLINE_TAIL_MAX,
   SECRET,
+  exact4096,
   gitEvidenceFor,
   identityFor,
   makeStoreRoot,
+  oversizeProviderOutput,
   providerOutput,
   removeRoot,
   sdkResultFor,
@@ -158,7 +162,7 @@ test('provider report and independently observed Git evidence stay distinct type
     assert.equal(receipt.git_evidence.head_sha, HEAD_SHA);
     assert.equal(receipt.git_evidence.pr_url, PR_URL);
     assert.equal(receipt.git_evidence.relative_path, cursorCloudGitEvidencePathV1(identityFor()));
-    assert.equal(receipt.provider_report.relative_path, cursorCloudProviderReportPathV1(identityFor(), 'application/json'));
+    assert.equal(receipt.provider_report.relative_path, cursorCloudProviderReportPathV1(identityFor(), 'text/plain'));
     assert.equal(isArtifactRelativePathV1(receipt.provider_report.relative_path), true);
     assert.equal(isArtifactRelativePathV1(receipt.git_evidence.relative_path), true);
     assert.notEqual(receipt.provider_report.relative_path, receipt.git_evidence.relative_path);
@@ -237,6 +241,91 @@ test('provider text cannot be supplied as Git evidence', async () => {
       'invalid_type',
       'git_evidence',
     );
+  });
+});
+
+test('upstream truncation is marked separately from inline clipping', async () => {
+  await withStore(async (store) => {
+    const exact = exact4096('END!');
+    const unclipped = await materializeCursorCloudResultSourceV1(store, {
+      ...identityFor(),
+      provider_report: { status: 'finished', output: exact },
+    });
+    assert.equal(unclipped.provider_report.source_truncated, false);
+    assert.equal(unclipped.provider_report.complete, true);
+    assert.equal(unclipped.provider_report.inline_clipped, false);
+    assert.equal(unclipped.provider_report.storage_limited, false);
+    assert.equal(unclipped.provider_report.inline_tail.source_truncated, false);
+    assert.equal(unclipped.provider_report.inline_tail.inline_clipped, false);
+    assert.equal(unclipped.provider_report.inline_tail.byte_length, INLINE_TAIL_MAX);
+
+    const over = oversizeProviderOutput();
+    const clipped = await materializeCursorCloudResultSourceV1(store, {
+      ...identityFor({ assignment_id: 'cloud-clip' }),
+      provider_report: { status: 'finished', output: over },
+    });
+    assert.equal(clipped.provider_report.source_truncated, false);
+    assert.equal(clipped.provider_report.complete, true);
+    assert.equal(clipped.provider_report.inline_clipped, true);
+    assert.equal(clipped.provider_report.storage_limited, false);
+    assert.equal(clipped.provider_report.inline_tail.source_truncated, false);
+    assert.equal(clipped.provider_report.inline_tail.inline_clipped, true);
+    assert.match(clipped.provider_report.inline_tail.text, /VERDICT: OVERSIZE PASS$/u);
+    assert.equal(await readAllSanitized(store, clipped.provider_report.sanitized_ref).then((text) => text.includes(over)), true);
+
+    const truncated = await materializeCursorCloudResultSourceV1(store, {
+      ...identityFor({ assignment_id: 'cloud-trunc' }),
+      provider_report: { status: 'finished', output: 'short upstream clip', source_truncated: true },
+      git_evidence: gitEvidenceFor({ source_truncated: false }),
+    });
+    assert.equal(truncated.provider_report.source_truncated, true);
+    assert.equal(truncated.provider_report.complete, false);
+    assert.equal(truncated.provider_report.inline_clipped, false);
+    assert.equal(truncated.provider_report.inline_tail.source_truncated, true);
+    assert.equal(truncated.provider_report.inline_tail.complete, false);
+    assert.equal(truncated.git_evidence.source_truncated, false);
+    assert.equal(truncated.git_evidence.complete, true);
+    assert.equal(truncated.git_evidence.inline_clipped, false);
+  });
+});
+
+test('provider and Git upstream truncation flags are independent', async () => {
+  await withStore(async (store) => {
+    const receipt = await materializeCursorCloudResultSourceV1(store, {
+      ...identityFor(),
+      provider_report: { status: 'finished', output: oversizeProviderOutput(), source_truncated: true },
+      git_evidence: gitEvidenceFor({ source_truncated: true }),
+    });
+    assert.equal(receipt.provider_report.source_truncated, true);
+    assert.equal(receipt.provider_report.inline_clipped, true);
+    assert.equal(receipt.provider_report.complete, false);
+    assert.equal(receipt.git_evidence.source_truncated, true);
+    assert.equal(receipt.git_evidence.complete, false);
+    assert.equal(receipt.provider_report.storage_limited, false);
+    assert.equal(receipt.git_evidence.storage_limited, false);
+  });
+});
+
+test('crossing the raw class cap fails closed and does not pretend the upstream truncated', async () => {
+  await withStore(async (store) => {
+    const error = await errorOfAsync(
+      () => materializeCursorCloudResultSourceV1(store, {
+        ...identityFor(),
+        provider_report: {
+          status: 'finished',
+          output: 'x'.repeat(MAX_RAW_ARTIFACT_BYTE_LENGTH + 1),
+          source_truncated: false,
+        },
+      }),
+      'artifact_stream_over_cap',
+      'provider_report',
+    );
+    assert.equal(error.message.includes('source_truncated'), false);
+    assert.equal(JSON.stringify(projectCursorCloudResultSourcesV1({
+      id: PROVIDER_RUN_ID,
+      status: 'finished',
+      result: oversizeProviderOutput(),
+    }).provider_report.source_truncated), 'false');
   });
 });
 

@@ -1380,16 +1380,12 @@ export async function openCursorCloudResultArtifactStoreV1(stateRoot) {
 export async function materializeCursorCloudResultSourceV1(store, input) {
   const { identity, observed, providerReport, gitEvidence } = parseOptions(input);
 
-  const providerBytes = await normalizeOutput(
-    providerReport.output === undefined && providerReport.error == null
-      ? providerReport.status
-      : freezeData({
-        status: providerReport.status,
-        output: providerReport.output ?? null,
-        error: providerReport.error,
-      }),
-    'provider_report',
-  );
+  const providerSource = providerReport.output !== undefined
+    ? providerReport.output
+    : providerReport.error != null
+      ? freezeData({ error: providerReport.error })
+      : providerReport.status;
+  const providerBytes = await normalizeOutput(providerSource, 'provider_report');
   if (providerBytes.bytes.byteLength > MAX_RAW_ARTIFACT_BYTE_LENGTH) {
     failSource('artifact_stream_over_cap', 'provider_report',
       `The Cursor Cloud provider report exceeded the ${MAX_RAW_ARTIFACT_BYTE_LENGTH}-byte raw class cap; nothing was published.`);

@@ -767,7 +767,11 @@ async function attachCursorCloudResultSource(root, task, sources) {
     const receipt = await materializeCursorCloudResultSourceV1(store, {
       ...identity,
       observed: sources.observed,
-      provider_report: sources.provider_report,
+      provider_report: sources.provider_report == null ? undefined : {
+        ...sources.provider_report,
+        // 3.2.1 result_* bounding is local clipping, never upstream truncation.
+        source_truncated: sources.provider_report.source_truncated === true,
+      },
       git_evidence: sources.git_evidence,
     });
     return await updateTask(root, task.id, { cursor_cloud_result_source: receipt });
