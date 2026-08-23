@@ -382,3 +382,34 @@ test('duplicate and conflicting identities fail closed', () => {
     'duplicate_sequence',
   );
 });
+
+test('accepted states reject forged PASS, incomplete facts, unsupported claims, and discrepancies', () => {
+  for (const finalState of ['pass', 'accepted', 'verified']) {
+    assert.doesNotThrow(() => parseEvidenceBundleV1(validBundle({ final_state: finalState })));
+  }
+
+  const forgedPass = validBundle({ facts: [validGitIdentityFact()] });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(forgedPass)).code, 'unproven_accepted_state');
+
+  const incompleteFact = validBundle({
+    facts: [validFact({ status: 'partial' }), validGitIdentityFact()],
+  });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(incompleteFact)).code, 'unproven_accepted_state');
+
+  const truncatedFact = validBundle({
+    facts: [validFact({ status: 'truncated', truncated: true }), validGitIdentityFact()],
+  });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(truncatedFact)).code, 'truncated_required_fact');
+
+  const unsupportedClaim = validBundle({ claims: [validClaim({ status: 'unsupported' })] });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(unsupportedClaim)).code, 'unproven_accepted_state');
+
+  const blockingDiscrepancy = validBundle({
+    facts: [
+      validFact({ payload: { command_id: 'unit-tests', result: 'fail' }, status: 'failed' }),
+      validGitIdentityFact(),
+    ],
+    discrepancies: [validDiscrepancy()],
+  });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(blockingDiscrepancy)).code, 'unproven_accepted_state');
+});
