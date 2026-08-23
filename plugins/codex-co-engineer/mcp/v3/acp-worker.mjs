@@ -17,6 +17,7 @@ import {
 } from './local-provider-result-sink.mjs';
 import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
 import { boundedProviderResult, boundedProviderValue, createProviderResultAccumulator, providerCharCount } from './provider-result.mjs';
+import { RunContractV1Error } from './run-manifest.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
@@ -67,21 +68,20 @@ function fail(code, message) {
   throw new AcpWorkerError(code, message);
 }
 
-function sinkSourceFromCollector(collector) {
-  const snapshot = collector.snapshot();
-  if (snapshot.overflow === true) {
-    throw new AcpWorkerError(
-      'artifact_stream_over_cap',
-      'The provider result exceeded the raw artifact class cap; nothing was published.',
-    );
-  }
-  return snapshot.source;
-}
-
-async function attachLocalProviderResultSink(root, task, source, sourceTruncated = false) {
+export async function attachLocalProviderResultSink(
+  root, task, source, sourceTruncated = false, overflow = false,
+) {
   const identity = localProviderResultIdentityFromTaskV1(task);
   if (identity == null) return task;
   try {
+    if (task?.status !== 'completed') {
+      throw new RunContractV1Error('artifact_sink_not_published', 'sink',
+        'The local provider result sink did not publish after provider terminal.');
+    }
+    if (overflow === true) {
+      throw new RunContractV1Error('artifact_stream_over_cap', 'source',
+        'The provider result exceeded the raw artifact class cap; nothing was published.');
+    }
     const store = await openLocalProviderArtifactStoreV1(root);
     const receipt = await sinkLocalProviderResultV1(store, {
       ...identity,
@@ -964,8 +964,9 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       finished_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, taskId, { type: 'terminal', status, stop_reason: result.stopReason ?? null });
+    const snapshot = complete.snapshot();
     return attachLocalProviderResultSink(
-      root, terminal, sinkSourceFromCollector(complete), false,
+      root, terminal, snapshot.source, false, snapshot.overflow === true,
     );
   } catch (error) {
     const failure = publicError(error, prompt);

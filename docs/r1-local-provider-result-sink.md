@@ -23,7 +23,12 @@ sinkLocalProviderResultV1(store, options)
   - `media_type` — optional identity-encoded text media type
 
 Local providers only: `grok`, `cursor-local`, `dsh`. Cursor Cloud is
-denied. Identities are never guessed from `task.id`.
+denied. Identities are never guessed from `task.id`. The ArtifactRef
+relative path is
+`runs/{run_id}/{assignment_id}/{provider}/{identity_binding}/provider-report.{ext}`,
+where `identity_binding` is the SHA-256 of length-prefixed provider,
+model, and optional child-envelope digest, so two identities cannot
+share a path or ref.
 
 ## Publication
 
@@ -62,9 +67,16 @@ remain P09's.
 `acp-worker.mjs` is the only serialized integration. It publishes the
 legacy bounded `task.result` first, then attaches optional
 `provider_result_sink` metadata. Sink failure after provider terminal is
-typed content-free evidence; it does not invent completion, change
-provider status, or replay work. Tasks without exact run/child/model
-identity keep the 3.2.1 path unchanged.
+typed content-free evidence with a closed code/path and a generic
+bounded message; it does not invent completion, change provider status,
+or replay work. Tasks without exact run/child/model identity keep the
+3.2.1 path unchanged.
+
+Failed, cancelled, or other non-success ACP turns never publish
+accumulated partial text as complete. Collector overflow at the raw
+class cap is handled inside `attachLocalProviderResultSink` with typed
+content-free nonpublication evidence and does not rewrite the provider
+terminal.
 
 Provider completion remains evidence, never acceptance.
 

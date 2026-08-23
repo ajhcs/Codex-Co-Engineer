@@ -9,8 +9,10 @@ import { ARTIFACT_REF_SCHEMA_ID } from '../mcp/v3/artifact-ref.mjs';
 import { publishArtifactV1, openArtifactStoreV1 } from '../mcp/v3/artifact-store.mjs';
 import {
   LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS,
+  LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE,
   LOCAL_PROVIDER_RESULT_SINK_SCHEMA_ID,
   contentFreeSinkFailureV1,
+  localProviderResultReportPathV1,
   sinkLocalProviderResultV1,
 } from '../mcp/v3/local-provider-result-sink.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
@@ -227,7 +229,7 @@ test('idempotent restart succeeds and conflicting or tampered artifacts fail clo
 
     const other = Buffer.from('tampered sanitized bytes that are not the original\n', 'utf8');
     await publishArtifactV1(store, conflictingSanitizedRef(
-      `runs/${RUN_ID}/${CHILD_B}/provider-report.txt`,
+      localProviderResultReportPathV1(identityFor('dsh', { assignment_id: CHILD_B })),
       other,
     ), other);
     const afterRaw = await expectCode(
@@ -271,14 +273,46 @@ test('content-free sink failure evidence never carries bytes secrets or handles'
   assert.equal(evidence.published, false);
   assert.deepEqual(Object.keys(evidence), [...LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS]);
   assert.equal(evidence.error.code, 'artifact_content_conflict');
+  assert.equal(evidence.error.path, 'artifact_ref');
+  assert.equal(evidence.error.message, LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE);
   assert.equal(Object.isFrozen(evidence), true);
 
   const noisy = new Error(`failed to write ${SECRET} at /tmp/not-a-real-store`);
   const fallback = contentFreeSinkFailureV1(noisy);
   assert.equal(fallback.error.code, 'artifact_sink_failed');
+  assert.equal(fallback.error.path, 'sink');
+  assert.equal(fallback.error.message, LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE);
   assert.equal(JSON.stringify(fallback).includes(SECRET), false);
   assert.equal(JSON.stringify(fallback).includes('/tmp/not-a-real-store'), false);
   assert.equal(utilTypes.isProxy(fallback), false);
+});
+
+test('secret-bearing RunContractV1Error never echoes into sink failure evidence', () => {
+  const secretPath = `source/${SECRET}`;
+  const secretMessage = `failed to write ${SECRET} at /tmp/not-a-real-store`;
+  const secretError = new RunContractV1Error('artifact_sink_failed', secretPath, secretMessage);
+  const evidence = contentFreeSinkFailureV1(secretError);
+  const serialized = JSON.stringify(evidence);
+  assert.equal(evidence.published, false);
+  assert.equal(evidence.error.code, 'artifact_sink_failed');
+  assert.equal(evidence.error.path, 'sink');
+  assert.equal(evidence.error.message, LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE);
+  assert.equal(serialized.includes(SECRET), false);
+  assert.equal(serialized.includes(secretPath), false);
+  assert.equal(serialized.includes('/tmp/not-a-real-store'), false);
+  assert.equal(evidence.error.message.includes(SECRET), false);
+  assert.equal(evidence.error.path.includes(SECRET), false);
+
+  const unknown = contentFreeSinkFailureV1(new RunContractV1Error(
+    'not_a_closed_code',
+    'not_a_closed_path',
+    `echo ${SECRET}`,
+  ));
+  assert.equal(unknown.error.code, 'artifact_sink_failed');
+  assert.equal(unknown.error.path, 'sink');
+  assert.equal(unknown.error.message, LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE);
+  assert.equal(JSON.stringify(unknown).includes(SECRET), false);
+  assert.equal(JSON.stringify(unknown).includes('not_a_closed_code'), false);
 });
 
 test('string chunk streams that are not intrinsic views still sanitize split tokens', async () => {

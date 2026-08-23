@@ -6,15 +6,20 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { isArtifactRelativePathV1 } from '../mcp/v3/artifact-path.mjs';
 import { readSanitizedArtifactV1 } from '../mcp/v3/artifact-reader.mjs';
 import {
+  MAX_RAW_ARTIFACT_BYTE_LENGTH,
   MAX_SANITIZED_ARTIFACT_BYTE_LENGTH,
 } from '../mcp/v3/artifact-ref.mjs';
 import { openArtifactStoreV1 } from '../mcp/v3/artifact-store.mjs';
 import {
   LOCAL_PROVIDER_RESULT_ARTIFACT_KIND,
   LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES,
+  LOCAL_PROVIDER_RESULT_SINK_FAILURE_CODE_ALLOWLIST,
   LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS,
+  LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE,
+  LOCAL_PROVIDER_RESULT_SINK_FAILURE_PATH_ALLOWLIST,
   LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_KEYS,
   LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_MAX_BYTES,
   LOCAL_PROVIDER_RESULT_SINK_OPTION_KEYS,
@@ -25,13 +30,14 @@ import {
   collectCliProviderOutputV1,
   createLocalProviderResultCollectorV1,
   localProviderResultIdentityFromTaskV1,
+  localProviderResultReportPathV1,
   openLocalProviderArtifactStoreV1,
   sinkLocalProviderResultV1,
 } from '../mcp/v3/local-provider-result-sink.mjs';
 import { ARTIFACT_SANITIZER_VERSION } from '../mcp/v3/artifact-sanitizer.mjs';
-import { runAcpTask, runCliFallback } from '../mcp/v3/acp-worker.mjs';
+import { attachLocalProviderResultSink, runAcpTask, runCliFallback } from '../mcp/v3/acp-worker.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
-import { createTask, readTask } from '../mcp/v3/task-store.mjs';
+import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 import {
   CHILD_B,
   CURSOR_MODEL,
@@ -127,6 +133,10 @@ test('the closed sink vocabulary and caps are exported frozen', () => {
   assert.deepEqual([...LOCAL_PROVIDER_RESULT_SINK_PROVIDERS], ['grok', 'cursor-local', 'dsh']);
   assert.ok(LOCAL_PROVIDER_RESULT_SINK_RECEIPT_KEYS.includes('inline_tail'));
   assert.ok(LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES.includes('local_provider_required'));
+  assert.ok(LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES.includes('artifact_sink_not_published'));
+  assert.ok(LOCAL_PROVIDER_RESULT_SINK_FAILURE_CODE_ALLOWLIST.includes('artifact_content_conflict'));
+  assert.ok(LOCAL_PROVIDER_RESULT_SINK_FAILURE_PATH_ALLOWLIST.includes('sink'));
+  assert.equal(LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE.includes('secret'), false);
 });
 
 test('the sink module uses P09/P10/P08 authorities and does not import protected seams', () => {
@@ -156,6 +166,8 @@ test('Grok Cursor and DSH strings JSON values and stream chunks publish under ex
     assert.equal(grok.raw_ref.artifact_class, 'raw');
     assert.equal(grok.sanitized_ref.artifact_class, 'sanitized');
     assert.equal(grok.raw_ref.relative_path, grok.sanitized_ref.relative_path);
+    assert.equal(grok.relative_path, localProviderResultReportPathV1(identityFor('grok')));
+    assert.equal(isArtifactRelativePathV1(grok.relative_path), true);
     assert.equal(grok.complete, true);
     assert.equal(grok.source_truncated, false);
     assert.equal(grok.inline_tail.inline_clipped, false);
@@ -269,6 +281,92 @@ test('collector retains older chunks until the raw class cap', () => {
   const snapshot = collector.snapshot();
   assert.equal(snapshot.overflow, false);
   assert.equal(snapshot.source.toString('utf8'), 'older-output-later-verdict');
+});
+
+test('collector overflow at the raw class cap never silently claims complete bytes', () => {
+  const collector = createLocalProviderResultCollectorV1();
+  collector.append(Buffer.alloc(MAX_RAW_ARTIFACT_BYTE_LENGTH, 0x61));
+  assert.equal(collector.snapshot().overflow, false);
+  collector.append(Buffer.from([0x62]));
+  const snapshot = collector.snapshot();
+  assert.equal(snapshot.overflow, true);
+  assert.equal(snapshot.byte_length, MAX_RAW_ARTIFACT_BYTE_LENGTH);
+  assert.equal(snapshot.source.byteLength, MAX_RAW_ARTIFACT_BYTE_LENGTH);
+});
+
+test('Grok vs Cursor Local model and digest identities never share a path or ref', async () => {
+  await withStore(async (store) => {
+    const source = grokText('VERDICT: ALIAS PASS');
+    const grok = await sinkLocalProviderResultV1(store, {
+      ...identityFor('grok'),
+      source,
+    });
+    const cursor = await sinkLocalProviderResultV1(store, {
+      ...identityFor('cursor-local'),
+      source,
+    });
+    assert.equal(isArtifactRelativePathV1(grok.relative_path), true);
+    assert.equal(isArtifactRelativePathV1(cursor.relative_path), true);
+    assert.notEqual(grok.relative_path, cursor.relative_path);
+    assert.equal(grok.raw_ref.sha256, cursor.raw_ref.sha256);
+    assert.notEqual(grok.raw_ref.relative_path, cursor.raw_ref.relative_path);
+    assert.notEqual(JSON.stringify(grok.raw_ref), JSON.stringify(cursor.raw_ref));
+    assert.match(grok.relative_path, /\/grok\//u);
+    assert.match(cursor.relative_path, /\/cursor-local\//u);
+    assert.equal(grok.relative_path.includes(':'), false);
+    assert.equal(cursor.relative_path.includes(':'), false);
+
+    const otherModel = await sinkLocalProviderResultV1(store, {
+      ...identityFor('grok', { model: 'grok-4' }),
+      source: grokText('VERDICT: MODEL PASS'),
+    });
+    assert.notEqual(otherModel.relative_path, grok.relative_path);
+    assert.match(otherModel.relative_path, /\/grok\//u);
+
+    const digestA = 'a'.repeat(64);
+    const digestB = 'b'.repeat(64);
+    const withA = await sinkLocalProviderResultV1(store, {
+      ...identityFor('grok', { assignment_id: CHILD_B, child_envelope_digest: digestA }),
+      source: grokText('VERDICT: DIGEST A'),
+    });
+    const withB = await sinkLocalProviderResultV1(store, {
+      ...identityFor('grok', { assignment_id: CHILD_B, child_envelope_digest: digestB }),
+      source: grokText('VERDICT: DIGEST B'),
+    });
+    const without = await sinkLocalProviderResultV1(store, {
+      ...identityFor('grok', { assignment_id: CHILD_B }),
+      source: grokText('VERDICT: DIGEST NONE'),
+    });
+    assert.notEqual(withA.relative_path, withB.relative_path);
+    assert.notEqual(withA.relative_path, without.relative_path);
+    assert.notEqual(withB.relative_path, without.relative_path);
+    assert.equal(withA.child_envelope_digest, digestA);
+    assert.equal(withB.child_envelope_digest, digestB);
+    assert.equal(without.child_envelope_digest, null);
+
+    const slashModel = 'org/model:tag';
+    const encoded = await sinkLocalProviderResultV1(store, {
+      ...identityFor('dsh', { assignment_id: 'lane-delta', model: slashModel }),
+      source: 'slash-colon-model',
+    });
+    assert.equal(isArtifactRelativePathV1(encoded.relative_path), true);
+    assert.equal(encoded.relative_path.includes(':'), false);
+    assert.equal(encoded.relative_path.includes('org/model'), false);
+    assert.equal(encoded.model, slashModel);
+    assert.equal(
+      encoded.relative_path,
+      localProviderResultReportPathV1(identityFor('dsh', { assignment_id: 'lane-delta', model: slashModel })),
+    );
+
+    const restart = await sinkLocalProviderResultV1(store, {
+      ...identityFor('grok'),
+      source,
+    });
+    assert.equal(restart.relative_path, grok.relative_path);
+    assert.equal(restart.raw_digest, grok.raw_digest);
+    assert.equal(restart.sanitized_digest, grok.sanitized_digest);
+    assert.equal(JSON.stringify(restart.raw_ref), JSON.stringify(grok.raw_ref));
+  });
 });
 
 test('legacy tasks without run identity do not bind a sink envelope', () => {
@@ -414,6 +512,123 @@ test('legacy ACP completion without run identity keeps 3.2.1 result shape', asyn
   const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
   assert.equal(terminal.status, 'completed');
   assert.equal(terminal.provider_result_sink, undefined);
+});
+
+test('failed Grok ACP turn never publishes accumulated output as complete', async () => {
+  const value = await workerFixture({
+    provider: 'grok',
+    id: 'grok-p11-failed',
+    run_id: RUN_ID,
+    assignment_id: 'lane-alpha',
+    model: GROK_MODEL,
+    prompt: 'provider-failure',
+  });
+  const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+  assert.equal(terminal.status, 'failed');
+  assert.equal(terminal.prompt_dispatched, true);
+  assert.equal(terminal.fallback_safe, false);
+  assert.ok(terminal.error);
+  assert.equal(terminal.provider_result_sink.published, false);
+  assert.equal(terminal.provider_result_sink.error.code, 'artifact_sink_not_published');
+  assert.equal(terminal.provider_result_sink.error.message, LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE);
+  assert.deepEqual(Object.keys(terminal.provider_result_sink), [...LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS]);
+  assert.equal(Object.hasOwn(terminal.provider_result_sink, 'complete'), false);
+  assert.equal(Object.hasOwn(terminal.provider_result_sink, 'empty'), false);
+  assert.equal(Object.hasOwn(terminal.provider_result_sink, 'raw_ref'), false);
+});
+
+test('non-success terminals preserve 3.2.1 result fields and never sink partial text', async () => {
+  const value = await workerFixture({
+    provider: 'cursor-local',
+    id: 'cursor-p11-partial-fail',
+    run_id: RUN_ID,
+    assignment_id: 'lane-beta',
+    model: CURSOR_MODEL,
+  });
+  const partial = 'PARTIAL TEXT THAT MUST NOT BE COMPLETE';
+  const failed = await updateTask(value.root, value.taskId, {
+    status: 'failed',
+    result: partial,
+    result_truncated: false,
+    error: { code: 'failed', message: 'provider failed' },
+    finished_at: new Date().toISOString(),
+  });
+  const attached = await attachLocalProviderResultSink(value.root, failed, partial, false);
+  assert.equal(attached.status, 'failed');
+  assert.equal(attached.result, partial);
+  assert.equal(attached.result_truncated, false);
+  assert.equal(attached.error.code, 'failed');
+  assert.equal(attached.provider_result_sink.published, false);
+  assert.equal(attached.provider_result_sink.error.code, 'artifact_sink_not_published');
+  assert.equal(JSON.stringify(attached.provider_result_sink).includes(partial), false);
+
+  const cancelledValue = await workerFixture({
+    provider: 'grok',
+    id: 'grok-p11-partial-cancel',
+    run_id: RUN_ID,
+    assignment_id: 'lane-alpha',
+    model: GROK_MODEL,
+  });
+  const cancelled = await updateTask(cancelledValue.root, cancelledValue.taskId, {
+    status: 'cancelled',
+    result: partial,
+    result_truncated: true,
+    finished_at: new Date().toISOString(),
+  });
+  const cancelledAttached = await attachLocalProviderResultSink(
+    cancelledValue.root, cancelled, partial, false,
+  );
+  assert.equal(cancelledAttached.status, 'cancelled');
+  assert.equal(cancelledAttached.result, partial);
+  assert.equal(cancelledAttached.result_truncated, true);
+  assert.equal(cancelledAttached.provider_result_sink.published, false);
+  assert.equal(cancelledAttached.provider_result_sink.error.code, 'artifact_sink_not_published');
+});
+
+test('ACP collector overflow stays inside attach and does not rewrite a completed terminal', async () => {
+  const value = await workerFixture({
+    provider: 'grok',
+    id: 'grok-p11-overflow',
+    run_id: RUN_ID,
+    assignment_id: 'lane-alpha',
+    model: GROK_MODEL,
+  });
+  const completed = await updateTask(value.root, value.taskId, {
+    status: 'completed',
+    result: 'legacy bounded result',
+    result_truncated: true,
+    result_original_chars: 100,
+    finished_at: new Date().toISOString(),
+  });
+  const attached = await attachLocalProviderResultSink(
+    value.root, completed, Buffer.alloc(16, 0x61), false, true,
+  );
+  assert.equal(attached.status, 'completed');
+  assert.equal(attached.result, 'legacy bounded result');
+  assert.equal(attached.result_truncated, true);
+  assert.equal(attached.result_original_chars, 100);
+  assert.equal(attached.provider_result_sink.published, false);
+  assert.equal(attached.provider_result_sink.error.code, 'artifact_stream_over_cap');
+  assert.equal(attached.provider_result_sink.error.path, 'source');
+  assert.equal(attached.provider_result_sink.error.message, LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE);
+  assert.equal(Object.hasOwn(attached.provider_result_sink, 'complete'), false);
+});
+
+test('legacy ACP overflow without sink identity keeps 3.2.1 result and skips the sink', async () => {
+  const value = await workerFixture({ id: 'legacy-overflow' });
+  const completed = await updateTask(value.root, value.taskId, {
+    status: 'completed',
+    result: 'legacy complete without sink',
+    result_truncated: false,
+    finished_at: new Date().toISOString(),
+  });
+  const attached = await attachLocalProviderResultSink(
+    value.root, completed, Buffer.alloc(16, 0x61), false, true,
+  );
+  assert.equal(attached.status, 'completed');
+  assert.equal(attached.result, 'legacy complete without sink');
+  assert.equal(attached.result_truncated, false);
+  assert.equal(attached.provider_result_sink, undefined);
 });
 
 test('sanitized oversize fails closed without reporting an artifact', async () => {

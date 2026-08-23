@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **P11 identity namespace, non-success, overflow, and content-free failure.**
+  Provider-report ArtifactRef paths now bind `provider`, `model`, and
+  optional child-envelope digest into a P07-strict namespace so two
+  identities cannot share a path or ref. Failed/cancelled ACP turns never
+  publish accumulated partial text as complete. Collector overflow at the
+  raw class cap is handled inside `attachLocalProviderResultSink` with
+  typed content-free evidence and does not rewrite the provider terminal
+  or claim complete output. `contentFreeSinkFailureV1` allowlists closed
+  code/path values and uses one generic bounded message.
+
 ### Added
 
 - **Local provider result sink.** Adds additive v3

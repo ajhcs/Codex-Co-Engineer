@@ -41,6 +41,9 @@ import path from 'node:path';
 import { types as utilTypes } from 'node:util';
 
 import {
+  validateArtifactRelativePathV1,
+} from './artifact-path.mjs';
+import {
   ARTIFACT_REF_SCHEMA_ID,
   MAX_RAW_ARTIFACT_BYTE_LENGTH,
   MIN_ARTIFACT_BYTE_LENGTH,
@@ -158,6 +161,7 @@ export const LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS = capturedFreeze([
 
 export const LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES = capturedFreeze([
   'artifact_sink_failed',
+  'artifact_sink_not_published',
   'artifact_sink_not_verified',
   'artifact_stream_invalid_chunk',
   'artifact_stream_invalid_source',
@@ -166,8 +170,46 @@ export const LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES = capturedFreeze([
   'invalid_type',
   'local_provider_required',
   'missing_key',
+  'proxy_denied',
   'unknown_key',
   'unknown_provider',
+]);
+
+export const LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE =
+  'The local provider result sink did not publish after provider terminal.';
+
+export const LOCAL_PROVIDER_RESULT_SINK_FAILURE_CODE_ALLOWLIST = capturedFreeze([
+  ...LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES,
+  'accessor_property_denied',
+  'artifact_content_conflict',
+  'artifact_digest_mismatch',
+  'artifact_length_mismatch',
+  'artifact_metadata_conflict',
+  'artifact_stream_failed',
+  'non_enumerable_property_denied',
+  'own_undefined_denied',
+  'sanitizer_content_encoding_denied',
+  'sanitizer_empty_output',
+  'sanitizer_media_type_denied',
+]);
+
+export const LOCAL_PROVIDER_RESULT_SINK_FAILURE_PATH_ALLOWLIST = capturedFreeze([
+  'artifact_ref',
+  'inline_tail',
+  'options.assignment_id',
+  'options.child_envelope_digest',
+  'options.media_type',
+  'options.model',
+  'options.provider',
+  'options.run_id',
+  'options.source',
+  'options.source_truncated',
+  'provenance',
+  'relative_path',
+  'root',
+  'sanitized',
+  'sink',
+  'source',
 ]);
 
 const PRIVATE_SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -274,8 +316,42 @@ function mediaExtension(mediaType) {
   return 'txt';
 }
 
-function providerReportPath(runId, assignmentId, mediaType) {
-  return `runs/${runId}/${assignmentId}/provider-report.${mediaExtension(mediaType)}`;
+function uint32be(length) {
+  const header = BUFFER_ALLOC(4);
+  header[0] = (length >>> 24) & 0xff;
+  header[1] = (length >>> 16) & 0xff;
+  header[2] = (length >>> 8) & 0xff;
+  header[3] = length & 0xff;
+  return header;
+}
+
+function identityNamespaceDigest(identity) {
+  const provider = BUFFER_FROM(identity.provider, 'utf8');
+  const model = BUFFER_FROM(identity.model, 'utf8');
+  const digest = BUFFER_FROM(identity.child_envelope_digest ?? '', 'utf8');
+  return CREATE_HASH('sha256')
+    .update(uint32be(provider.byteLength))
+    .update(provider)
+    .update(uint32be(model.byteLength))
+    .update(model)
+    .update(uint32be(digest.byteLength))
+    .update(digest)
+    .digest('hex');
+}
+
+function providerReportPath(identity, mediaType) {
+  const binding = identityNamespaceDigest(identity);
+  const relativePath = `runs/${identity.run_id}/${identity.assignment_id}/${identity.provider}/${binding}/provider-report.${mediaExtension(mediaType)}`;
+  validateArtifactRelativePathV1(relativePath, 'relative_path');
+  return relativePath;
+}
+
+export function localProviderResultReportPathV1(identity, mediaType = 'text/plain') {
+  if (identity === null || typeof identity !== 'object' || Array.isArray(identity)) {
+    failSink('invalid_type', 'identity',
+      'A provider-report path requires a bounded identity object.');
+  }
+  return providerReportPath(identity, mediaType);
 }
 
 function encodeJsonValue(value) {
@@ -643,23 +719,26 @@ function publishedReceipt(identity, mediaType, relativePath, provenance, inlineT
 
 export function contentFreeSinkFailureV1(error) {
   const fromContract = error instanceof RunContractV1Error;
-  const code = fromContract && typeof error.code === 'string'
+  const rawCode = fromContract && typeof error.code === 'string'
     ? error.code
     : 'artifact_sink_failed';
-  const field = fromContract && typeof error.path === 'string'
+  const rawPath = fromContract && typeof error.path === 'string'
     ? error.path
     : 'sink';
-  const message = fromContract
-    ? diagnostic(error.message)
-    : 'The local provider result sink failed after provider terminal publication.';
+  const code = capturedIncludes(LOCAL_PROVIDER_RESULT_SINK_FAILURE_CODE_ALLOWLIST, rawCode)
+    ? rawCode
+    : 'artifact_sink_failed';
+  const field = capturedIncludes(LOCAL_PROVIDER_RESULT_SINK_FAILURE_PATH_ALLOWLIST, rawPath)
+    ? rawPath
+    : 'sink';
   return freezeData({
     schema: LOCAL_PROVIDER_RESULT_SINK_SCHEMA_ID,
     version: LOCAL_PROVIDER_RESULT_SINK_VERSION,
     published: false,
     error: freezeData({
       code,
-      path: diagnostic(field),
-      message,
+      path: field,
+      message: LOCAL_PROVIDER_RESULT_SINK_FAILURE_MESSAGE,
     }),
   });
 }
@@ -721,7 +800,7 @@ export async function sinkLocalProviderResultV1(store, input) {
     return emptyReceipt(identity, sourceTruncated);
   }
 
-  const relativePath = providerReportPath(identity.run_id, identity.assignment_id, mediaType);
+  const relativePath = providerReportPath(identity, mediaType);
   const rawRef = parseArtifactRefV1({
     schema: ARTIFACT_REF_SCHEMA_ID,
     run_id: identity.run_id,
@@ -762,9 +841,12 @@ capturedFreeze(createLocalProviderResultCollectorV1);
 capturedFreeze(collectCliProviderOutputV1);
 capturedFreeze(contentFreeSinkFailureV1);
 capturedFreeze(localProviderResultIdentityFromTaskV1);
+capturedFreeze(localProviderResultReportPathV1);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_PROVIDERS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_OPTION_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_RECEIPT_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES);
+capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_FAILURE_CODE_ALLOWLIST);
+capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_FAILURE_PATH_ALLOWLIST);
