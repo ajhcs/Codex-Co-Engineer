@@ -6,7 +6,7 @@ Status: specified, not implemented.
 
 Priority: high
 Component: Codex-Co-Engineer
-Last updated: 2026-08-21
+Last updated: 2026-08-23
 
 The accepted architecture for R1 is
 [ADR 0001](adr/0001-r1-bounded-run-architecture.md). It defines a 3.3.0 run
@@ -17,10 +17,11 @@ fallback or replay, and Codex-only final acceptance.
 
 This worktree does not implement the run runtime, candidate composition,
 or `AttentionBatchV1`. The P16A VerificationPolicyV1 schema and owner
-loader plus the P16B approved-command resolver exist as data validation
-and resolution only; P16C trusted-policy command execution remains later
-work. Gate A remains the functional release authority; Gate B
-context-efficiency and Gate C credit economics stay advisory.
+loader, the P16B approved-command resolver, and the P16C constrained
+verification runner exist as additive v3 modules. The runner is not wired
+into the MCP server, supervisor, or scheduler. Gate A remains the
+functional release authority; Gate B context-efficiency and Gate C credit
+economics stay advisory.
 
 ## Durable, low-token agent completion waits
 

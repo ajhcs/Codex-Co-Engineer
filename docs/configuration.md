@@ -6,7 +6,11 @@ described in [Profiles](#profiles); verification commands never come from
 profiles and remain a separate owner-maintained `VerificationPolicyV1`.
 The approved-command resolver consumes that owner policy plus a closed
 Codex/owner `command_id` selection and returns a frozen ExecutionIntent
-receipt; it does not execute the command.
+receipt; it does not execute the command. The constrained verification
+runner consumes only a genuine P16B receipt plus that trusted policy,
+runs the exact owner-approved executable and argv once in a disposable
+workspace separate from the candidate, and records bounded sanitized
+host-observed evidence. It is not wired into the MCP server.
 Provider authentication is normal persistent login/session state or an
 owner-only key file. The setup command installs the pinned local composition
 and creates the default DSH configuration; it never performs login on the

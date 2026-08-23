@@ -4,6 +4,28 @@
 
 ### Added
 
+- **Constrained verification runner.** Adds additive
+  `constrained-verification-runner.mjs` for W16-P16C. The module consumes a
+  genuine immutable P16B ExecutionIntent receipt plus trusted P16A
+  `VerificationPolicyV1`, creates a disposable verification workspace
+  disjoint from the candidate, and executes the exact owner-approved
+  absolute executable and argv once with `shell=false` and no PATH lookup.
+  The child environment is empty by default and receives only
+  policy-authorized bounded entries. The runner enforces timeout,
+  signal/termination fail-closed rules, stdout/stderr byte caps,
+  host-available process isolation (Linux user/pid/net namespace via
+  `unshare` on the default adapter), network deny/default (allowlists are
+  unsupported), and one execution only. Candidate Git identity and
+  filesystem are audited before and after; persistent
+  candidate/ref/config/worktree mutation fails closed. Temporary cleanup
+  deletes only the exact workspace this invocation created. Outcome
+  evidence is bounded, sanitized, and P13-compatible: host-observed exit
+  status is never upgraded from provider-reported PASS. The module is not
+  wired into the MCP server, supervisor, scheduler, or process-boundary
+  worker launcher, and it does not merge, rebase, push, open a pull
+  request, or mutate a protected ref. Coverage lives in
+  `test/r1-constrained-verification-runner.test.mjs` and
+  `test/r1-constrained-verification-runner-adversarial.test.mjs`.
 - **Approved verification-command resolver.** Adds additive
   `approved-verification-command.mjs` for W15-P16B. The module consumes an
   immutable trusted `VerificationPolicyV1` from P16A plus a closed
