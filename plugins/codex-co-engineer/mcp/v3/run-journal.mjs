@@ -1,12 +1,19 @@
-// Durable append-only run journal, cursor paging, and torn-tail healing (P25).
+// Durable append-only run journal, cursor paging, and torn-tail healing (P25)
+// plus the R25B aggregate resolution binding.
 //
-// Additive v3 module. Every create/open/append/read first binds an exact
+// Additive v3 module. Legacy create/open/append/read first binds an exact
 // validated accepted-P24 durable run record (the `openRunStore(...)` handle
 // plus the `getByRunId` result) by run identity and canonical digest, then
 // operates on one per-run private directory inside a separate caller-supplied
 // existing private journal root. The P24 store root is never written to and
 // sharing it as the journal root fails closed, because the accepted P24 flat
 // root rejects foreign entries.
+//
+// R25B adds stamp v2 and a closed aggregate resolution binding: an exact
+// validated R24A marker/claim/anchor/coordination/resolved-plan identity
+// that is already resolution_ready. Legacy create/open still write and
+// verify stamp v1 against an accepted P24 record. There is no migration,
+// root adoption, empty-root inference, or legacy-to-aggregate fallback.
 //
 // Storage layout (all paths derived only from validated identifiers):
 //   <root>/runs/<run_id>/journal.jsonl   append-only bounded canonical JSONL
@@ -40,7 +47,23 @@ import {
   capturedTest,
   sortedCapturedKeys,
 } from './grammar.mjs';
-import { canonicalJsonStringify } from './identity.mjs';
+import {
+  AGGREGATE_CLAIM_KEYS,
+  AGGREGATE_MARKER_KEYS,
+  AGGREGATE_RESOLVED_PLAN_KEYS,
+  AGGREGATE_RESOLVED_PLAN_SCHEMA_ID,
+  AGGREGATE_RUN_CLAIM_SCHEMA_ID,
+  AGGREGATE_RUN_STAMP_SCHEMA_ID,
+  AGGREGATE_STORAGE_ROOT_KIND,
+  MAX_AGGREGATE_CLAIM_BYTES,
+  MAX_AGGREGATE_MARKER_BYTES,
+  MAX_AGGREGATE_RECORD_BYTES,
+  MAX_AGGREGATE_STAMP_BYTES,
+  STORAGE_ROOT_SCHEMA_ID,
+  validateAggregateRunAnchorV1,
+  validateAggregateRunCoordinationV1,
+} from './aggregate-run-anchor.mjs';
+import { IDENTITY_LABELS, canonicalJsonStringify } from './identity.mjs';
 import {
   assertBoundDigest,
   assertSharedGitIdentityV1,
@@ -71,11 +94,22 @@ import {
   SHA256_DIGEST_PATTERN,
   assertDirectJsonClosure,
   freezeData,
+  identityBoundDigest,
 } from './selection-json.mjs';
 
 export const RUN_JOURNAL_LOCK_SCHEMA_ID = 'codex-co-engineer.run-journal-lock.v1';
 export const RUN_JOURNAL_STAMP_SCHEMA_ID = 'codex-co-engineer.run-journal-created.v1';
+export const RUN_JOURNAL_STAMP_SCHEMA_ID_V2 = 'codex-co-engineer.run-journal-created.v2';
 export const RUN_JOURNAL_CURSOR_DOMAIN = 'codex-co-engineer.run-journal-cursor.v1';
+export const RUN_JOURNAL_AGGREGATE_BINDING_DOMAIN =
+  'codex-co-engineer.run-journal-aggregate-binding.v1';
+export const RUN_JOURNAL_AGGREGATE_BINDING_KEYS = capturedFreeze([
+  'run_id', 'marker_digest', 'claim_digest', 'anchor_digest',
+  'coordination_digest', 'resolved_plan_digest', 'phase', 'revision',
+]);
+export const RUN_JOURNAL_AGGREGATE_BINDING_RECORD_KEYS = capturedFreeze([
+  ...RUN_JOURNAL_AGGREGATE_BINDING_KEYS, 'binding_digest',
+]);
 
 export const MAX_RUN_JOURNAL_ENTRIES = 512;
 export const MAX_RUN_JOURNAL_ENTRY_BYTES = 4096;
@@ -89,7 +123,7 @@ export const MAX_RUN_JOURNAL_TEMPORARIES = 8;
 export const MAX_RUN_JOURNAL_DIRECTORY_ENTRIES = 16;
 export const MAX_RUN_JOURNAL_ROOT_ENTRIES = 8;
 export const MAX_RUN_JOURNAL_LOCK_BYTES = 160;
-export const MAX_RUN_JOURNAL_STAMP_BYTES = 256;
+export const MAX_RUN_JOURNAL_STAMP_BYTES = 384;
 export const MAX_RUN_JOURNAL_DIAGNOSTIC_BYTES = 160;
 export const RUN_JOURNAL_LOCK_WAIT_MS = 2_000;
 export const RUN_JOURNAL_LOCK_POLL_MS = 10;
@@ -100,10 +134,18 @@ const JOURNAL_NAME = 'journal.jsonl';
 const STATE_NAME = 'state.json';
 const LOCK_NAME = 'lock';
 const STAMP_NAME = 'created.json';
+const AGGREGATE_MARKER_NAME = 'storage-root.v1';
+const AGGREGATE_CLAIMS_NAME = 'claims';
+const AGGREGATE_RUNS_NAME = 'runs';
+const AGGREGATE_PLAN_RECORD_NAME = 'resolved-plan.record.json';
+const AGGREGATE_STAMP_NAME = 'created.json';
 const TEMP_NAME_PATTERN = /^\.tmp-[0-9a-f]{32}$/u;
 const LOCK_OWNER_NAME_PATTERN = /^\.lock-[0-9a-f]{32}$/u;
 const HEX_PATTERN = /^[0-9a-f]{64}$/u;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
+const NONCE_PATTERN = /^[0-9a-f]{32}$/u;
+const JOURNAL_MODE_LEGACY = 'legacy';
+const JOURNAL_MODE_AGGREGATE = 'aggregate';
 const HASH_ALGORITHM = 'sha256';
 const TEXT_DECODER = new TextDecoder('utf-8', { fatal: true });
 const CREATE_HASH = createHash;
@@ -563,7 +605,431 @@ function parseJournalOptions(options) {
     root: assertSafeRootPath(options.root),
     store: assertStoreHandle(options.store),
     runId,
+    journalMode: JOURNAL_MODE_LEGACY,
   };
+}
+
+function assertAnchorHandle(anchor) {
+  if (anchor === undefined || anchor === null || typeof anchor !== 'object'
+    || typeof anchor.getByRunId !== 'function'
+    || typeof anchor.getCoordination !== 'function'
+    || typeof anchor.root !== 'string'
+    || typeof anchor.marker_digest !== 'string') {
+    failJournal('invalid_type', 'anchor',
+      'The aggregate journal requires an openAggregateRunAnchor(...) handle.');
+  }
+  assertBoundDigest(anchor.marker_digest, 'anchor.marker_digest');
+  return {
+    handle: anchor,
+    root: assertSafeRootPath(anchor.root),
+    markerDigest: anchor.marker_digest,
+  };
+}
+
+function parseAggregateJournalOptions(options) {
+  if (options === undefined || options === null || typeof options !== 'object'
+    || Array.isArray(options)) {
+    failJournal('invalid_type', 'options', 'Journal options must be a plain options object.');
+  }
+  for (const key of sortedCapturedKeys(options)) {
+    if (!capturedIncludes(['root', 'anchor', 'run_id'], key)) {
+      failJournal('unknown_key', `options.${key}`, `options.${key} is not part of the closed options.`);
+    }
+  }
+  for (const key of ['root', 'anchor', 'run_id']) {
+    if (!capturedHasOwn(options, key)) {
+      failJournal('missing_key', `options.${key}`, `options.${key} is required.`);
+    }
+  }
+  const runId = options.run_id;
+  assertRunId(runId, 'run_id');
+  const anchor = assertAnchorHandle(options.anchor);
+  return {
+    root: assertSafeRootPath(options.root),
+    anchor: anchor.handle,
+    anchorRoot: anchor.root,
+    markerDigest: anchor.markerDigest,
+    runId,
+    journalMode: JOURNAL_MODE_AGGREGATE,
+  };
+}
+
+function claimDigestPayload(fields) {
+  return {
+    schema: fields.schema,
+    run_id: fields.run_id,
+    anchor_digest: fields.anchor_digest,
+    submission_idempotency_key: fields.submission_idempotency_key,
+    root_marker_nonce: fields.root_marker_nonce,
+    root_marker_digest: fields.root_marker_digest,
+    nonce: fields.nonce,
+  };
+}
+
+export function computeAggregateBindingDigest(parts) {
+  if (parts === undefined || parts === null || typeof parts !== 'object' || Array.isArray(parts)) {
+    failJournal('invalid_type', 'binding', 'An aggregate binding must be a plain JSON data object.');
+  }
+  const fields = closedObject(
+    parts,
+    'binding',
+    RUN_JOURNAL_AGGREGATE_BINDING_RECORD_KEYS,
+    RUN_JOURNAL_AGGREGATE_BINDING_KEYS,
+  );
+  assertRunId(fields.run_id, 'binding.run_id');
+  assertBoundDigest(fields.marker_digest, 'binding.marker_digest');
+  assertBoundDigest(fields.claim_digest, 'binding.claim_digest');
+  assertBoundDigest(fields.anchor_digest, 'binding.anchor_digest');
+  assertBoundDigest(fields.coordination_digest, 'binding.coordination_digest');
+  assertBoundDigest(fields.resolved_plan_digest, 'binding.resolved_plan_digest');
+  if (fields.phase !== 'resolution_ready') {
+    failJournal('run_journal_aggregate_not_ready', 'binding.phase',
+      'Aggregate journals require a resolution_ready R24A coordination phase.');
+  }
+  if (typeof fields.revision !== 'number' || !NUMBER_IS_SAFE_INTEGER(fields.revision)
+    || (fields.revision !== 1 && fields.revision !== 2)) {
+    failJournal('run_journal_aggregate_not_ready', 'binding.revision',
+      'Aggregate journals require a resolution_ready revision of 1 or 2.');
+  }
+  const canonical = canonicalJsonStringify({
+    run_id: fields.run_id,
+    marker_digest: fields.marker_digest,
+    claim_digest: fields.claim_digest,
+    anchor_digest: fields.anchor_digest,
+    coordination_digest: fields.coordination_digest,
+    resolved_plan_digest: fields.resolved_plan_digest,
+    phase: fields.phase,
+    revision: fields.revision,
+  });
+  const digest = CREATE_HASH(HASH_ALGORITHM)
+    .update(`${RUN_JOURNAL_AGGREGATE_BINDING_DOMAIN}\n${canonical}\n`, 'utf8')
+    .digest('hex');
+  return `sha256:${digest}`;
+}
+
+export function validateBoundAggregateResolution(record) {
+  if (record === undefined || record === null || typeof record !== 'object' || Array.isArray(record)) {
+    failJournal('invalid_type', 'binding', 'An aggregate binding must be a plain JSON data object.');
+  }
+  assertDirectJsonClosure(record, 'binding');
+  const fields = closedObject(record, 'binding', RUN_JOURNAL_AGGREGATE_BINDING_RECORD_KEYS);
+  const rebuilt = computeAggregateBindingDigest(fields);
+  if (typeof fields.binding_digest !== 'string'
+    || !capturedTest(SHA256_DIGEST_PATTERN, fields.binding_digest)
+    || rebuilt !== fields.binding_digest) {
+    failJournal('run_journal_record_mismatch', 'binding.binding_digest',
+      'The aggregate binding digest does not match its recomputed value.');
+  }
+  return snapshotRecord({
+    run_id: fields.run_id,
+    marker_digest: fields.marker_digest,
+    claim_digest: fields.claim_digest,
+    anchor_digest: fields.anchor_digest,
+    coordination_digest: fields.coordination_digest,
+    resolved_plan_digest: fields.resolved_plan_digest,
+    phase: fields.phase,
+    revision: fields.revision,
+    binding_digest: fields.binding_digest,
+  });
+}
+
+function failAggregateMismatch(field, message) {
+  failJournal('run_journal_aggregate_mismatch', field, message);
+}
+
+function parseCanonicalStoredBytes(bytes, field) {
+  if (bytes === null || bytes === undefined) {
+    failAggregateMismatch(field, 'The aggregate identity record is missing.');
+  }
+  if (bytes.byteLength >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    failAggregateMismatch(field, 'The aggregate identity record is malformed.');
+  }
+  let text;
+  try {
+    text = TEXT_DECODER.decode(bytes);
+  } catch {
+    failAggregateMismatch(field, 'The aggregate identity record is malformed.');
+  }
+  if (!text.endsWith('\n')) {
+    failAggregateMismatch(field, 'The aggregate identity record is malformed.');
+  }
+  const body = text.slice(0, -1);
+  let parsed;
+  try {
+    parsed = JSON_PARSE(body);
+  } catch {
+    failAggregateMismatch(field, 'The aggregate identity record is malformed.');
+  }
+  if (canonicalJsonStringify(parsed) !== body) {
+    failAggregateMismatch(field, 'The aggregate identity record is malformed.');
+  }
+  return parsed;
+}
+
+function validateDurableMarker(parsed) {
+  let fields;
+  try {
+    fields = closedObject(parsed, AGGREGATE_MARKER_NAME, AGGREGATE_MARKER_KEYS);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) {
+      failAggregateMismatch(AGGREGATE_MARKER_NAME, 'The aggregate root marker is malformed.');
+    }
+    throw error;
+  }
+  if (fields.schema !== STORAGE_ROOT_SCHEMA_ID
+    || fields.kind !== AGGREGATE_STORAGE_ROOT_KIND
+    || typeof fields.nonce !== 'string'
+    || !capturedTest(NONCE_PATTERN, fields.nonce)) {
+    failAggregateMismatch(AGGREGATE_MARKER_NAME, 'The aggregate root marker is malformed.');
+  }
+  const digest = identityBoundDigest(IDENTITY_LABELS.STORAGE_ROOT, {
+    schema: fields.schema,
+    kind: fields.kind,
+    nonce: fields.nonce,
+  });
+  if (digest !== fields.canonical_digest) {
+    failAggregateMismatch(AGGREGATE_MARKER_NAME, 'The aggregate root marker digest does not match.');
+  }
+  return snapshotRecord(fields);
+}
+
+function validateDurableClaim(parsed, runId) {
+  let fields;
+  try {
+    fields = closedObject(parsed, 'claim', AGGREGATE_CLAIM_KEYS);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) {
+      failAggregateMismatch('claim', 'The aggregate claim is malformed.');
+    }
+    throw error;
+  }
+  if (fields.schema !== AGGREGATE_RUN_CLAIM_SCHEMA_ID || fields.run_id !== runId) {
+    failAggregateMismatch('claim', 'The aggregate claim does not bind this run.');
+  }
+  const digest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RUN_CLAIM, claimDigestPayload(fields));
+  if (digest !== fields.canonical_digest) {
+    failAggregateMismatch('claim', 'The aggregate claim digest does not match.');
+  }
+  return snapshotRecord(fields);
+}
+
+function validateDurablePlan(parsed, runId) {
+  let fields;
+  try {
+    fields = closedObject(parsed, AGGREGATE_PLAN_RECORD_NAME, AGGREGATE_RESOLVED_PLAN_KEYS);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) {
+      failAggregateMismatch(AGGREGATE_PLAN_RECORD_NAME, 'The resolved-plan record is malformed.');
+    }
+    throw error;
+  }
+  if (fields.schema !== AGGREGATE_RESOLVED_PLAN_SCHEMA_ID
+    || fields.run_id !== runId
+    || fields.complete !== true) {
+    failAggregateMismatch(AGGREGATE_PLAN_RECORD_NAME, 'The resolved-plan record does not bind this run.');
+  }
+  const digest = identityBoundDigest(IDENTITY_LABELS.AGGREGATE_RESOLVED_PLAN, {
+    schema: fields.schema,
+    run_id: fields.run_id,
+    complete: true,
+  });
+  if (digest !== fields.canonical_digest) {
+    failAggregateMismatch(AGGREGATE_PLAN_RECORD_NAME, 'The resolved-plan record digest does not match.');
+  }
+  return snapshotRecord(fields);
+}
+
+function validateDurableAggregateStamp(parsed, runId, anchorDigest, claimNonce) {
+  const keys = parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+    ? []
+    : sortedCapturedKeys(parsed);
+  if (keys.length !== 4
+    || !keys.includes('schema') || !keys.includes('run_id')
+    || !keys.includes('record_canonical_digest') || !keys.includes('nonce')
+    || parsed.schema !== AGGREGATE_RUN_STAMP_SCHEMA_ID
+    || parsed.run_id !== runId
+    || parsed.record_canonical_digest !== anchorDigest
+    || parsed.nonce !== claimNonce
+    || typeof parsed.nonce !== 'string'
+    || !capturedTest(NONCE_PATTERN, parsed.nonce)) {
+    failAggregateMismatch(AGGREGATE_STAMP_NAME, 'The aggregate run stamp does not match this claim.');
+  }
+}
+
+function projectAggregateBinding(fields) {
+  return {
+    run_id: fields.run_id,
+    marker_digest: fields.marker_digest,
+    claim_digest: fields.claim_digest,
+    anchor_digest: fields.anchor_digest,
+    coordination_digest: fields.coordination_digest,
+    resolved_plan_digest: fields.resolved_plan_digest,
+    phase: fields.phase,
+    revision: fields.revision,
+  };
+}
+
+async function observeAggregateResolution(anchor, runId) {
+  const record = await anchor.getByRunId(runId);
+  const validated = validateAggregateRunAnchorV1(record);
+  if (validated.run_id !== runId) {
+    failJournal('run_journal_identity_mismatch', 'run_id',
+      'The bound aggregate anchor must carry the exact requested run identity.');
+  }
+  const coordination = await anchor.getCoordination(runId);
+  const coord = validateAggregateRunCoordinationV1(coordination);
+  if (coord.run_id !== runId || coord.anchor_digest !== validated.canonical_digest) {
+    failJournal('run_journal_identity_mismatch', 'coordination',
+      'The bound aggregate coordination does not match the anchor identity.');
+  }
+  if (coord.phase !== 'resolution_ready' || coord.resolved_plan_digest === null) {
+    failJournal('run_journal_aggregate_not_ready', 'phase',
+      'Aggregate journals require a resolution_ready R24A resolved plan.');
+  }
+  if (coord.revision !== 1 && coord.revision !== 2) {
+    failJournal('run_journal_aggregate_not_ready', 'revision',
+      'Aggregate journals require a resolution_ready revision of 1 or 2.');
+  }
+  return {
+    run_id: runId,
+    marker_digest: anchor.marker_digest,
+    anchor_digest: validated.canonical_digest,
+    coordination_digest: coord.state_digest,
+    resolved_plan_digest: coord.resolved_plan_digest,
+    phase: coord.phase,
+    revision: coord.revision,
+  };
+}
+
+async function readDurableAggregateIdentity(anchorRoot, runId, observed) {
+  const rootToken = await openDirectoryHandle(anchorRoot, 'anchor');
+  try {
+    const markerOpened = await readBoundedFile(
+      rootToken, AGGREGATE_MARKER_NAME, MAX_AGGREGATE_MARKER_BYTES, AGGREGATE_MARKER_NAME,
+    );
+    const marker = validateDurableMarker(parseCanonicalStoredBytes(
+      markerOpened === null ? null : markerOpened.bytes, AGGREGATE_MARKER_NAME,
+    ));
+    if (marker.canonical_digest !== observed.marker_digest) {
+      failJournal('run_journal_aggregate_swapped', AGGREGATE_MARKER_NAME,
+        'The aggregate root marker changed during binding.');
+    }
+    const claimsToken = await openDirectoryHandle(
+      childPath(rootToken.path, AGGREGATE_CLAIMS_NAME), 'claim',
+    );
+    let claim;
+    try {
+      const claimName = `${runId}.json`;
+      const claimOpened = await readBoundedFile(
+        claimsToken, claimName, MAX_AGGREGATE_CLAIM_BYTES, 'claim',
+      );
+      claim = validateDurableClaim(
+        parseCanonicalStoredBytes(claimOpened === null ? null : claimOpened.bytes, 'claim'),
+        runId,
+      );
+    } finally {
+      await claimsToken.handle.close().catch(() => {});
+    }
+    if (claim.anchor_digest !== observed.anchor_digest
+      || claim.root_marker_digest !== marker.canonical_digest
+      || claim.root_marker_nonce !== marker.nonce) {
+      failAggregateMismatch('claim', 'The aggregate claim does not bind this marker and anchor.');
+    }
+    const runsToken = await openDirectoryHandle(
+      childPath(rootToken.path, AGGREGATE_RUNS_NAME), 'runs',
+    );
+    try {
+      const runToken = await openDirectoryHandle(childPath(runsToken.path, runId), 'directory');
+      try {
+        const planOpened = await readBoundedFile(
+          runToken, AGGREGATE_PLAN_RECORD_NAME, MAX_AGGREGATE_RECORD_BYTES, AGGREGATE_PLAN_RECORD_NAME,
+        );
+        const plan = validateDurablePlan(
+          parseCanonicalStoredBytes(
+            planOpened === null ? null : planOpened.bytes, AGGREGATE_PLAN_RECORD_NAME,
+          ),
+          runId,
+        );
+        if (plan.canonical_digest !== observed.resolved_plan_digest) {
+          failJournal('run_journal_aggregate_swapped', AGGREGATE_PLAN_RECORD_NAME,
+            'The resolved-plan record changed during binding.');
+        }
+        const stampOpened = await readBoundedFile(
+          runToken, AGGREGATE_STAMP_NAME, MAX_AGGREGATE_STAMP_BYTES, AGGREGATE_STAMP_NAME,
+        );
+        validateDurableAggregateStamp(
+          parseCanonicalStoredBytes(
+            stampOpened === null ? null : stampOpened.bytes, AGGREGATE_STAMP_NAME,
+          ),
+          runId,
+          observed.anchor_digest,
+          claim.nonce,
+        );
+      } finally {
+        await runToken.handle.close().catch(() => {});
+      }
+    } finally {
+      await runsToken.handle.close().catch(() => {});
+    }
+    return {
+      ...observed,
+      claim_digest: claim.canonical_digest,
+    };
+  } finally {
+    await rootToken.handle.close().catch(() => {});
+  }
+}
+
+export async function bindAggregateResolution(anchor, runId) {
+  assertRunId(runId, 'run_id');
+  const bound = assertAnchorHandle(anchor);
+  const first = await observeAggregateResolution(bound.handle, runId);
+  const durable = await readDurableAggregateIdentity(bound.root, runId, first);
+  const second = await observeAggregateResolution(bound.handle, runId);
+  const firstProj = projectAggregateBinding(durable);
+  const secondProj = {
+    ...projectAggregateBinding({
+      ...second,
+      claim_digest: durable.claim_digest,
+    }),
+  };
+  if (canonicalJsonStringify(firstProj) !== canonicalJsonStringify(secondProj)
+    || first.marker_digest !== second.marker_digest
+    || first.anchor_digest !== second.anchor_digest
+    || first.coordination_digest !== second.coordination_digest
+    || first.resolved_plan_digest !== second.resolved_plan_digest
+    || first.revision !== second.revision) {
+    failJournal('run_journal_aggregate_swapped', 'anchor',
+      'The aggregate resolution identity changed during binding.');
+  }
+  const bindingDigest = computeAggregateBindingDigest(firstProj);
+  return validateBoundAggregateResolution({
+    ...firstProj,
+    binding_digest: bindingDigest,
+  });
+}
+
+async function verifyAggregateRootSeparation(anchor, rootToken) {
+  const names = [anchor.root];
+  names.push(path.join(anchor.root, AGGREGATE_CLAIMS_NAME));
+  names.push(path.join(anchor.root, AGGREGATE_RUNS_NAME));
+  for (const candidate of names) {
+    let handle;
+    try {
+      handle = await open(assertSafeRootPath(candidate), ROOT_OPEN_FLAGS);
+    } catch {
+      continue;
+    }
+    try {
+      const stat = await handle.stat();
+      if (sameIdentity(stat, rootToken)) {
+        failJournal('run_journal_root_shared', 'root',
+          'The journal root must be separate from the R24A aggregate root.');
+      }
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +1174,7 @@ async function auditStateCache(dirToken, entries, replayedState, volatile = fals
 // Verifies this directory is exactly the private journal created for the
 // bound record. Survives inode reuse: a deleted-and-recreated or foreign
 // substituted directory cannot carry the creation stamp of this binding.
-async function verifyCreationStamp(dirToken, binding) {
+async function verifyCreationStamp(dirToken, binding, journalMode = JOURNAL_MODE_LEGACY) {
   const opened = await readBoundedFile(dirToken, STAMP_NAME, MAX_RUN_JOURNAL_STAMP_BYTES, STAMP_NAME);
   const rebound = () => failJournal('run_journal_dir_rebound', STAMP_NAME,
     'The run directory is not the private journal created for this bound record.');
@@ -731,23 +1197,49 @@ async function verifyCreationStamp(dirToken, binding) {
   if (!text.endsWith('\n') || canonicalJsonStringify(parsed) !== text.slice(0, -1)
     || keys.length !== 4
     || !keys.includes('schema') || !keys.includes('run_id')
-    || !keys.includes('record_canonical_digest') || !keys.includes('nonce')
-    || parsed.schema !== RUN_JOURNAL_STAMP_SCHEMA_ID
+    || !keys.includes('nonce')
     || parsed.run_id !== binding.run_id
-    || parsed.record_canonical_digest !== binding.canonical_digest
     || typeof parsed.nonce !== 'string'
-    || !capturedTest(/^[0-9a-f]{32}$/u, parsed.nonce)) {
+    || !capturedTest(NONCE_PATTERN, parsed.nonce)) {
+    rebound();
+  }
+  if (journalMode === JOURNAL_MODE_AGGREGATE) {
+    if (!keys.includes('binding_digest')
+      || parsed.schema !== RUN_JOURNAL_STAMP_SCHEMA_ID_V2) {
+      rebound();
+    }
+    if (parsed.binding_digest !== binding.binding_digest) {
+      failJournal('run_journal_identity_conflict', STAMP_NAME,
+        'The run journal already binds a different aggregate resolution identity.');
+    }
+    return;
+  }
+  if (!keys.includes('record_canonical_digest')
+    || parsed.schema !== RUN_JOURNAL_STAMP_SCHEMA_ID
+    || parsed.record_canonical_digest !== binding.canonical_digest) {
     rebound();
   }
 }
 
-async function writeCreationStamp(dirToken, binding, nonceHex) {
-  const body = `${canonicalJsonStringify({
-    schema: RUN_JOURNAL_STAMP_SCHEMA_ID,
-    run_id: binding.run_id,
-    record_canonical_digest: binding.canonical_digest,
-    nonce: nonceHex,
-  })}\n`;
+async function writeCreationStamp(dirToken, binding, nonceHex, journalMode = JOURNAL_MODE_LEGACY) {
+  const record = journalMode === JOURNAL_MODE_AGGREGATE
+    ? {
+      schema: RUN_JOURNAL_STAMP_SCHEMA_ID_V2,
+      run_id: binding.run_id,
+      binding_digest: binding.binding_digest,
+      nonce: nonceHex,
+    }
+    : {
+      schema: RUN_JOURNAL_STAMP_SCHEMA_ID,
+      run_id: binding.run_id,
+      record_canonical_digest: binding.canonical_digest,
+      nonce: nonceHex,
+    };
+  const body = `${canonicalJsonStringify(record)}\n`;
+  if (NodeBuffer.byteLength(body, 'utf8') > MAX_RUN_JOURNAL_STAMP_BYTES) {
+    failJournal('run_journal_file_too_large', STAMP_NAME,
+      `Journal files must not exceed ${MAX_RUN_JOURNAL_STAMP_BYTES} bytes.`);
+  }
   await atomicPublish(dirToken, STAMP_NAME, NodeBuffer.from(body, 'utf8'), STAMP_NAME);
 }
 
