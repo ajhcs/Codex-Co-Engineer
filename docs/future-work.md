@@ -38,16 +38,23 @@ The P11 local provider result sink is in-tree as an additive
 provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
 ACPX/CLI output is published through the accepted P09 sanitizer and P08
 store, with a P10-derived sanitized inline tail. It does not implement
-P12 evidence bundles, supervisor/server MCP registration, cloud-worker
-sinks, cleanup, or run runtime. `acp-worker.mjs` is the only serialized
-seam; 3.2.1 `task.result` bounding is unchanged. Ambient umask variance
+P13 evidence bundles, supervisor/server MCP registration, cleanup, or
+run runtime. `acp-worker.mjs` is the only serialized seam; 3.2.1
+`task.result` bounding is unchanged. Ambient umask variance
 for P08 store-root `mkdtemp` privacy is recorded here and is not
 runtime-changed: P11 fixtures `chmod 0700` after creating their own
 roots and do not include optional P08 umask test-fixture
 determinization.
 
-Cursor Local and Cursor Cloud adapters, registry cutover, scheduler,
-durable store, P12 evidence bundles, cloud-worker sinks, cleanup, run
+The P12 Cursor Cloud result source is in-tree as additive result-source
+materialization: provider-reported output/status and independently
+observed Git evidence are stored as distinct typed P09/P10 sources. The
+cloud-worker result seam is the only serialized integration. It does not
+dispatch live Cloud runs, cut over scheduler/store/supervisor, mutate
+Git, or create PRs.
+
+Cursor Local and Cursor Cloud live-transport qualification, registry
+cutover, scheduler, durable store, P13 evidence bundles, cleanup, run
 runtime, and `AttentionBatchV1` remain later work. Gate A remains the
 functional release authority; Gate B context-efficiency and Gate C
 credit economics stay advisory.

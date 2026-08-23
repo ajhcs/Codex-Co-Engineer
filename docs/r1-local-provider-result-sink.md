@@ -82,9 +82,9 @@ Provider completion remains evidence, never acceptance.
 
 ## Non-goals
 
-P12 evidence bundles, supervisor/server MCP registration, P18/P20
-transports, cleanup, scheduler, cloud-worker sinks, and protected refs
-remain unclaimed. This module does not edit `task-store.mjs`. Ambient
+P13 evidence bundles, supervisor/server MCP registration, P18/P20
+transports, cleanup, scheduler, and protected refs remain unclaimed.
+P12 Cursor Cloud result-source materialization is a separate module. This module does not edit `task-store.mjs`. Ambient
 umask variance for P08 store-root fixtures is recorded in
 [future-work.md](future-work.md); P11 fixtures chmod `0700` after
 creation and do not change process umask.
