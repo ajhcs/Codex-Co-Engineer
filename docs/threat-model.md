@@ -104,7 +104,11 @@ executable command catalog those lanes may run. Codex may select only
 approved command IDs and permitted parameters; manifests carry those IDs
 and parameters, never arbitrary executable argv. The approved-command
 resolver binds a closed Codex/owner selection to a frozen ExecutionIntent
-receipt without executing. Provider-reported or provider-requested
+receipt without executing. The constrained verification runner consumes
+only a genuine immutable receipt plus trusted policy, executes that exact
+command once in a disposable workspace, and fails closed on candidate
+mutation, escaped descendants, output floods, timeouts, and cleanup
+uncertainty. Provider-reported or provider-requested
 commands are evidence or attention only and are never automatically
 executed. A verifier may not:
 
