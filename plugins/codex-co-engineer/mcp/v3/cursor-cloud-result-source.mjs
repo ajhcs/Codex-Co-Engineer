@@ -64,6 +64,7 @@ import {
   capturedFreeze,
   capturedIncludes,
   capturedIsArray,
+  capturedOwnKeys,
   capturedTest,
   isKnownProvider,
   isModelId,
@@ -79,10 +80,12 @@ import {
 } from './run-manifest.mjs';
 import {
   assertDirectJsonClosure,
+  assertNotProxy,
   assertPlainObject,
   fail,
   freezeData,
   hasOwn,
+  ownDescriptor,
   ownDataValue,
 } from './selection-json.mjs';
 
@@ -148,6 +151,58 @@ export const CURSOR_CLOUD_SDK_BRANCH_KEYS = capturedFreeze([
 const CURSOR_CLOUD_GIT_PROJECTOR_KEYS = capturedFreeze([
   ...CURSOR_CLOUD_GIT_EVIDENCE_INPUT_KEYS,
   ...CURSOR_CLOUD_SDK_GIT_KEYS,
+]);
+
+export const CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS = capturedFreeze([
+  'status',
+  'result',
+  'output',
+  'error',
+  'truncated',
+  'source_truncated',
+]);
+
+export const CURSOR_CLOUD_SDK_RESULT_KEYS = capturedFreeze([
+  'id',
+  'requestId',
+  'agentId',
+  'git',
+  ...CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS,
+]);
+
+export const CURSOR_CLOUD_RESULT_CORRELATION_KEYS = capturedFreeze([
+  'recorded',
+  'observed',
+  'git_evidence',
+]);
+
+const CURSOR_CLOUD_TASK_IDENTITY_KEYS = capturedFreeze([
+  'run_id',
+  'assignment_id',
+  'provider',
+  'model',
+  'child_envelope_digest',
+  'run_idempotency_key',
+  'provider_agent_id',
+  'provider_run_id',
+  'provider_repo_url',
+  'provider_repo_identity',
+  'provider_branch',
+  'starting_ref',
+  'head_sha',
+]);
+
+const CURSOR_CLOUD_RECORDED_IDENTITY_KEYS = capturedFreeze([
+  'run_id',
+  'assignment_id',
+  'request_id',
+  'provider_run_id',
+  'agent_id',
+  'branch',
+  'repository_identity',
+  'repository_url',
+  'starting_sha',
+  'head_sha',
 ]);
 
 export const CURSOR_CLOUD_PROVIDER_REPORT_STATUSES = capturedFreeze([
@@ -302,7 +357,14 @@ export const CURSOR_CLOUD_RESULT_SOURCE_FAILURE_PATH_ALLOWLIST = capturedFreeze(
   'options.run_id',
   'options.starting_sha',
   'provider_report',
+  'provider_report.error',
+  'provider_report.output',
+  'provider_report.source_truncated',
   'provenance',
+  'recorded',
+  'result',
+  'task',
+  'correlation',
   'relative_path',
   'root',
   'source',
@@ -314,6 +376,7 @@ const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u;
 const REPO_IDENTITY_PATTERN = /^[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?\/[A-Za-z0-9._~/-]+$/u;
 const REPO_URL_PATTERN = /^https:\/\/[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?\/[A-Za-z0-9._~/-]+$/u;
 const PR_URL_PATTERN = /^https:\/\/[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?\/[A-Za-z0-9._~/-]+$/u;
+const DENSE_ARRAY_INDEX_PATTERN = /^(0|[1-9][0-9]*)$/u;
 
 const INTRINSIC_VIEW_SURFACE_KEYS = capturedFreeze([
   'buffer',
@@ -328,6 +391,7 @@ const BUFFER_FROM = NodeBuffer.from.bind(NodeBuffer);
 const BUFFER_CONCAT = NodeBuffer.concat.bind(NodeBuffer);
 const BUFFER_ALLOC = NodeBuffer.alloc.bind(NodeBuffer);
 const JSON_STRINGIFY = JSON.stringify;
+const JSON_PARSE = JSON.parse;
 const STRING = String;
 const PATH_JOIN = path.join;
 const PATH_RESOLVE = path.resolve;
@@ -342,7 +406,9 @@ const IS_PROXY = utilTypes.isProxy;
 const IS_ARRAY_BUFFER = utilTypes.isArrayBuffer;
 const IS_SHARED_ARRAY_BUFFER = utilTypes.isSharedArrayBuffer;
 const NUMBER_IS_FINITE = Number.isFinite;
+const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 
+const ARRAY_PROTOTYPE = Array.prototype;
 const UINT8ARRAY_PROTOTYPE = Uint8Array.prototype;
 const BUFFER_PROTOTYPE = NodeBuffer.prototype;
 const OBJECT_PROTOTYPE = Object.prototype;
@@ -550,16 +616,222 @@ function parseBooleanFlag(input, key, field) {
   return flagged === true;
 }
 
-function closedObject(input, allowed, field, label) {
-  assertPlainObject(input, 'invalid_type', field, label);
-  const keys = sortedCapturedKeys(input);
-  for (let index = 0; index < keys.length; index += 1) {
-    if (!capturedIncludes(allowed, keys[index])) {
-      failSource('unknown_key', `${field}.${keys[index]}`,
-        `${field}.${keys[index]} is not part of the closed result-source vocabulary.`);
+function inspectOwnKeys(input, field) {
+  try {
+    return capturedOwnKeys(input);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    failSource('proxy_denied', field,
+      `${field} keys could not be inspected safely.`);
+  }
+}
+
+function isDenseArrayIndexKey(key, length) {
+  if (typeof key !== 'string' || !capturedTest(DENSE_ARRAY_INDEX_PATTERN, key)) return false;
+  const index = Number(key);
+  return NUMBER_IS_SAFE_INTEGER(index) && index >= 0 && index < length && STRING(index) === key;
+}
+
+function assertConcreteDenseDirectDataArray(value, field) {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    assertNotProxy(value, field);
+  }
+  let isArray = false;
+  try {
+    isArray = capturedIsArray(value);
+  } catch {
+    failSource('malformed_result', field,
+      'Independently observed Git branches must be a dense array.');
+  }
+  if (value === null || typeof value !== 'object' || isArray !== true) {
+    failSource('malformed_result', field,
+      'Independently observed Git branches must be a dense array.');
+  }
+  let prototype;
+  try {
+    prototype = OBJECT_GET_PROTOTYPE_OF(value);
+  } catch {
+    failSource('malformed_result', field,
+      'Independently observed Git branches must be a dense array.');
+  }
+  if (prototype !== ARRAY_PROTOTYPE && prototype !== null) {
+    failSource('malformed_result', field,
+      'Independently observed Git branches must be a dense array.');
+  }
+  const lengthDescriptor = ownDescriptor(value, 'length');
+  if (lengthDescriptor === undefined
+    || lengthDescriptor.enumerable
+    || lengthDescriptor.get !== undefined
+    || lengthDescriptor.set !== undefined
+    || typeof lengthDescriptor.value !== 'number'
+    || !NUMBER_IS_SAFE_INTEGER(lengthDescriptor.value)
+    || lengthDescriptor.value < 0) {
+    failSource('malformed_result', field,
+      'Independently observed Git branches must be a dense array.');
+  }
+  const length = lengthDescriptor.value;
+  const ownKeys = inspectOwnKeys(value, field);
+  for (let index = 0; index < ownKeys.length; index += 1) {
+    const key = ownKeys[index];
+    if (typeof key === 'symbol') {
+      failSource('unknown_key', `${field}[symbol]`,
+        'Independently observed Git branches carry a symbol key outside the closed result-source vocabulary.');
+    }
+    if (key === 'length') continue;
+    const descriptor = ownDescriptor(value, key);
+    if (!isDenseArrayIndexKey(key, length)) {
+      if (descriptor !== undefined && !descriptor.enumerable) {
+        failSource('non_enumerable_property_denied', field,
+          'Independently observed Git branches carry non-enumerable properties beyond dense indices.');
+      }
+      failSource('unknown_key', field,
+        'Independently observed Git branches carry named properties beyond dense indices.');
+    }
+    const memberPath = `${field}[${key}]`;
+    if (descriptor === undefined || !descriptor.enumerable) {
+      failSource('non_enumerable_property_denied', memberPath,
+        `${memberPath} could not be described as an own enumerable data property.`);
+    }
+    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+      failSource('accessor_property_denied', memberPath,
+        `${memberPath} is an accessor property; result-source data must be direct JSON values and getters are never invoked.`);
+    }
+    if (descriptor.value === undefined) {
+      failSource('own_undefined_denied', memberPath,
+        `${memberPath} is an own undefined value; omit the element instead of writing undefined.`);
+    }
+    if (descriptor.value !== null && (typeof descriptor.value === 'object' || typeof descriptor.value === 'function')) {
+      assertNotProxy(descriptor.value, memberPath);
     }
   }
-  return keys;
+  for (let index = 0; index < length; index += 1) {
+    if (!hasOwn(value, STRING(index))) {
+      failSource('malformed_result', field,
+        'Independently observed Git branches must be a dense array.');
+    }
+  }
+  return length;
+}
+
+function rejectRecordedMismatchBypassAliases(recorded) {
+  if (hasOwn(recorded, 'requestId')) {
+    failSource('unknown_key', 'recorded.requestId',
+      'recorded carries a request identity alias outside the closed result-source vocabulary.');
+  }
+  if (hasOwn(recorded, 'branch_name')) {
+    failSource('unknown_key', 'recorded.branch_name',
+      'recorded carries a branch identity alias outside the closed result-source vocabulary.');
+  }
+  if (hasOwn(recorded, 'headSha')) {
+    failSource('unknown_key', 'recorded.headSha',
+      'recorded carries a head identity alias outside the closed result-source vocabulary.');
+  }
+}
+
+function closedObject(input, allowed, field, label) {
+  assertPlainObject(input, 'invalid_type', field, label);
+  const ownKeys = inspectOwnKeys(input, field);
+  const names = [];
+  for (let index = 0; index < ownKeys.length; index += 1) {
+    const key = ownKeys[index];
+    if (typeof key === 'symbol') {
+      failSource('unknown_key', `${field}[symbol]`,
+        `${field} carries a symbol key outside the closed result-source vocabulary.`);
+    }
+    if (!capturedIncludes(allowed, key)) {
+      failSource('unknown_key', `${field}.${key}`,
+        `${field}.${key} is not part of the closed result-source vocabulary.`);
+    }
+    names.push(key);
+  }
+  names.sort();
+  return names;
+}
+
+function ownScalar(input, key, field) {
+  const value = ownDataValue(input, key, field);
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    assertNotProxy(value, field);
+  }
+  return value;
+}
+
+function optionalOwnScalar(input, key, field) {
+  if (!hasOwn(input, key)) return undefined;
+  const descriptor = ownDescriptor(input, key);
+  if (descriptor === undefined) return undefined;
+  if (!descriptor.enumerable) {
+    failSource('non_enumerable_property_denied', field,
+      `${field} could not be described as an own enumerable data property.`);
+  }
+  if (descriptor.get !== undefined || descriptor.set !== undefined) {
+    failSource('accessor_property_denied', field,
+      `${field} is an accessor property; result-source data must be direct JSON values and getters are never invoked.`);
+  }
+  const value = descriptor.value;
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    assertNotProxy(value, field);
+  }
+  return value;
+}
+
+function cloneOwnedJson(value, field) {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!NUMBER_IS_FINITE(value)) {
+      failSource('invalid_type', field, 'JSON number results must be finite.');
+    }
+    return value;
+  }
+  if (typeof value !== 'object') {
+    failSource('invalid_type', field,
+      'The Cursor Cloud JSON value could not be copied into owned data.');
+  }
+  assertNotProxy(value, field);
+  assertDirectJsonClosure(value, field);
+  try {
+    return JSON_PARSE(JSON_STRINGIFY(value));
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    failSource('invalid_type', field,
+      'The Cursor Cloud JSON value could not be copied into owned data.');
+  }
+}
+
+function readExactBoolean(input, key, field) {
+  const flagged = ownDataValue(input, key, field);
+  if (flagged !== true && flagged !== false) {
+    failSource('invalid_type', field,
+      `${field} must be an exact boolean when present.`);
+  }
+  return flagged === true;
+}
+
+function readTruncationAliases(input, field) {
+  const hasTruncated = hasOwn(input, 'truncated');
+  const hasSourceTruncated = hasOwn(input, 'source_truncated');
+  if (!hasTruncated && !hasSourceTruncated) return false;
+  const truncated = hasTruncated
+    ? readExactBoolean(input, 'truncated', `${field}.source_truncated`)
+    : null;
+  const sourceTruncated = hasSourceTruncated
+    ? readExactBoolean(input, 'source_truncated', `${field}.source_truncated`)
+    : null;
+  if (hasTruncated && hasSourceTruncated && truncated !== sourceTruncated) {
+    failSource('invalid_format', `${field}.source_truncated`,
+      'truncated and source_truncated aliases must match when both are present.');
+  }
+  return (sourceTruncated ?? truncated) === true;
+}
+
+function assertNotProxySurface(value, field, label) {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    assertNotProxy(value, field);
+  }
+  if (value === null || typeof value !== 'object' || capturedIsArray(value)) {
+    failSource('malformed_result', field, label);
+  }
 }
 
 function encodeJsonValue(value, field) {
@@ -682,12 +954,12 @@ function parseObserved(input) {
 
 function parseProviderReport(input) {
   if (!hasOwn(input, 'provider_report')) {
-    return freezeData({
+    return {
       status: null,
       output: undefined,
       error: null,
       source_truncated: false,
-    });
+    };
   }
   const report = ownDataValue(input, 'provider_report', 'provider_report');
   closedObject(report, CURSOR_CLOUD_PROVIDER_REPORT_INPUT_KEYS, 'provider_report',
@@ -700,17 +972,18 @@ function parseProviderReport(input) {
         'provider_report.status must be a closed provider-reported status.');
     }
   }
-  return freezeData({
+  return {
     status,
     output: hasOwn(report, 'output') ? ownDataValue(report, 'output', 'provider_report.output') : undefined,
     error: hasOwn(report, 'error') ? ownDataValue(report, 'error', 'provider_report.error') : null,
     source_truncated: parseBooleanFlag(report, 'source_truncated', 'provider_report.source_truncated'),
-  });
+  };
 }
 
 function parseGitEvidence(input) {
-  if (!hasOwn(input, 'git_evidence') || input.git_evidence == null) return null;
+  if (!hasOwn(input, 'git_evidence')) return null;
   const git = ownDataValue(input, 'git_evidence', 'git_evidence');
+  if (git == null) return null;
   closedObject(git, CURSOR_CLOUD_GIT_EVIDENCE_INPUT_KEYS, 'git_evidence',
     'Independently observed Cursor Cloud Git evidence');
   const projected = {};
@@ -856,10 +1129,19 @@ export function isCursorCloudResultIdentityMismatchV1(error) {
 }
 
 export function assertCursorCloudResultCorrelationV1(input) {
-  assertPlainObject(input, 'invalid_type', 'correlation', 'The Cursor Cloud result correlation');
+  closedObject(input, CURSOR_CLOUD_RESULT_CORRELATION_KEYS, 'correlation',
+    'The Cursor Cloud result correlation');
   const recorded = hasOwn(input, 'recorded')
     ? ownDataValue(input, 'recorded', 'recorded')
-    : input;
+    : {};
+  assertPlainObject(recorded, 'invalid_type', 'recorded', 'The recorded Cursor Cloud identity');
+  rejectRecordedMismatchBypassAliases(recorded);
+  closedObject(recorded, CURSOR_CLOUD_RECORDED_IDENTITY_KEYS, 'recorded',
+    'The recorded Cursor Cloud identity');
+  for (let index = 0; index < CURSOR_CLOUD_RECORDED_IDENTITY_KEYS.length; index += 1) {
+    const key = CURSOR_CLOUD_RECORDED_IDENTITY_KEYS[index];
+    if (hasOwn(recorded, key)) optionalOwnScalar(recorded, key, `recorded.${key}`);
+  }
   const observed = hasOwn(input, 'observed')
     ? parseObserved({ observed: ownDataValue(input, 'observed', 'observed') })
     : freezeData({});
@@ -867,64 +1149,75 @@ export function assertCursorCloudResultCorrelationV1(input) {
     ? parseGitEvidence({ git_evidence: ownDataValue(input, 'git_evidence', 'git_evidence') })
     : null;
 
-  if (typeof recorded.run_id === 'string' && observed.run_id !== undefined) {
-    assertRunId(recorded.run_id, 'recorded.run_id');
-    assertExactIdentity(recorded.run_id, observed.run_id, 'run_identity_mismatch', 'observed.run_id', 'run');
+  const recordedRunId = optionalOwnScalar(recorded, 'run_id', 'recorded.run_id');
+  if (typeof recordedRunId === 'string' && observed.run_id !== undefined) {
+    assertRunId(recordedRunId, 'recorded.run_id');
+    assertExactIdentity(recordedRunId, observed.run_id, 'run_identity_mismatch', 'observed.run_id', 'run');
   }
-  if (typeof recorded.assignment_id === 'string' && observed.assignment_id !== undefined) {
-    if (!isAssignmentId(recorded.assignment_id)) {
+  const recordedAssignmentId = optionalOwnScalar(recorded, 'assignment_id', 'recorded.assignment_id');
+  if (typeof recordedAssignmentId === 'string' && observed.assignment_id !== undefined) {
+    if (!isAssignmentId(recordedAssignmentId)) {
       failSource('invalid_format', 'recorded.assignment_id',
         'recorded.assignment_id violates the assignment-id grammar.');
     }
     assertExactIdentity(
-      recorded.assignment_id, observed.assignment_id, 'assignment_identity_mismatch',
+      recordedAssignmentId, observed.assignment_id, 'assignment_identity_mismatch',
       'observed.assignment_id', 'assignment',
     );
   }
-  if (typeof recorded.request_id === 'string' && observed.request_id !== undefined) {
-    const requestId = assertTokenId(recorded.request_id, 'recorded.request_id', 'request');
+  const recordedRequestId = optionalOwnScalar(recorded, 'request_id', 'recorded.request_id');
+  if (typeof recordedRequestId === 'string' && observed.request_id !== undefined) {
+    const requestId = assertTokenId(recordedRequestId, 'recorded.request_id', 'request');
     assertExactIdentity(
       requestId, observed.request_id, 'request_identity_mismatch',
       'observed.request_id', 'request',
     );
   }
-  if (typeof recorded.provider_run_id === 'string' && observed.provider_run_id !== undefined) {
+  const recordedProviderRunId = optionalOwnScalar(recorded, 'provider_run_id', 'recorded.provider_run_id');
+  if (typeof recordedProviderRunId === 'string' && observed.provider_run_id !== undefined) {
     const providerRunId = assertTokenId(
-      recorded.provider_run_id, 'recorded.provider_run_id', 'provider run',
+      recordedProviderRunId, 'recorded.provider_run_id', 'provider run',
     );
     assertExactIdentity(
       providerRunId, observed.provider_run_id, 'provider_run_identity_mismatch',
       'observed.provider_run_id', 'provider run',
     );
   }
-  if (typeof recorded.agent_id === 'string' && observed.agent_id !== undefined) {
-    const agentId = assertTokenId(recorded.agent_id, 'recorded.agent_id', 'agent');
+  const recordedAgentId = optionalOwnScalar(recorded, 'agent_id', 'recorded.agent_id');
+  if (typeof recordedAgentId === 'string' && observed.agent_id !== undefined) {
+    const agentId = assertTokenId(recordedAgentId, 'recorded.agent_id', 'agent');
     assertExactIdentity(
       agentId, observed.agent_id, 'agent_identity_mismatch',
       'observed.agent_id', 'agent',
     );
   }
   if (git !== null) {
-    if (typeof recorded.branch === 'string' && git.branch !== undefined) {
-      const branch = assertBranch(recorded.branch, 'recorded.branch');
+    const recordedBranch = optionalOwnScalar(recorded, 'branch', 'recorded.branch');
+    if (typeof recordedBranch === 'string' && git.branch !== undefined) {
+      const branch = assertBranch(recordedBranch, 'recorded.branch');
       assertExactIdentity(branch, git.branch, 'branch_identity_mismatch', 'git_evidence.branch', 'branch');
     }
-    if (typeof recorded.repository_identity === 'string' && git.repository_identity !== undefined) {
-      const repo = assertRepoIdentity(recorded.repository_identity, 'recorded.repository_identity');
+    const recordedRepoIdentity = optionalOwnScalar(
+      recorded, 'repository_identity', 'recorded.repository_identity',
+    );
+    if (typeof recordedRepoIdentity === 'string' && git.repository_identity !== undefined) {
+      const repo = assertRepoIdentity(recordedRepoIdentity, 'recorded.repository_identity');
       assertExactIdentity(
         repo, git.repository_identity, 'repository_identity_mismatch',
         'git_evidence.repository_identity', 'repository',
       );
     }
-    if (typeof recorded.repository_url === 'string' && git.repository_url !== undefined) {
-      const url = assertRepoUrl(recorded.repository_url, 'recorded.repository_url');
+    const recordedRepoUrl = optionalOwnScalar(recorded, 'repository_url', 'recorded.repository_url');
+    if (typeof recordedRepoUrl === 'string' && git.repository_url !== undefined) {
+      const url = assertRepoUrl(recordedRepoUrl, 'recorded.repository_url');
       assertExactIdentity(
         url, git.repository_url, 'repository_identity_mismatch',
         'git_evidence.repository_url', 'repository',
       );
     }
-    if (typeof recorded.starting_sha === 'string') {
-      const starting = assertCommit(recorded.starting_sha, 'recorded.starting_sha');
+    const recordedStarting = optionalOwnScalar(recorded, 'starting_sha', 'recorded.starting_sha');
+    if (typeof recordedStarting === 'string') {
+      const starting = assertCommit(recordedStarting, 'recorded.starting_sha');
       if (git.starting_sha !== undefined) {
         assertExactIdentity(
           starting, git.starting_sha, 'base_identity_mismatch',
@@ -938,29 +1231,35 @@ export function assertCursorCloudResultCorrelationV1(input) {
           'Cursor Cloud merge-base identity did not match the recorded starting SHA or observed head.');
       }
     }
-    if (typeof recorded.head_sha === 'string' && git.head_sha !== undefined) {
-      const head = assertCommit(recorded.head_sha, 'recorded.head_sha');
+    const recordedHead = optionalOwnScalar(recorded, 'head_sha', 'recorded.head_sha');
+    if (typeof recordedHead === 'string' && git.head_sha !== undefined) {
+      const head = assertCommit(recordedHead, 'recorded.head_sha');
       assertExactIdentity(head, git.head_sha, 'head_identity_mismatch', 'git_evidence.head_sha', 'head');
     }
   }
   return freezeData({ recorded: true, observed, git_evidence: git });
 }
 
-function parseOptions(input) {
-  assertPlainObject(input, 'invalid_type', 'options', 'The Cursor Cloud result source options');
-  const keys = sortedCapturedKeys(input);
-  for (let index = 0; index < keys.length; index += 1) {
-    if (!capturedIncludes(CURSOR_CLOUD_RESULT_SOURCE_OPTION_KEYS, keys[index])) {
-      failSource('unknown_key', `options.${keys[index]}`,
-        `options.${keys[index]} is not part of the closed result-source vocabulary.`);
+function recordedCorrelationIdentity(identity) {
+  const recorded = {};
+  for (let index = 0; index < CURSOR_CLOUD_RECORDED_IDENTITY_KEYS.length; index += 1) {
+    const key = CURSOR_CLOUD_RECORDED_IDENTITY_KEYS[index];
+    if (hasOwn(identity, key)) {
+      recorded[key] = ownDataValue(identity, key, `recorded.${key}`);
     }
   }
+  return recorded;
+}
+
+function parseOptions(input) {
+  closedObject(input, CURSOR_CLOUD_RESULT_SOURCE_OPTION_KEYS, 'options',
+    'The Cursor Cloud result source options');
   const identity = parseIdentity(input);
   const observed = parseObserved(input);
   const providerReport = parseProviderReport(input);
   const gitEvidence = parseGitEvidence(input);
   assertCursorCloudResultCorrelationV1({
-    recorded: identity,
+    recorded: recordedCorrelationIdentity(identity),
     observed,
     git_evidence: gitEvidence,
   });
@@ -1209,12 +1508,12 @@ export function projectCursorCloudGitEvidenceV1(git) {
   const projected = {};
   if (hasOwn(git, 'branches')) {
     const branches = ownDataValue(git, 'branches', 'git_evidence.branches');
-    if (!capturedIsArray(branches)) {
-      failSource('malformed_result', 'git_evidence.branches',
-        'Independently observed Git branches must be a dense array.');
-    }
-    if (branches.length > 0) {
-      Object.assign(projected, mapSdkBranchRecord(branches[0], 'git_evidence.branches[0]'));
+    const length = assertConcreteDenseDirectDataArray(branches, 'git_evidence.branches');
+    if (length > 0) {
+      Object.assign(projected, mapSdkBranchRecord(
+        ownDataValue(branches, '0', 'git_evidence.branches[0]'),
+        'git_evidence.branches[0]',
+      ));
     }
   }
   const typedInput = {};
@@ -1242,35 +1541,35 @@ export function projectCursorCloudProviderReportV1(result) {
   if (result === null || result === undefined) {
     return freezeData({ status: null, output: undefined, error: null, source_truncated: false });
   }
-  if (typeof result !== 'object' || Array.isArray(result)) {
-    failSource('malformed_result', 'provider_report',
-      'A Cursor Cloud provider report must be a plain result object.');
-  }
-  if (IS_PROXY(result)) {
-    failSource('proxy_denied', 'provider_report',
-      'The Cursor Cloud provider report is a live or revoked Proxy.');
-  }
+  assertNotProxySurface(
+    result,
+    'provider_report',
+    'A Cursor Cloud provider report must be a plain result object.',
+  );
+  closedObject(result, CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS, 'provider_report',
+    'The Cursor Cloud provider report');
   const projected = {
-    status: hasOwn(result, 'status') ? result.status : null,
-    output: hasOwn(result, 'result') ? result.result : (hasOwn(result, 'output') ? result.output : undefined),
-    error: hasOwn(result, 'error') ? result.error : null,
-    source_truncated: false,
+    status: hasOwn(result, 'status') ? ownScalar(result, 'status', 'provider_report.status') : null,
+    output: undefined,
+    error: null,
+    source_truncated: readTruncationAliases(result, 'provider_report'),
   };
-  if (hasOwn(result, 'truncated')) {
-    const flagged = result.truncated;
-    if (flagged !== true && flagged !== false) {
-      failSource('invalid_type', 'provider_report.source_truncated',
-        'Provider truncation must be an exact boolean when present.');
-    }
-    projected.source_truncated = flagged === true;
+  if (hasOwn(result, 'result')) {
+    projected.output = cloneOwnedJson(
+      ownDataValue(result, 'result', 'provider_report.output'),
+      'provider_report.output',
+    );
+  } else if (hasOwn(result, 'output')) {
+    projected.output = cloneOwnedJson(
+      ownDataValue(result, 'output', 'provider_report.output'),
+      'provider_report.output',
+    );
   }
-  if (hasOwn(result, 'source_truncated')) {
-    const flagged = result.source_truncated;
-    if (flagged !== true && flagged !== false) {
-      failSource('invalid_type', 'provider_report.source_truncated',
-        'Provider truncation must be an exact boolean when present.');
-    }
-    projected.source_truncated = flagged === true;
+  if (hasOwn(result, 'error')) {
+    projected.error = cloneOwnedJson(
+      ownDataValue(result, 'error', 'provider_report.error'),
+      'provider_report.error',
+    );
   }
   if (projected.status !== null && !capturedIncludes(CURSOR_CLOUD_PROVIDER_REPORT_STATUSES, projected.status)) {
     failSource('invalid_format', 'provider_report.status',
@@ -1279,28 +1578,54 @@ export function projectCursorCloudProviderReportV1(result) {
   return freezeData(projected);
 }
 
+function ownedProviderReportInput(result) {
+  const projected = {};
+  for (let index = 0; index < CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS.length; index += 1) {
+    const key = CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS[index];
+    if (hasOwn(result, key)) {
+      projected[key] = ownDataValue(result, key, `provider_report.${key}`);
+    }
+  }
+  return projected;
+}
+
 export function projectCursorCloudResultSourcesV1(result) {
-  if (result === null || result === undefined || typeof result !== 'object' || Array.isArray(result)) {
+  if (result === null || result === undefined) {
     failSource('malformed_result', 'result',
       'A Cursor Cloud result must be a plain object with distinct provider and Git sources.');
   }
-  if (IS_PROXY(result)) {
-    failSource('proxy_denied', 'result', 'The Cursor Cloud result is a live or revoked Proxy.');
-  }
+  assertNotProxySurface(
+    result,
+    'result',
+    'A Cursor Cloud result must be a plain object with distinct provider and Git sources.',
+  );
+  closedObject(result, CURSOR_CLOUD_SDK_RESULT_KEYS, 'result',
+    'A Cursor Cloud result');
   const observed = {};
-  if (hasOwn(result, 'id') && result.id !== undefined) {
-    observed.provider_run_id = assertTokenId(result.id, 'observed.provider_run_id', 'provider run');
+  if (hasOwn(result, 'id')) {
+    observed.provider_run_id = assertTokenId(
+      ownScalar(result, 'id', 'observed.provider_run_id'),
+      'observed.provider_run_id', 'provider run',
+    );
   }
-  if (hasOwn(result, 'requestId') && result.requestId !== undefined) {
-    observed.request_id = assertTokenId(result.requestId, 'observed.request_id', 'request');
+  if (hasOwn(result, 'requestId')) {
+    observed.request_id = assertTokenId(
+      ownScalar(result, 'requestId', 'observed.request_id'),
+      'observed.request_id', 'request',
+    );
   }
-  if (hasOwn(result, 'agentId') && result.agentId !== undefined) {
-    observed.agent_id = assertTokenId(result.agentId, 'observed.agent_id', 'agent');
+  if (hasOwn(result, 'agentId')) {
+    observed.agent_id = assertTokenId(
+      ownScalar(result, 'agentId', 'observed.agent_id'),
+      'observed.agent_id', 'agent',
+    );
   }
   return freezeData({
     observed: freezeData(observed),
-    provider_report: projectCursorCloudProviderReportV1(result),
-    git_evidence: projectCursorCloudGitEvidenceV1(hasOwn(result, 'git') ? result.git : null),
+    provider_report: projectCursorCloudProviderReportV1(ownedProviderReportInput(result)),
+    git_evidence: projectCursorCloudGitEvidenceV1(
+      hasOwn(result, 'git') ? ownDataValue(result, 'git', 'git') : null,
+    ),
   });
 }
 
@@ -1331,28 +1656,63 @@ export function contentFreeCloudResultSourceFailureV1(error) {
 }
 
 export function cursorCloudResultSourceIdentityFromTaskV1(task) {
-  if (task === null || typeof task !== 'object' || Array.isArray(task)) return null;
-  if (IS_PROXY(task)) return null;
+  if (task === null || (typeof task !== 'object' && typeof task !== 'function')) return null;
+  assertNotProxy(task, 'task');
+  if (typeof task !== 'object' || capturedIsArray(task)) return null;
   if (!hasOwn(task, 'run_id') || !hasOwn(task, 'assignment_id') || !hasOwn(task, 'provider')) {
     return null;
   }
-  if (!hasOwn(task, 'model') || task.model === null || task.model === undefined) return null;
-  if (task.provider !== CURSOR_CLOUD_RESULT_SOURCE_PROVIDER) return null;
+  if (!hasOwn(task, 'model')) return null;
+  for (let index = 0; index < CURSOR_CLOUD_TASK_IDENTITY_KEYS.length; index += 1) {
+    const key = CURSOR_CLOUD_TASK_IDENTITY_KEYS[index];
+    if (hasOwn(task, key)) optionalOwnScalar(task, key, `task.${key}`);
+  }
+  const model = optionalOwnScalar(task, 'model', 'task.model');
+  if (model === null || model === undefined) return null;
+  const provider = optionalOwnScalar(task, 'provider', 'task.provider');
+  if (provider !== CURSOR_CLOUD_RESULT_SOURCE_PROVIDER) return null;
   const identity = {
-    run_id: task.run_id,
-    assignment_id: task.assignment_id,
-    provider: task.provider,
-    model: task.model,
+    run_id: optionalOwnScalar(task, 'run_id', 'task.run_id'),
+    assignment_id: optionalOwnScalar(task, 'assignment_id', 'task.assignment_id'),
+    provider,
+    model,
   };
-  if (hasOwn(task, 'child_envelope_digest')) identity.child_envelope_digest = task.child_envelope_digest;
-  if (hasOwn(task, 'run_idempotency_key')) identity.request_id = task.run_idempotency_key;
-  if (hasOwn(task, 'provider_agent_id')) identity.agent_id = task.provider_agent_id;
-  if (hasOwn(task, 'provider_run_id')) identity.provider_run_id = task.provider_run_id;
-  if (hasOwn(task, 'provider_repo_url')) identity.repository_url = task.provider_repo_url;
-  if (hasOwn(task, 'provider_repo_identity')) identity.repository_identity = task.provider_repo_identity;
-  if (hasOwn(task, 'provider_branch')) identity.branch = task.provider_branch;
-  if (hasOwn(task, 'starting_ref')) identity.starting_sha = task.starting_ref;
-  if (hasOwn(task, 'head_sha')) identity.head_sha = task.head_sha;
+  if (hasOwn(task, 'child_envelope_digest')) {
+    const digest = optionalOwnScalar(task, 'child_envelope_digest', 'task.child_envelope_digest');
+    if (digest !== undefined) identity.child_envelope_digest = digest;
+  }
+  if (hasOwn(task, 'run_idempotency_key')) {
+    const requestId = optionalOwnScalar(task, 'run_idempotency_key', 'task.run_idempotency_key');
+    if (requestId !== undefined) identity.request_id = requestId;
+  }
+  if (hasOwn(task, 'provider_agent_id')) {
+    const agentId = optionalOwnScalar(task, 'provider_agent_id', 'task.provider_agent_id');
+    if (agentId !== undefined) identity.agent_id = agentId;
+  }
+  if (hasOwn(task, 'provider_run_id')) {
+    const providerRunId = optionalOwnScalar(task, 'provider_run_id', 'task.provider_run_id');
+    if (providerRunId !== undefined) identity.provider_run_id = providerRunId;
+  }
+  if (hasOwn(task, 'provider_repo_url')) {
+    const url = optionalOwnScalar(task, 'provider_repo_url', 'task.provider_repo_url');
+    if (url !== undefined) identity.repository_url = url;
+  }
+  if (hasOwn(task, 'provider_repo_identity')) {
+    const repo = optionalOwnScalar(task, 'provider_repo_identity', 'task.provider_repo_identity');
+    if (repo !== undefined) identity.repository_identity = repo;
+  }
+  if (hasOwn(task, 'provider_branch')) {
+    const branch = optionalOwnScalar(task, 'provider_branch', 'task.provider_branch');
+    if (branch !== undefined) identity.branch = branch;
+  }
+  if (hasOwn(task, 'starting_ref')) {
+    const starting = optionalOwnScalar(task, 'starting_ref', 'task.starting_ref');
+    if (starting !== undefined) identity.starting_sha = starting;
+  }
+  if (hasOwn(task, 'head_sha')) {
+    const head = optionalOwnScalar(task, 'head_sha', 'task.head_sha');
+    if (head !== undefined) identity.head_sha = head;
+  }
   return freezeData(identity);
 }
 
@@ -1409,16 +1769,20 @@ export async function materializeCursorCloudResultSourceV1(store, input) {
   let gitSlot = emptySlot('git_evidence', CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND, gitFields);
   if (gitEvidence !== null) {
     const record = gitStoreRecord(gitEvidence);
-    const gitBytes = encodeJsonValue(record, 'git_evidence');
-    const gitPath = cursorCloudGitEvidencePathV1(identity);
-    const publishedGit = await publishSource(
-      store, identity, CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND,
-      gitPath, 'application/json', gitBytes,
-      gitEvidence.source_truncated === true,
-    );
-    gitSlot = publishedGit == null
-      ? emptySlot('git_evidence', CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND, gitFields)
-      : publishedSlot('git_evidence', CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND, publishedGit, gitFields);
+    if (sortedCapturedKeys(record).length === 0) {
+      gitSlot = emptySlot('git_evidence', CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND, gitFields);
+    } else {
+      const gitBytes = encodeJsonValue(record, 'git_evidence');
+      const gitPath = cursorCloudGitEvidencePathV1(identity);
+      const publishedGit = await publishSource(
+        store, identity, CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND,
+        gitPath, 'application/json', gitBytes,
+        gitEvidence.source_truncated === true,
+      );
+      gitSlot = publishedGit == null
+        ? emptySlot('git_evidence', CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND, gitFields)
+        : publishedSlot('git_evidence', CURSOR_CLOUD_GIT_EVIDENCE_ARTIFACT_KIND, publishedGit, gitFields);
+    }
   }
 
   return freezeData({
@@ -1461,3 +1825,8 @@ capturedFreeze(CURSOR_CLOUD_RESULT_SOURCE_FAILURE_PATH_ALLOWLIST);
 capturedFreeze(CURSOR_CLOUD_PROVIDER_REPORT_INPUT_KEYS);
 capturedFreeze(CURSOR_CLOUD_GIT_EVIDENCE_INPUT_KEYS);
 capturedFreeze(CURSOR_CLOUD_RESULT_SOURCE_OBSERVED_KEYS);
+capturedFreeze(CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS);
+capturedFreeze(CURSOR_CLOUD_SDK_RESULT_KEYS);
+capturedFreeze(CURSOR_CLOUD_RESULT_CORRELATION_KEYS);
+capturedFreeze(CURSOR_CLOUD_TASK_IDENTITY_KEYS);
+capturedFreeze(CURSOR_CLOUD_RECORDED_IDENTITY_KEYS);

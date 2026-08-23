@@ -306,6 +306,35 @@ test('provider and Git upstream truncation flags are independent', async () => {
   });
 });
 
+test('explicit empty Git evidence stays unpublished and does not invent bytes', async () => {
+  await withStore(async (store) => {
+    const emptyGit = await materializeCursorCloudResultSourceV1(store, {
+      ...identityFor(),
+      git_evidence: {},
+    });
+    assertReceiptShape(emptyGit);
+    assert.equal(emptyGit.git_evidence.published, false);
+    assert.equal(emptyGit.git_evidence.empty, true);
+    assert.equal(emptyGit.git_evidence.source_byte_length, 0);
+    assert.equal(emptyGit.git_evidence.raw_ref, null);
+    assert.equal(emptyGit.git_evidence.sanitized_ref, null);
+    assert.equal(emptyGit.git_evidence.relative_path, null);
+    assert.equal(emptyGit.git_evidence.inline_tail, null);
+    assert.equal(emptyGit.published, false);
+
+    const withProvider = await materializeCursorCloudResultSourceV1(store, {
+      ...identityFor({ assignment_id: 'cloud-empty-git' }),
+      provider_report: { status: 'finished', output: 'done' },
+      git_evidence: {},
+    });
+    assert.equal(withProvider.provider_report.published, true);
+    assert.equal(withProvider.git_evidence.published, false);
+    assert.equal(withProvider.git_evidence.empty, true);
+    assert.equal(withProvider.git_evidence.source_byte_length, 0);
+    assert.equal(withProvider.git_evidence.raw_ref, null);
+  });
+});
+
 test('crossing the raw class cap fails closed and does not pretend the upstream truncated', async () => {
   await withStore(async (store) => {
     const error = await errorOfAsync(
@@ -328,5 +357,3 @@ test('crossing the raw class cap fails closed and does not pretend the upstream 
     }).provider_report.source_truncated), 'false');
   });
 });
-
-
