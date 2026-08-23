@@ -85,6 +85,27 @@
   a torn store stays torn and fails closed until an operator acts. Coverage
   lives in `test/r1-artifact-store.test.mjs` and
   `test/r1-artifact-store-adversarial.test.mjs`.
+- **ScopeVerifierV1 independent changed-path ownership, read-only, and
+  merge-commit verifier.** Adds an additive v3 `scope-verifier.mjs` module
+  for W16-P15. It consumes only trusted P14 `GitIdentityV1` snapshots and
+  P13 `VerifiedFactV1` / `EvidenceDiscrepancyV1` records, never provider
+  claims, and binds content-free `git_diff` / `head_sha` facts
+  (`platform_git` with `scope_match`, `read_only_no_changes`, and
+  `merge_commit_absence`). Observation is argv-only (`/usr/bin/git`, no
+  shell) through the P14 closed environment with system/global/caller
+  config and protocols disabled; output, time, and command counts are
+  bounded; typed errors never echo hostile bytes. It validates ownership
+  of additions, deletions, renames, and copies against trusted assignment
+  write-scope globs (P02 matcher), including overlap with other writers,
+  symlink/gitlink/type-change, Unicode NFC vs confusable separators, and
+  tracked plus untracked state. Read-only lanes must have no candidate or
+  worktree mutations. Merge commits and multi-parent histories fail.
+  Pre/post identity and worktree fingerprints detect observation races
+  and fail closed. It does not own P16A trusted command policy, P28 Git
+  mutation, P30/P35 composition, server/supervisor integration, network,
+  or merge/rebase/push/PR. Coverage lives in `r1-scope-verifier` and
+  `r1-scope-verifier-adversarial` tests plus disposable rename, merge,
+  symlink, gitlink, Unicode, untracked, and race fixtures.
 - **GitIdentityV1 independent repository, ancestry, and merge-base
   verifier.** Adds an additive v3 `git-identity.mjs` module for W13-P14.
   It derives Git facts from the local repository through argv execution
