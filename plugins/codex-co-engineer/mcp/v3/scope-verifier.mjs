@@ -15,12 +15,18 @@
 //
 // Observation is fail-closed: spawn is argv-only, the child environment is
 // the P14 closed map (system/global/caller config and protocols disabled),
+// closed -c overrides disable fsmonitor/fileMode hiding on every spawn,
 // output/time/command counts are bounded, typed errors never echo hostile
-// bytes, and a pre/post fingerprint mismatch is an observation race.
+// bytes, and a pre/post fingerprint mismatch is an observation race. Ignored
+// worktree paths, assume-unchanged/skip-worktree flags, HEAD parents
+// (including base_sha===head_sha), unchanged-source copies, and untracked
+// lstat proofs are observed through Git-native or lstat evidence.
 
 import { Buffer as NodeBuffer } from 'node:buffer';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { lstat as nodeLstat } from 'node:fs/promises';
+import path from 'node:path';
 import { types as utilTypes } from 'node:util';
 
 import {
@@ -123,6 +129,14 @@ const SCOPE_GIT_ISOLATION_FLAGS = capturedFreeze([
   '-c', 'log.showSignature=false',
 ]);
 
+const SCOPE_GIT_RUNTIME_OVERRIDES = capturedFreeze([
+  '-c', 'core.fsmonitor=',
+  '-c', 'core.useBuiltinFSMonitor=false',
+  '-c', 'core.untrackedCache=false',
+  '-c', 'core.fileMode=true',
+  '-c', 'diff.external=',
+]);
+
 const FORBIDDEN_ENV_KEYS = capturedFreeze([
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
@@ -162,6 +176,10 @@ const HASH_PROTOTYPE = Object.getPrototypeOf(CRYPTO_CREATE_HASH('sha256'));
 const HASH_UPDATE = HASH_PROTOTYPE.update;
 const HASH_DIGEST = HASH_PROTOTYPE.digest;
 const SPAWN = nodeSpawn;
+const LSTAT = nodeLstat;
+const PATH_JOIN = path.join;
+const PATH_RESOLVE = path.resolve;
+const PATH_IS_ABSOLUTE = path.isAbsolute;
 const REFLECT_APPLY = Reflect.apply;
 const STRING_FROM_CODE_POINT = String.fromCodePoint;
 const IS_PROXY = utilTypes.isProxy;
@@ -539,6 +557,22 @@ function parseOptions(options, path = 'options') {
   return freezeRecord(SCOPE_OPTIONS_ALLOWED_KEYS, { spawn });
 }
 
+function prependClosedGitOverrides(args) {
+  if (!ARRAY_IS_ARRAY(args)) return args;
+  const isolated = [];
+  for (let index = 0; index < SCOPE_GIT_RUNTIME_OVERRIDES.length; index += 1) {
+    REFLECT_APPLY(ARRAY_PUSH, isolated, [SCOPE_GIT_RUNTIME_OVERRIDES[index]]);
+  }
+  for (let index = 0; index < args.length; index += 1) {
+    REFLECT_APPLY(ARRAY_PUSH, isolated, [args[index]]);
+  }
+  return isolated;
+}
+
+function wrapIsolatedSpawn(spawnFn) {
+  return (command, args, options) => spawnFn(command, prependClosedGitOverrides(args), options);
+}
+
 function splitNul(text) {
   if (typeof text !== 'string') return [];
   if (text.length === 0) return [];
@@ -708,6 +742,106 @@ function parseLsFilesOthers(stdout, path, paths, seen) {
   }
 }
 
+function parseLsFilesVerbose(stdout, path) {
+  const parts = splitNul(stdout);
+  for (let index = 0; index < parts.length; index += 1) {
+    const entry = parts[index];
+    if (typeof entry !== 'string' || entry.length < 3 || entry.charCodeAt(1) !== 0x20) {
+      fail('git_execution_failed', path, `${path} produced an unexpected git observation.`);
+    }
+    const tag = entry.charCodeAt(0);
+    if (tag > 0x7e || tag < 0x20) {
+      fail('hostile_name_denied', path, `${path} produced an unexpected git observation.`);
+    }
+    if (tag !== 0x48) {
+      fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+    }
+  }
+}
+
+function isSymlinkStat(metadata) {
+  return typeof metadata?.isSymbolicLink === 'function' && metadata.isSymbolicLink();
+}
+
+function isFileStat(metadata) {
+  return typeof metadata?.isFile === 'function' && metadata.isFile();
+}
+
+function isDirectoryStat(metadata) {
+  return typeof metadata?.isDirectory === 'function' && metadata.isDirectory();
+}
+
+function isInsideRepository(repositoryPath, target) {
+  const root = PATH_RESOLVE(repositoryPath);
+  const resolved = PATH_RESOLVE(target);
+  if (resolved === root) return true;
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  return resolved.startsWith(prefix);
+}
+
+async function lstatProven(target, path) {
+  let first;
+  try {
+    first = await LSTAT(target);
+  } catch {
+    fail('observation_race', path, `${path} observed a git identity or worktree race.`);
+  }
+  let second;
+  try {
+    second = await LSTAT(target);
+  } catch {
+    fail('observation_race', path, `${path} observed a git identity or worktree race.`);
+  }
+  if (typeof first?.isSymbolicLink !== 'function' || typeof second?.isSymbolicLink !== 'function'
+    || typeof first.isFile !== 'function' || typeof second.isFile !== 'function'
+    || typeof first.isDirectory !== 'function' || typeof second.isDirectory !== 'function') {
+    fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+  }
+  if (first.isSymbolicLink() !== second.isSymbolicLink()
+    || first.isFile() !== second.isFile()
+    || first.isDirectory() !== second.isDirectory()
+    || first.mode !== second.mode) {
+    fail('observation_race', path, `${path} observed a git identity or worktree race.`);
+  }
+  return first;
+}
+
+async function proveUntrackedPaths(repositoryPath, paths, path) {
+  let symlink = false;
+  for (let index = 0; index < paths.length; index += 1) {
+    const relative = paths[index];
+    const parts = relative.split('/');
+    let current = PATH_RESOLVE(repositoryPath);
+    for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+      const part = parts[partIndex];
+      if (part.length === 0 || part === '.' || part === '..') {
+        fail('hostile_name_denied', path, `${path} is not a repository-relative path.`);
+      }
+      current = PATH_JOIN(current, part);
+      if (!PATH_IS_ABSOLUTE(current) || !isInsideRepository(repositoryPath, current)) {
+        fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+      }
+      const metadata = await lstatProven(current, path);
+      const last = partIndex === parts.length - 1;
+      if (isSymlinkStat(metadata)) {
+        if (!last) {
+          fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+        }
+        symlink = true;
+        continue;
+      }
+      if (last) {
+        if (!isFileStat(metadata) || isDirectoryStat(metadata)) {
+          fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+        }
+      } else if (!isDirectoryStat(metadata) || isFileStat(metadata)) {
+        fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+      }
+    }
+  }
+  return { symlink };
+}
+
 function parseRevListParents(stdout, path, expectedHead, allowEmpty) {
   if (stdout.includes('\0') || stdout.includes('\r')) {
     fail('git_execution_failed', path, `${path} produced extra git output.`);
@@ -743,7 +877,7 @@ function parseRevListParents(stdout, path, expectedHead, allowEmpty) {
       sawHead = true;
       parentCount = parents;
     }
-    if (parents !== 1) merge = true;
+    if (parents > 1) merge = true;
   }
   if (expectedHead !== undefined && !sawHead && lines.length > 0) {
     parentCount = lines[0].split(' ').length - 1;
@@ -1044,32 +1178,53 @@ function classifyDiffRecords(records, path) {
   return { symlink, gitlink, type_change: typeChange };
 }
 
-async function observeScope(session, flags, baseSha, headSha, path) {
+async function observeScope(session, flags, repositoryPath, baseSha, headSha, path) {
   const sameCommit = baseSha === headSha;
   const diffText = await gitRequired(session, [
     ...flags, 'diff-tree', '--no-commit-id', '--raw', '--full-index', '-z', '-r',
-    '-M', '-C', '--end-of-options', baseSha, headSha,
+    '-M', '-C', '--find-copies-harder', '--end-of-options', baseSha, headSha,
   ], `${path}.diff`);
   const parsed = parseDiffTreeRaw(diffText, `${path}.diff`);
   const statusText = await gitRequired(session, [
     ...flags, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
-    '--ignore-submodules=none',
+    '--ignored', '--ignore-submodules=none',
   ], `${path}.status`);
   parseStatusPorcelain(statusText, `${path}.status`, parsed.paths, parsed.seen);
   const untrackedText = await gitRequired(session, [
     ...flags, 'ls-files', '-z', '--others', '--exclude-standard',
   ], `${path}.untracked`);
+  const untrackedPaths = [];
+  const untrackedSeen = new Set();
   parseLsFilesOthers(untrackedText, `${path}.untracked`, parsed.paths, parsed.seen);
-  let parent;
-  if (sameCommit) {
-    parent = { commits: [], parent_count: 1, merge: false, new_commit_count: 0 };
-  } else {
+  parseLsFilesOthers(untrackedText, `${path}.untracked`, untrackedPaths, untrackedSeen);
+  const ignoredText = await gitRequired(session, [
+    ...flags, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard',
+  ], `${path}.ignored`);
+  parseLsFilesOthers(ignoredText, `${path}.ignored`, parsed.paths, parsed.seen);
+  parseLsFilesOthers(ignoredText, `${path}.ignored`, untrackedPaths, untrackedSeen);
+  const verboseText = await gitRequired(session, [
+    ...flags, 'ls-files', '-v', '-z',
+  ], `${path}.index`);
+  parseLsFilesVerbose(verboseText, `${path}.index`);
+  const proof = await proveUntrackedPaths(repositoryPath, untrackedPaths, `${path}.untracked`);
+  const headParentText = await gitRequired(session, [
+    ...flags, 'rev-list', '--parents', '--max-count=1', headSha,
+  ], `${path}.head_parents`);
+  const headParent = parseRevListParents(
+    headParentText, `${path}.head_parents`, headSha, false,
+  );
+  let merge = headParent.merge === true || headParent.parent_count > 1;
+  let newCommitCount = 0;
+  let rangeCommits = [];
+  if (!sameCommit) {
     const rangeText = await gitRequired(session, [
       ...flags, 'rev-list', '--parents', `--max-count=${MAX_NEW_COMMITS + 1}`,
       headSha, '--not', baseSha,
     ], `${path}.parents`);
-    parent = parseRevListParents(rangeText, `${path}.parents`, headSha, false);
-    parent.new_commit_count = parent.commits.length;
+    const range = parseRevListParents(rangeText, `${path}.parents`, headSha, false);
+    merge = merge || range.merge === true || range.parent_count > 1;
+    newCommitCount = range.commits.length;
+    rangeCommits = range.commits;
   }
   REFLECT_APPLY(ARRAY_SORT, parsed.paths, [(left, right) => {
     if (left === right) return 0;
@@ -1080,7 +1235,10 @@ async function observeScope(session, flags, baseSha, headSha, path) {
     diff: digestBytes(diffText),
     status: digestBytes(statusText),
     untracked: digestBytes(untrackedText),
-    parents: parent.commits,
+    ignored: digestBytes(ignoredText),
+    index_flags: digestBytes(verboseText),
+    head_parents: headParent.commits,
+    parents: rangeCommits,
     path_set_digest: pathSetDigest,
   });
   const operations = classifyDiffRecords(parsed.records, `${path}.diff`);
@@ -1090,11 +1248,11 @@ async function observeScope(session, flags, baseSha, headSha, path) {
     path_set_digest: pathSetDigest,
     rename_count: parsed.rename_count,
     copy_count: parsed.copy_count,
-    parent_count: parent.parent_count,
-    new_commit_count: parent.new_commit_count,
-    merge: parent.merge === true || (!sameCommit && parent.parent_count !== 1),
-    dirty: statusText.length > 0 || untrackedText.length > 0,
-    symlink: operations.symlink,
+    parent_count: headParent.parent_count,
+    new_commit_count: newCommitCount,
+    merge,
+    dirty: statusText.length > 0 || untrackedText.length > 0 || ignoredText.length > 0,
+    symlink: operations.symlink === true || proof.symlink === true,
     gitlink: operations.gitlink,
     type_change: operations.type_change,
     fingerprint,
@@ -1148,20 +1306,24 @@ function emitDiscrepancy(id, kind, code, request, factIds, sequence) {
 export async function verifyScopeV1(input, options) {
   const request = parseScopeVerifierRequestV1(input);
   const parsedOptions = parseOptions(options);
+  const isolatedSpawn = wrapIsolatedSpawn(parsedOptions.spawn);
+  const isolatedOptions = freezeRecord(SCOPE_OPTIONS_ALLOWED_KEYS, { spawn: isolatedSpawn });
   const pathLabel = 'scope';
-  const livePre = await verifyGitIdentityV1(request.identity_request, parsedOptions);
+  const livePre = await verifyGitIdentityV1(request.identity_request, isolatedOptions);
   assertLiveIdentity(request.identity, livePre, `${pathLabel}.identity`);
-  const session = createSession(parsedOptions.spawn);
+  const session = createSession(isolatedSpawn);
   const repositoryPath = livePre.observation.repository_path;
   const gitDir = livePre.observation.git_dir;
   const flags = repoFlags(repositoryPath, gitDir);
   const pre = await observeScope(
-    session, flags, livePre.observation.base_sha, livePre.observation.head_sha, pathLabel,
+    session, flags, repositoryPath, livePre.observation.base_sha, livePre.observation.head_sha,
+    pathLabel,
   );
-  const livePost = await verifyGitIdentityV1(request.identity_request, parsedOptions);
+  const livePost = await verifyGitIdentityV1(request.identity_request, isolatedOptions);
   assertLiveIdentity(request.identity, livePost, `${pathLabel}.identity`);
   const post = await observeScope(
-    session, flags, livePost.observation.base_sha, livePost.observation.head_sha, pathLabel,
+    session, flags, repositoryPath, livePost.observation.base_sha, livePost.observation.head_sha,
+    pathLabel,
   );
   if (pre.fingerprint !== post.fingerprint
     || identityFingerprint(livePre) !== identityFingerprint(livePost)) {

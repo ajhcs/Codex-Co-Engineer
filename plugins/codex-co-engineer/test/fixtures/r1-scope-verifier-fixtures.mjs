@@ -4,7 +4,7 @@
 // stay parent-failing until the verifier module exists.
 
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -229,6 +229,59 @@ export async function createCopyInScopeRepo() {
   return wrap(root, { baseSha, headSha, extra: { from: 'src/original.txt', to: 'src/copied.txt' } });
 }
 
+export async function createCopyEscapingRepo() {
+  const root = await emptyRepo('p15-copy-escape-');
+  await writeAndAdd(root, 'src/keep.txt', 'keep\n');
+  await writeAndAdd(root, 'docs/secret.txt', 'unique-copy-blob-docs-9876543210\n');
+  const baseSha = await commit(root, 'base');
+  await runFixtureGit(root, ['branch', '--', 'candidate']);
+  await runFixtureGit(root, ['checkout', 'candidate']);
+  await writeAndAdd(root, 'src/fromdocs.txt', 'unique-copy-blob-docs-9876543210\n');
+  const headSha = await commit(root, 'copy-escape');
+  await runFixtureGit(root, ['checkout', 'main']);
+  return wrap(root, {
+    baseSha, headSha, extra: { from: 'docs/secret.txt', to: 'src/fromdocs.txt' },
+  });
+}
+
+export async function createIgnoredOutOfScopeRepo() {
+  const root = await emptyRepo('p15-ignored-');
+  await writeAndAdd(root, 'src/keep.txt', 'keep\n');
+  await writeAndAdd(root, 'docs/readme.txt', 'docs\n');
+  await writeAndAdd(root, '.gitignore', 'scratch.ignored\n');
+  const baseSha = await commit(root, 'base');
+  await runFixtureGit(root, ['branch', '--', 'candidate']);
+  await runFixtureGit(root, ['checkout', 'candidate']);
+  await writeAndAdd(root, 'src/added.txt', 'added\n');
+  const headSha = await commit(root, 'head');
+  await runFixtureGit(root, ['checkout', 'main']);
+  await writeFile(path.join(root, 'docs', 'scratch.ignored'), 'ignored-out\n', 'utf8');
+  return wrap(root, { baseSha, headSha, extra: { ignored: 'docs/scratch.ignored' } });
+}
+
+export async function createHiddenIndexFlagRepo() {
+  const repo = await createInScopeWriterRepo();
+  await runFixtureGit(repo.path, ['update-index', '--assume-unchanged', '--', 'src/keep.txt']);
+  await runFixtureGit(repo.path, ['update-index', '--skip-worktree', '--', 'docs/readme.txt']);
+  repo.extra = { ...repo.extra, assume_unchanged: 'src/keep.txt', skip_worktree: 'docs/readme.txt' };
+  return repo;
+}
+
+export async function createFileModeHiddenChmodRepo() {
+  const repo = await createReadOnlyUnchangedRepo();
+  await runFixtureGit(repo.path, ['config', 'core.fileMode', 'false']);
+  await chmod(path.join(repo.path, 'src', 'keep.txt'), 0o755);
+  repo.extra = { ...repo.extra, chmod: 'src/keep.txt' };
+  return repo;
+}
+
+export async function createUntrackedSymlinkRepo() {
+  const repo = await createInScopeWriterRepo();
+  await symlink('keep.txt', path.join(repo.path, 'src', 'link-untracked.txt'));
+  repo.extra = { ...repo.extra, untracked: 'src/link-untracked.txt' };
+  return repo;
+}
+
 export async function createDeletionInScopeRepo() {
   const root = await emptyRepo('p15-delete-');
   await writeAndAdd(root, 'src/gone.txt', 'delete-me\n');
@@ -271,6 +324,14 @@ export async function createMergeCommitRepo() {
   const headSha = await runFixtureGit(root, ['rev-parse', 'HEAD']);
   await runFixtureGit(root, ['checkout', 'main']);
   return wrap(root, { baseSha, headSha, extra: {} });
+}
+
+export async function createMergeHeadEqualsBaseRepo() {
+  const merge = await createMergeCommitRepo();
+  await runFixtureGit(merge.path, ['checkout', 'candidate']);
+  await runFixtureGit(merge.path, ['checkout', '-B', 'main', merge.headSha]);
+  merge.baseSha = merge.headSha;
+  return merge;
 }
 
 export async function createHistoricalMergeRepo() {

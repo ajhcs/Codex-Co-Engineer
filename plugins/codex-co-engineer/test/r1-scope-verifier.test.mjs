@@ -168,7 +168,8 @@ test('additions, deletions, in-scope renames, and copies stay owned', async (t) 
   const copyIdentity = await identityOf(copy);
   const copyResult = await verifyScopeV1(scopeRequest(copy, copyIdentity));
   assert.equal(copyResult.status, 'verified');
-  assert.equal(copyResult.observation.path_count >= 1, true);
+  assert.equal(copyResult.observation.path_count >= 2, true);
+  assert.equal(copyResult.observation.copy_count >= 1, true);
 
   const deletion = await createDeletionInScopeRepo();
   t.after(() => deletion.cleanup());

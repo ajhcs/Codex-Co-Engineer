@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn as nodeSpawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { types as utilTypes } from 'node:util';
 import test from 'node:test';
 
@@ -23,17 +26,24 @@ import {
   READ_ONLY_ASSIGNMENT_ID,
   countingProxy,
   createConfusableSeparatorRepo,
+  createCopyEscapingRepo,
+  createFileModeHiddenChmodRepo,
   createGitlinkRepo,
+  createHiddenIndexFlagRepo,
   createHistoricalMergeRepo,
+  createIgnoredOutOfScopeRepo,
   createInScopeWriterRepo,
   createMergeCommitRepo,
+  createMergeHeadEqualsBaseRepo,
   createNonNfcRepo,
   createOutOfScopeWriterRepo,
   createRenameEscapingRepo,
   createSymlinkRepo,
   createTypeChangeRepo,
+  createUntrackedSymlinkRepo,
   createUntrackedOutOfScopeRepo,
   identityRequest,
+  runFixtureGit,
   scopeRequest,
   trapTotal,
 } from './fixtures/r1-scope-verifier-fixtures.mjs';
@@ -368,8 +378,95 @@ test('closed protocol and config env is forced on every P15 git spawn', async (t
       assert.equal(options.env.GIT_CONFIG_GLOBAL, '/dev/null');
       assert.equal(options.env.GIT_CONFIG_SYSTEM, '/dev/null');
       assert.equal(Object.hasOwn(options.env, 'GIT_CONFIG'), false);
+      assert.equal(args.includes('core.fsmonitor='), true);
+      assert.equal(args.includes('core.useBuiltinFSMonitor=false'), true);
+      assert.equal(args.includes('core.fileMode=true'), true);
+      const fsmonitorIndex = args.indexOf('core.fsmonitor=');
+      assert.equal(fsmonitorIndex > 0 && args[fsmonitorIndex - 1] === '-c', true);
       return nodeSpawn(command, args, options);
     },
   });
   assert.equal(result.status, 'verified');
+});
+
+test('ignored worktree changes are enumerated and denied outside write_scope', async (t) => {
+  const repo = await createIgnoredOutOfScopeRepo();
+  t.after(() => repo.cleanup());
+  const identity = await identityOf(repo);
+  const result = await verifyScopeV1(scopeRequest(repo, identity));
+  assert.equal(result.status, 'failed');
+  assert.equal(discrepancyIds(result).includes('scope-mismatch'), true);
+  assert.equal(JSON.stringify(result).includes('scratch.ignored'), false);
+});
+
+test('assume-unchanged and skip-worktree index flags fail closed', async (t) => {
+  const repo = await createHiddenIndexFlagRepo();
+  t.after(() => repo.cleanup());
+  const identity = await identityOf(repo);
+  const error = await errorOf(() => verifyScopeV1(scopeRequest(repo, identity)));
+  assert.equal(error.code, 'git_execution_failed');
+  assertContentFree(error, 'keep.txt', 'readme.txt', 'assume-unchanged', 'skip-worktree');
+});
+
+test('chmod is observed even when local core.fileMode is false', async (t) => {
+  const repo = await createFileModeHiddenChmodRepo();
+  t.after(() => repo.cleanup());
+  const identity = await identityOf(repo, { assignment_id: READ_ONLY_ASSIGNMENT_ID });
+  const result = await verifyScopeV1(scopeRequest(repo, identity, {
+    assignment_id: READ_ONLY_ASSIGNMENT_ID,
+    access: 'read_only',
+    write_scope: [],
+  }));
+  assert.equal(result.status, 'failed');
+  assert.equal(discrepancyIds(result).includes('read-only-mutation'), true);
+  assert.equal(result.observation.dirty, true);
+});
+
+test('merge HEAD is rejected when base_sha equals head_sha', async (t) => {
+  const merge = await createMergeHeadEqualsBaseRepo();
+  t.after(() => merge.cleanup());
+  const identity = await identityOf(merge);
+  const result = await verifyScopeV1(scopeRequest(merge, identity));
+  assert.equal(result.status, 'failed');
+  assert.equal(discrepancyIds(result).includes('merge-commit'), true);
+  assert.equal(result.observation.parent_count > 1, true);
+  assert.equal(result.observation.base_sha, result.observation.head_sha);
+});
+
+test('unchanged-source copies keep source and destination ownership', async (t) => {
+  const repo = await createCopyEscapingRepo();
+  t.after(() => repo.cleanup());
+  const identity = await identityOf(repo);
+  const result = await verifyScopeV1(scopeRequest(repo, identity));
+  assert.equal(result.status, 'failed');
+  assert.equal(discrepancyIds(result).includes('scope-mismatch'), true);
+  assert.equal(result.observation.copy_count >= 1, true);
+  assert.equal(JSON.stringify(result).includes('secret.txt'), false);
+  assert.equal(JSON.stringify(result).includes('fromdocs.txt'), false);
+});
+
+test('untracked in-scope symlinks are rejected after lstat proof', async (t) => {
+  const repo = await createUntrackedSymlinkRepo();
+  t.after(() => repo.cleanup());
+  const identity = await identityOf(repo);
+  const result = await verifyScopeV1(scopeRequest(repo, identity));
+  assert.equal(result.status, 'failed');
+  assert.equal(discrepancyIds(result).includes('symlink-change'), true);
+  assert.equal(JSON.stringify(result).includes('link-untracked.txt'), false);
+});
+
+test('core.fsmonitor repository config cannot execute during observation', async (t) => {
+  const hookDir = await mkdtemp(path.join(tmpdir(), 'p15-fsm-hook-'));
+  t.after(() => rm(hookDir, { recursive: true, force: true }));
+  const hookPath = path.join(hookDir, 'fsm.sh');
+  const markerPath = path.join(hookDir, 'ran');
+  await writeFile(hookPath, `#!/bin/sh\necho ran >> "${markerPath}"\nexit 0\n`);
+  await chmod(hookPath, 0o755);
+  const repo = await createInScopeWriterRepo();
+  t.after(() => repo.cleanup());
+  const identity = await identityOf(repo);
+  await runFixtureGit(repo.path, ['config', 'core.fsmonitor', hookPath]);
+  const result = await verifyScopeV1(scopeRequest(repo, identity));
+  assert.equal(result.status, 'verified');
+  assert.equal(existsSync(markerPath), false);
 });
