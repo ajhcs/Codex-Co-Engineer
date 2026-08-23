@@ -4,6 +4,24 @@
 
 ### Added
 
+- **Aggregate journal binding after R24A resolution_ready (R25B).** Additive
+  `run-journal.mjs` gains stamp v2 and distinct
+  `createAggregateRunJournal` / `openAggregateRunJournal` entrypoints that
+  bind an existing P25 journal root/run identity to an exact validated R24A
+  marker, claim, anchor, coordination, and resolved-plan identity only after
+  that aggregate run is `resolution_ready` and the durable resolved-plan
+  record/digest re-verify. Legacy `createRunJournal` / `openRunJournal`,
+  stamp v1, fingerprint, six event kinds, reducer/state/cursor schemas, and
+  lock order stay byte- and behavior-identical; standalone P24/P25 callers
+  are unchanged. There is no migration, cross-open, root adoption,
+  empty-root inference, or legacy-to-aggregate fallback. Missing,
+  malformed, mismatched, or swapped R24A records, marker/claim/stamp
+  substitutions, symlink/hardlink/non-regular files, wrong run/root/plan,
+  stale phase/revision, and post-validation TOCTOU fail closed with typed
+  content-free errors. Identical aggregate identity reopens and replays
+  exactly; a different binding is a permanent conflict. Coverage lives in
+  `r1-run-journal-aggregate` and `r1-run-journal-aggregate-adversarial`
+  tests. R24A record publication remains in `aggregate-run-anchor.mjs`.
 - **Aggregate pre-dispatch run anchor for unresolved P05 selection.** Additive
   `aggregate-run-anchor.mjs` persists one immutable AggregateRunAnchorV1 plus
   absorbing coordination state for runs whose P05 provider/model selection is

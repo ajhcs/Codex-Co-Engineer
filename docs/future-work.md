@@ -6,7 +6,7 @@ Status: specified, not implemented.
 
 Priority: high
 Component: Codex-Co-Engineer
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 The accepted architecture for R1 is
 [ADR 0001](adr/0001-r1-bounded-run-architecture.md). It defines a 3.3.0 run
@@ -23,11 +23,16 @@ aggregate pre-dispatch run anchor accepts its own existing private root
 marked `storage-root.v1` kind `aggregate_run_anchor`, binds identity with
 durable claims before run directories, and publishes full selection
 request/reply/resolved-plan records before absorbing coordination
-references; it does not migrate or write into P24/P25. None of these
-library layers implement the rest of the run runtime: there is no
-scheduler, provider dispatch, workspace provisioning, cleanup, candidate
-composition, `AttentionBatchV1`, supervisor/server journal wiring, or MCP
-surface above the library layer.
+references; it does not migrate or write into P24/P25. R25B is only the
+binding bridge that can open the existing P25 journal against that exact
+R24A identity after `resolution_ready`, using stamp v2 and distinct
+aggregate entrypoints; it does not add event kinds, a second run lock,
+scheduler, provider, workspace, server, or MCP wiring, and it never
+migrates or cross-opens legacy P24/P25 state. None of these library layers
+implement the rest of the run runtime: there is no scheduler, provider
+dispatch, workspace provisioning, cleanup, candidate composition,
+`AttentionBatchV1`, supervisor/server journal wiring, or MCP surface above
+the library layer.
 Gate A remains the functional release authority; Gate B context-efficiency
 and Gate C credit economics stay advisory.
 
