@@ -2,8 +2,89 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **P11 identity namespace, non-success, overflow, and content-free failure.**
+  Provider-report ArtifactRef paths now bind `provider`, `model`, and
+  optional child-envelope digest into a P07-strict namespace so two
+  identities cannot share a path or ref. Failed/cancelled ACP turns never
+  publish accumulated partial text as complete. Collector overflow at the
+  raw class cap is handled inside `attachLocalProviderResultSink` with
+  typed content-free evidence and does not rewrite the provider terminal
+  or claim complete output. `contentFreeSinkFailureV1` allowlists closed
+  code/path values and uses one generic bounded message.
+
 ### Added
 
+- **Local provider result sink.** Adds additive v3
+  `local-provider-result-sink.mjs` (P11) that routes final local Grok ACP,
+  Cursor Local ACP, and DSH ACPX/CLI provider output into the accepted
+  P08/P09 raw+sanitized artifact store through one provider-neutral sink,
+  binding exact `run_id` / `assignment_id` / `provider` / `model` / optional
+  child-envelope digest identity into the ArtifactRefV1 path. The complete
+  transport-available result is stored up to the existing class cap; older
+  output is never silently discarded, empty results stay unpublished, and a
+  source that the upstream already clipped is persisted with truthful
+  `source_truncated` / `complete` provenance. Only sanitized artifacts are
+  model-readable. The receipt is detached deep-frozen content-free
+  metadata (raw/sanitized refs, P09 provenance, digests, counts,
+  truncation) plus a default inline tail of at most 4,096 UTF-8 bytes
+  derived through the accepted P10 sanitized reader and aligned on a valid
+  UTF-8 boundary, with inline clipping recorded separately from upstream
+  truncation. The ACP worker is the only serialized seam: it preserves
+  3.2.1 `task.result` / `result_*` and event/terminal shapes, attaches
+  optional `provider_result_sink` metadata only after provider terminal
+  publication, and records typed content-free evidence on sink failure
+  without inventing completion or replaying provider work. Coverage lives
+  in `test/r1-local-provider-result-sink.test.mjs` and
+  `test/r1-local-provider-result-sink-adversarial.test.mjs`.
+- **Atomic raw/sanitized artifact store.** Adds the additive v3
+  `artifact-store.mjs` module for W4-P08: it binds validated ArtifactRefV1
+  declarations to real bytes under one caller-supplied existing private store
+  root, mapping each strict relative path segment-for-segment into disjoint
+  `raw/` and `sanitized/` namespaces (`content/<path>` plus a strictly parsed
+  canonical sidecar per artifact), so raw evidence and model-facing
+  projections never collide even at one path and no parallel ref or path
+  schema is introduced - references are parsed with `parseArtifactRefV1` and
+  nothing else, so traversal, absolute paths, reserved device names,
+  separator look-alikes, and Unicode tricks inherit the exact P07 denials.
+  Sources are intrinsic Buffer/Uint8Array views or bounded async iterables of
+  such views; proxies, subclasses, SharedArrayBuffer backings, strings,
+  accessor-shaped iterables, and arbitrary class instances are denied before
+  any byte is read. Declared byte length and SHA-256 are treated as untrusted
+  claims: bytes stream into an unpredictable owner-only same-directory
+  temporary while the class cap (sanitized 256 KiB, raw 32 MiB) is enforced
+  on every chunk before it is written, actual length and digest are computed
+  from the streamed bytes, and both must match the declaration exactly before
+  publication; the temporary is fsynced, published by exclusive hardlink that
+  refuses to clobber, unlinked, and the parent directories fsynced, so no
+  partial artifact ever exists under an authoritative name. Exact same
+  validated ref plus bytes is idempotent across concurrent submissions (one
+  deterministic winner plus idempotent losers behind a per-root operation
+  chain); conflicting content at one location, the same digest under
+  different metadata, or any other competing publication fails closed with
+  typed content-free errors and leaves the authoritative state untouched,
+  rolling back a race loser's own link only when the platform proves the
+  inode is ours. Roots and parents use descriptor/no-follow discipline -
+  O_NOFOLLOW|O_DIRECTORY opens, device/inode identity brackets, lstat-walked
+  0700 parent chains re-proven after publication - rejecting missing,
+  non-private, symlinked, replaced, and swapped roots and parents wherever
+  provable. Verification and audit stream stored bytes in fixed chunks solely
+  to recompute length and digest (never returning or buffering content),
+  enumerate with bounded per-directory entries, files, depth, and total
+  audited bytes, and condemn leftover or torn temporaries (a reserved name
+  grammar artifacts may never spell), orphaned or duplicate sidecars,
+  symlinks, hardlinks, FIFOs and other non-regular entries, foreign names,
+  truncated or oversized content, malformed or misplaced metadata, and
+  content swapped under a path; audits return detached frozen metadata plus a
+  framed inventory fingerprint that restarts reproduce exactly. Receipts,
+  verdicts, and reports are deep-frozen, content-free, and never echo the
+  store root, artifact bytes, or operating-system errors. Out of scope and
+  unclaimed: P09 sanitization, the P10 reader, the P13 evidence bundle,
+  cleanup, scheduler/provider/supervisor wiring, and protected references;
+  a torn store stays torn and fails closed until an operator acts. Coverage
+  lives in `test/r1-artifact-store.test.mjs` and
+  `test/r1-artifact-store-adversarial.test.mjs`.
 - **ArtifactRefV1 and the strict relative artifact path policy.** Adds two
   additive, pure v3 modules for W3-P07. `artifact-path.mjs` owns one
   deterministic fail-closed question - is this string a strict portable
@@ -34,6 +115,66 @@
   producers declare references, and only a later storage authority may bind
   them to bytes. Coverage lives in `test/r1-artifact-ref.test.mjs` and
   `test/r1-artifact-ref-adversarial.test.mjs`.
+- **Grok ACP ProviderDriverV1 adapter (P18).** Additive `grok-acp-driver`
+  binds provider slot `grok` onto the accepted P17 preflight/launch/
+  reconcile/cancel contract and the P05 13-field capability record
+  (`confirmed_launch`, `live_session_reply`, local managed worktree at
+  `run_base_sha`, `never_replay`, no merge/PR authority). An injected
+  bounded ACP transport keeps tests deterministic: launch is `dispatched`
+  only after an authoritative acknowledgement; any exception, timeout,
+  loss, or unusable receipt after spawn/dispatch intent is returned as
+  `dispatch_uncertain` and is never retried, replayed, or
+  fallback-substituted. Duplicate launch, digest-only launch, direct
+  mode, merge/PR, and cross-provider/model drift fail closed. Bounded
+  live progress, detailed events, same-session reply identity,
+  cancellation confirmation, and restart reattach are supported exactly
+  where Grok ACP supports them, with stale session/run/child/model/
+  workspace identities failing closed. Event pages, text, counts,
+  cursors, timings, and diagnostics are capped; envelope/prompt bytes
+  stay evidence and do not enter driver results or transport
+  preflight/observe/cancel/reattach requests. Process-local P17 lane
+  risk may remain; the module does not claim durable P19/P21 state,
+  supervisor cutover, or live Grok ACP qualification. Coverage lives in
+  `r1-grok-acp-driver` and `r1-grok-acp-driver-adversarial` tests.
+- **Closed P20 DSH ACPX provider driver for Muse Spark 1.2 Contributor and Ox
+  Alpha.** Additive `DshApxDriverV1` hard-binds provider `dsh` plus exactly the
+  two allowed DSH models and implements the accepted P17 preflight/launch/
+  reconcile/cancel lifecycle against an injected bounded ACPX one-shot
+  transport port, inheriting every envelope, capability, transition, and denial
+  rule from the accepted contract with no parallel schema. ACPX provides no
+  authoritative prompt-sent acknowledgement: after spawn intent the posture
+  stays `dispatch_uncertain`, post-intent exceptions and loss are never
+  replayed, retried, or fallback-substituted, and only provably pre-spawn
+  failures may report `not_sent` under a two-attempt lane budget. Same-session
+  reply is unsupported: unresolved attention surfaces honestly and no
+  replacement prompt or session is started. Live progress, detailed events,
+  cancellation confirmation, and restart recovery read recorded ACPX evidence
+  through bounded cursor-monotonic pages; exact model/config/credential
+  identity and task/session correlation fail closed on drift; forged receipts
+  fail closed while genuine loss degrades to uncertainty. Events, records,
+  cursors, lanes, attempts, operations, clock readings, and diagnostics are
+  capped, and detail telemetry is content-free by construction. The module
+  claims no real-transport qualification, durable P19/P21 store, supervisor
+  cutover, or merge/PR authority; the exact port surface for later real DSH
+  Muse/Ox lifecycle conformance is recorded in
+  `docs/dsh-acpx-driver.md`. Coverage lives in `r1-dsh-acpx-driver` and
+  `r1-dsh-acpx-driver-adversarial` tests.
+- **Closed P17 provider-driver envelope and capability contract.** Additive
+  `ProviderDriverV1` owns the preflight/launch/reconcile/cancel lifecycle
+  plus typed results, exact ChildEnvelopeV1 launch proof (text bytes and
+  raw lowercase 64-hex P03 digest; digest-only launches are denied), and
+  honest capability declaration through the accepted P05 13-field
+  `ProviderCapabilitiesV1` bridge rather than a parallel schema.
+  Driver-surface features for same-session-adjacent live progress,
+  reconcile-only restart reattach, cancellation, and detailed events fail
+  closed when unsupported, with no fallback or post-dispatch replay.
+  Process-local status transitions refuse duplicate dispatch, stale
+  envelope correlation, and capability-contradicting launch certainty.
+  Direct-JS inputs use the P05 descriptor-first closure; validated values
+  are detached and deeply frozen. The module claims no provider transport,
+  registry cutover, scheduler, or durable store. Coverage lives in
+  `r1-provider-driver` and `r1-provider-driver-adversarial` tests plus the
+  reusable `provider-driver-contract-suite` harness.
 - **Deterministic P05 resolver and P17 capability bridge.** Additive
   `resolveRunSelectionV1` / `resolveSelectionAnswersV1` bind every
   assignment's provider/model from authored explicit execution, the

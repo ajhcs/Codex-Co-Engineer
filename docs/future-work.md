@@ -6,7 +6,7 @@ Status: specified, not implemented.
 
 Priority: high
 Component: Codex-Co-Engineer
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 The accepted architecture for R1 is
 [ADR 0001](adr/0001-r1-bounded-run-architecture.md). It defines a 3.3.0 run
@@ -15,9 +15,42 @@ identity, with deterministic explicit/profile resolution, no direct mode on
 run submissions, disjoint writers, read-only verification, no post-dispatch
 fallback or replay, and Codex-only final acceptance.
 
-This worktree does not implement the run runtime, candidate composition,
-or `AttentionBatchV1`. Gate A remains the functional release authority;
-Gate B context-efficiency and Gate C credit economics stay advisory.
+The P17 `ProviderDriverV1` envelope/capability contract is in-tree as a
+pure contract and provider-agnostic conformance harness. It validates
+preflight/launch/reconcile/cancel requests and results against the
+accepted P05 13-field capability bridge.
+
+The P18 Grok ACP adapter is in-tree as a Grok-specific binding of that
+contract onto an injected bounded ACP transport. It hard-binds provider
+`grok`, the exact selected model, exact ChildEnvelopeV1 text+digest, local
+managed-worktree/run-base semantics, and no merge/PR authority. Launch
+confirms only after an authoritative ACP acknowledgement; post-spawn
+loss is `dispatch_uncertain` and is never replayed. The P20 DSH adapter
+(`DshApxDriverV1`) drives the contract over an injected bounded ACPX
+one-shot transport port for Muse Spark 1.2 Contributor and Ox Alpha,
+with honest post-spawn uncertainty, unsupported same-session reply,
+bounded recorded-evidence reconcile/restart/cancel behavior, and
+fail-closed identity/correlation drift denials. Neither adapter's
+deterministic transport port substitutes for the remaining real
+lifecycle routes documented in `docs/dsh-acpx-driver.md`.
+
+The P11 local provider result sink is in-tree as an additive
+provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
+ACPX/CLI output is published through the accepted P09 sanitizer and P08
+store, with a P10-derived sanitized inline tail. It does not implement
+P12 evidence bundles, supervisor/server MCP registration, cloud-worker
+sinks, cleanup, or run runtime. `acp-worker.mjs` is the only serialized
+seam; 3.2.1 `task.result` bounding is unchanged. Ambient umask variance
+for P08 store-root `mkdtemp` privacy is recorded here and is not
+runtime-changed: P11 fixtures `chmod 0700` after creating their own
+roots and do not include optional P08 umask test-fixture
+determinization.
+
+Cursor Local and Cursor Cloud adapters, registry cutover, scheduler,
+durable store, P12 evidence bundles, cloud-worker sinks, cleanup, run
+runtime, and `AttentionBatchV1` remain later work. Gate A remains the
+functional release authority; Gate B context-efficiency and Gate C
+credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 

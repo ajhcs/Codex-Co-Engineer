@@ -7,8 +7,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import {
+  collectCliProviderOutputV1,
+  contentFreeSinkFailureV1,
+  createLocalProviderResultCollectorV1,
+  localProviderResultIdentityFromTaskV1,
+  openLocalProviderArtifactStoreV1,
+  sinkLocalProviderResultV1,
+} from './local-provider-result-sink.mjs';
 import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
 import { boundedProviderResult, boundedProviderValue, createProviderResultAccumulator, providerCharCount } from './provider-result.mjs';
+import { RunContractV1Error } from './run-manifest.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
@@ -57,6 +66,37 @@ export class AcpWorkerError extends Error {
 
 function fail(code, message) {
   throw new AcpWorkerError(code, message);
+}
+
+export async function attachLocalProviderResultSink(
+  root, task, source, sourceTruncated = false, overflow = false,
+) {
+  const identity = localProviderResultIdentityFromTaskV1(task);
+  if (identity == null) return task;
+  try {
+    if (task?.status !== 'completed') {
+      throw new RunContractV1Error('artifact_sink_not_published', 'sink',
+        'The local provider result sink did not publish after provider terminal.');
+    }
+    if (overflow === true) {
+      throw new RunContractV1Error('artifact_stream_over_cap', 'source',
+        'The provider result exceeded the raw artifact class cap; nothing was published.');
+    }
+    const store = await openLocalProviderArtifactStoreV1(root);
+    const receipt = await sinkLocalProviderResultV1(store, {
+      ...identity,
+      source,
+      source_truncated: sourceTruncated === true,
+    });
+    return await updateTask(root, task.id, { provider_result_sink: receipt });
+  } catch (error) {
+    const evidence = contentFreeSinkFailureV1(error);
+    try {
+      return await updateTask(root, task.id, { provider_result_sink: evidence });
+    } catch {
+      return task;
+    }
+  }
 }
 
 function taskTimeoutMs(task, now = Date.now()) {
@@ -619,7 +659,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     const compact = { type: 'text_delta', text: result ?? 'CLI fallback completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed' });
-    return updateTask(root, task.id, {
+    const terminal = await updateTask(root, task.id, {
       status: 'completed',
       result,
       ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
@@ -629,6 +669,9 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       fallback_safe: false,
       finished_at: new Date().toISOString(),
     });
+    return attachLocalProviderResultSink(
+      root, terminal, collectCliProviderOutputV1(stdout), stdoutTruncated,
+    );
   } catch (error) {
     const failure = publicError(error, prompt);
     const terminalStatus = signal?.aborted || error?.code === 'cancelled'
@@ -771,7 +814,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     const compact = { type: 'text_delta', text: typeof output === 'string' ? output : 'DSH ACP task completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed', stop_reason: 'end_turn' });
-    return updateTask(root, task.id, {
+    const terminal = await updateTask(root, task.id, {
       status: 'completed',
       error: null,
       stop_reason: 'end_turn',
@@ -783,6 +826,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       acp_session_id: Object.values(flow.sessionBindings ?? {})[0]?.acpSessionId ?? null,
       finished_at: new Date().toISOString(),
     });
+    return attachLocalProviderResultSink(root, terminal, outputValue, false);
   } catch (error) {
     if (!dispatchUncertain && !authenticationFailure(error)) {
       const fallback = await fallbackToCliIfSafe({ root, task, prompt, signal, error });
@@ -892,10 +936,12 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     controller.signal.addEventListener('abort', cancel, { once: true });
     let lastEvent = null;
     const output = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
+    const complete = createLocalProviderResultCollectorV1();
     try {
       for await (const event of turn.events) {
         if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
           output.append(event.text);
+          complete.append(event.text);
         }
         const compact = boundedEvent(event, prompt);
         await appendTaskEvent(root, taskId, { type: 'provider', event: compact });
@@ -918,7 +964,10 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       finished_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, taskId, { type: 'terminal', status, stop_reason: result.stopReason ?? null });
-    return terminal;
+    const snapshot = complete.snapshot();
+    return attachLocalProviderResultSink(
+      root, terminal, snapshot.source, false, snapshot.overflow === true,
+    );
   } catch (error) {
     const failure = publicError(error, prompt);
     const current = (await readTask(root, taskId)).task;
