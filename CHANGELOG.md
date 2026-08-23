@@ -104,6 +104,47 @@
   dispatch. Coverage lives in `r1-git-identity` and
   `r1-git-identity-adversarial` tests plus disposable forged/stale/
   rewritten fixtures.
+- **Approved verification-command resolver.** Adds additive
+  `approved-verification-command.mjs` for W15-P16B. The module consumes an
+  immutable trusted `VerificationPolicyV1` from P16A plus a closed
+  Codex/owner selection of `command_id` and typed parameter values, and
+  returns a fresh frozen ExecutionIntent / ApprovedCommand receipt. Every
+  parameter is checked against the owner-authored domain (exact name set,
+  required semantics, types, enums, ranges, length, and path-segment
+  grammar). Expansion substitutes only whole-token `{name}` placeholders
+  from the owner argv template; there is no shell string, PATH lookup,
+  executable override, interpolation, substitution, globbing, or option
+  smuggling. Provider, profile, and manifest reported commands remain
+  evidence only: matching command-id or argv text does not authorize
+  resolution. Receipts bind policy identity, command-descriptor identity,
+  canonical parameters, executable path, exact argv, and inherited P16A
+  constraints without executing. Hostile containers fail closed with typed
+  content-free errors. Callers' objects are neither mutated nor frozen.
+  The module never invokes a shell, resolves PATH, opens a network socket,
+  reads arbitrary workspace files, mutates a candidate, or implements the
+  later P16C runner. Coverage lives in
+  `test/r1-approved-verification-command.test.mjs` and
+  `test/r1-approved-verification-command-adversarial.test.mjs`.
+- **Trusted VerificationPolicyV1 schema and owner-authored policy loader.**
+  Adds additive `trusted-verification-policy.mjs` for W14-P16A. The module
+  owns a versioned immutable command catalog: each stable command ID binds
+  an owner-authored absolute executable path, a fixed argv template, typed
+  parameter domains, and explicit network, environment, mutation, timeout,
+  and output policies. Absent capabilities materialize as exact default-deny
+  receipts (no network, empty environment, no persistent mutation, bounded
+  time and output). Canonical identity/digest is framed through the P03
+  `verification-policy.v1` / `verification-command-descriptor.v1` labels.
+  Profiles, manifests, and provider reports may name a command ID and typed
+  parameters only; executable paths, argv, shell text, environment, network
+  targets, mutation grants, and resource limits are rejected on that
+  untrusted surface. Hostile containers fail closed (proxies, accessors,
+  symbols, exotic prototypes, cycles, bounds, ambiguous IDs) with typed
+  content-free errors. The owner loader reads
+  `<config>/codex-co-engineer/verification-policy.json` and never invokes a
+  shell, resolves PATH, executes a command, opens a network socket, mutates
+  a candidate, or implements the later approved-command resolver/runner.
+  Coverage lives in `test/r1-trusted-verification-policy.test.mjs` and
+  `test/r1-trusted-verification-policy-adversarial.test.mjs`.
 - **ArtifactRefV1 and the strict relative artifact path policy.** Adds two
   additive, pure v3 modules for W3-P07. `artifact-path.mjs` owns one
   deterministic fail-closed question - is this string a strict portable
