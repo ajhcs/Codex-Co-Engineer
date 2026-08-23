@@ -131,6 +131,42 @@ export function acceptanceRef(overrides = {}) {
   });
 }
 
+export function validDiscrepancy(overrides = {}) {
+  return {
+    discrepancy_id: 'd-mismatch',
+    discrepancy_kind: 'mismatch',
+    status: 'recorded',
+    code: 'claim_fact_mismatch',
+    run_id: RUN_ID,
+    assignment_id: ASSIGNMENT_ID,
+    sequence: 0,
+    claim_ids: ['c-tests'],
+    fact_ids: ['f-accept'],
+    artifact_digests: [],
+    ...overrides,
+  };
+}
+
+export function validBundle(overrides = {}) {
+  return {
+    schema: 'codex-co-engineer.evidence-bundle.v1',
+    version: 1,
+    run_id: RUN_ID,
+    request_id: REQUEST_ID,
+    assignment_id: ASSIGNMENT_ID,
+    provider: PROVIDER,
+    model: MODEL,
+    repository: { path: REPOSITORY_PATH, base_sha: BASE_SHA },
+    sequence: 0,
+    final_state: 'pass',
+    claims: [validClaim()],
+    facts: [validFact(), validGitIdentityFact()],
+    discrepancies: [],
+    artifacts: [reportRef(), acceptanceRef(), validArtifactRef()],
+    ...overrides,
+  };
+}
+
 export function countingProxy(target) {
   const counts = { get: 0, ownKeys: 0, getOwnPropertyDescriptor: 0, has: 0, apply: 0 };
   const proxy = new Proxy(target, {

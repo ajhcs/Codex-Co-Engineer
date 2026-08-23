@@ -2,26 +2,43 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  ARTIFACT_REF_SCHEMA_ID,
   CLAIM_ALLOWED_KEYS,
   CLAIM_KINDS,
   CLAIM_REQUIRED_KEYS,
+  DISCREPANCY_KINDS,
   EVIDENCE_BUNDLE_SCHEMA_ID,
   EVIDENCE_BUNDLE_VERSION,
+  EVIDENCE_DIGEST_LABEL,
   FACT_ALLOWED_KEYS,
   FACT_KINDS,
   FACT_REQUIRED_KEYS,
+  canonicalEvidenceBundleJsonV1,
   canonicalProviderClaimJsonV1,
   canonicalVerifiedFactJsonV1,
+  evidenceBundleDigestV1,
+  parseEvidenceBundleV1,
+  parseEvidenceDiscrepancyV1,
   parseProviderClaimV1,
   parseVerifiedFactV1,
+  verifyEvidenceBundleDigestV1,
 } from '../mcp/v3/evidence-bundle.mjs';
+import { IDENTITY_DOMAIN, IDENTITY_LABELS } from '../mcp/v3/identity.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
+import { parseArtifactRefV1 } from '../mcp/v3/artifact-ref.mjs';
 import {
+  ASSIGNMENT_ID,
+  BASE_SHA,
   MODEL,
+  RUN_ID,
+  SHA_ACCEPT,
   countingProxy,
   payloadDigest,
   trapTotal,
+  validArtifactRef,
+  validBundle,
   validClaim,
+  validDiscrepancy,
   validFact,
   validGitIdentityFact,
   validModelClaim,
@@ -231,4 +248,137 @@ test('live proxies and accessors are denied without invoking traps or getters', 
   });
   assert.equal(errorOf(() => parseProviderClaimV1(getterClaim)).code, 'accessor_property_denied');
   assert.equal(reads, 0);
+});
+
+test('a valid bundle freezes exact P07 artifact snapshots and detaches from the caller', () => {
+  const input = validBundle();
+  const snapshot = parseEvidenceBundleV1(input);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.claims), true);
+  assert.equal(Object.isFrozen(snapshot.facts), true);
+  assert.equal(Object.isFrozen(snapshot.artifacts), true);
+  assert.equal(snapshot.artifacts.length, 3);
+  assert.equal(snapshot.artifacts[0].schema, ARTIFACT_REF_SCHEMA_ID);
+  for (const ref of snapshot.artifacts) {
+    assert.deepEqual(Object.keys(ref), Object.keys(parseArtifactRefV1(validArtifactRef())));
+    assert.equal(ref.run_id, RUN_ID);
+    assert.equal(ref.assignment_id, ASSIGNMENT_ID);
+  }
+  input.final_state = 'failed';
+  input.artifacts.push(validArtifactRef({ relative_path: 'runs/run-evidence-01/lane-alpha/other.patch' }));
+  assert.equal(snapshot.final_state, 'pass');
+  assert.equal(snapshot.artifacts.length, 3);
+  assert.throws(() => { 'use strict'; snapshot.final_state = 'failed'; }, TypeError);
+});
+
+test('discrepancies link claim and fact identities without erasing either source', () => {
+  const claim = validClaim({ payload: { result: 'pass' } });
+  const fact = validFact({ payload: { command_id: 'unit-tests', result: 'fail' }, status: 'failed' });
+  const discrepancy = validDiscrepancy();
+  parseEvidenceDiscrepancyV1(discrepancy);
+  const snapshot = parseEvidenceBundleV1(validBundle({
+    final_state: 'failed',
+    claims: [claim],
+    facts: [fact, validGitIdentityFact()],
+    discrepancies: [discrepancy],
+  }));
+  assert.equal(snapshot.claims[0].payload.result, 'pass');
+  assert.equal(snapshot.facts.find((entry) => entry.fact_id === 'f-accept').payload.result, 'fail');
+  assert.equal(snapshot.discrepancies[0].discrepancy_kind, 'mismatch');
+  assert.deepEqual([...snapshot.discrepancies[0].claim_ids], ['c-tests']);
+  assert.deepEqual([...snapshot.discrepancies[0].fact_ids], ['f-accept']);
+  assert.equal(DISCREPANCY_KINDS.includes('mismatch'), true);
+});
+
+test('raw paths, URLs, and inline blobs are never accepted as artifact links', () => {
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      artifacts: ['runs/run-evidence-01/lane-alpha/diff.patch'],
+    }))).code,
+    'invalid_type',
+  );
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      artifacts: ['https://example.invalid/report'],
+    }))).code,
+    'invalid_type',
+  );
+  const blob = validArtifactRef({ body: 'inline' });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(validBundle({ artifacts: [blob] }))).code, 'unknown_key');
+  const extraPath = validArtifactRef({ url: '/tmp/secret' });
+  assert.equal(errorOf(() => parseEvidenceBundleV1(validBundle({ artifacts: [extraPath] }))).code, 'unknown_key');
+});
+
+test('artifact identity drift and non-P07 snapshots fail closed', () => {
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      artifacts: [validArtifactRef({ assignment_id: 'lane-beta' })],
+    }))).code,
+    'identity_mismatch',
+  );
+  const incomplete = validArtifactRef();
+  delete incomplete.sha256;
+  assert.equal(errorOf(() => parseEvidenceBundleV1(validBundle({ artifacts: [incomplete] }))).code, 'missing_key');
+});
+
+test('canonical bundle bytes and digests are stable under key permutation and use the reserved identity label', () => {
+  const straight = validBundle();
+  const reordered = {};
+  for (const key of Object.keys(straight).reverse()) reordered[key] = straight[key];
+  reordered.claims = [{ ...straight.claims[0] }];
+  const reversedClaim = {};
+  for (const key of Object.keys(straight.claims[0]).reverse()) {
+    reversedClaim[key] = straight.claims[0][key];
+  }
+  reordered.claims = [reversedClaim];
+  reordered.facts = [...straight.facts].reverse();
+  reordered.artifacts = [...straight.artifacts].reverse();
+  assert.equal(canonicalEvidenceBundleJsonV1(straight), canonicalEvidenceBundleJsonV1(reordered));
+  const descriptor = evidenceBundleDigestV1(straight);
+  assert.equal(descriptor.domain, IDENTITY_DOMAIN);
+  assert.equal(descriptor.label, IDENTITY_LABELS.EVIDENCE_BUNDLE);
+  assert.equal(descriptor.label, EVIDENCE_DIGEST_LABEL);
+  assert.equal(verifyEvidenceBundleDigestV1(reordered, descriptor.digest), true);
+  assert.equal(verifyEvidenceBundleDigestV1(straight, 'zz'.repeat(32)), false);
+  assert.equal(verifyEvidenceBundleDigestV1(straight, 1), false);
+  const mutated = validBundle({ sequence: 1 });
+  assert.notEqual(evidenceBundleDigestV1(mutated).digest, descriptor.digest);
+});
+
+test('facts cannot be synthesized from provider-derived artifacts', () => {
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      facts: [validFact({ artifact_digests: ['11'.repeat(32)] })],
+    }))).code,
+    'provider_proof_rejected',
+  );
+});
+
+test('stale git identity facts fail closed against the bundle base', () => {
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      facts: [
+        validFact(),
+        validGitIdentityFact({
+          payload: { base_sha: 'c'.repeat(40), head_sha: BASE_SHA },
+        }),
+      ],
+    }))).code,
+    'stale_fact',
+  );
+});
+
+test('duplicate and conflicting identities fail closed', () => {
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      claims: [validClaim(), validClaim({ sequence: 1 })],
+    }))).code,
+    'duplicate_id',
+  );
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      facts: [validFact(), validFact({ fact_id: 'f-other', sequence: 0 })],
+    }))).code,
+    'duplicate_sequence',
+  );
 });

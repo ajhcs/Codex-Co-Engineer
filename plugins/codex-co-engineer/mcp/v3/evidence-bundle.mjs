@@ -21,13 +21,14 @@ import {
   parseArtifactRefV1,
 } from './artifact-ref.mjs';
 import {
-  capturedDescriptor,
   capturedFreeze,
   capturedIncludes,
+  capturedIsArray,
   capturedJoin,
   isKnownProvider,
   isModelId,
   knownProvidersJoined,
+  sortedCapturedKeys,
 } from './grammar.mjs';
 import {
   IDENTITY_DOMAIN,
@@ -408,6 +409,32 @@ function parseOptionalTimestamp(input, path) {
   return assertTimestamp(optOwn(input, 'recorded_at'), `${path}.recorded_at`);
 }
 
+function assertEvidenceBounds(value, path) {
+  let nodes = 0;
+  const walk = (node, depth, nodePath) => {
+    nodes += 1;
+    if (nodes > MAX_EVIDENCE_NODES) {
+      fail('out_of_range', nodePath, `${path} exceeds ${MAX_EVIDENCE_NODES} evidence nodes.`);
+    }
+    if (depth > MAX_EVIDENCE_DEPTH) {
+      fail('out_of_range', nodePath,
+        `${nodePath} exceeds the evidence depth cap of ${MAX_EVIDENCE_DEPTH}.`);
+    }
+    if (node === null || typeof node !== 'object') return;
+    if (capturedIsArray(node)) {
+      for (let index = 0; index < node.length; index += 1) {
+        walk(node[index], depth + 1, `${nodePath}[${index}]`);
+      }
+      return;
+    }
+    const keys = sortedCapturedKeys(node);
+    for (let index = 0; index < keys.length; index += 1) {
+      walk(node[keys[index]], depth + 1, `${nodePath}.${keys[index]}`);
+    }
+  };
+  walk(value, 0, path);
+}
+
 function parseIdentityPair(input, path) {
   const runId = optOwn(input, 'run_id');
   assertRunId(runId, `${path}.run_id`);
@@ -568,6 +595,507 @@ export function canonicalProviderClaimJsonV1(input, path = 'claim') {
 export function canonicalVerifiedFactJsonV1(input, path = 'fact') {
   return canonicalJsonStringify(parseVerifiedFactV1(input, path));
 }
+
+export function parseEvidenceDiscrepancyV1(input, path = 'discrepancy') {
+  assertPlainObject(input, 'invalid_type', path, `${path}`);
+  assertDirectJsonClosure(input, path);
+  assertAllowedKeys(input, DISCREPANCY_ALLOWED_KEYS, path);
+  requiredKeys(input, DISCREPANCY_REQUIRED_KEYS, path);
+  const identity = parseIdentityPair(input, path);
+  const kind = assertEnum(
+    optOwn(input, 'discrepancy_kind'), DISCREPANCY_KINDS,
+    'unknown_discrepancy_kind', `${path}.discrepancy_kind`, 'discrepancy kind',
+  );
+  const status = assertEnum(
+    optOwn(input, 'status'), DISCREPANCY_STATUSES, 'unknown_status', `${path}.status`, 'discrepancy status',
+  );
+  const code = assertEnum(
+    optOwn(input, 'code'), DISCREPANCY_CODES, 'unknown_code', `${path}.code`, 'discrepancy code',
+  );
+  if (KIND_CODES[kind] !== code) {
+    fail('unsupported_pairing', `${path}.code`,
+      `${path}.code must be the closed code for its discrepancy kind.`);
+  }
+  const claimIds = parseIdList(input, 'claim_ids', path);
+  const factIds = parseIdList(input, 'fact_ids', path);
+  if (kind === 'mismatch' && (claimIds.length === 0 || factIds.length === 0)) {
+    fail('invalid_format', path,
+      `${path} of kind mismatch must link at least one claim identity and one fact identity.`);
+  }
+  if (kind === 'missing' && claimIds.length === 0) {
+    fail('invalid_format', `${path}.claim_ids`,
+      `${path} of kind missing must link the claim identity that lacks a fact.`);
+  }
+  const values = {
+    discrepancy_id: assertRecordId(optOwn(input, 'discrepancy_id'), `${path}.discrepancy_id`),
+    discrepancy_kind: kind,
+    status,
+    code,
+    run_id: identity.run_id,
+    assignment_id: identity.assignment_id,
+    sequence: assertSequence(optOwn(input, 'sequence'), `${path}.sequence`),
+    claim_ids: claimIds,
+    fact_ids: factIds,
+    artifact_digests: parseArtifactDigestList(input, path),
+  };
+  const recordedAt = parseOptionalTimestamp(input, path);
+  if (recordedAt !== undefined) values.recorded_at = recordedAt;
+  return freezeRecord(DISCREPANCY_ALLOWED_KEYS, values);
+}
+
+function parseRepository(input, path) {
+  const value = optOwn(input, 'repository');
+  assertPlainObject(value, 'invalid_type', path, path);
+  assertDirectJsonClosure(value, path);
+  assertAllowedKeys(value, REPOSITORY_ALLOWED_KEYS, path);
+  requiredKeys(value, REPOSITORY_ALLOWED_KEYS, path);
+  const repositoryPath = optOwn(value, 'path');
+  assertRepositoryPath(repositoryPath, `${path}.path`);
+  const baseSha = optOwn(value, 'base_sha');
+  assertBaseSha(baseSha, `${path}.base_sha`);
+  return freezeRecord(REPOSITORY_ALLOWED_KEYS, { path: repositoryPath, base_sha: baseSha });
+}
+
+function parseCandidate(input, path) {
+  if (!hasOwn(input, 'candidate')) return undefined;
+  const value = optOwn(input, 'candidate');
+  assertPlainObject(value, 'invalid_type', path, path);
+  assertDirectJsonClosure(value, path);
+  assertAllowedKeys(value, CANDIDATE_ALLOWED_KEYS, path);
+  requiredKeys(value, CANDIDATE_ALLOWED_KEYS, path);
+  const sha = optOwn(value, 'sha');
+  if (!isSha40(sha)) {
+    fail('invalid_format', `${path}.sha`,
+      `${path}.sha must be an exact immutable 40-character lowercase hex commit SHA.`);
+  }
+  return freezeRecord(CANDIDATE_ALLOWED_KEYS, { sha });
+}
+
+function compareById(left, right, key) {
+  if (left[key] === right[key]) return 0;
+  return left[key] < right[key] ? -1 : 1;
+}
+
+function parseRecordList(input, key, path, max, parseOne, idKey) {
+  const value = optOwn(input, key);
+  const field = `${path}.${key}`;
+  assertNotProxy(value, field);
+  assertDenseJsonArray(value, field);
+  if (value.length > max) {
+    fail('out_of_range', field, `${field} exceeds ${max} entries.`);
+  }
+  const snapshots = [];
+  const seenIds = new Set();
+  const seenSequences = new Set();
+  for (let index = 0; index < value.length; index += 1) {
+    const entryPath = `${field}[${index}]`;
+    assertNotProxy(value[index], entryPath);
+    const snapshot = parseOne(value[index], entryPath);
+    if (seenIds.has(snapshot[idKey])) {
+      fail('duplicate_id', `${entryPath}.${idKey}`,
+        `${entryPath}.${idKey} repeats an identity; duplicates are denied instead of collapsed.`);
+    }
+    if (seenSequences.has(snapshot.sequence)) {
+      fail('duplicate_sequence', `${entryPath}.sequence`,
+        `${entryPath}.sequence repeats an injected sequence.`);
+    }
+    seenIds.add(snapshot[idKey]);
+    seenSequences.add(snapshot.sequence);
+    snapshots.push(snapshot);
+  }
+  snapshots.sort((left, right) => compareById(left, right, idKey));
+  return capturedFreeze(snapshots);
+}
+
+function parseArtifactSnapshots(input, path, runId, assignmentId) {
+  const value = optOwn(input, 'artifacts');
+  const field = `${path}.artifacts`;
+  assertNotProxy(value, field);
+  assertDenseJsonArray(value, field);
+  if (value.length > MAX_EVIDENCE_ARTIFACT_REFS) {
+    fail('out_of_range', field, `${field} exceeds ${MAX_EVIDENCE_ARTIFACT_REFS} entries.`);
+  }
+  const snapshots = [];
+  const seenCanonical = new Set();
+  const seenSha = new Map();
+  for (let index = 0; index < value.length; index += 1) {
+    const entryPath = `${field}[${index}]`;
+    assertNotProxy(value[index], entryPath);
+    if (typeof value[index] === 'string') {
+      fail('invalid_type', entryPath,
+        `${entryPath} must be an exact ${ARTIFACT_REF_SCHEMA_ID} snapshot, not a raw path or URL.`);
+    }
+    const snapshot = parseArtifactRefV1(value[index], entryPath);
+    if (snapshot.run_id !== runId || snapshot.assignment_id !== assignmentId) {
+      fail('identity_mismatch', entryPath,
+        `${entryPath} identity does not match the enclosing evidence bundle.`);
+    }
+    const canonical = canonicalJsonStringify(snapshot);
+    if (seenCanonical.has(canonical)) {
+      fail('duplicate_id', entryPath,
+        `${entryPath} repeats an identical artifact reference; duplicates are denied instead of collapsed.`);
+    }
+    seenCanonical.add(canonical);
+    const prior = seenSha.get(snapshot.sha256);
+    if (prior !== undefined && prior !== canonical) {
+      fail('conflicting_id', entryPath,
+        `${entryPath} reuses an artifact digest for a different ArtifactRefV1 snapshot.`);
+    }
+    seenSha.set(snapshot.sha256, canonical);
+    snapshots.push(snapshot);
+  }
+  snapshots.sort(compareArtifactRefsV1);
+  return capturedFreeze(snapshots);
+}
+
+function artifactByDigest(artifacts) {
+  const map = new Map();
+  for (let index = 0; index < artifacts.length; index += 1) {
+    map.set(artifacts[index].sha256, artifacts[index]);
+  }
+  return map;
+}
+
+function resolveDigests(digests, artifacts, path, requiredKinds, allowEmpty) {
+  if (digests.length === 0) {
+    if (allowEmpty) return;
+    fail('provider_proof_rejected', `${path}.artifact_digests`,
+      `${path}.artifact_digests must cite at least one proof artifact.`);
+  }
+  let proof = false;
+  for (let index = 0; index < digests.length; index += 1) {
+    const digest = digests[index];
+    const ref = artifacts.get(digest);
+    if (ref === undefined) {
+      fail('identity_mismatch', `${path}.artifact_digests[${index}]`,
+        `${path}.artifact_digests[${index}] does not resolve to an exact ArtifactRefV1 snapshot.`);
+    }
+    if (requiredKinds === 'provider') {
+      if (!capturedIncludes(PROVIDER_DERIVED_ARTIFACT_KINDS, ref.artifact_kind)) {
+        fail('provider_proof_rejected', `${path}.artifact_digests[${index}]`,
+          `${path} claims must cite provider-derived artifacts, never proof artifacts as claims.`);
+      }
+    } else if (capturedIncludes(PROOF_ARTIFACT_KINDS, ref.artifact_kind)) {
+      proof = true;
+    }
+  }
+  if (requiredKinds === 'proof' && !proof) {
+    fail('provider_proof_rejected', `${path}.artifact_digests`,
+      `${path} facts cannot be synthesized from provider-derived artifacts alone.`);
+  }
+}
+
+function claimComparable(claim) {
+  const kind = claim.claim_kind;
+  if (kind === 'tests_passed' || kind === 'command_reported') return `result:${claim.payload.result}`;
+  if (kind === 'head_reached') return `sha:${claim.payload.sha}`;
+  if (kind === 'model_used') return `model:${claim.payload.model}`;
+  if (kind === 'files_changed') return `count:${claim.payload.path_count}`;
+  return '';
+}
+
+function factComparable(fact) {
+  const kind = fact.fact_kind;
+  if (kind === 'acceptance_results') return `result:${fact.payload.result}`;
+  if (kind === 'head_sha') return `sha:${fact.payload.sha}`;
+  if (kind === 'git_identity') return `sha:${fact.payload.head_sha}`;
+  if (kind === 'model_attested') return `model:${fact.payload.model}`;
+  if (kind === 'git_diff') return `count:${fact.payload.path_count}`;
+  return '';
+}
+
+function isSuccessClaim(claim) {
+  if (claim.status !== 'asserted') return false;
+  if (claim.claim_kind === 'tests_passed' || claim.claim_kind === 'command_reported') {
+    return claim.payload.result === 'pass';
+  }
+  return capturedIncludes(['files_changed', 'head_reached', 'model_used'], claim.claim_kind);
+}
+
+function matchingFacts(claim, facts) {
+  const mapped = CLAIM_FACT_MAP[claim.claim_kind] || [];
+  const matches = [];
+  for (let index = 0; index < facts.length; index += 1) {
+    const fact = facts[index];
+    if (fact.subject !== claim.subject) continue;
+    if (!capturedIncludes(mapped, fact.fact_kind)) continue;
+    matches.push(fact);
+  }
+  return matches;
+}
+
+function linkedPair(discrepancy, claimId, factId) {
+  let hasClaim = false;
+  let hasFact = false;
+  for (let index = 0; index < discrepancy.claim_ids.length; index += 1) {
+    if (discrepancy.claim_ids[index] === claimId) hasClaim = true;
+  }
+  for (let index = 0; index < discrepancy.fact_ids.length; index += 1) {
+    if (discrepancy.fact_ids[index] === factId) hasFact = true;
+  }
+  return hasClaim && hasFact;
+}
+
+function assertLinkedIdentities(discrepancies, claims, facts, path) {
+  const claimIds = new Set();
+  const factIds = new Set();
+  for (let index = 0; index < claims.length; index += 1) claimIds.add(claims[index].claim_id);
+  for (let index = 0; index < facts.length; index += 1) factIds.add(facts[index].fact_id);
+  for (let index = 0; index < discrepancies.length; index += 1) {
+    const discrepancy = discrepancies[index];
+    const field = `${path}.discrepancies`;
+    for (let c = 0; c < discrepancy.claim_ids.length; c += 1) {
+      if (!claimIds.has(discrepancy.claim_ids[c])) {
+        fail('identity_mismatch', `${field}[${index}].claim_ids[${c}]`,
+          `${field}[${index}].claim_ids[${c}] does not resolve to a claim identity.`);
+      }
+    }
+    for (let f = 0; f < discrepancy.fact_ids.length; f += 1) {
+      if (!factIds.has(discrepancy.fact_ids[f])) {
+        fail('identity_mismatch', `${field}[${index}].fact_ids[${f}]`,
+          `${field}[${index}].fact_ids[${f}] does not resolve to a fact identity.`);
+      }
+    }
+  }
+}
+
+function assertClaimFactLinks(claims, facts, discrepancies, path) {
+  for (let index = 0; index < claims.length; index += 1) {
+    const claim = claims[index];
+    const matches = matchingFacts(claim, facts);
+    for (let m = 0; m < matches.length; m += 1) {
+      const fact = matches[m];
+      if (claimComparable(claim) === factComparable(fact)) continue;
+      let linked = false;
+      for (let d = 0; d < discrepancies.length; d += 1) {
+        const discrepancy = discrepancies[d];
+        if (discrepancy.discrepancy_kind !== 'mismatch') continue;
+        if (linkedPair(discrepancy, claim.claim_id, fact.fact_id)) {
+          linked = true;
+          break;
+        }
+      }
+      if (!linked) {
+        fail('invalid_format', path,
+          `${path} preserves both the claim and the contradicting fact only when a mismatch discrepancy links their identities.`);
+      }
+    }
+  }
+}
+
+function assertIdentityBinding(record, runId, assignmentId, path) {
+  if (record.run_id !== runId || record.assignment_id !== assignmentId) {
+    fail('identity_mismatch', path,
+      `${path} identity drifted from the enclosing evidence bundle.`);
+  }
+}
+
+function isCompleteVerified(fact) {
+  return fact.status === 'verified' && fact.truncated === false;
+}
+
+function assertAcceptedState(bundle, path) {
+  if (!capturedIncludes(ACCEPTED_FINAL_STATES, bundle.final_state)) return;
+  if (bundle.discrepancies.length > 0) {
+    fail('unproven_accepted_state', `${path}.final_state`,
+      `${path}.final_state cannot be accepted, verified, or pass while a discrepancy remains recorded.`);
+  }
+  let verifiedCount = 0;
+  for (let index = 0; index < bundle.facts.length; index += 1) {
+    const fact = bundle.facts[index];
+    if (fact.status === 'truncated' || fact.truncated === true) {
+      fail('truncated_required_fact', `${path}.facts`,
+        `${path}.final_state requires complete facts; truncated facts cannot justify acceptance.`);
+    }
+    if (fact.fact_kind === 'artifact_integrity' && fact.payload.result !== 'match') {
+      fail('unproven_accepted_state', `${path}.final_state`,
+        `${path}.final_state cannot pass while an artifact integrity fact reports mismatch.`);
+    }
+    if (!isCompleteVerified(fact)) {
+      fail('unproven_accepted_state', `${path}.final_state`,
+        `${path}.final_state requires verified facts; partial, failed, or unknown facts cannot justify acceptance.`);
+    }
+    verifiedCount += 1;
+  }
+  if (verifiedCount === 0) {
+    fail('unproven_accepted_state', `${path}.final_state`,
+      `${path}.final_state cannot be justified by provider claims alone.`);
+  }
+  for (let index = 0; index < bundle.claims.length; index += 1) {
+    const claim = bundle.claims[index];
+    if (claim.status === 'unsupported') {
+      fail('unproven_accepted_state', `${path}.final_state`,
+        `${path}.final_state cannot be accepted while an unsupported claim remains.`);
+    }
+    if (!isSuccessClaim(claim)) continue;
+    const matches = matchingFacts(claim, bundle.facts);
+    let justified = false;
+    for (let m = 0; m < matches.length; m += 1) {
+      if (isCompleteVerified(matches[m]) && claimComparable(claim) === factComparable(matches[m])) {
+        justified = true;
+        break;
+      }
+    }
+    if (!justified) {
+      fail('unproven_accepted_state', `${path}.final_state`,
+        `${path}.final_state requires a matching verified fact for every provider success claim.`);
+    }
+  }
+}
+
+export function parseEvidenceBundleV1(input, path = 'evidence_bundle') {
+  assertPlainObject(input, 'invalid_type', path, `${path}`);
+  assertDirectJsonClosure(input, path);
+  assertEvidenceBounds(input, path);
+  assertAllowedKeys(input, BUNDLE_ALLOWED_KEYS, path);
+  requiredKeys(input, BUNDLE_REQUIRED_KEYS, path);
+
+  const schema = optOwn(input, 'schema');
+  if (schema !== EVIDENCE_BUNDLE_SCHEMA_ID) {
+    fail('invalid_format', `${path}.schema`,
+      `${path}.schema must be exactly "${EVIDENCE_BUNDLE_SCHEMA_ID}".`);
+  }
+  const version = optOwn(input, 'version');
+  if (version !== EVIDENCE_BUNDLE_VERSION) {
+    fail('invalid_format', `${path}.version`,
+      `${path}.version must be exactly ${EVIDENCE_BUNDLE_VERSION}; additive versions cannot rewrite v1 bytes.`);
+  }
+  const runId = optOwn(input, 'run_id');
+  assertRunId(runId, `${path}.run_id`);
+  const requestId = optOwn(input, 'request_id');
+  assertRunId(requestId, `${path}.request_id`);
+  const assignmentId = optOwn(input, 'assignment_id');
+  if (!isAssignmentId(assignmentId)) {
+    fail('invalid_format', `${path}.assignment_id`,
+      `${path}.assignment_id violates the assignment-id grammar.`);
+  }
+  const provider = optOwn(input, 'provider');
+  if (!isKnownProvider(provider)) {
+    fail('invalid_format', `${path}.provider`,
+      `${path}.provider must be one of ${knownProvidersJoined()}.`);
+  }
+  const model = optOwn(input, 'model');
+  if (!isModelId(model)) {
+    fail('invalid_format', `${path}.model`,
+      `${path}.model violates the accepted model-id grammar.`);
+  }
+  const repository = parseRepository(input, `${path}.repository`);
+  const candidate = parseCandidate(input, `${path}.candidate`);
+  const sequence = assertSequence(optOwn(input, 'sequence'), `${path}.sequence`);
+  const recordedAt = parseOptionalTimestamp(input, path);
+  const finalState = assertEnum(
+    optOwn(input, 'final_state'), FINAL_STATES, 'unknown_final_state', `${path}.final_state`, 'final state',
+  );
+
+  const claims = parseRecordList(input, 'claims', path, MAX_CLAIMS, parseProviderClaimV1, 'claim_id');
+  const facts = parseRecordList(input, 'facts', path, MAX_FACTS, parseVerifiedFactV1, 'fact_id');
+  const discrepancies = parseRecordList(
+    input, 'discrepancies', path, MAX_DISCREPANCIES, parseEvidenceDiscrepancyV1, 'discrepancy_id',
+  );
+  const artifacts = parseArtifactSnapshots(input, path, runId, assignmentId);
+  const artifactMap = artifactByDigest(artifacts);
+
+  for (let index = 0; index < claims.length; index += 1) {
+    const claim = claims[index];
+    const field = `${path}.claims[${index}]`;
+    assertIdentityBinding(claim, runId, assignmentId, field);
+    resolveDigests(claim.artifact_digests, artifactMap, field, 'provider', true);
+  }
+  for (let index = 0; index < facts.length; index += 1) {
+    const fact = facts[index];
+    const field = `${path}.facts[${index}]`;
+    assertIdentityBinding(fact, runId, assignmentId, field);
+    const allowEmpty = fact.status === 'unknown' || fact.status === 'failed';
+    resolveDigests(
+      fact.artifact_digests, artifactMap, field,
+      fact.fact_kind === 'model_attested' ? null : 'proof',
+      allowEmpty && fact.fact_kind !== 'model_attested',
+    );
+    if (fact.fact_kind === 'git_identity' && fact.payload.base_sha !== repository.base_sha) {
+      fail('stale_fact', `${field}.payload.base_sha`,
+        `${field}.payload.base_sha does not match the bundle repository base.`);
+    }
+  }
+  for (let index = 0; index < discrepancies.length; index += 1) {
+    const discrepancy = discrepancies[index];
+    const field = `${path}.discrepancies[${index}]`;
+    assertIdentityBinding(discrepancy, runId, assignmentId, field);
+    resolveDigests(discrepancy.artifact_digests, artifactMap, field, null, true);
+  }
+  assertLinkedIdentities(discrepancies, claims, facts, path);
+  assertClaimFactLinks(claims, facts, discrepancies, path);
+
+  const values = {
+    schema: EVIDENCE_BUNDLE_SCHEMA_ID,
+    version: EVIDENCE_BUNDLE_VERSION,
+    run_id: runId,
+    request_id: requestId,
+    assignment_id: assignmentId,
+    provider,
+    model,
+    repository,
+    sequence,
+    final_state: finalState,
+    claims,
+    facts,
+    discrepancies,
+    artifacts,
+  };
+  if (candidate !== undefined) values.candidate = candidate;
+  if (recordedAt !== undefined) values.recorded_at = recordedAt;
+  const snapshot = freezeRecord(BUNDLE_ALLOWED_KEYS, values);
+  assertAcceptedState(snapshot, path);
+  const canonical = canonicalJsonStringify(snapshot);
+  if (BUFFER_FROM(canonical, 'utf8').length > MAX_BUNDLE_CANONICAL_BYTES) {
+    fail('out_of_range', path,
+      `${path} canonical bytes exceed ${MAX_BUNDLE_CANONICAL_BYTES}.`);
+  }
+  return snapshot;
+}
+
+export function canonicalEvidenceBundleJsonV1(input, path = 'evidence_bundle') {
+  return canonicalJsonStringify(parseEvidenceBundleV1(input, path));
+}
+
+export function evidenceBundleDigestV1(input, path = 'evidence_bundle') {
+  const snapshot = parseEvidenceBundleV1(input, path);
+  const canonical = canonicalJsonStringify(snapshot);
+  const canonicalBytes = BUFFER_FROM(canonical, 'utf8');
+  const descriptor = identityDigestV1(EVIDENCE_DIGEST_LABEL, [canonicalBytes]);
+  return capturedFreeze({
+    algorithm: DIGEST_ALGORITHM,
+    domain: IDENTITY_DOMAIN,
+    version: IDENTITY_VERSION,
+    label: EVIDENCE_DIGEST_LABEL,
+    input_bytes: canonicalBytes.length,
+    digest: descriptor.digest,
+  });
+}
+
+export function verifyEvidenceBundleDigestV1(input, expectedDigestHex, path = 'evidence_bundle') {
+  if (typeof expectedDigestHex !== 'string'
+    || expectedDigestHex.length !== EVIDENCE_DIGEST_HEX_LENGTH
+    || !testPattern(PRIVATE_SHA256_PATTERN, expectedDigestHex)) {
+    return false;
+  }
+  const actual = evidenceBundleDigestV1(input, path).digest;
+  return TIMING_SAFE_EQUAL(BUFFER_FROM(actual, 'hex'), BUFFER_FROM(expectedDigestHex, 'hex')) === true;
+}
+
+export const EVIDENCE_CONTRACT_DESCRIPTOR = capturedFreeze({
+  schema: EVIDENCE_BUNDLE_SCHEMA_ID,
+  version: EVIDENCE_BUNDLE_VERSION,
+  label: EVIDENCE_DIGEST_LABEL,
+  bounds: capturedFreeze({
+    max_depth: MAX_EVIDENCE_DEPTH,
+    max_nodes: MAX_EVIDENCE_NODES,
+    max_claims: MAX_CLAIMS,
+    max_facts: MAX_FACTS,
+    max_discrepancies: MAX_DISCREPANCIES,
+    max_artifacts: MAX_EVIDENCE_ARTIFACT_REFS,
+    max_canonical_bytes: MAX_BUNDLE_CANONICAL_BYTES,
+  }),
+});
 
 export { RunContractV1Error as EvidenceContractV1Error };
 export { ARTIFACT_REF_SCHEMA_ID };
