@@ -32,8 +32,11 @@ import {
   MODEL,
   RUN_ID,
   SHA_ACCEPT,
+  SHA_REPORT,
+  acceptanceRef,
   countingProxy,
   payloadDigest,
+  reportRef,
   trapTotal,
   validArtifactRef,
   validBundle,
@@ -352,6 +355,47 @@ test('facts cannot be synthesized from provider-derived artifacts', () => {
     }))).code,
     'provider_proof_rejected',
   );
+});
+
+test('model_attested facts require independent proof, not provider-report reuse', () => {
+  const modelFact = (artifactDigests) => validFact({
+    fact_id: 'f-model',
+    fact_kind: 'model_attested',
+    sequence: 2,
+    subject: 'model',
+    authority: 'independent_provider_query',
+    method: 'independent_model_query',
+    exit_code: null,
+    payload: { model: MODEL },
+    artifact_digests: artifactDigests,
+  });
+
+  assert.equal(
+    errorOf(() => parseEvidenceBundleV1(validBundle({
+      facts: [validFact(), validGitIdentityFact(), modelFact([SHA_REPORT])],
+    }))).code,
+    'provider_proof_rejected',
+  );
+
+  assert.doesNotThrow(() => parseEvidenceBundleV1(validBundle({
+    facts: [validFact(), validGitIdentityFact(), modelFact([SHA_ACCEPT])],
+  })));
+
+  const usageSha = '77'.repeat(32);
+  assert.doesNotThrow(() => parseEvidenceBundleV1(validBundle({
+    facts: [validFact(), validGitIdentityFact(), modelFact([usageSha])],
+    artifacts: [
+      reportRef(),
+      acceptanceRef(),
+      validArtifactRef(),
+      validArtifactRef({
+        artifact_kind: 'usage_evidence',
+        relative_path: `runs/${RUN_ID}/${ASSIGNMENT_ID}/usage.json`,
+        sha256: usageSha,
+        media_type: 'application/json',
+      }),
+    ],
+  })));
 });
 
 test('stale git identity facts fail closed against the bundle base', () => {

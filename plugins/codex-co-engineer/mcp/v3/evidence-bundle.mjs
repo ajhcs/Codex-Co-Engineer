@@ -1008,7 +1008,7 @@ export function parseEvidenceBundleV1(input, path = 'evidence_bundle') {
     const allowEmpty = fact.status === 'unknown' || fact.status === 'failed';
     resolveDigests(
       fact.artifact_digests, artifactMap, field,
-      fact.fact_kind === 'model_attested' ? null : 'proof',
+      'proof',
       allowEmpty && fact.fact_kind !== 'model_attested',
     );
     if (fact.fact_kind === 'git_identity' && fact.payload.base_sha !== repository.base_sha) {
