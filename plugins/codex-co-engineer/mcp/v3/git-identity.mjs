@@ -14,13 +14,21 @@
 // Observation is fail-closed: spawn is argv-only (no shell), the child
 // environment is a closed map that cannot inherit GIT_* / config / replace /
 // graft influence, output/time/command counts are bounded, and typed errors
-// never echo hostile bytes.
+// never echo hostile bytes. Effective local, worktree, include, and includeIf
+// config is observed through Git-native listing before ref/object/ancestry
+// reads and again before a verified result is returned.
 
 import { Buffer as NodeBuffer } from 'node:buffer';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat as nodeLstat, realpath as nodeRealpath } from 'node:fs/promises';
+import {
+  lstat as nodeLstat,
+  readdir as nodeReaddir,
+  readFile as nodeReadFile,
+  realpath as nodeRealpath,
+} from 'node:fs/promises';
 import path from 'node:path';
+import { types as utilTypes } from 'node:util';
 
 import {
   parseEvidenceDiscrepancyV1,
@@ -29,14 +37,15 @@ import {
   MAX_SEQUENCE,
 } from './evidence-bundle.mjs';
 import {
+  capturedDescriptor,
   capturedFreeze,
   capturedHasOwn,
+  capturedOwnKeys,
   capturedUtf8ByteLength,
 } from './grammar.mjs';
 import { canonicalJsonStringify } from './identity.mjs';
 import {
   RunContractV1Error,
-  assertAllowedKeys,
   assertBaseSha,
   assertRepositoryPath,
   assertRunId,
@@ -108,27 +117,43 @@ const OBJECT_FREEZE = Object.freeze;
 const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const MATH_FLOOR = Math.floor;
 const MATH_MAX = Math.max;
+const MATH_MIN = Math.min;
 const ARRAY_IS_ARRAY = Array.isArray;
 const ARRAY_PUSH = Array.prototype.push;
 const BUFFER_FROM = NodeBuffer.from.bind(NodeBuffer);
 const BUFFER_CONCAT = NodeBuffer.concat.bind(NodeBuffer);
 const BUFFER_BYTE_LENGTH = NodeBuffer.byteLength;
+const BUFFER_IS_BUFFER = NodeBuffer.isBuffer.bind(NodeBuffer);
 const CRYPTO_CREATE_HASH = createHash;
 const HASH_PROTOTYPE = Object.getPrototypeOf(CRYPTO_CREATE_HASH('sha256'));
 const HASH_UPDATE = HASH_PROTOTYPE.update;
 const HASH_DIGEST = HASH_PROTOTYPE.digest;
 const PATH_IS_ABSOLUTE = path.isAbsolute;
+const PATH_JOIN = path.join;
 const PATH_RESOLVE = path.resolve;
 const SPAWN = nodeSpawn;
 const LSTAT = nodeLstat;
+const READDIR = nodeReaddir;
+const READFILE = nodeReadFile;
 const REALPATH = nodeRealpath;
 const REFLECT_APPLY = Reflect.apply;
+const IS_PROXY = utilTypes.isProxy;
+const MAX_LAYOUT_FILE_BYTES = 4096;
+const MAX_CONFIG_FILE_BYTES = 65_536;
+const PROVENANCE_CONFIG_PATTERN = /(?:^|\n)[ \t]*(?:promisor|partialclonefilter|partialclone)[ \t]*=/u;
+const EFFECTIVE_PROVENANCE_KEY_PATTERN =
+  /^(?:extensions\.partialclone|remote\..+\.(?:promisor|partialclonefilter))$/iu;
+const EFFECTIVE_CONFIG_LIST_ARGS = capturedFreeze([
+  'config', '--includes', '--show-origin', '--show-scope', '--list', '-z',
+]);
 
 const CLOSED_GIT_ENV = capturedFreeze({
   PATH: '/usr/bin:/bin',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_ALLOW_PROTOCOL: '',
+  GIT_PROTOCOL_FROM_USER: '0',
   GIT_TERMINAL_PROMPT: '0',
   GIT_OPTIONAL_LOCKS: '0',
   GIT_PAGER: 'cat',
@@ -159,6 +184,381 @@ const FORBIDDEN_ENV_KEYS = capturedFreeze([
 ]);
 
 export const GIT_CLOSED_ENV = CLOSED_GIT_ENV;
+
+function contractError(code, path, message) {
+  return new RunContractV1Error(code, path, message);
+}
+
+function asContractError(error, path, code = 'git_execution_failed') {
+  if (error instanceof RunContractV1Error) return error;
+  return contractError(code, path, `${path} could not complete a git observation.`);
+}
+
+function isSymlinkStat(metadata) {
+  return typeof metadata?.isSymbolicLink === 'function' && metadata.isSymbolicLink();
+}
+
+function assertOwnedHandle(value, path) {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+    fail('git_execution_failed', path, `${path} could not start a git observation.`);
+  }
+  try {
+    if (IS_PROXY(value)) {
+      fail('proxy_denied', path,
+        `${path} is a live or revoked Proxy; git observation accepts owned process handles only.`);
+    }
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    fail('git_execution_failed', path, `${path} could not start a git observation.`);
+  }
+}
+
+function readHandleField(handle, key, path) {
+  assertOwnedHandle(handle, path);
+  let value;
+  try {
+    value = handle[key];
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    fail('git_execution_failed', path, `${path} could not start a git observation.`);
+  }
+  if (value !== null && value !== undefined
+    && (typeof value === 'object' || typeof value === 'function')) {
+    assertOwnedHandle(value, path);
+  }
+  return value;
+}
+
+function invokeHandle(handle, key, args, path) {
+  const method = readHandleField(handle, key, path);
+  if (typeof method !== 'function') {
+    fail('git_execution_failed', path, `${path} could not start a git observation.`);
+  }
+  try {
+    return REFLECT_APPLY(method, handle, args);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+    fail('git_execution_failed', path, `${path} could not start a git observation.`);
+  }
+}
+
+function ownedChunk(chunk, path) {
+  try {
+    if (typeof chunk === 'string') return BUFFER_FROM(chunk, 'utf8');
+    if (BUFFER_IS_BUFFER(chunk)) return BUFFER_FROM(chunk);
+  } catch (error) {
+    if (error instanceof RunContractV1Error) throw error;
+  }
+  fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+}
+
+function assertClosedKeySet(input, allowedKeys, path) {
+  let ownKeys;
+  try {
+    ownKeys = capturedOwnKeys(input);
+  } catch {
+    fail('invalid_type', path, `${path} keys could not be inspected safely.`);
+  }
+  for (let index = 0; index < ownKeys.length; index += 1) {
+    const key = ownKeys[index];
+    if (typeof key === 'symbol') {
+      fail('symbol_key_denied', path,
+        `${path} carries a symbol property; git identity records are direct JSON only.`);
+    }
+    let allowed = false;
+    for (let allowedIndex = 0; allowedIndex < allowedKeys.length; allowedIndex += 1) {
+      if (allowedKeys[allowedIndex] === key) {
+        allowed = true;
+        break;
+      }
+    }
+    if (!allowed) {
+      fail('unknown_key', path, `${path} carries a key outside the closed vocabulary.`);
+    }
+  }
+}
+
+function assertNestedClosedKeys(input, key, allowedKeys, path) {
+  const descriptor = capturedDescriptor(input, key);
+  if (descriptor === undefined) return;
+  if (descriptor.get !== undefined || descriptor.set !== undefined) return;
+  const value = descriptor.value;
+  if (value === null || typeof value !== 'object' || ARRAY_IS_ARRAY(value)) return;
+  try {
+    if (IS_PROXY(value)) return;
+  } catch {
+    return;
+  }
+  assertClosedKeySet(value, allowedKeys, `${path}.${key}`);
+}
+
+async function lstatOrNull(target) {
+  try {
+    return await LSTAT(target);
+  } catch {
+    return null;
+  }
+}
+
+function oneLayoutLine(text, path, code) {
+  if (typeof text !== 'string') {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  let value = text;
+  if (value.endsWith('\n')) value = value.slice(0, -1);
+  if (value.endsWith('\r')) value = value.slice(0, -1);
+  if (value.includes('\n') || value.includes('\r') || value.includes('\0')) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  return value;
+}
+
+function resolveLayoutPath(raw, fromDir, path, code) {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.includes('\0')) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  const resolved = PATH_IS_ABSOLUTE(raw) ? PATH_RESOLVE(raw) : PATH_RESOLVE(fromDir, raw);
+  if (!PATH_IS_ABSOLUTE(resolved) || PATH_RESOLVE(resolved) !== resolved) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  return resolved;
+}
+
+function isDirectChildPath(parent, child) {
+  const prefix = parent.endsWith('/') ? parent : `${parent}/`;
+  if (!child.startsWith(prefix)) return false;
+  const rest = child.slice(prefix.length);
+  return rest.length > 0 && !rest.includes('/') && rest !== '.' && rest !== '..';
+}
+
+async function readBoundedUtf8(target, maxBytes, path, code) {
+  const metadata = await lstatOrNull(target);
+  if (metadata === null) return null;
+  if (isSymlinkStat(metadata) || typeof metadata.isFile !== 'function' || !metadata.isFile()) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  if (typeof metadata.size === 'number' && metadata.size > maxBytes) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  let text;
+  try {
+    text = await READFILE(target, { encoding: 'utf8' });
+  } catch {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  if (typeof text !== 'string' || BUFFER_BYTE_LENGTH(text) > maxBytes) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  return text;
+}
+
+async function realpathOf(target, path, code) {
+  try {
+    return await REALPATH(target);
+  } catch {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+}
+
+async function assertDirectoryNotSymlink(target, path, code) {
+  let metadata;
+  try {
+    metadata = await LSTAT(target);
+  } catch {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  if (isSymlinkStat(metadata) || typeof metadata.isDirectory !== 'function' || !metadata.isDirectory()) {
+    fail(code, path, `${path} is not a trusted git layout.`);
+  }
+  return realpathOf(target, path, code);
+}
+
+async function assertNoExternalObjectProvenance(gitCommonDir, path) {
+  await assertDirectoryNotSymlink(
+    PATH_JOIN(gitCommonDir, 'objects'), path, 'config_influence_denied',
+  );
+  const infoDir = PATH_JOIN(gitCommonDir, 'objects', 'info');
+  const alternateNames = ['alternates', 'http-alternates'];
+  for (let index = 0; index < alternateNames.length; index += 1) {
+    const target = PATH_JOIN(infoDir, alternateNames[index]);
+    if (await lstatOrNull(target) !== null) {
+      fail('config_influence_denied', path,
+        `${path} must not observe external object provenance.`);
+    }
+  }
+  const packDir = PATH_JOIN(gitCommonDir, 'objects', 'pack');
+  const packMeta = await lstatOrNull(packDir);
+  if (packMeta !== null) {
+    if (isSymlinkStat(packMeta)
+      || typeof packMeta.isDirectory !== 'function'
+      || !packMeta.isDirectory()) {
+      fail('config_influence_denied', path,
+        `${path} must not observe external object provenance.`);
+    }
+    let names;
+    try {
+      names = await READDIR(packDir);
+    } catch {
+      fail('config_influence_denied', path,
+        `${path} must not observe external object provenance.`);
+    }
+    for (let index = 0; index < names.length; index += 1) {
+      const name = names[index];
+      if (typeof name === 'string' && name.endsWith('.promisor')) {
+        fail('config_influence_denied', path,
+          `${path} must not observe external object provenance.`);
+      }
+    }
+  }
+  const configText = await readBoundedUtf8(
+    PATH_JOIN(gitCommonDir, 'config'), MAX_CONFIG_FILE_BYTES, path, 'config_influence_denied',
+  );
+  if (configText !== null && PROVENANCE_CONFIG_PATTERN.test(configText)) {
+    fail('config_influence_denied', path,
+      `${path} must not observe external object provenance.`);
+  }
+}
+
+function denyExternalObjectProvenance(path) {
+  fail('config_influence_denied', path,
+    `${path} must not observe external object provenance.`);
+}
+
+function isProhibitedEffectiveConfigKey(key) {
+  if (typeof key !== 'string' || key.length === 0) return false;
+  EFFECTIVE_PROVENANCE_KEY_PATTERN.lastIndex = 0;
+  return EFFECTIVE_PROVENANCE_KEY_PATTERN.test(key);
+}
+
+function assertNoProhibitedEffectiveConfig(stdout, path) {
+  if (typeof stdout !== 'string') denyExternalObjectProvenance(path);
+  if (stdout.length === 0) return;
+  const fields = stdout.split('\0');
+  let limit = fields.length;
+  if (limit > 0 && fields[limit - 1] === '') limit -= 1;
+  if (limit % 3 !== 0) {
+    fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+  }
+  for (let index = 0; index < limit; index += 3) {
+    const record = fields[index + 2];
+    if (typeof record !== 'string' || record.length === 0) continue;
+    const newline = record.indexOf('\n');
+    const key = newline === -1 ? record : record.slice(0, newline);
+    if (isProhibitedEffectiveConfigKey(key)) denyExternalObjectProvenance(path);
+  }
+}
+
+async function assertNoEffectiveProvenanceConfig(session, flags, path) {
+  const result = await gitMaybe(
+    session,
+    [...flags, ...EFFECTIVE_CONFIG_LIST_ARGS],
+    `${path}.config`,
+  );
+  if (result.exit_code !== 0) {
+    fail('git_execution_failed', path, `${path} could not complete a git observation.`);
+  }
+  assertNoProhibitedEffectiveConfig(result.stdout, path);
+}
+
+function parseGitFile(contents, worktreePath, path) {
+  const line = oneLayoutLine(contents, path, 'repository_invalid');
+  if (line.length < 7 || line.slice(0, 7) !== 'gitdir:') {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  return resolveLayoutPath(line.slice(7).trim(), worktreePath, path, 'repository_invalid');
+}
+
+async function assertLinkedWorktree(repositoryPath, gitFilePath, observedGitDir, path) {
+  const gitFileText = await readBoundedUtf8(
+    gitFilePath, MAX_LAYOUT_FILE_BYTES, path, 'repository_invalid',
+  );
+  if (gitFileText === null) {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  const declaredGitDir = parseGitFile(gitFileText, repositoryPath, path);
+  const declaredReal = await assertDirectoryNotSymlink(
+    declaredGitDir, path, 'repository_invalid',
+  );
+  const observedReal = await realpathOf(observedGitDir, path, 'repository_invalid');
+  if (declaredReal !== observedReal) {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  const commondirText = await readBoundedUtf8(
+    PATH_JOIN(declaredGitDir, 'commondir'), MAX_LAYOUT_FILE_BYTES, path, 'repository_invalid',
+  );
+  if (commondirText === null) {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  const commonDir = await assertDirectoryNotSymlink(
+    resolveLayoutPath(
+      oneLayoutLine(commondirText, path, 'repository_invalid'),
+      declaredGitDir, path, 'repository_invalid',
+    ),
+    path,
+    'repository_invalid',
+  );
+  const worktreesRoot = await assertDirectoryNotSymlink(
+    PATH_JOIN(commonDir, 'worktrees'), path, 'repository_invalid',
+  );
+  if (!isDirectChildPath(worktreesRoot, declaredReal)) {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  const backpointerText = await readBoundedUtf8(
+    PATH_JOIN(declaredGitDir, 'gitdir'), MAX_LAYOUT_FILE_BYTES, path, 'repository_invalid',
+  );
+  if (backpointerText === null) {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  const backpointer = resolveLayoutPath(
+    oneLayoutLine(backpointerText, path, 'repository_invalid'),
+    declaredGitDir, path, 'repository_invalid',
+  );
+  const expectedGitFile = PATH_JOIN(repositoryPath, '.git');
+  let resolvedBack;
+  try {
+    resolvedBack = await REALPATH(backpointer);
+  } catch {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  let resolvedGitFile;
+  try {
+    resolvedGitFile = await REALPATH(expectedGitFile);
+  } catch {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  if (resolvedBack !== resolvedGitFile && resolvedBack !== repositoryPath) {
+    fail('repository_invalid', path, `${path} is not a trusted git layout.`);
+  }
+  await assertNoExternalObjectProvenance(commonDir, path);
+}
+
+async function assertSafeRepositoryLayout(repositoryPath, observedGitDir, path) {
+  const gitFilePath = PATH_JOIN(repositoryPath, '.git');
+  const layoutPath = `${path}.repository.path`;
+  let metadata;
+  try {
+    metadata = await LSTAT(gitFilePath);
+  } catch {
+    fail('repository_invalid', layoutPath,
+      `${layoutPath} is not a git worktree root.`);
+  }
+  if (isSymlinkStat(metadata)) {
+    fail('repository_invalid', layoutPath, `${layoutPath} is not a trusted git layout.`);
+  }
+  if (typeof metadata.isDirectory === 'function' && metadata.isDirectory()) {
+    const resolved = await realpathOf(gitFilePath, layoutPath, 'repository_invalid');
+    const observedReal = await realpathOf(observedGitDir, layoutPath, 'repository_invalid');
+    if (resolved !== observedReal) {
+      fail('repository_invalid', layoutPath, `${layoutPath} is not a trusted git layout.`);
+    }
+    await assertNoExternalObjectProvenance(gitFilePath, path);
+    return;
+  }
+  if (typeof metadata.isFile !== 'function' || !metadata.isFile()) {
+    fail('repository_invalid', layoutPath, `${layoutPath} is not a trusted git layout.`);
+  }
+  await assertLinkedWorktree(repositoryPath, gitFilePath, observedGitDir, path);
+}
 
 function freezeRecord(keys, values) {
   const snapshot = {};
@@ -274,8 +674,7 @@ function assertBaseRefName(value, path) {
 function parseRepository(input, path) {
   const value = optOwn(input, 'repository');
   assertPlainObject(value, 'invalid_type', path, path);
-  assertDirectJsonClosure(value, path);
-  assertAllowedKeys(value, GIT_IDENTITY_REPOSITORY_ALLOWED_KEYS, path);
+  assertClosedKeySet(value, GIT_IDENTITY_REPOSITORY_ALLOWED_KEYS, path);
   requiredKeys(value, GIT_IDENTITY_REPOSITORY_ALLOWED_KEYS, path);
   const repositoryPath = optOwn(value, 'path');
   assertRepositoryPath(repositoryPath, `${path}.path`);
@@ -299,8 +698,9 @@ function assertSequence(value, path) {
 
 export function parseGitIdentityRequestV1(input, path = 'git_identity') {
   assertPlainObject(input, 'invalid_type', path, `${path}`);
+  assertClosedKeySet(input, GIT_IDENTITY_REQUEST_ALLOWED_KEYS, path);
+  assertNestedClosedKeys(input, 'repository', GIT_IDENTITY_REPOSITORY_ALLOWED_KEYS, path);
   assertDirectJsonClosure(input, path);
-  assertAllowedKeys(input, GIT_IDENTITY_REQUEST_ALLOWED_KEYS, path);
   requiredKeys(input, GIT_IDENTITY_REQUEST_REQUIRED_KEYS, path);
   const repository = parseRepository(input, `${path}.repository`);
   const expectedBaseRef = assertBaseRefName(
@@ -332,7 +732,7 @@ function parseOptions(options, path = 'options') {
   }
   assertNotProxy(options, path);
   assertPlainObject(options, 'invalid_type', path, path);
-  assertAllowedKeys(options, GIT_IDENTITY_OPTIONS_ALLOWED_KEYS, path);
+  assertClosedKeySet(options, GIT_IDENTITY_OPTIONS_ALLOWED_KEYS, path);
   let spawn = SPAWN;
   if (hasOwn(options, 'spawn')) {
     spawn = optOwn(options, 'spawn');
@@ -345,105 +745,156 @@ function parseOptions(options, path = 'options') {
 }
 
 function createSession(spawnFn) {
+  const startedAt = Date.now();
   return {
     spawn: spawnFn,
     commands: 0,
-    startedAt: Date.now(),
+    startedAt,
+    deadlineAt: startedAt + MAX_GIT_TOTAL_TIME_MS,
   };
+}
+
+function assertDeadline(session, path) {
+  if (Date.now() >= session.deadlineAt) {
+    fail('bounds_exceeded', path, `${path} exceeds the git wall-clock cap.`);
+  }
+}
+
+function remainingMs(session) {
+  const left = session.deadlineAt - Date.now();
+  return left > 0 ? left : 0;
 }
 
 function assertSessionBounds(session, path) {
   if (session.commands >= MAX_GIT_COMMANDS) {
     fail('bounds_exceeded', path, `${path} exceeds the git command-count cap.`);
   }
-  const elapsed = Date.now() - session.startedAt;
-  if (elapsed > MAX_GIT_TOTAL_TIME_MS) {
-    fail('bounds_exceeded', path, `${path} exceeds the git wall-clock cap.`);
-  }
+  assertDeadline(session, path);
+}
+
+function listenStream(stream, event, handler, path) {
+  if (stream === undefined || stream === null) return;
+  invokeHandle(stream, 'on', [event, handler], path);
 }
 
 function runGit(session, args, path) {
   assertGitArgv(args, `${path}.args`);
   assertSessionBounds(session, path);
+  const budget = remainingMs(session);
+  if (budget <= 0) {
+    fail('bounds_exceeded', path, `${path} exceeds the git wall-clock cap.`);
+  }
   session.commands += 1;
   const argv = [GIT_EXECUTABLE, ...GIT_ISOLATION_FLAGS, ...args];
   assertGitArgv(argv, `${path}.argv`);
+  const spawnOptions = {
+    cwd: '/',
+    env: CLOSED_GIT_ENV,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  };
+  assertClosedEnv(spawnOptions.env, `${path}.env`);
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = session.spawn(GIT_EXECUTABLE, argv.slice(1), {
-        cwd: '/',
-        env: CLOSED_GIT_ENV,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
+      child = session.spawn(GIT_EXECUTABLE, argv.slice(1), spawnOptions);
     } catch (error) {
-      reject(new RunContractV1Error(
+      reject(contractError(
         'git_execution_failed', path, `${path} could not start a git observation.`,
       ));
       return;
     }
-    if (child === null || typeof child !== 'object') {
-      reject(new RunContractV1Error(
-        'git_execution_failed', path, `${path} could not start a git observation.`,
-      ));
+    try {
+      assertOwnedHandle(child, path);
+    } catch (error) {
+      reject(asContractError(error, path));
       return;
     }
-    assertClosedEnv(CLOSED_GIT_ENV, `${path}.env`);
     const stdoutChunks = [];
     const stderrChunks = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let exceeded = false;
     let settled = false;
+    let timer;
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (error) reject(error);
+      if (error) reject(asContractError(error, path));
       else resolve(result);
     };
     const exceed = () => {
       if (exceeded) return;
       exceeded = true;
-      try { child.kill('SIGKILL'); } catch { /* already exited */ }
-      finish(new RunContractV1Error(
+      try { invokeHandle(child, 'kill', ['SIGKILL'], path); } catch { /* already exited */ }
+      finish(contractError(
         'bounds_exceeded', path, `${path} exceeded a closed git output or time bound.`,
       ));
     };
-    const timer = setTimeout(exceed, MAX_GIT_TIME_MS);
+    timer = setTimeout(exceed, MATH_MIN(MAX_GIT_TIME_MS, budget));
     const onChunk = (target, getSize, setSize) => (chunk) => {
-      const next = getSize() + chunk.length;
-      setSize(next);
-      if (next > MAX_GIT_OUTPUT_BYTES) {
-        exceed();
-        return;
+      try {
+        const owned = ownedChunk(chunk, path);
+        const next = getSize() + owned.length;
+        setSize(next);
+        if (next > MAX_GIT_OUTPUT_BYTES) {
+          exceed();
+          return;
+        }
+        REFLECT_APPLY(ARRAY_PUSH, target, [owned]);
+      } catch (error) {
+        finish(asContractError(error, path));
       }
-      REFLECT_APPLY(ARRAY_PUSH, target, [chunk]);
     };
-    child.stdout?.on('data', onChunk(stdoutChunks, () => stdoutBytes, (value) => { stdoutBytes = value; }));
-    child.stderr?.on('data', onChunk(stderrChunks, () => stderrBytes, (value) => { stderrBytes = value; }));
-    child.once('error', () => {
-      finish(new RunContractV1Error(
-        'git_execution_failed', path, `${path} could not complete a git observation.`,
-      ));
-    });
-    child.once('close', (code, signal) => {
-      if (exceeded) return;
-      const stdout = BUFFER_CONCAT(stdoutChunks).toString('utf8');
-      const stderr = BUFFER_CONCAT(stderrChunks).toString('utf8');
-      if (signal !== null && signal !== undefined) {
-        finish(new RunContractV1Error(
+    try {
+      listenStream(
+        readHandleField(child, 'stdout', path),
+        'data',
+        onChunk(stdoutChunks, () => stdoutBytes, (value) => { stdoutBytes = value; }),
+        path,
+      );
+      listenStream(
+        readHandleField(child, 'stderr', path),
+        'data',
+        onChunk(stderrChunks, () => stderrBytes, (value) => { stderrBytes = value; }),
+        path,
+      );
+      invokeHandle(child, 'once', ['error', () => {
+        finish(contractError(
           'git_execution_failed', path, `${path} could not complete a git observation.`,
         ));
-        return;
-      }
-      finish(null, {
-        exit_code: typeof code === 'number' ? code : 1,
-        stdout,
-        stderr,
-      });
-    });
+      }], path);
+      invokeHandle(child, 'once', ['close', (code, signal) => {
+        if (exceeded) return;
+        try {
+          if (Date.now() >= session.deadlineAt) {
+            finish(contractError(
+              'bounds_exceeded', path, `${path} exceeds the git wall-clock cap.`,
+            ));
+            return;
+          }
+          const stdout = BUFFER_CONCAT(stdoutChunks).toString('utf8');
+          const stderr = BUFFER_CONCAT(stderrChunks).toString('utf8');
+          if (signal !== null && signal !== undefined) {
+            finish(contractError(
+              'git_execution_failed', path, `${path} could not complete a git observation.`,
+            ));
+            return;
+          }
+          finish(null, {
+            exit_code: typeof code === 'number' ? code : 1,
+            stdout,
+            stderr,
+          });
+        } catch (error) {
+          finish(asContractError(error, path));
+        }
+      }], path);
+    } catch (error) {
+      try { invokeHandle(child, 'kill', ['SIGKILL'], path); } catch { /* already exited */ }
+      finish(asContractError(error, path));
+    }
   });
 }
 
@@ -640,25 +1091,16 @@ async function observeBaseRef(session, flags, expectedBaseRef, expectedBaseSha, 
     fail('symbolic_ref_drift', `${path}.expected_base_ref`,
       `${path}.expected_base_ref must be a direct branch ref, not a symbolic ref.`);
   }
-  const peeled = await gitMaybe(
+  const direct = await gitMaybe(
     session,
-    [...flags, 'rev-parse', '--verify', '--end-of-options', `${expectedBaseRef}^{commit}`],
+    [...flags, 'rev-parse', '--verify', '--end-of-options', expectedBaseRef],
     `${path}.expected_base_ref`,
   );
-  if (peeled.exit_code !== 0) {
-    const unborn = await gitMaybe(
-      session,
-      [...flags, 'show-ref', '--verify', '--', expectedBaseRef],
-      `${path}.expected_base_ref`,
-    );
-    if (unborn.exit_code !== 0) {
-      fail('unborn_ref_denied', `${path}.expected_base_ref`,
-        `${path}.expected_base_ref does not name an existing commit.`);
-    }
-    fail('non_commit_object', `${path}.expected_base_ref`,
-      `${path}.expected_base_ref does not peel to a commit.`);
+  if (direct.exit_code !== 0) {
+    fail('unborn_ref_denied', `${path}.expected_base_ref`,
+      `${path}.expected_base_ref does not name an existing commit.`);
   }
-  const observedBaseSha = parseObservedSha(peeled.stdout, `${path}.expected_base_ref`);
+  const observedBaseSha = parseObservedSha(direct.stdout, `${path}.expected_base_ref`);
   const objectType = await gitLine(
     session,
     [...flags, 'cat-file', '-t', '--', observedBaseSha],
@@ -666,6 +1108,20 @@ async function observeBaseRef(session, flags, expectedBaseRef, expectedBaseSha, 
     PRIVATE_OBJECT_TYPE_PATTERN,
   );
   if (objectType !== 'commit') {
+    fail('non_commit_object', `${path}.expected_base_ref`,
+      `${path}.expected_base_ref is not a commit object.`);
+  }
+  const peeled = await gitMaybe(
+    session,
+    [...flags, 'rev-parse', '--verify', '--end-of-options', `${expectedBaseRef}^{commit}`],
+    `${path}.expected_base_ref`,
+  );
+  if (peeled.exit_code !== 0) {
+    fail('non_commit_object', `${path}.expected_base_ref`,
+      `${path}.expected_base_ref does not peel to a commit.`);
+  }
+  const peeledSha = parseObservedSha(peeled.stdout, `${path}.expected_base_ref`);
+  if (peeledSha !== observedBaseSha) {
     fail('non_commit_object', `${path}.expected_base_ref`,
       `${path}.expected_base_ref is not a commit object.`);
   }
@@ -775,7 +1231,8 @@ async function observeAncestry(session, flags, expectedBaseSha, observedBaseSha,
   };
 }
 
-function durationOf(session) {
+function durationOf(session, path) {
+  assertDeadline(session, path);
   return MATH_MAX(0, MATH_FLOOR(Date.now() - session.startedAt));
 }
 
@@ -824,7 +1281,9 @@ export async function verifyGitIdentityV1(input, options) {
   const session = createSession(parsedOptions.spawn);
   const repositoryPath = request.repository.path;
   const gitDir = await assertLocalRepository(session, repositoryPath, pathLabel);
+  await assertSafeRepositoryLayout(repositoryPath, gitDir, pathLabel);
   const flags = repoFlags(repositoryPath, gitDir);
+  await assertNoEffectiveProvenanceConfig(session, flags, pathLabel);
   await assertNoReplaceOrGrafts(session, flags, pathLabel);
   const worktreeHeadRef = await observeWorktreeHeadRef(session, flags, pathLabel);
   const base = await observeBaseRef(
@@ -836,7 +1295,7 @@ export async function verifyGitIdentityV1(input, options) {
   const ancestry = await observeAncestry(
     session, flags, request.repository.base_sha, base.sha, head.sha, pathLabel,
   );
-  const durationMs = durationOf(session);
+  const durationMs = durationOf(session, pathLabel);
   const observation = freezeRecord(GIT_IDENTITY_OBSERVATION_ALLOWED_KEYS, {
     repository_path: repositoryPath,
     git_dir: gitDir,
@@ -861,13 +1320,16 @@ export async function verifyGitIdentityV1(input, options) {
   }
   const discrepancies = [];
   const pushDiscrepancy = (id, factIds) => {
-    if (request.sequence + discrepancies.length > MAX_SEQUENCE) {
-      fail('out_of_range', `${pathLabel}.discrepancies`,
-        `${pathLabel}.discrepancies exceed the injected sequence bound.`);
+    const sequence = request.sequence + discrepancies.length;
+    if (sequence > MAX_SEQUENCE) return;
+    try {
+      REFLECT_APPLY(ARRAY_PUSH, discrepancies, [
+        emitDiscrepancy(id, request, factIds, sequence),
+      ]);
+    } catch (error) {
+      if (error instanceof RunContractV1Error && error.code === 'out_of_range') return;
+      throw error;
     }
-    REFLECT_APPLY(ARRAY_PUSH, discrepancies, [
-      emitDiscrepancy(id, request, factIds, request.sequence + discrepancies.length),
-    ]);
   };
   if (ancestry.stale_base) pushDiscrepancy('stale-base', ['git-identity']);
   if (ancestry.rewritten_base) pushDiscrepancy('rewritten-history', ['git-identity', 'head-sha']);
@@ -891,7 +1353,7 @@ export async function verifyGitIdentityV1(input, options) {
       durationMs,
     ),
   ]);
-  return freezeRecord(GIT_IDENTITY_RESULT_ALLOWED_KEYS, {
+  const result = freezeRecord(GIT_IDENTITY_RESULT_ALLOWED_KEYS, {
     schema: GIT_IDENTITY_SCHEMA_ID,
     version: GIT_IDENTITY_VERSION,
     status,
@@ -899,6 +1361,11 @@ export async function verifyGitIdentityV1(input, options) {
     discrepancies: capturedFreeze(discrepancies),
     observation,
   });
+  if (status === 'verified') {
+    await assertNoEffectiveProvenanceConfig(session, flags, pathLabel);
+  }
+  assertDeadline(session, pathLabel);
+  return result;
 }
 
 OBJECT_FREEZE(GIT_IDENTITY_ERROR_CODES);
