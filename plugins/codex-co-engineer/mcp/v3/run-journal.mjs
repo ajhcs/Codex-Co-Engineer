@@ -9,11 +9,13 @@
 // sharing it as the journal root fails closed, because the accepted P24 flat
 // root rejects foreign entries.
 //
-// R25B adds stamp v2 and a closed aggregate resolution binding: an exact
-// validated R24A marker/claim/anchor/coordination/resolved-plan identity
-// that is already resolution_ready. Legacy create/open still write and
-// verify stamp v1 against an accepted P24 record. There is no migration,
-// root adoption, empty-root inference, or legacy-to-aggregate fallback.
+// Aggregate create/open is a distinct entrypoint. It binds the same P25
+// journal root/run identity to an exact validated R24A aggregate anchor that
+// is already resolution_ready, with its marker/claim/anchor/coordination/
+// resolved-plan identity durably verified. It writes stamp v2 and never
+// claims a P24 record. Legacy open never claims aggregate state; aggregate
+// open never claims legacy state. There is no migration, cross-open, root
+// adoption, empty-root inference, or legacy-to-aggregate fallback.
 //
 // Storage layout (all paths derived only from validated identifiers):
 //   <root>/runs/<run_id>/journal.jsonl   append-only bounded canonical JSONL
@@ -1613,16 +1615,26 @@ function withRunChain(dirToken, operation) {
   return current;
 }
 
+function bindingDigestOf(binding, journalMode) {
+  return journalMode === JOURNAL_MODE_AGGREGATE ? binding.binding_digest : binding.canonical_digest;
+}
+
 async function buildHandle(parsed, binding, mode) {
   const { root, store, runId } = parsed;
-  if (binding.run_id !== runId || typeof binding.canonical_digest !== 'string'
-    || !capturedTest(SHA256_DIGEST_PATTERN, binding.canonical_digest)) {
+  const journalMode = parsed.journalMode ?? JOURNAL_MODE_LEGACY;
+  const digest = bindingDigestOf(binding, journalMode);
+  if (binding.run_id !== runId || typeof digest !== 'string'
+    || !capturedTest(SHA256_DIGEST_PATTERN, digest)) {
     failJournal('run_journal_identity_mismatch', 'run_id',
       'The bound record must carry the exact requested run identity.');
   }
   const rootToken = await openDirectoryHandle(root, 'root');
   try {
-    await verifyRootSeparation(store, rootToken);
+    if (journalMode === JOURNAL_MODE_AGGREGATE) {
+      await verifyAggregateRootSeparation(parsed.anchor, rootToken);
+    } else {
+      await verifyRootSeparation(store, rootToken);
+    }
     const rootNames = await enumerateDirectory(rootToken, MAX_RUN_JOURNAL_ROOT_ENTRIES, 'root');
     if (!rootNames.includes('runs')) {
       if (mode !== 'create') {
@@ -1666,24 +1678,32 @@ async function buildHandle(parsed, binding, mode) {
             'The run directory name must equal the bound run id.');
         }
         if (mode === 'create') {
-          await verifyCreationStamp(dirToken, binding).then(() => {
+          await verifyCreationStamp(dirToken, binding, journalMode).then(() => {
             failJournal('run_journal_already_exists', 'run_id',
               'A run journal already exists for that run identity.');
           }, (error) => {
+            if (error instanceof RunContractV1Error
+              && error.code === 'run_journal_identity_conflict') {
+              throw error;
+            }
             if (!(error instanceof RunContractV1Error
               && error.code === 'run_journal_dir_rebound')) throw error;
           });
-          await writeCreationStamp(dirToken, binding, RANDOM_BYTES(16).toString('hex'));
+          await writeCreationStamp(
+            dirToken, binding, RANDOM_BYTES(16).toString('hex'), journalMode,
+          );
         } else {
-          await verifyCreationStamp(dirToken, binding);
+          await verifyCreationStamp(dirToken, binding, journalMode);
         }
-        const fingerprint = runFingerprint(binding.run_id, binding.canonical_digest);
+        const fingerprint = runFingerprint(binding.run_id, digest);
         return assembleHandle({
           root,
           store,
+          anchor: parsed.anchor,
           runId,
           binding,
           fingerprint,
+          journalMode,
           rootToken: capturedFreeze({ path: rootToken.path, dev: rootToken.dev, ino: rootToken.ino }),
           runsToken: capturedFreeze({ path: runsToken.path, dev: runsToken.dev, ino: runsToken.ino }),
           dirToken: capturedFreeze({ path: dirToken.path, dev: dirToken.dev, ino: dirToken.ino }),
@@ -1719,7 +1739,8 @@ async function bindRecord(store, runId) {
 }
 
 function assembleHandle(context) {
-  const { store, runId, binding, fingerprint, rootToken, dirToken } = context;
+  const { store, anchor, runId, binding, fingerprint, rootToken, dirToken } = context;
+  const journalMode = context.journalMode ?? JOURNAL_MODE_LEGACY;
   // Snapshot cache for the serialized operation chain. Reads always fully
   // re-audit; a locked mutation may reuse the snapshot only while the journal
   // bytes are exactly the audited ones, so any external modification forces a
@@ -1727,6 +1748,14 @@ function assembleHandle(context) {
   let snapshot = null;
 
   async function rebind() {
+    if (journalMode === JOURNAL_MODE_AGGREGATE) {
+      const fresh = await bindAggregateResolution(anchor, runId);
+      if (fresh.binding_digest !== binding.binding_digest) {
+        failJournal('run_journal_identity_conflict', 'run_id',
+          'The aggregate resolution identity does not match this journal binding.');
+      }
+      return fresh;
+    }
     const fresh = await bindRecord(store, runId);
     if (fresh.canonical_digest !== binding.canonical_digest) {
       failJournal('run_journal_identity_mismatch', 'run_id',
@@ -1742,10 +1771,14 @@ function assembleHandle(context) {
       let dirOpened = null;
       try {
         dirOpened = await reopenAndVerify(dirToken, 'directory');
-        await verifyCreationStamp(dirOpened, binding);
+        await verifyCreationStamp(dirOpened, binding, journalMode);
         let lockToken = null;
         try {
           if (mutating) lockToken = await acquireRunLock(dirOpened);
+          if (journalMode === JOURNAL_MODE_AGGREGATE) {
+            await rebind();
+            await verifyCreationStamp(dirOpened, binding, journalMode);
+          }
           const result = await fn(dirOpened, lockToken);
           const rootAfter = await reopenAndVerify(rootToken, 'root');
           await rootAfter.handle.close().catch(() => {});
@@ -1760,12 +1793,24 @@ function assembleHandle(context) {
     });
   }
 
+  const identityFields = journalMode === JOURNAL_MODE_AGGREGATE
+    ? {
+      root: rootToken.path,
+      directory: dirToken.path,
+      run_id: runId,
+      aggregate_binding_digest: binding.binding_digest,
+      run_fingerprint: fingerprint,
+    }
+    : {
+      root: rootToken.path,
+      directory: dirToken.path,
+      run_id: runId,
+      record_canonical_digest: binding.canonical_digest,
+      run_fingerprint: fingerprint,
+    };
+
   return capturedFreeze({
-    root: rootToken.path,
-    directory: dirToken.path,
-    run_id: runId,
-    record_canonical_digest: binding.canonical_digest,
-    run_fingerprint: fingerprint,
+    ...identityFields,
 
     async currentState() {
       return operate(true, async (dirOpened) => {
@@ -2161,6 +2206,22 @@ export async function createRunJournal(options) {
 export async function openRunJournal(options) {
   const parsed = parseJournalOptions(options);
   const binding = await bindRecord(parsed.store, parsed.runId);
+  const handle = await buildHandle(parsed, binding, 'open');
+  await handle.currentState();
+  return handle;
+}
+
+export async function createAggregateRunJournal(options) {
+  const parsed = parseAggregateJournalOptions(options);
+  const binding = await bindAggregateResolution(parsed.anchor, parsed.runId);
+  const handle = await buildHandle(parsed, binding, 'create');
+  await handle.currentState();
+  return handle;
+}
+
+export async function openAggregateRunJournal(options) {
+  const parsed = parseAggregateJournalOptions(options);
+  const binding = await bindAggregateResolution(parsed.anchor, parsed.runId);
   const handle = await buildHandle(parsed, binding, 'open');
   await handle.currentState();
   return handle;
