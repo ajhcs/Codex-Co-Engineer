@@ -397,6 +397,65 @@ test('failures are typed and content-free', () => {
   assert.equal(urlError.message.includes('evil.example'), false);
 });
 
+test('missing policy under a reviewer-created 0755 directory is immutable default deny', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'r1-p16a-policy-0755-'));
+  const ownerConfigDir = path.join(root, 'owner-config');
+  const policyDir = path.join(ownerConfigDir, 'codex-co-engineer');
+  try {
+    await mkdir(policyDir, { recursive: true });
+    await chmod(ownerConfigDir, 0o755);
+    await chmod(policyDir, 0o755);
+    const missing = await loadOwnerVerificationPolicyV1({ ownerConfigDir });
+    assert.equal(missing.source.present, false);
+    assert.equal(missing.policy.commands.length, 0);
+    assert.equal(missing.policy.schema, VERIFICATION_POLICY_SCHEMA_ID);
+    assert.equal(missing.policy.version, VERIFICATION_POLICY_VERSION);
+    assert.equal(Object.isFrozen(missing), true);
+    assert.equal(Object.isFrozen(missing.policy), true);
+    assert.equal(Object.isFrozen(missing.policy.commands), true);
+    assert.equal(
+      missing.digest.digest,
+      verificationPolicyDigestV1({
+        schema: VERIFICATION_POLICY_SCHEMA_ID,
+        version: VERIFICATION_POLICY_VERSION,
+        commands: [],
+      }).digest,
+    );
+    await chmod(policyDir, 0o775);
+    const groupWritableMissing = await loadOwnerVerificationPolicyV1({ ownerConfigDir });
+    assert.equal(groupWritableMissing.source.present, false);
+    assert.equal(groupWritableMissing.policy.commands.length, 0);
+    assert.equal(groupWritableMissing.digest.digest, missing.digest.digest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an existing unsafe policy file still fails closed under ordinary 0755 directories', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'r1-p16a-policy-unsafe-'));
+  const ownerConfigDir = path.join(root, 'owner-config');
+  const policyDir = path.join(ownerConfigDir, 'codex-co-engineer');
+  const file = path.join(policyDir, 'verification-policy.json');
+  try {
+    await mkdir(policyDir, { recursive: true });
+    await writeFile(file, JSON.stringify(validPolicy({
+      commands: [validCommand({ executable: '/bin/sh' })],
+    })));
+    await chmod(ownerConfigDir, 0o755);
+    await chmod(policyDir, 0o755);
+    await chmod(file, 0o666);
+    await assert.rejects(
+      () => loadOwnerVerificationPolicyV1({ ownerConfigDir }),
+      (error) => error instanceof RunContractV1Error
+        && error.code === 'policy_catalog_not_owner_controlled'
+        && error.message.includes('/bin/sh') === false
+        && error.message.includes(file) === false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('the owner loader round-trips a catalog and treats absence as default deny', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'r1-p16a-policy-'));
   const ownerConfigDir = path.join(root, 'owner-config');

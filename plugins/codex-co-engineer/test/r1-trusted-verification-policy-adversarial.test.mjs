@@ -11,6 +11,7 @@ import {
   parseVerificationPolicyV1,
   rejectUntrustedExecutableContentV1,
   verificationPolicyDigestV1,
+  verificationPolicyRoots,
 } from '../mcp/v3/trusted-verification-policy.mjs';
 import {
   countingProxy,
@@ -250,6 +251,91 @@ test('content-free errors never echo attacker keys, paths, URLs, or native stack
   assert.equal(error.message.includes('/etc/passwd'), false);
   assert.equal(error.message.includes('https://steal.test'), false);
   assert.equal(error.message.includes('at parse'), false);
+});
+
+test('loader options reject null, primitive, function, exotic, proxy, and revoked objects', () => {
+  const secret = 'sk-options-secret-/etc/passwd';
+  for (const value of [null, 1, 0, true, false, secret]) {
+    const error = errorOf(() => verificationPolicyRoots(value));
+    assert.equal(error.code, 'policy_options_denied', String(value));
+    assert.equal(error.message.includes(secret), false);
+    assert.equal(error.message.includes('/etc/passwd'), false);
+  }
+
+  const fnError = errorOf(() => verificationPolicyRoots(function loaderOptions() {
+    throw new Error(secret);
+  }));
+  assert.equal(fnError.code, 'policy_options_denied');
+  assert.equal(fnError.message.includes(secret), false);
+
+  const date = new Date('2026-08-23T00:00:00.000Z');
+  date.ownerConfigDir = '/tmp/attacker-date-config';
+  const dateError = errorOf(() => verificationPolicyRoots(date));
+  assert.equal(dateError.code, 'exotic_prototype_denied');
+  assert.equal(dateError.message.includes('attacker-date-config'), false);
+  assert.equal(dateError.message.includes('2026'), false);
+
+  const map = new Map([['ownerConfigDir', '/tmp/attacker-map-config']]);
+  const mapError = errorOf(() => verificationPolicyRoots(map));
+  assert.equal(mapError.code, 'exotic_prototype_denied');
+  assert.equal(mapError.message.includes('attacker-map-config'), false);
+
+  class ExoticOptions {}
+  const exotic = new ExoticOptions();
+  exotic.ownerConfigDir = '/tmp/attacker-class-config';
+  assert.equal(errorOf(() => verificationPolicyRoots(exotic)).code, 'exotic_prototype_denied');
+
+  const nullProto = Object.create(null);
+  nullProto.ownerConfigDir = '/tmp/owner-config';
+  const roots = verificationPolicyRoots(nullProto);
+  assert.equal(roots.scope, 'owner');
+  assert.equal(roots.file.endsWith('verification-policy.json'), true);
+  assert.equal(Object.isFrozen(roots), true);
+
+  const { proxy, counts } = countingProxy({ ownerConfigDir: '/tmp/owner-config' });
+  assert.equal(errorOf(() => verificationPolicyRoots(proxy)).code, 'proxy_denied');
+  assert.equal(trapTotal(counts), 0);
+
+  const { proxy: revokedProxy, revoke } = Proxy.revocable({ ownerConfigDir: '/tmp/owner-config' }, {
+    get() { throw new Error(`revoked get ${secret}`); },
+    ownKeys() { throw new Error('revoked ownKeys'); },
+    getOwnPropertyDescriptor() { throw new Error('revoked descriptor'); },
+  });
+  revoke();
+  assert.equal(utilTypes.isProxy(revokedProxy), true);
+  const revokedError = errorOf(() => verificationPolicyRoots(revokedProxy));
+  assert.equal(revokedError.code, 'proxy_denied');
+  assert.equal(revokedError.message.includes(secret), false);
+  assert.equal(revokedError.message.includes('TypeError'), false);
+});
+
+test('own env accessors are rejected without invocation or process-env fallback', () => {
+  let reads = 0;
+  const options = {};
+  Object.defineProperty(options, 'env', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      reads += 1;
+      throw new Error('env getter bomb /tmp/attacker-home https://steal.test');
+    },
+  });
+  const error = errorOf(() => verificationPolicyRoots(options));
+  assert.equal(error.code, 'accessor_property_denied');
+  assert.equal(reads, 0);
+  assert.equal(error.message.includes('attacker-home'), false);
+  assert.equal(error.message.includes('https://steal.test'), false);
+  assert.equal(error.message.includes('getter bomb'), false);
+
+  const proxyEnv = {};
+  const { proxy, counts } = countingProxy({ HOME: '/tmp/attacker-home' });
+  Object.defineProperty(proxyEnv, 'env', {
+    enumerable: true,
+    configurable: true,
+    value: proxy,
+  });
+  assert.equal(errorOf(() => verificationPolicyRoots(proxyEnv)).code, 'proxy_denied');
+  assert.equal(trapTotal(counts), 0);
 });
 
 test('rejectUntrustedExecutableContentV1 walks nested profile and provider shapes', () => {

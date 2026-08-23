@@ -78,6 +78,7 @@ import {
   fail,
   hasOwn,
   optOwn,
+  ownDataValue,
 } from './selection-json.mjs';
 
 export const VERIFICATION_POLICY_SCHEMA_ID = 'codex-co-engineer.verification-policy.v1';
@@ -289,6 +290,7 @@ const STRING_REPLACE = Function.prototype.call.bind(String.prototype.replace);
 const ARRAY_PUSH = Array.prototype.push;
 const ARRAY_SORT = Function.prototype.call.bind(Array.prototype.sort);
 const ARRAY_PROTOTYPE = Array.prototype;
+const OBJECT_PROTOTYPE = Object.prototype;
 const SET_CTOR = Set;
 const SET_ADD = SET_CTOR.prototype.add;
 const SET_HAS = SET_CTOR.prototype.has;
@@ -949,8 +951,33 @@ function requireNormalizedAbsolute(value, path) {
   return value;
 }
 
-function readEnvironment(env, path) {
-  const source = env === undefined ? process.env : env;
+function assertStandardDataObject(value, path) {
+  assertNotProxy(value, path);
+  if (value === null || typeof value !== 'object' || capturedIsArray(value)) {
+    deny('policy_options_denied', path);
+  }
+  let prototype;
+  try {
+    prototype = capturedGetPrototypeOf(value);
+  } catch {
+    deny('exotic_prototype_denied', path);
+  }
+  if (prototype !== OBJECT_PROTOTYPE && prototype !== null) {
+    deny('exotic_prototype_denied', path);
+  }
+}
+
+function assertClosedOwnKeys(value, allowed, path) {
+  const keys = ownKeysOrDeny(value, path);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (typeof key === 'symbol') deny('symbol_key_denied', path);
+    if (!capturedIncludes(allowed, key)) deny('unknown_key', path);
+  }
+}
+
+function readProcessEnvironment(path) {
+  const source = process.env;
   assertNotProxy(source, path);
   if (typeof source !== 'object' || source === null || capturedIsArray(source)) {
     deny('policy_options_denied', path);
@@ -971,6 +998,20 @@ function readEnvironment(env, path) {
   return { xdgConfigHome: read('XDG_CONFIG_HOME'), home: read('HOME') };
 }
 
+function readEnvironment(env, path) {
+  if (env === undefined) return readProcessEnvironment(path);
+  assertStandardDataObject(env, path);
+  assertClosedOwnKeys(env, LOADER_ENV_KEYS, path);
+  const read = (key) => {
+    if (!hasOwn(env, key)) return undefined;
+    const value = ownDataValue(env, key, `${path}.${key}`);
+    assertNotProxy(value, `${path}.${key}`);
+    if (typeof value !== 'string') deny('policy_options_denied', `${path}.${key}`);
+    return value;
+  };
+  return { xdgConfigHome: read('XDG_CONFIG_HOME'), home: read('HOME') };
+}
+
 function defaultOwnerConfigDir(environment) {
   if (typeof environment.xdgConfigHome === 'string' && environment.xdgConfigHome.length > 0
     && PATH_IS_ABSOLUTE(environment.xdgConfigHome)
@@ -986,20 +1027,15 @@ function defaultOwnerConfigDir(environment) {
 }
 
 export function verificationPolicyRoots(options = {}) {
-  assertNotProxy(options, 'options');
-  if (typeof options !== 'object' || options === null || capturedIsArray(options)) {
-    deny('policy_options_denied', 'options');
-  }
-  const optionKeys = ownKeysOrDeny(options, 'options');
-  for (let index = 0; index < optionKeys.length; index += 1) {
-    const key = optionKeys[index];
-    if (typeof key === 'symbol') deny('symbol_key_denied', 'options');
-    if (!capturedIncludes(LOADER_OPTION_KEYS, key)) deny('unknown_key', 'options');
-  }
+  assertStandardDataObject(options, 'options');
+  assertClosedOwnKeys(options, LOADER_OPTION_KEYS, 'options');
   const ownerConfigDir = hasOwn(options, 'ownerConfigDir')
-    ? requireNormalizedAbsolute(optOwn(options, 'ownerConfigDir'), 'options.ownerConfigDir')
+    ? requireNormalizedAbsolute(
+      ownDataValue(options, 'ownerConfigDir', 'options.ownerConfigDir'),
+      'options.ownerConfigDir',
+    )
     : defaultOwnerConfigDir(readEnvironment(
-      hasOwn(options, 'env') ? optOwn(options, 'env') : undefined,
+      hasOwn(options, 'env') ? ownDataValue(options, 'env', 'options.env') : undefined,
       'options.env',
     ));
   const dir = PATH_JOIN(ownerConfigDir, OWNER_POLICY_DIRNAME);
@@ -1134,7 +1170,6 @@ export async function loadOwnerVerificationPolicyV1(options = {}) {
   });
   if (dirEntry !== undefined) {
     if (dirEntry.isSymbolicLink() || !dirEntry.isDirectory()) deny('policy_catalog_not_regular', 'policy');
-    requireOwnerControl(dirEntry, 'policy');
   }
   const catalog = await readOwnerPolicyFile(roots.file);
   if (dirEntry !== undefined) {
@@ -1142,6 +1177,10 @@ export async function loadOwnerVerificationPolicyV1(options = {}) {
       deny('policy_catalog_changed_during_read', 'policy');
     });
     if (!sameEntry(dirEntry, afterDir)) deny('policy_catalog_changed_during_read', 'policy');
+  }
+  if (catalog.present) {
+    if (dirEntry === undefined) deny('policy_catalog_changed_during_read', 'policy');
+    requireOwnerControl(dirEntry, 'policy');
   }
   const policy = catalog.present ? parsePolicyText(catalog.text) : emptyPolicy();
   const digest = digestOf(VERIFICATION_POLICY_DIGEST_LABEL, policy);
