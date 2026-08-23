@@ -115,6 +115,50 @@
   producers declare references, and only a later storage authority may bind
   them to bytes. Coverage lives in `test/r1-artifact-ref.test.mjs` and
   `test/r1-artifact-ref-adversarial.test.mjs`.
+- **Grok ACP ProviderDriverV1 adapter (P18).** Additive `grok-acp-driver`
+  binds provider slot `grok` onto the accepted P17 preflight/launch/
+  reconcile/cancel contract and the P05 13-field capability record
+  (`confirmed_launch`, `live_session_reply`, local managed worktree at
+  `run_base_sha`, `never_replay`, no merge/PR authority). An injected
+  bounded ACP transport keeps tests deterministic: launch is `dispatched`
+  only after an authoritative acknowledgement; any exception, timeout,
+  loss, or unusable receipt after spawn/dispatch intent is returned as
+  `dispatch_uncertain` and is never retried, replayed, or
+  fallback-substituted. Duplicate launch, digest-only launch, direct
+  mode, merge/PR, and cross-provider/model drift fail closed. Bounded
+  live progress, detailed events, same-session reply identity,
+  cancellation confirmation, and restart reattach are supported exactly
+  where Grok ACP supports them, with stale session/run/child/model/
+  workspace identities failing closed. Event pages, text, counts,
+  cursors, timings, and diagnostics are capped; envelope/prompt bytes
+  stay evidence and do not enter driver results or transport
+  preflight/observe/cancel/reattach requests. Process-local P17 lane
+  risk may remain; the module does not claim durable P19/P21 state,
+  supervisor cutover, or live Grok ACP qualification. Coverage lives in
+  `r1-grok-acp-driver` and `r1-grok-acp-driver-adversarial` tests.
+- **Closed P20 DSH ACPX provider driver for Muse Spark 1.2 Contributor and Ox
+  Alpha.** Additive `DshApxDriverV1` hard-binds provider `dsh` plus exactly the
+  two allowed DSH models and implements the accepted P17 preflight/launch/
+  reconcile/cancel lifecycle against an injected bounded ACPX one-shot
+  transport port, inheriting every envelope, capability, transition, and denial
+  rule from the accepted contract with no parallel schema. ACPX provides no
+  authoritative prompt-sent acknowledgement: after spawn intent the posture
+  stays `dispatch_uncertain`, post-intent exceptions and loss are never
+  replayed, retried, or fallback-substituted, and only provably pre-spawn
+  failures may report `not_sent` under a two-attempt lane budget. Same-session
+  reply is unsupported: unresolved attention surfaces honestly and no
+  replacement prompt or session is started. Live progress, detailed events,
+  cancellation confirmation, and restart recovery read recorded ACPX evidence
+  through bounded cursor-monotonic pages; exact model/config/credential
+  identity and task/session correlation fail closed on drift; forged receipts
+  fail closed while genuine loss degrades to uncertainty. Events, records,
+  cursors, lanes, attempts, operations, clock readings, and diagnostics are
+  capped, and detail telemetry is content-free by construction. The module
+  claims no real-transport qualification, durable P19/P21 store, supervisor
+  cutover, or merge/PR authority; the exact port surface for later real DSH
+  Muse/Ox lifecycle conformance is recorded in
+  `docs/dsh-acpx-driver.md`. Coverage lives in `r1-dsh-acpx-driver` and
+  `r1-dsh-acpx-driver-adversarial` tests.
 - **Closed P17 provider-driver envelope and capability contract.** Additive
   `ProviderDriverV1` owns the preflight/launch/reconcile/cancel lifecycle
   plus typed results, exact ChildEnvelopeV1 launch proof (text bytes and

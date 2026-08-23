@@ -18,10 +18,21 @@ fallback or replay, and Codex-only final acceptance.
 The P17 `ProviderDriverV1` envelope/capability contract is in-tree as a
 pure contract and provider-agnostic conformance harness. It validates
 preflight/launch/reconcile/cancel requests and results against the
-accepted P05 13-field capability bridge. It does not implement Grok,
-Cursor Local, DSH, or Cursor Cloud transports, registry cutover,
-scheduler, or durable store; those remain P18/P20/P19/P21 and later
-run-runtime work.
+accepted P05 13-field capability bridge.
+
+The P18 Grok ACP adapter is in-tree as a Grok-specific binding of that
+contract onto an injected bounded ACP transport. It hard-binds provider
+`grok`, the exact selected model, exact ChildEnvelopeV1 text+digest, local
+managed-worktree/run-base semantics, and no merge/PR authority. Launch
+confirms only after an authoritative ACP acknowledgement; post-spawn
+loss is `dispatch_uncertain` and is never replayed. The P20 DSH adapter
+(`DshApxDriverV1`) drives the contract over an injected bounded ACPX
+one-shot transport port for Muse Spark 1.2 Contributor and Ox Alpha,
+with honest post-spawn uncertainty, unsupported same-session reply,
+bounded recorded-evidence reconcile/restart/cancel behavior, and
+fail-closed identity/correlation drift denials. Neither adapter's
+deterministic transport port substitutes for the remaining real
+lifecycle routes documented in `docs/dsh-acpx-driver.md`.
 
 The P11 local provider result sink is in-tree as an additive
 provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
@@ -35,9 +46,11 @@ runtime-changed: P11 fixtures `chmod 0700` after creating their own
 roots and do not include optional P08 umask test-fixture
 determinization.
 
-This worktree does not implement the run runtime, candidate composition,
-or `AttentionBatchV1`. Gate A remains the functional release authority;
-Gate B context-efficiency and Gate C credit economics stay advisory.
+Cursor Local and Cursor Cloud adapters, registry cutover, scheduler,
+durable store, P12 evidence bundles, cloud-worker sinks, cleanup, run
+runtime, and `AttentionBatchV1` remain later work. Gate A remains the
+functional release authority; Gate B context-efficiency and Gate C
+credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
