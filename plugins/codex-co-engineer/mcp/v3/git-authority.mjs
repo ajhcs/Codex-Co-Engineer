@@ -3,14 +3,24 @@
 // `gate_a_no_protected_ref_mutation`).
 //
 // Additive v3 static law: protected/default refs, the allowed task-branch
-// namespace, credential-free repository/ref identity, and tri-class
-// classification. No Git mutation, no P29 credential/remote I/O, no P30
-// audit. Policy plus detection is not containment. Receipts never echo
-// repository paths, URLs, credentials, provider text, or hostile refs.
+// namespace, credential-free repository/ref identity, tri-class
+// classification, and operation authority. External agents never merge,
+// rebase, push, create PRs, mutate protected/default refs, create
+// tags/releases, or obtain credential/remote mutation authority. No Git
+// mutation, no P29 credential/remote I/O, no P30 audit. Policy plus
+// detection is not containment. Receipts never echo repository paths,
+// URLs, credentials, provider text, or hostile refs.
 
 import { Buffer as NodeBuffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 
-import { capturedFreeze, capturedTest } from './grammar.mjs';
+import {
+  CAPABILITY_RECORD_ALLOWED_KEYS,
+  CREATE_PR_POSTURES,
+  MERGE_AUTHORITIES,
+  PROVIDER_CAPABILITIES_BRIDGE_SCHEMA_ID,
+} from './capability-bridge.mjs';
+import { capturedFreeze, capturedIncludes, capturedTest, isKnownProvider } from './grammar.mjs';
 import { canonicalJsonStringify } from './identity.mjs';
 import {
   RunContractV1Error,
@@ -38,6 +48,18 @@ export const GIT_AUTHORITY_VERSION = 1;
 export const REF_CLASS_VALUES = capturedFreeze([
   'platform_run_owned', 'unclassified', 'user_protected', 'worker_lane',
 ]);
+export const ACTOR_VALUES = capturedFreeze(['codex', 'platform', 'worker']);
+export const AUTHORITY_VERDICTS = capturedFreeze(['allowed', 'denied']);
+export const ALLOWED_OPERATIONS = capturedFreeze([
+  'commit_on_lane_branch', 'compose_candidate_non_authoritative',
+  'create_lane_branch', 'read_only_inspect',
+]);
+export const DENIED_OPERATIONS = capturedFreeze([
+  'create_pr', 'credential_helper', 'delete_ref', 'fetch', 'force_push',
+  'merge', 'merge_pr', 'protected_ref_update', 'pull', 'push', 'rebase',
+  'release_create', 'remote_mutate', 'tag_create', 'tag_delete',
+]);
+export const GIT_OPERATIONS = capturedFreeze([...ALLOWED_OPERATIONS, ...DENIED_OPERATIONS]);
 export const MAX_AUTHORITY_OBJECT_KEYS = 32;
 export const MAX_AUTHORITY_KEY_BYTES = 128;
 export const MAX_REF_BYTES = 200;
@@ -81,6 +103,24 @@ export const REF_REQUEST_ALLOWED_KEYS = capturedFreeze([
 export const BRANCH_REQUEST_ALLOWED_KEYS = capturedFreeze([
   'assignment_id', 'manifest_digest_hex', 'run_id',
 ]);
+export const HISTORY_ALLOWED_KEYS = capturedFreeze(['parent_counts']);
+export const POSTURE_ALLOWED_KEYS = capturedFreeze([...CAPABILITY_RECORD_ALLOWED_KEYS, 'schema']);
+export const OPERATION_REQUEST_ALLOWED_KEYS = capturedFreeze([
+  'actor', 'capability', 'default_branch', 'history', 'identity',
+  'init_default_branch', 'manifest_digest_hex', 'operation',
+  'origin_head_branch', 'ref', 'schema', 'version',
+]);
+export const OPERATION_REQUEST_REQUIRED_KEYS = capturedFreeze([
+  'actor', 'identity', 'operation', 'schema', 'version',
+]);
+export const EVIDENCE_CONTEXT_ALLOWED_KEYS = capturedFreeze([
+  'discrepancy_id', 'fact_id', 'sequence',
+]);
+export const RECEIPT_KEYS = capturedFreeze([
+  'actor', 'assignment_id', 'base_sha', 'code', 'default_branch_target',
+  'message', 'operation', 'path', 'ref_class', 'run_id', 'schema',
+  'verdict', 'version',
+]);
 
 export const GIT_AUTHORITY_ERROR_CODES = capturedFreeze([
   'accessor_property_denied', 'aliased_reference_denied',
@@ -96,11 +136,39 @@ export const GIT_AUTHORITY_ERROR_CODES = capturedFreeze([
 
 const DEFINE = Object.defineProperty;
 const OBJECT_IS = Object.is;
+const IS_INT = Number.isSafeInteger;
 const STRING = String;
 const BYTE_LENGTH = NodeBuffer.byteLength.bind(NodeBuffer);
 const IS_ARRAY = Array.isArray;
 const OWN_KEYS = Reflect.ownKeys;
 const SET_CTOR = Set;
+const HASH = createHash;
+const HASH_DIGEST = Object.getPrototypeOf(HASH('sha256')).digest;
+const HASH_UPDATE = Object.getPrototypeOf(HASH('sha256')).update;
+
+const DENIED_OPERATION_CODES = capturedFreeze({
+  create_pr: 'merge_authority_denied',
+  credential_helper: 'credential_content_denied',
+  delete_ref: 'protected_ref_write_denied',
+  fetch: 'push_authority_denied',
+  force_push: 'push_authority_denied',
+  merge: 'merge_authority_denied',
+  merge_pr: 'merge_authority_denied',
+  protected_ref_update: 'protected_ref_write_denied',
+  pull: 'push_authority_denied',
+  push: 'push_authority_denied',
+  rebase: 'merge_authority_denied',
+  release_create: 'protected_ref_write_denied',
+  remote_mutate: 'push_authority_denied',
+  tag_create: 'protected_ref_write_denied',
+  tag_delete: 'protected_ref_write_denied',
+});
+const ACTOR_OPERATIONS = capturedFreeze({
+  worker: capturedFreeze(['commit_on_lane_branch', 'create_lane_branch', 'read_only_inspect']),
+  platform: capturedFreeze(['compose_candidate_non_authoritative', 'read_only_inspect']),
+  codex: capturedFreeze(['read_only_inspect']),
+});
+const RECORD_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
 const MSG = capturedFreeze({
   accessor_property_denied: 'GitAuthorityPolicyV1 denies accessor inputs.',
@@ -389,6 +457,244 @@ export function isProtectedRefV1(input) {
   return classifyRefV1(input).protected === true;
 }
 
+export function classifyLaneHistoryV1(input) {
+  const path = 'history';
+  const object = assertClosedObject(input, HISTORY_ALLOWED_KEYS, path);
+  requireKeys(object, HISTORY_ALLOWED_KEYS, path);
+  const counts = optOwn(object, 'parent_counts');
+  assertNotProxy(counts, `${path}.parent_counts`);
+  if (!IS_ARRAY(counts) || counts.length < 1 || counts.length > MAX_HISTORY_COMMITS) {
+    deny('out_of_range', `${path}.parent_counts`);
+  }
+  let merge = false;
+  for (let i = 0; i < counts.length; i += 1) {
+    const count = ownDataValue(counts, STRING(i), `${path}.parent_counts[${i}]`);
+    if (typeof count !== 'number' || !IS_INT(count) || count < 0 || count > MAX_PARENT_COUNT) {
+      deny('out_of_range', `${path}.parent_counts`);
+    }
+    if (count >= 2) merge = true;
+  }
+  return freezeRecord(['schema', 'version', 'verdict', 'code', 'path', 'message'], {
+    schema: GIT_AUTHORITY_SCHEMA_ID,
+    version: GIT_AUTHORITY_VERSION,
+    verdict: merge ? 'denied' : 'allowed',
+    code: merge ? 'merge_history_denied' : 'authority_ok',
+    path: 'history',
+    message: MSG[merge ? 'merge_history_denied' : 'authority_ok'],
+  });
+}
+
+export function assertAuthorityPostureV1(input) {
+  const path = 'capability';
+  const object = assertClosedObject(input, POSTURE_ALLOWED_KEYS, path);
+  if (!hasOwn(object, 'merge_authority') || !hasOwn(object, 'create_pr_posture')) {
+    deny('missing_key', path);
+  }
+  if (hasOwn(object, 'schema')
+    && optOwn(object, 'schema') !== PROVIDER_CAPABILITIES_BRIDGE_SCHEMA_ID) {
+    deny('authority_posture_mismatch', `${path}.schema`);
+  }
+  const mergeAuthority = optOwn(object, 'merge_authority');
+  if (!capturedIncludes(MERGE_AUTHORITIES, mergeAuthority)) {
+    deny('authority_posture_mismatch', `${path}.merge_authority`);
+  }
+  const createPr = optOwn(object, 'create_pr_posture');
+  if (!capturedIncludes(CREATE_PR_POSTURES, createPr)) {
+    deny('authority_posture_mismatch', `${path}.create_pr_posture`);
+  }
+  let provider;
+  if (hasOwn(object, 'provider')) {
+    provider = optOwn(object, 'provider');
+    if (!isKnownProvider(provider)) deny('authority_posture_mismatch', `${path}.provider`);
+  }
+  if (createPr === 'non_authoritative_cloud_only' && provider !== 'cursor-cloud') {
+    deny('authority_posture_mismatch', `${path}.create_pr_posture`);
+  }
+  return freezeRecord(['merge_authority', 'create_pr_posture', 'provider'], {
+    merge_authority: mergeAuthority,
+    create_pr_posture: createPr,
+    provider,
+  });
+}
+
+function classifyRefFromOperation(object, identity) {
+  if (!hasOwn(object, 'ref')) return undefined;
+  const refRequest = { ref: optOwn(object, 'ref') };
+  if (identity !== undefined) refRequest.identity = {
+    repository_path: optOwn(optOwn(object, 'identity'), 'repository_path'),
+    base_sha: identity.base_sha,
+    run_id: identity.run_id,
+    assignment_id: identity.assignment_id,
+  };
+  for (const key of ['default_branch', 'origin_head_branch', 'init_default_branch', 'manifest_digest_hex']) {
+    if (hasOwn(object, key)) refRequest[key] = optOwn(object, key);
+  }
+  return classifyRefV1(refRequest);
+}
+
+function receipt(values) {
+  return freezeRecord(RECEIPT_KEYS, {
+    schema: GIT_AUTHORITY_SCHEMA_ID,
+    version: GIT_AUTHORITY_VERSION,
+    message: MSG[values.code] ?? MSG.invalid_format,
+    ref_class: null,
+    default_branch_target: false,
+    ...values,
+  });
+}
+
+export function classifyGitOperationV1(input) {
+  const path = 'request';
+  const object = assertClosedObject(input, OPERATION_REQUEST_ALLOWED_KEYS, path);
+  requireKeys(object, OPERATION_REQUEST_REQUIRED_KEYS, path);
+  if (optOwn(object, 'schema') !== GIT_AUTHORITY_SCHEMA_ID) deny('invalid_format', `${path}.schema`);
+  if (optOwn(object, 'version') !== GIT_AUTHORITY_VERSION) deny('invalid_format', `${path}.version`);
+  const actor = optOwn(object, 'actor');
+  if (!capturedIncludes(ACTOR_VALUES, actor)) deny('invalid_format', `${path}.actor`);
+  const operation = optOwn(object, 'operation');
+  if (typeof operation !== 'string') deny('invalid_type', `${path}.operation`);
+  if (!capturedIncludes(GIT_OPERATIONS, operation)) deny('unknown_git_operation', `${path}.operation`);
+  const identity = bindAuthorityIdentityV1(optOwn(object, 'identity'));
+  if (hasOwn(object, 'capability')) assertAuthorityPostureV1(optOwn(object, 'capability'));
+
+  const deniedCode = DENIED_OPERATION_CODES[operation];
+  if (deniedCode !== undefined) {
+    return receipt({
+      verdict: 'denied', code: deniedCode, path: 'operation', actor, operation,
+      run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+    });
+  }
+  if (!capturedIncludes(ACTOR_OPERATIONS[actor], operation)) {
+    return receipt({
+      verdict: 'denied', code: 'authority_posture_mismatch', path: 'actor', actor, operation,
+      run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+    });
+  }
+  if (hasOwn(object, 'history')) {
+    const history = classifyLaneHistoryV1(optOwn(object, 'history'));
+    if (history.verdict === 'denied') {
+      return receipt({
+        verdict: 'denied', code: 'merge_history_denied', path: 'history', actor, operation,
+        run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+      });
+    }
+  }
+
+  const write = operation !== 'read_only_inspect';
+  if (write && !hasOwn(object, 'ref')) deny('missing_key', `${path}.ref`);
+  const classified = classifyRefFromOperation(object, identity);
+  if (classified !== undefined && write) {
+    const allowedClass = operation === 'compose_candidate_non_authoritative'
+      ? 'platform_run_owned' : 'worker_lane';
+    const allowed = operation === 'compose_candidate_non_authoritative'
+      ? classified.ref_class === 'platform_run_owned' && classified.code === 'protected_ref_write_denied'
+      : classified.ref_class === 'worker_lane' && classified.code === 'authority_ok';
+    if (!allowed) {
+      return receipt({
+        verdict: 'denied',
+        code: classified.default_branch_target ? 'default_branch_target_denied' : classified.code,
+        path: 'ref', actor, operation, ref_class: classified.ref_class,
+        default_branch_target: classified.default_branch_target,
+        run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+      });
+    }
+    return receipt({
+      verdict: 'allowed', code: 'authority_ok', path: 'operation', actor, operation,
+      ref_class: allowedClass, run_id: identity.run_id, assignment_id: identity.assignment_id,
+      base_sha: identity.base_sha,
+    });
+  }
+  return receipt({
+    verdict: 'allowed', code: 'authority_ok', path: 'operation', actor, operation,
+    ref_class: classified === undefined ? null : classified.ref_class,
+    default_branch_target: classified === undefined ? false : classified.default_branch_target,
+    run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+  });
+}
+
+function digestOf(value) {
+  const hash = HASH('sha256');
+  HASH_UPDATE.call(hash, canonicalJsonStringify(value));
+  return HASH_DIGEST.call(hash, 'hex');
+}
+
+function evidenceMethod(code) {
+  if (code === 'merge_history_denied') return 'merge_commit_absence';
+  if (code === 'default_branch_target_denied' || code === 'protected_ref_write_denied'
+    || code === 'branch_namespace_violation') {
+    return 'protected_ref_snapshot_compare';
+  }
+  return 'ancestry_check';
+}
+
+export function projectAuthorityEvidenceV1(verdict, context = {}) {
+  const path = 'evidence';
+  if (verdict === undefined || verdict === null) deny('invalid_type', path);
+  assertDirectJsonClosure(verdict, path);
+  assertPlainObject(verdict, 'invalid_type', path, path);
+  assertAllowedKeys(verdict, RECEIPT_KEYS, path);
+  const ctx = context === undefined ? {} : context;
+  if (ctx !== undefined && ctx !== null && typeof ctx === 'object') {
+    assertClosedObject(ctx, EVIDENCE_CONTEXT_ALLOWED_KEYS, `${path}.context`);
+  }
+  const factId = hasOwn(ctx, 'fact_id') ? optOwn(ctx, 'fact_id') : 'f-authority';
+  const discrepancyId = hasOwn(ctx, 'discrepancy_id') ? optOwn(ctx, 'discrepancy_id') : 'd-authority';
+  const sequence = hasOwn(ctx, 'sequence') ? optOwn(ctx, 'sequence') : 0;
+  if (typeof factId !== 'string' || !capturedTest(RECORD_ID_PATTERN, factId)) deny('invalid_format', `${path}.fact_id`);
+  if (typeof discrepancyId !== 'string' || !capturedTest(RECORD_ID_PATTERN, discrepancyId)) {
+    deny('invalid_format', `${path}.discrepancy_id`);
+  }
+  if (typeof sequence !== 'number' || !IS_INT(sequence) || sequence < 0 || sequence > 65535) {
+    deny('out_of_range', `${path}.sequence`);
+  }
+  const denied = optOwn(verdict, 'verdict') === 'denied';
+  const code = optOwn(verdict, 'code');
+  const runId = optOwn(verdict, 'run_id');
+  const assignmentId = optOwn(verdict, 'assignment_id');
+  const baseSha = optOwn(verdict, 'base_sha');
+  const payload = { base_sha: baseSha, head_sha: baseSha };
+  const fact = freezeData({
+    fact_id: factId,
+    fact_kind: 'git_identity',
+    status: denied ? 'failed' : 'verified',
+    code: 'host_observed',
+    run_id: runId,
+    assignment_id: assignmentId,
+    sequence,
+    subject: 'git-authority',
+    authority: 'platform_git',
+    method: evidenceMethod(typeof code === 'string' ? code : 'authority_ok'),
+    input_digest: digestOf({
+      actor: optOwn(verdict, 'actor'), operation: optOwn(verdict, 'operation'),
+      ref_class: optOwn(verdict, 'ref_class'),
+    }),
+    output_digest: digestOf({ verdict: optOwn(verdict, 'verdict'), code }),
+    exit_code: denied ? 1 : 0,
+    duration_ms: 0,
+    truncated: false,
+    payload,
+    artifact_digests: [],
+  });
+  const discrepancy = denied ? freezeData({
+    discrepancy_id: discrepancyId,
+    discrepancy_kind: 'security',
+    status: 'recorded',
+    code: 'security_boundary',
+    run_id: runId,
+    assignment_id: assignmentId,
+    sequence,
+    claim_ids: [],
+    fact_ids: [factId],
+    artifact_digests: [],
+  }) : null;
+  return freezeData({
+    schema: GIT_AUTHORITY_SCHEMA_ID,
+    version: GIT_AUTHORITY_VERSION,
+    facts: [fact],
+    discrepancies: discrepancy === null ? [] : [discrepancy],
+  });
+}
+
 capturedFreeze(parseGitAuthorityPolicyV1);
 capturedFreeze(bindAuthorityIdentityV1);
 capturedFreeze(expectedRunBranchNameV1);
@@ -398,3 +704,7 @@ capturedFreeze(isValidRunBranchNameV1);
 capturedFreeze(isRunOwnedCandidateRefV1);
 capturedFreeze(classifyRefV1);
 capturedFreeze(isProtectedRefV1);
+capturedFreeze(classifyLaneHistoryV1);
+capturedFreeze(assertAuthorityPostureV1);
+capturedFreeze(classifyGitOperationV1);
+capturedFreeze(projectAuthorityEvidenceV1);

@@ -16,6 +16,21 @@
 
 ### Added
 
+- **Git authority policy.** Adds additive v3 `git-authority.mjs` (P28): a
+  closed immutable `GitAuthorityPolicyV1` for protected/default refs, the
+  `codex/run-<digest-prefix>/<assignment>` lane namespace, credential-free
+  repository/ref identity, and operation authority. External agents and
+  providers cannot merge, rebase, push, create PRs, mutate
+  protected/default refs, create tags/releases, or obtain
+  credential/remote mutation authority. Default-branch targets, merge
+  histories, namespace/confusable/ref-grammar attacks, unknown
+  operations/keys, proxy/accessor inputs, and bounds abuse fail closed.
+  Verdicts and P13-compatible facts/discrepancies are content-free and
+  never echo repository paths, URLs, credentials, provider text, or
+  hostile refs. This is policy at the authority seam only: no Git
+  mutation, no P29 credential isolation, and no P30 protected-ref audit.
+  Coverage lives in `test/r1-git-authority.test.mjs` and
+  `test/r1-git-authority-adversarial.test.mjs`.
 - **Local provider result sink.** Adds additive v3
   `local-provider-result-sink.mjs` (P11) that routes final local Grok ACP,
   Cursor Local ACP, and DSH ACPX/CLI provider output into the accepted
