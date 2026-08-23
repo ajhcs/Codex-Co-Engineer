@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,9 @@ import {
   CONSTRAINED_VERIFICATION_SCHEMA_ID,
   CONSTRAINED_VERIFICATION_VERSION,
   GIT_EXECUTABLE,
+  PRLIMIT_EXECUTABLE,
+  RESOURCE_ADDRESS_SPACE_BYTES,
+  RESOURCE_NPROC,
   UNSHARE_EXECUTABLE,
   VERIFICATION_EXECUTION_DIGEST_LABEL,
   executeConstrainedVerificationV1,
@@ -83,6 +87,7 @@ test('schema identity is additive v1 and does not claim a 4.0.0 major', () => {
   assert.equal(VERIFICATION_EXECUTION_DIGEST_LABEL, IDENTITY_LABELS.VERIFICATION_EXECUTION_RECEIPT);
   assert.equal(GIT_EXECUTABLE, '/usr/bin/git');
   assert.equal(UNSHARE_EXECUTABLE, '/usr/bin/unshare');
+  assert.equal(PRLIMIT_EXECUTABLE, '/usr/bin/prlimit');
 });
 
 test('a genuine P16B intent executes once with shell=false, empty env, and exact argv', async () => {
@@ -113,6 +118,12 @@ test('a genuine P16B intent executes once with shell=false, empty env, and exact
     assert.deepEqual(calls.spawn[0].options.env, {});
     assert.equal(calls.spawn[0].options.networkMode, 'deny');
     assert.equal(calls.spawn[0].options.cwd === candidate, false);
+    assert.match(calls.spawn[0].options.cwd, /^\/proc\/self\/fd\/[0-9]+$/u);
+    assert.equal(typeof calls.spawn[0].options.executableFd, 'number');
+    assert.equal(typeof calls.spawn[0].options.workspaceFd, 'number');
+    assert.equal(calls.spawn[0].options.resourceLimits.nproc, RESOURCE_NPROC);
+    assert.equal(calls.spawn[0].options.resourceLimits.address_space_bytes, RESOURCE_ADDRESS_SPACE_BYTES);
+    assert.equal(Number.isSafeInteger(calls.spawn[0].options.resourceLimits.cpu_seconds), true);
     assert.equal(Object.isFrozen(request), false);
     assert.throws(() => { receipt.outcome.result = 'fail'; }, TypeError);
   });
@@ -216,8 +227,24 @@ test('timeout, output flood, signal ambiguity, and escaped descendants fail clos
       spawn: () => fakeChild({ hang: true, ignoreKill: true, pid: 99 }),
       listDescendants: async () => [],
     });
-    const timeoutError = await errorOf(() => executeConstrainedVerificationV1(request, {
+    const stuckError = await errorOf(() => executeConstrainedVerificationV1(request, {
       adapter: hanging.adapter,
+    }));
+    assert.equal(stuckError.code, 'cleanup_uncertain');
+
+    let hangingChild;
+    const timed = recordingAdapter({
+      spawn: () => {
+        hangingChild = fakeChild({ hang: true, pid: 77 });
+        return hangingChild;
+      },
+      killProcessGroup: () => {
+        hangingChild.emit('exit', null, 'SIGTERM');
+      },
+      listDescendants: async () => [],
+    });
+    const timeoutError = await errorOf(() => executeConstrainedVerificationV1(request, {
+      adapter: timed.adapter,
     }));
     assert.equal(timeoutError.code, 'timeout');
 
@@ -280,26 +307,46 @@ test('candidate mutation and identity mismatch fail closed without a pass receip
 
 test('cleanup refuses broad or swapped paths and still removes the exact workspace', async () => {
   await withHarness(async ({ request, candidate, root }) => {
-    const forbidden = [];
+    const recursive = [];
     const { adapter, calls } = recordingAdapter({
       child: { code: 0 },
       rmdirExact: async (record) => {
-        if (record.path === '/' || record.path === root || record.path === candidate
-          || record.path === tmpdir()) {
-          forbidden.push(record.path);
-          throw new Error('refused broad delete');
-        }
-        await rm(record.path, { recursive: true, force: false });
+        recursive.push(record.path);
+        throw new Error('path-recursive rmdirExact must not run');
       },
     });
     const receipt = await executeConstrainedVerificationV1(request, { adapter });
     assert.equal(receipt.cleanup.status, 'removed');
-    assert.equal(calls.rmdir.length, 1);
-    assert.equal(calls.rmdir[0].startsWith(path.resolve(tmpdir())), true);
-    assert.equal(calls.rmdir[0].includes('codex-co-engineer-p16c-'), true);
-    assert.equal(forbidden.length, 0);
-    assert.notEqual(calls.rmdir[0], candidate);
-    assert.notEqual(calls.rmdir[0], '/');
+    assert.equal(calls.rmdir.length, 0);
+    assert.equal(recursive.length, 0);
+    assert.equal(recursive.includes(candidate), false);
+    assert.equal(recursive.includes('/'), false);
+    assert.equal(recursive.includes(root), false);
+    assert.equal(recursive.includes(tmpdir()), false);
+    assert.equal(await readFile(path.join(candidate, 'README'), 'utf8'), 'p16c\n');
+  });
+});
+
+test('normal nested-directory cleanup removes the workspace and closes pinned fds', async () => {
+  await withHarness(async ({ request, candidate }) => {
+    let pinned;
+    const { adapter } = recordingAdapter({ child: { code: 0 } });
+    adapter.afterQuarantinePin = async (info) => {
+      pinned = info;
+      const qPath = path.join(info.parentPath, info.qName);
+      fs.mkdirSync(path.join(qPath, 'nested', 'deep'), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(qPath, 'nested', 'deep', 'file.txt'), 'workspace-only\n');
+      fs.fstatSync(info.parentFd);
+      fs.fstatSync(info.dirFd);
+      fs.fstatSync(info.qFd);
+    };
+    const receipt = await executeConstrainedVerificationV1(request, { adapter });
+    assert.equal(receipt.cleanup.status, 'removed');
+    assert.equal(typeof pinned.parentFd, 'number');
+    assert.throws(() => fs.fstatSync(pinned.parentFd), { code: 'EBADF' });
+    assert.throws(() => fs.fstatSync(pinned.dirFd), { code: 'EBADF' });
+    assert.throws(() => fs.fstatSync(pinned.qFd), { code: 'EBADF' });
+    assert.equal(await readFile(path.join(candidate, 'README'), 'utf8'), 'p16c\n');
   });
 });
 
@@ -334,6 +381,10 @@ test('the module never shells, looks up PATH, or integrates server/supervisor su
   assert.doesNotMatch(source, /\bgit rebase\b/u);
   assert.doesNotMatch(source, /\bgit push\b/u);
   assert.doesNotMatch(source, /create_pr/u);
+  assert.equal(source.includes('recursive: true'), false);
+  assert.doesNotMatch(source, /\bFS_RM\b/u);
+  assert.match(source, /FS_UNLINK_SYNC/u);
+  assert.match(source, /O_DIRECTORY/u);
 });
 
 test('symlinks and special files on the executable or candidate fail closed', async () => {
@@ -375,5 +426,32 @@ test('the approved command is spawned exactly once per invocation', async () => 
     await executeConstrainedVerificationV1(request, { adapter });
     assert.equal(calls.spawn.length, 1);
     assert.equal(calls.spawn[0].file, TRUE_EXECUTABLE);
+  });
+});
+
+test('the disposable workspace materializes candidate README bytes for the command', async () => {
+  await withHarness(async ({ request, candidate }) => {
+    const receipt = await executeConstrainedVerificationV1(request);
+    assert.equal(receipt.outcome.result, 'pass');
+    const original = await readFile(path.join(candidate, 'README'), 'utf8');
+    assert.equal(original, 'p16c\n');
+  });
+});
+
+test('host cat of copied README observes candidate content without mutating the source', async () => {
+  const { createHash } = await import('node:crypto');
+  await withHarness(async ({ candidate, head }) => {
+    const request = genuineRequest({
+      policy: policyForExecutable('/usr/bin/cat', { argv_template: ['README'] }),
+      executable: '/usr/bin/cat',
+      candidate: { repository: candidate, expected_head_sha: head, expected_base_sha: head },
+    });
+    const receipt = await executeConstrainedVerificationV1(request);
+    assert.equal(receipt.outcome.result, 'pass');
+    assert.equal(receipt.outcome.exit_code, 0);
+    const expected = createHash('sha256').update('p16c\n', 'utf8').digest('hex');
+    assert.equal(receipt.outcome.stdout_digest, expected);
+    assert.equal(await readFile(path.join(candidate, 'README'), 'utf8'), 'p16c\n');
+    assert.equal(receipt.candidate_audit.unchanged, true);
   });
 });

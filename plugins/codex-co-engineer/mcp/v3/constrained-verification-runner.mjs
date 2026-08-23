@@ -31,7 +31,8 @@
 import { Buffer as NodeBuffer } from 'node:buffer';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import fs from 'node:fs';
+import { lstat, mkdir, readFile, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -91,12 +92,22 @@ export const VERIFICATION_EXECUTION_DIGEST_LABEL = IDENTITY_LABELS.VERIFICATION_
 
 export const GIT_EXECUTABLE = '/usr/bin/git';
 export const UNSHARE_EXECUTABLE = '/usr/bin/unshare';
+export const PRLIMIT_EXECUTABLE = '/usr/bin/prlimit';
 export const WORKSPACE_NAME_PREFIX = 'codex-co-engineer-p16c-';
+export const WORKSPACE_PARENT_PREFIX = 'codex-co-engineer-p16c-owner-';
+export const QUARANTINE_NAME_PREFIX = 'codex-co-engineer-p16c-quarantine-';
 export const KILL_GRACE_MS = 1_000;
 export const STUCK_GRACE_MS = 100;
 export const GIT_AUDIT_TIMEOUT_MS = 5_000;
 export const GIT_AUDIT_MAX_BYTES = 65_536;
 export const WORKSPACE_MODE = 0o700;
+export const RESOURCE_ADDRESS_SPACE_BYTES = 268_435_456;
+export const RESOURCE_NPROC = 32;
+export const RESOURCE_CPU_SECONDS_CAP = 120;
+export const COPY_MAX_FILE_BYTES = 1_048_576;
+export const COPY_MAX_TOTAL_BYTES = 8_388_608;
+export const COPY_MAX_ENTRIES = 4_096;
+export const COPY_MAX_DEPTH = 32;
 
 export const REQUEST_ALLOWED_KEYS = capturedFreeze(['candidate', 'intent', 'policy']);
 export const REQUEST_REQUIRED_KEYS = REQUEST_ALLOWED_KEYS;
@@ -106,8 +117,9 @@ export const CANDIDATE_ALLOWED_KEYS = capturedFreeze([
 export const CANDIDATE_REQUIRED_KEYS = capturedFreeze(['repository']);
 export const OPTION_ALLOWED_KEYS = capturedFreeze(['adapter']);
 export const ADAPTER_ALLOWED_KEYS = capturedFreeze([
-  'killProcessGroup', 'listDescendants', 'lstat', 'mkdir', 'nowMs',
-  'randomId', 'readGitIdentity', 'realpath', 'rmdirExact', 'spawn', 'tmpRoot',
+  'afterQuarantinePin', 'killProcessGroup', 'listDescendants', 'lstat', 'mkdir',
+  'nowMs', 'randomId', 'readGitIdentity', 'realpath', 'rmdirExact', 'spawn',
+  'tmpRoot',
 ]);
 export const RECEIPT_BODY_KEYS = capturedFreeze([
   'candidate_audit', 'cleanup', 'command_id', 'facts', 'intent_identity',
@@ -259,6 +271,28 @@ const GIT_AUDIT_COMMANDS = capturedFreeze([
   capturedFreeze(['worktree', 'list', '--porcelain']),
   capturedFreeze(['rev-parse', '--absolute-git-dir']),
 ]);
+export const GIT_CONFIG_OVERRIDES = capturedFreeze([
+  '--no-pager',
+  '-c', 'core.fsmonitor=',
+  '-c', 'core.fsmonitorHook=',
+  '-c', 'core.useBuiltinFSMonitor=false',
+  '-c', 'core.hooksPath=/dev/null',
+  '-c', 'core.pager=',
+  '-c', 'core.editor=true',
+  '-c', 'core.askPass=',
+  '-c', 'filter.lfs.process=',
+  '-c', 'filter.lfs.required=false',
+]);
+export const GIT_CLOSED_ENV = capturedFreeze({
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_OPTIONAL_LOCKS: '0',
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_PAGER: 'cat',
+  GIT_EDITOR: 'true',
+  LC_ALL: 'C',
+});
 
 const OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const OBJECT_PROTOTYPE = Object.prototype;
@@ -280,16 +314,31 @@ const PATH_JOIN = path.join;
 const PATH_RESOLVE = path.resolve;
 const PATH_IS_ABSOLUTE = path.isAbsolute;
 const PATH_RELATIVE = path.relative;
-const PATH_DIRNAME = path.dirname;
 const OS_TMPDIR = tmpdir;
 const FS_LSTAT = lstat;
 const FS_MKDIR = mkdir;
 const FS_REALPATH = realpath;
-const FS_RM = rm;
+const FS_OPEN_SYNC = fs.openSync;
+const FS_CLOSE_SYNC = fs.closeSync;
+const FS_FSTAT_SYNC = fs.fstatSync;
+const FS_LSTAT_SYNC = fs.lstatSync;
+const FS_READ_SYNC = fs.readSync;
+const FS_WRITE_SYNC = fs.writeSync;
+const FS_FCHMOD_SYNC = fs.fchmodSync;
+const FS_MKDIR_SYNC = fs.mkdirSync;
+const FS_RMDIR_SYNC = fs.rmdirSync;
+const FS_UNLINK_SYNC = fs.unlinkSync;
+const FS_RENAME_SYNC = fs.renameSync;
+const FS_READDIR_SYNC = fs.readdirSync;
+const FS_CONSTANTS = fs.constants;
 const PROCESS_KILL = process.kill.bind(process);
 const RANDOM_BYTES = randomBytes;
 const NODE_SPAWN = nodeSpawn;
 const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
+const OPEN_NOFOLLOW_READ = FS_CONSTANTS.O_RDONLY | FS_CONSTANTS.O_NOFOLLOW;
+const OPEN_NOFOLLOW_DIR = FS_CONSTANTS.O_RDONLY | FS_CONSTANTS.O_DIRECTORY | FS_CONSTANTS.O_NOFOLLOW;
+const OPEN_NOFOLLOW_CREATE = FS_CONSTANTS.O_WRONLY | FS_CONSTANTS.O_CREAT | FS_CONSTANTS.O_EXCL
+  | FS_CONSTANTS.O_NOFOLLOW;
 
 function deny(code, path) {
   fail(code, path, MESSAGES[code] ?? MESSAGES.invalid_format);
@@ -405,6 +454,87 @@ function equalDigest(left, right) {
   return TIMING_SAFE_EQUAL(BUFFER_FROM(left, 'utf8'), BUFFER_FROM(right, 'utf8')) === true;
 }
 
+function closeQuiet(fd) {
+  if (!NUMBER_IS_SAFE_INTEGER(fd) || fd < 0) return;
+  try { FS_CLOSE_SYNC(fd); } catch { /* already closed */ }
+}
+
+function procFdPath(fd, name) {
+  if (!NUMBER_IS_SAFE_INTEGER(fd) || fd < 0) deny('workspace_unreadable', 'workspace');
+  if (name === undefined) return `/proc/self/fd/${fd}`;
+  if (typeof name !== 'string' || name.length === 0 || name === '.' || name === '..'
+    || capturedTest(/[/\0]/u, name)) {
+    deny('workspace_unreadable', 'workspace');
+  }
+  return `/proc/self/fd/${fd}/${name}`;
+}
+
+function openNoFollow(target, flags, path, code) {
+  let fd;
+  try {
+    fd = FS_OPEN_SYNC(target, flags);
+  } catch (error) {
+    if (error && error.code === 'ELOOP') deny('symlink_denied', path);
+    deny(code, path);
+  }
+  return fd;
+}
+
+function fstatOrDeny(fd, path, code) {
+  try {
+    return FS_FSTAT_SYNC(fd, { bigint: true });
+  } catch {
+    deny(code, path);
+  }
+}
+
+function hashFdSync(fd) {
+  const hash = CRYPTO_CREATE_HASH(DIGEST_ALGORITHM);
+  const buf = BUFFER_ALLOC(65_536);
+  let pos = 0;
+  while (true) {
+    let bytesRead;
+    try {
+      bytesRead = FS_READ_SYNC(fd, buf, 0, buf.length, pos);
+    } catch {
+      deny('executable_not_runnable', 'request.intent.executable');
+    }
+    if (bytesRead === 0) break;
+    HASH_UPDATE.call(hash, buf.subarray(0, bytesRead));
+    pos += bytesRead;
+  }
+  return HASH_DIGEST.call(hash, 'hex');
+}
+
+function assertPinnedRegularFile(stat, path, code) {
+  if (stat.isSymbolicLink() || !stat.isFile()) deny(code, path);
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
+}
+
+function resourceLimitsFor(timeoutMs) {
+  const cpuSeconds = Math.ceil(timeoutMs / 1_000) + 1;
+  if (!NUMBER_IS_SAFE_INTEGER(cpuSeconds) || cpuSeconds < 1 || cpuSeconds > RESOURCE_CPU_SECONDS_CAP) {
+    deny('out_of_range', 'request.intent.timeout_ms');
+  }
+  return capturedFreeze({
+    cpu_seconds: cpuSeconds,
+    address_space_bytes: RESOURCE_ADDRESS_SPACE_BYTES,
+    nproc: RESOURCE_NPROC,
+  });
+}
+
+function entryMode(stat) {
+  return Number(stat.mode & 0o777n);
+}
+
+function isSparseRegular(stat) {
+  if (!stat.isFile() || stat.size <= 0n) return false;
+  return stat.blocks === 0n || stat.blocks * 512n < stat.size;
+}
+
 function cloneParameters(parameters) {
   const keys = sortedCapturedKeys(parameters);
   const values = {};
@@ -512,25 +642,27 @@ function defaultTmpRoot() {
 }
 
 function defaultKillProcessGroup(pid, signal) {
-  if (!NUMBER_IS_SAFE_INTEGER(pid) || pid <= 0) return;
+  if (!NUMBER_IS_SAFE_INTEGER(pid) || pid <= 0) return false;
   try {
     PROCESS_KILL(-pid, signal);
+    return true;
   } catch {
     try {
       PROCESS_KILL(pid, signal);
+      return true;
     } catch {
-      // ESRCH and equivalent races are inspected by listDescendants.
+      return false;
     }
   }
 }
 
 async function defaultListDescendants(pid) {
-  if (!NUMBER_IS_SAFE_INTEGER(pid) || pid <= 0) return freezeList([]);
+  if (!NUMBER_IS_SAFE_INTEGER(pid) || pid <= 0) deny('cleanup_uncertain', 'execution');
   let dir;
   try {
     dir = await readdir('/proc');
   } catch {
-    return freezeList([]);
+    deny('cleanup_uncertain', 'execution');
   }
   const leftover = [];
   for (let index = 0; index < dir.length; index += 1) {
@@ -541,11 +673,12 @@ async function defaultListDescendants(pid) {
     let stat;
     try {
       stat = await readFile(`/proc/${other}/stat`, 'utf8');
-    } catch {
-      continue;
+    } catch (error) {
+      if (error && error.code === 'ENOENT') continue;
+      deny('cleanup_uncertain', 'execution');
     }
     const close = stat.indexOf(')');
-    if (close < 0) continue;
+    if (close < 0) deny('cleanup_uncertain', 'execution');
     const rest = stat.slice(close + 2).split(' ');
     const ppid = Number(rest[1]);
     const pgid = Number(rest[2]);
@@ -610,80 +743,115 @@ async function collectChildOutput(child, timeoutMs) {
 }
 
 async function defaultReadGitIdentity(repository) {
-  let gitStat;
+  const gitFd = openNoFollow(GIT_EXECUTABLE, OPEN_NOFOLLOW_READ, 'candidate', 'git_unavailable');
   try {
-    gitStat = await FS_LSTAT(GIT_EXECUTABLE, { bigint: true });
-  } catch {
-    deny('git_unavailable', 'candidate');
-  }
-  if (gitStat.isSymbolicLink() || !gitStat.isFile()) deny('git_unavailable', 'candidate');
-  const env = {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_SYSTEM: '/dev/null',
-    GIT_OPTIONAL_LOCKS: '0',
-    GIT_TERMINAL_PROMPT: '0',
-  };
-  const outputs = {};
-  const names = ['head', 'status', 'refs', 'config', 'worktrees', 'gitdir'];
-  for (let index = 0; index < GIT_AUDIT_COMMANDS.length; index += 1) {
-    const args = ['-C', repository, '--no-optional-locks'];
-    const command = GIT_AUDIT_COMMANDS[index];
-    for (let argIndex = 0; argIndex < command.length; argIndex += 1) {
-      ARRAY_PUSH.call(args, command[argIndex]);
+    const gitStat = fstatOrDeny(gitFd, 'candidate', 'git_unavailable');
+    assertPinnedRegularFile(gitStat, 'candidate', 'git_unavailable');
+    const outputs = {};
+    const names = ['head', 'status', 'refs', 'config', 'worktrees', 'gitdir'];
+    for (let index = 0; index < GIT_AUDIT_COMMANDS.length; index += 1) {
+      const args = [];
+      for (let overrideIndex = 0; overrideIndex < GIT_CONFIG_OVERRIDES.length; overrideIndex += 1) {
+        ARRAY_PUSH.call(args, GIT_CONFIG_OVERRIDES[overrideIndex]);
+      }
+      ARRAY_PUSH.call(args, '-C');
+      ARRAY_PUSH.call(args, repository);
+      ARRAY_PUSH.call(args, '--no-optional-locks');
+      const command = GIT_AUDIT_COMMANDS[index];
+      for (let argIndex = 0; argIndex < command.length; argIndex += 1) {
+        ARRAY_PUSH.call(args, command[argIndex]);
+      }
+      let child;
+      try {
+        child = NODE_SPAWN('/proc/self/fd/3', args, {
+          cwd: '/',
+          env: { ...GIT_CLOSED_ENV },
+          shell: false,
+          stdio: ['ignore', 'pipe', 'pipe', gitFd],
+          windowsHide: true,
+        });
+      } catch {
+        deny('git_identity_unverified', 'candidate');
+      }
+      const result = await collectChildOutput(child, GIT_AUDIT_TIMEOUT_MS);
+      if (names[index] === 'head' && result.code !== 0) deny('git_identity_unverified', 'candidate');
+      outputs[names[index]] = result.stdout.toString('utf8');
     }
-    let child;
-    try {
-      child = NODE_SPAWN(GIT_EXECUTABLE, args, {
-        cwd: PATH_DIRNAME(repository),
-        env,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-    } catch {
-      deny('git_identity_unverified', 'candidate');
-    }
-    const result = await collectChildOutput(child, GIT_AUDIT_TIMEOUT_MS);
-    if (names[index] === 'head' && result.code !== 0) deny('git_identity_unverified', 'candidate');
-    outputs[names[index]] = result.stdout.toString('utf8');
+    const head = STRING_REPLACE(outputs.head, /\s+/gu, '');
+    assertBaseSha(head, 'candidate.head_sha');
+    return freezeRecord(capturedFreeze([
+      'config', 'gitdir', 'head_sha', 'refs', 'status', 'worktrees',
+    ]), {
+      head_sha: head,
+      status: outputs.status,
+      refs: outputs.refs,
+      config: outputs.config,
+      worktrees: outputs.worktrees,
+      gitdir: STRING_REPLACE(outputs.gitdir, /\s+$/gu, ''),
+    });
+  } finally {
+    closeQuiet(gitFd);
   }
-  const head = STRING_REPLACE(outputs.head, /\s+/gu, '');
-  assertBaseSha(head, 'candidate.head_sha');
-  return freezeRecord(capturedFreeze([
-    'config', 'gitdir', 'head_sha', 'refs', 'status', 'worktrees',
-  ]), {
-    head_sha: head,
-    status: outputs.status,
-    refs: outputs.refs,
-    config: outputs.config,
-    worktrees: outputs.worktrees,
-    gitdir: STRING_REPLACE(outputs.gitdir, /\s+$/gu, ''),
-  });
 }
 
 function defaultSpawn(file, args, options) {
   if (options.shell !== false) deny('shell_content_denied', 'execution');
   if (options.networkMode !== 'deny') deny('network_allowlist_unsupported', 'execution.network');
-  const confinementArgs = [
-    '--user', '--pid', '--fork', '--net', '--', file,
-  ];
-  for (let index = 0; index < args.length; index += 1) {
-    ARRAY_PUSH.call(confinementArgs, args[index]);
+  const execFd = options.executableFd;
+  const workspaceFd = options.workspaceFd;
+  const limits = options.resourceLimits;
+  if (!NUMBER_IS_SAFE_INTEGER(execFd) || execFd < 0) deny('executable_not_runnable', 'execution');
+  if (!NUMBER_IS_SAFE_INTEGER(workspaceFd) || workspaceFd < 0) deny('workspace_unreadable', 'workspace');
+  if (limits === undefined || !NUMBER_IS_SAFE_INTEGER(limits.cpu_seconds)
+    || !NUMBER_IS_SAFE_INTEGER(limits.address_space_bytes)
+    || !NUMBER_IS_SAFE_INTEGER(limits.nproc)) {
+    deny('resource_bound_unavailable', 'execution');
   }
-  const spawnOptions = {
-    cwd: options.cwd,
-    env: options.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    detached: false,
-  };
-  return NODE_SPAWN(UNSHARE_EXECUTABLE, confinementArgs, spawnOptions);
+  const unshareFd = openNoFollow(
+    UNSHARE_EXECUTABLE, OPEN_NOFOLLOW_READ, 'execution', 'network_isolation_unavailable',
+  );
+  const prlimitFd = openNoFollow(
+    PRLIMIT_EXECUTABLE, OPEN_NOFOLLOW_READ, 'execution', 'resource_bound_unavailable',
+  );
+  try {
+    assertPinnedRegularFile(
+      fstatOrDeny(unshareFd, 'execution', 'network_isolation_unavailable'),
+      'execution', 'network_isolation_unavailable',
+    );
+    assertPinnedRegularFile(
+      fstatOrDeny(prlimitFd, 'execution', 'resource_bound_unavailable'),
+      'execution', 'resource_bound_unavailable',
+    );
+    const confinementArgs = [
+      '--user', '--pid', '--fork', '--net', '--',
+      '/proc/self/fd/6',
+      `--cpu=${limits.cpu_seconds}`,
+      `--as=${limits.address_space_bytes}`,
+      `--nproc=${limits.nproc}`,
+      '--',
+      '/proc/self/fd/3',
+    ];
+    for (let index = 0; index < args.length; index += 1) {
+      ARRAY_PUSH.call(confinementArgs, args[index]);
+    }
+    return NODE_SPAWN('/proc/self/fd/5', confinementArgs, {
+      cwd: '/proc/self/fd/4',
+      env: options.env,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe', execFd, workspaceFd, unshareFd, prlimitFd],
+      windowsHide: true,
+      detached: false,
+    });
+  } finally {
+    closeQuiet(unshareFd);
+    closeQuiet(prlimitFd);
+  }
 }
 
-async function defaultRmdirExact(record) {
-  await FS_RM(record.path, { recursive: true, force: false });
+async function defaultAfterQuarantinePin() {}
+
+async function defaultRmdirExact() {
+  deny('cleanup_uncertain', 'cleanup');
 }
 
 function defaultAdapter() {
@@ -694,6 +862,7 @@ function defaultAdapter() {
     lstat: (target, options) => FS_LSTAT(target, options ?? { bigint: true }),
     mkdir: (target, options) => FS_MKDIR(target, options),
     realpath: (target) => FS_REALPATH(target),
+    afterQuarantinePin: defaultAfterQuarantinePin,
     rmdirExact: defaultRmdirExact,
     spawn: defaultSpawn,
     killProcessGroup: defaultKillProcessGroup,
@@ -844,6 +1013,198 @@ function buildChildEnvironment(environment) {
   return env;
 }
 
+function copyRegularFile(srcFd, destDirFd, name, mode, size) {
+  const destFd = openNoFollow(
+    procFdPath(destDirFd, name), OPEN_NOFOLLOW_CREATE, 'workspace', 'workspace_unreadable',
+  );
+  try {
+    const buf = BUFFER_ALLOC(65_536);
+    let pos = 0;
+    while (pos < size) {
+      let bytesRead;
+      try {
+        bytesRead = FS_READ_SYNC(srcFd, buf, 0, Math.min(buf.length, size - pos), pos);
+      } catch {
+        deny('candidate_race', 'workspace');
+      }
+      if (bytesRead === 0) deny('candidate_race', 'workspace');
+      let written = 0;
+      while (written < bytesRead) {
+        let n;
+        try {
+          n = FS_WRITE_SYNC(destFd, buf, written, bytesRead - written, pos + written);
+        } catch {
+          deny('workspace_unreadable', 'workspace');
+        }
+        written += n;
+      }
+      pos += bytesRead;
+    }
+    try {
+      FS_FCHMOD_SYNC(destFd, mode);
+    } catch {
+      deny('workspace_unreadable', 'workspace');
+    }
+    const destStat = fstatOrDeny(destFd, 'workspace', 'workspace_unreadable');
+    if (destStat.size !== BigInt(size) || destStat.isSymbolicLink() || !destStat.isFile()) {
+      deny('candidate_race', 'workspace');
+    }
+  } finally {
+    closeQuiet(destFd);
+  }
+}
+
+function compareCopyPath(left, right) {
+  if (left.path < right.path) return -1;
+  if (left.path > right.path) return 1;
+  return 0;
+}
+
+function digestCopyIdentity(identity) {
+  identity.sort(compareCopyPath);
+  return sha256Hex(BUFFER_FROM(canonicalJsonStringify(identity), 'utf8'));
+}
+
+function copyDirectoryTree(srcFd, destFd, relative, depth, limits, identity) {
+  if (depth > COPY_MAX_DEPTH) deny('out_of_range', 'workspace');
+  let names;
+  try {
+    names = FS_READDIR_SYNC(procFdPath(srcFd), { encoding: 'buffer' });
+  } catch {
+    deny('candidate_unreadable', 'request.candidate.repository');
+  }
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index].toString('utf8');
+    if (name === '.' || name === '..' || capturedTest(/[/\0]/u, name)) {
+      deny('candidate_unreadable', 'request.candidate.repository');
+    }
+    limits.entries += 1;
+    if (limits.entries > COPY_MAX_ENTRIES) deny('out_of_range', 'workspace');
+    const srcChild = procFdPath(srcFd, name);
+    let stat;
+    try {
+      stat = FS_LSTAT_SYNC(srcChild, { bigint: true });
+    } catch {
+      deny('candidate_unreadable', 'request.candidate.repository');
+    }
+    const rel = relative === '' ? name : `${relative}/${name}`;
+    if (stat.isSymbolicLink()) deny('symlink_denied', 'workspace');
+    if (stat.isDirectory()) {
+      const mode = entryMode(stat);
+      try {
+        FS_MKDIR_SYNC(procFdPath(destFd, name), { mode, recursive: false });
+      } catch {
+        deny('workspace_unreadable', 'workspace');
+      }
+      const childSrc = openNoFollow(srcChild, OPEN_NOFOLLOW_DIR, 'workspace', 'candidate_unreadable');
+      const childDest = openNoFollow(
+        procFdPath(destFd, name), OPEN_NOFOLLOW_DIR, 'workspace', 'workspace_unreadable',
+      );
+      try {
+        ARRAY_PUSH.call(identity, capturedFreeze({ kind: 'directory', mode: STRING(mode), path: rel }));
+        copyDirectoryTree(childSrc, childDest, rel, depth + 1, limits, identity);
+      } finally {
+        closeQuiet(childSrc);
+        closeQuiet(childDest);
+      }
+      continue;
+    }
+    if (!stat.isFile() || stat.isBlockDevice() || stat.isCharacterDevice()
+      || stat.isFIFO() || stat.isSocket() || isSparseRegular(stat)) {
+      deny('special_file_denied', 'workspace');
+    }
+    if (stat.size > BigInt(COPY_MAX_FILE_BYTES)) deny('out_of_range', 'workspace');
+    limits.bytes += Number(stat.size);
+    if (limits.bytes > COPY_MAX_TOTAL_BYTES) deny('out_of_range', 'workspace');
+    const srcFile = openNoFollow(srcChild, OPEN_NOFOLLOW_READ, 'workspace', 'candidate_unreadable');
+    try {
+      const opened = fstatOrDeny(srcFile, 'workspace', 'candidate_unreadable');
+      if (!sameIdentity(opened, stat) || opened.isSymbolicLink() || !opened.isFile()) {
+        deny('candidate_race', 'workspace');
+      }
+      const mode = entryMode(stat);
+      copyRegularFile(srcFile, destFd, name, mode, Number(stat.size));
+      ARRAY_PUSH.call(identity, capturedFreeze({
+        digest: hashFdSync(srcFile),
+        kind: 'file',
+        mode: STRING(mode),
+        path: rel,
+        size: STRING(stat.size),
+      }));
+    } finally {
+      closeQuiet(srcFile);
+    }
+  }
+}
+
+function walkCopyIdentity(dirFd, relative, depth, identity) {
+  if (depth > COPY_MAX_DEPTH) deny('out_of_range', 'workspace');
+  let names;
+  try {
+    names = FS_READDIR_SYNC(procFdPath(dirFd), { encoding: 'buffer' });
+  } catch {
+    deny('workspace_unreadable', 'workspace');
+  }
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index].toString('utf8');
+    if (name === '.' || name === '..' || capturedTest(/[/\0]/u, name)) {
+      deny('workspace_unreadable', 'workspace');
+    }
+    const rel = relative === '' ? name : `${relative}/${name}`;
+    const child = procFdPath(dirFd, name);
+    let stat;
+    try {
+      stat = FS_LSTAT_SYNC(child, { bigint: true });
+    } catch {
+      deny('workspace_unreadable', 'workspace');
+    }
+    if (stat.isSymbolicLink()) deny('symlink_denied', 'workspace');
+    if (stat.isDirectory()) {
+      ARRAY_PUSH.call(identity, capturedFreeze({
+        kind: 'directory', mode: STRING(entryMode(stat)), path: rel,
+      }));
+      const childFd = openNoFollow(child, OPEN_NOFOLLOW_DIR, 'workspace', 'workspace_unreadable');
+      try {
+        walkCopyIdentity(childFd, rel, depth + 1, identity);
+      } finally {
+        closeQuiet(childFd);
+      }
+      continue;
+    }
+    if (!stat.isFile()) deny('special_file_denied', 'workspace');
+    const fileFd = openNoFollow(child, OPEN_NOFOLLOW_READ, 'workspace', 'workspace_unreadable');
+    try {
+      ARRAY_PUSH.call(identity, capturedFreeze({
+        digest: hashFdSync(fileFd),
+        kind: 'file',
+        mode: STRING(entryMode(stat)),
+        path: rel,
+        size: STRING(stat.size),
+      }));
+    } finally {
+      closeQuiet(fileFd);
+    }
+  }
+}
+
+function materializeCandidateCopy(sourcePath, destFd) {
+  const srcFd = openNoFollow(
+    sourcePath, OPEN_NOFOLLOW_DIR, 'request.candidate.repository', 'candidate_unreadable',
+  );
+  try {
+    const identity = [];
+    const limits = { bytes: 0, entries: 0 };
+    copyDirectoryTree(srcFd, destFd, '', 0, limits, identity);
+    const copyDigest = digestCopyIdentity(identity);
+    const verify = [];
+    walkCopyIdentity(destFd, '', 0, verify);
+    if (!equalDigest(copyDigest, digestCopyIdentity(verify))) deny('candidate_race', 'workspace');
+    return copyDigest;
+  } finally {
+    closeQuiet(srcFd);
+  }
+}
+
 async function createWorkspace(adapter, candidate) {
   const root = adapter.tmpRoot();
   if (typeof root !== 'string' || !PATH_IS_ABSOLUTE(root) || PATH_RESOLVE(root) !== root) {
@@ -851,70 +1212,274 @@ async function createWorkspace(adapter, candidate) {
   }
   const rootEntry = await lstatOrDeny(adapter, root, 'workspace', 'workspace_unreadable');
   if (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()) deny('symlink_denied', 'workspace');
+  const parentId = adapter.randomId();
   const id = adapter.randomId();
-  if (typeof id !== 'string' || !capturedTest(WORKSPACE_ID_PATTERN, id)) {
+  if (typeof parentId !== 'string' || !capturedTest(WORKSPACE_ID_PATTERN, parentId)
+    || typeof id !== 'string' || !capturedTest(WORKSPACE_ID_PATTERN, id)) {
     deny('workspace_unreadable', 'workspace');
   }
-  const workspacePath = PATH_JOIN(root, `${WORKSPACE_NAME_PREFIX}${id}`);
-  if (PATH_RESOLVE(workspacePath) !== workspacePath) deny('workspace_unreadable', 'workspace');
-  if (isPathInside(candidate.repository, workspacePath)
+  const parentName = `${WORKSPACE_PARENT_PREFIX}${parentId}`;
+  const workspaceName = `${WORKSPACE_NAME_PREFIX}${id}`;
+  const parentPath = PATH_JOIN(root, parentName);
+  const workspacePath = PATH_JOIN(parentPath, workspaceName);
+  if (PATH_RESOLVE(parentPath) !== parentPath || PATH_RESOLVE(workspacePath) !== workspacePath) {
+    deny('workspace_unreadable', 'workspace');
+  }
+  if (isPathInside(candidate.repository, parentPath)
+    || isPathInside(parentPath, candidate.repository)
+    || isPathInside(candidate.repository, workspacePath)
     || isPathInside(workspacePath, candidate.repository)
-    || workspacePath === root || workspacePath === '/' || workspacePath === candidate.repository) {
+    || workspacePath === root || workspacePath === '/' || parentPath === '/'
+    || workspacePath === candidate.repository || parentPath === candidate.repository) {
     deny('workspace_overlap_denied', 'workspace');
   }
   try {
+    await adapter.mkdir(parentPath, { recursive: false, mode: WORKSPACE_MODE });
+  } catch {
+    deny('workspace_unreadable', 'workspace');
+  }
+  const parentFd = openNoFollow(parentPath, OPEN_NOFOLLOW_DIR, 'workspace', 'workspace_unreadable');
+  const parentStat = fstatOrDeny(parentFd, 'workspace', 'workspace_unreadable');
+  if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) deny('symlink_denied', 'workspace');
+  try {
     await adapter.mkdir(workspacePath, { recursive: false, mode: WORKSPACE_MODE });
   } catch {
+    closeQuiet(parentFd);
     deny('workspace_unreadable', 'workspace');
   }
-  const entry = await lstatOrDeny(adapter, workspacePath, 'workspace', 'workspace_unreadable');
-  if (entry.isSymbolicLink()) deny('symlink_denied', 'workspace');
-  if (!entry.isDirectory()) deny('special_file_denied', 'workspace');
-  let resolved;
+  const dirFd = openNoFollow(
+    procFdPath(parentFd, workspaceName), OPEN_NOFOLLOW_DIR, 'workspace', 'workspace_unreadable',
+  );
+  const entry = fstatOrDeny(dirFd, 'workspace', 'workspace_unreadable');
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    closeQuiet(dirFd);
+    closeQuiet(parentFd);
+    deny('symlink_denied', 'workspace');
+  }
+  let copyDigest;
   try {
-    resolved = await adapter.realpath(workspacePath);
-  } catch {
-    deny('workspace_unreadable', 'workspace');
+    copyDigest = materializeCandidateCopy(candidate.repository, dirFd);
+  } catch (error) {
+    closeQuiet(dirFd);
+    closeQuiet(parentFd);
+    throw error;
   }
-  if (resolved !== workspacePath) deny('symlink_denied', 'workspace');
-  return capturedFreeze({
-    path: workspacePath,
-    root,
+  return {
+    copyDigest,
+    cwd: procFdPath(dirFd),
     dev: entry.dev,
+    dirFd,
+    id,
     ino: entry.ino,
     mode: entry.mode,
+    name: workspaceName,
+    parentDev: parentStat.dev,
+    parentFd,
+    parentIno: parentStat.ino,
+    parentPath,
+    path: workspacePath,
+    root,
+  };
+}
+
+function closeWorkspaceFds(record) {
+  if (record === undefined) return;
+  closeQuiet(record.dirFd);
+  closeQuiet(record.parentFd);
+  record.dirFd = -1;
+  record.parentFd = -1;
+}
+
+function sameDirPin(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function cleanupFdPath(fd, name) {
+  if (!NUMBER_IS_SAFE_INTEGER(fd) || fd < 0) deny('cleanup_uncertain', 'cleanup');
+  if (name === undefined) return `/proc/self/fd/${fd}`;
+  if (typeof name !== 'string' || name.length === 0 || name === '.' || name === '..'
+    || capturedTest(/[/\0]/u, name)) {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  return `/proc/self/fd/${fd}/${name}`;
+}
+
+function openCleanupDir(target) {
+  let fd;
+  try {
+    fd = FS_OPEN_SYNC(target, OPEN_NOFOLLOW_DIR);
+  } catch {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  return fd;
+}
+
+function assertPinnedDirectory(stat, expectedDev, expectedIno) {
+  if (expectedDev !== undefined && (stat.dev !== expectedDev || stat.ino !== expectedIno)) {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) deny('cleanup_uncertain', 'cleanup');
+}
+
+function emptyPinnedDirectory(dirFd, expectedDev, expectedIno, depth) {
+  if (depth > COPY_MAX_DEPTH) deny('cleanup_uncertain', 'cleanup');
+  const pinned = fstatOrDeny(dirFd, 'cleanup', 'cleanup_uncertain');
+  assertPinnedDirectory(pinned, expectedDev, expectedIno);
+  let names;
+  try {
+    names = FS_READDIR_SYNC(cleanupFdPath(dirFd), { encoding: 'buffer' });
+  } catch {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index].toString('utf8');
+    if (name === '.' || name === '..' || capturedTest(/[/\0]/u, name)) {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+    const childPath = cleanupFdPath(dirFd, name);
+    let stat;
+    try {
+      stat = FS_LSTAT_SYNC(childPath, { bigint: true });
+    } catch {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+    if (stat.isDirectory()) {
+      const childFd = openCleanupDir(childPath);
+      try {
+        const opened = fstatOrDeny(childFd, 'cleanup', 'cleanup_uncertain');
+        if (!sameDirPin(opened, stat) || opened.isSymbolicLink() || !opened.isDirectory()) {
+          deny('cleanup_uncertain', 'cleanup');
+        }
+        emptyPinnedDirectory(childFd, opened.dev, opened.ino, depth + 1);
+      } finally {
+        closeQuiet(childFd);
+      }
+      try {
+        const remaining = FS_LSTAT_SYNC(childPath, { bigint: true });
+        if (!sameDirPin(remaining, stat) || remaining.isSymbolicLink() || !remaining.isDirectory()) {
+          deny('cleanup_uncertain', 'cleanup');
+        }
+        FS_RMDIR_SYNC(childPath);
+      } catch (error) {
+        if (error && error.name === 'RunContractV1Error') throw error;
+        deny('cleanup_uncertain', 'cleanup');
+      }
+      continue;
+    }
+    try {
+      FS_UNLINK_SYNC(childPath);
+    } catch {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+  }
+  let leftover;
+  try {
+    leftover = FS_READDIR_SYNC(cleanupFdPath(dirFd), { encoding: 'buffer' });
+  } catch {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  if (leftover.length !== 0) deny('cleanup_uncertain', 'cleanup');
+}
+
+function unlinkQuarantineName(parentFd, qName, expectedDev, expectedIno) {
+  const namePath = cleanupFdPath(parentFd, qName);
+  let nameStat;
+  try {
+    nameStat = FS_LSTAT_SYNC(namePath, { bigint: true });
+  } catch {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  assertPinnedDirectory(nameStat, expectedDev, expectedIno);
+  try {
+    FS_RMDIR_SYNC(namePath);
+  } catch {
+    deny('cleanup_uncertain', 'cleanup');
+  }
+}
+
+function assertQuarantineAbsent(parentFd, qName) {
+  try {
+    FS_LSTAT_SYNC(cleanupFdPath(parentFd, qName), { bigint: true });
+  } catch (error) {
+    if (error && error.name === 'RunContractV1Error') throw error;
+    if (error && error.code === 'ENOENT') return;
+    deny('cleanup_uncertain', 'cleanup');
+  }
+  deny('cleanup_uncertain', 'cleanup');
+}
+
+async function invokeAfterQuarantinePin(adapter, record, qName, qFd) {
+  if (typeof adapter.afterQuarantinePin !== 'function') return;
+  await adapter.afterQuarantinePin({
+    dev: record.dev,
+    dirFd: record.dirFd,
+    ino: record.ino,
+    name: record.name,
+    parentFd: record.parentFd,
+    parentPath: record.parentPath,
+    path: record.path,
+    qFd,
+    qName,
   });
 }
 
-function assertExactWorkspace(record, entry, resolved) {
-  if (record.path === '/' || record.path === record.root) deny('cleanup_uncertain', 'cleanup');
-  if (!isPathInside(record.root, record.path) || record.path === record.root) {
-    deny('cleanup_uncertain', 'cleanup');
-  }
-  if (PATH_RELATIVE(record.root, record.path).includes('..')) deny('cleanup_uncertain', 'cleanup');
-  if (entry.isSymbolicLink() || !entry.isDirectory()) deny('cleanup_uncertain', 'cleanup');
-  if (entry.dev !== record.dev || entry.ino !== record.ino) deny('cleanup_uncertain', 'cleanup');
-  if (resolved !== record.path) deny('cleanup_uncertain', 'cleanup');
-}
-
 async function removeExactWorkspace(adapter, record) {
-  if (record === undefined || typeof record.path !== 'string' || !PATH_IS_ABSOLUTE(record.path)) {
+  if (record === undefined || !NUMBER_IS_SAFE_INTEGER(record.parentFd) || record.parentFd < 0
+    || !NUMBER_IS_SAFE_INTEGER(record.dirFd) || record.dirFd < 0
+    || typeof record.name !== 'string' || typeof record.id !== 'string'
+    || !STRING_STARTS_WITH(record.name, WORKSPACE_NAME_PREFIX)
+    || !capturedTest(WORKSPACE_ID_PATTERN, record.id)
+    || record.parentPath === '/' || record.path === '/' || record.path === record.parentPath) {
     deny('cleanup_uncertain', 'cleanup');
   }
-  if (PATH_RESOLVE(record.path) !== record.path) deny('cleanup_uncertain', 'cleanup');
-  const entry = await lstatOrDeny(adapter, record.path, 'cleanup', 'cleanup_uncertain');
-  let resolved;
-  try {
-    resolved = await adapter.realpath(record.path);
-  } catch {
+  const qName = `${QUARANTINE_NAME_PREFIX}${record.id}`;
+  if (qName === record.name || !STRING_STARTS_WITH(qName, QUARANTINE_NAME_PREFIX)) {
     deny('cleanup_uncertain', 'cleanup');
   }
-  assertExactWorkspace(record, entry, resolved);
+  let qFd = -1;
   try {
-    await adapter.rmdirExact(record);
-  } catch (error) {
-    if (error && error.name === 'RunContractV1Error') throw error;
-    deny('cleanup_uncertain', 'cleanup');
+    try {
+      FS_RENAME_SYNC(
+        cleanupFdPath(record.parentFd, record.name), cleanupFdPath(record.parentFd, qName),
+      );
+    } catch {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+    qFd = openCleanupDir(cleanupFdPath(record.parentFd, qName));
+    const qStat = fstatOrDeny(qFd, 'cleanup', 'cleanup_uncertain');
+    const pinned = fstatOrDeny(record.dirFd, 'cleanup', 'cleanup_uncertain');
+    if (!sameDirPin(qStat, record) || !sameDirPin(pinned, record)
+      || qStat.isSymbolicLink() || !qStat.isDirectory()
+      || pinned.isSymbolicLink() || !pinned.isDirectory()) {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+    await invokeAfterQuarantinePin(adapter, record, qName, qFd);
+    emptyPinnedDirectory(qFd, record.dev, record.ino, 0);
+    const qAfter = fstatOrDeny(qFd, 'cleanup', 'cleanup_uncertain');
+    const pinnedAfter = fstatOrDeny(record.dirFd, 'cleanup', 'cleanup_uncertain');
+    if (!sameDirPin(qAfter, record) || !sameDirPin(pinnedAfter, record)
+      || qAfter.isSymbolicLink() || !qAfter.isDirectory()
+      || pinnedAfter.isSymbolicLink() || !pinnedAfter.isDirectory()) {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+    unlinkQuarantineName(record.parentFd, qName, record.dev, record.ino);
+    assertQuarantineAbsent(record.parentFd, qName);
+    const parentStat = fstatOrDeny(record.parentFd, 'cleanup', 'cleanup_uncertain');
+    if (parentStat.dev !== record.parentDev || parentStat.ino !== record.parentIno
+      || parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+    try {
+      FS_RMDIR_SYNC(record.parentPath);
+    } catch {
+      deny('cleanup_uncertain', 'cleanup');
+    }
+  } finally {
+    closeQuiet(qFd);
+    closeQuiet(record.dirFd);
+    closeQuiet(record.parentFd);
+    record.dirFd = -1;
+    record.parentFd = -1;
   }
 }
 
@@ -961,44 +1526,104 @@ function attachCappedStream(stream, maxBytes, onFlood) {
   };
 }
 
-async function runApprovedOnce(adapter, intent, cwd, env, markSpawned) {
+function pinApprovedExecutable(executable) {
+  const execFd = openNoFollow(
+    executable, OPEN_NOFOLLOW_READ, 'request.intent.executable', 'executable_not_runnable',
+  );
+  const preStat = fstatOrDeny(execFd, 'request.intent.executable', 'executable_not_runnable');
+  assertPinnedRegularFile(preStat, 'request.intent.executable', 'executable_not_runnable');
+  const mode = typeof preStat.mode === 'bigint' ? Number(preStat.mode & 0o111n) : preStat.mode & 0o111;
+  if (mode === 0) {
+    closeQuiet(execFd);
+    deny('executable_not_runnable', 'request.intent.executable');
+  }
+  const preHash = hashFdSync(execFd);
+  return { execFd, preHash, preStat };
+}
+
+function assertExecutableIdentityHeld(executable, pin) {
+  const postStat = fstatOrDeny(pin.execFd, 'request.intent.executable', 'executable_not_runnable');
+  if (!sameIdentity(postStat, pin.preStat) || postStat.isSymbolicLink() || !postStat.isFile()) {
+    deny('executable_not_runnable', 'request.intent.executable');
+  }
+  const postHash = hashFdSync(pin.execFd);
+  if (!equalDigest(postHash, pin.preHash)) deny('executable_not_runnable', 'request.intent.executable');
+  let pathStat;
+  try {
+    pathStat = FS_LSTAT_SYNC(executable, { bigint: true });
+  } catch {
+    deny('executable_not_runnable', 'request.intent.executable');
+  }
+  if (pathStat.isSymbolicLink() || pathStat.dev !== pin.preStat.dev || pathStat.ino !== pin.preStat.ino) {
+    deny('executable_not_runnable', 'request.intent.executable');
+  }
+}
+
+async function listDescendantsOrUncertain(adapter, pid) {
+  let leftovers;
+  try {
+    leftovers = await adapter.listDescendants(pid);
+  } catch (error) {
+    if (error && error.name === 'RunContractV1Error') throw error;
+    deny('cleanup_uncertain', 'execution');
+  }
+  if (!capturedIsArray(leftovers)) deny('cleanup_uncertain', 'execution');
+  return leftovers;
+}
+
+async function runApprovedOnce(adapter, intent, workspace, env, markSpawned) {
   if (intent.timeout_ms < KILL_GRACE_MS) deny('out_of_range', 'request.intent.timeout_ms');
   const argv = [];
   for (let index = 0; index < intent.argv.length; index += 1) {
     ARRAY_PUSH.call(argv, intent.argv[index]);
   }
+  const limits = resourceLimitsFor(intent.timeout_ms);
+  const verify = [];
+  walkCopyIdentity(workspace.dirFd, '', 0, verify);
+  if (!equalDigest(workspace.copyDigest, digestCopyIdentity(verify))) {
+    deny('candidate_race', 'workspace');
+  }
+  const pin = pinApprovedExecutable(intent.executable);
   markSpawned();
   let child;
   try {
     child = adapter.spawn(intent.executable, argv, {
-      cwd,
+      cwd: workspace.cwd,
       env,
-      shell: false,
+      executableFd: pin.execFd,
       networkMode: 'deny',
+      resourceLimits: limits,
+      shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      workspaceFd: workspace.dirFd,
       detached: false,
     });
   } catch {
+    closeQuiet(pin.execFd);
     deny('resource_bound_unavailable', 'execution');
   }
-  if (!child || typeof child.on !== 'function') deny('resource_bound_unavailable', 'execution');
+  if (!child || typeof child.on !== 'function') {
+    closeQuiet(pin.execFd);
+    deny('resource_bound_unavailable', 'execution');
+  }
   let flooded = false;
   let timedOut = false;
+  let killConfirmed = true;
   let killGrace;
   const stdoutCap = attachCappedStream(child.stdout, intent.resources.max_output_bytes, () => {
     flooded = true;
-    try { adapter.killProcessGroup(child.pid, 'SIGKILL'); } catch { /* already dead */ }
+    try { adapter.killProcessGroup(child.pid, 'SIGKILL'); } catch { killConfirmed = false; }
   });
   const stderrCap = attachCappedStream(child.stderr, intent.resources.max_error_bytes, () => {
     flooded = true;
-    try { adapter.killProcessGroup(child.pid, 'SIGKILL'); } catch { /* already dead */ }
+    try { adapter.killProcessGroup(child.pid, 'SIGKILL'); } catch { killConfirmed = false; }
   });
   const timer = setTimeout(() => {
     timedOut = true;
-    try { adapter.killProcessGroup(child.pid, 'SIGTERM'); } catch { /* already dead */ }
+    try { adapter.killProcessGroup(child.pid, 'SIGTERM'); } catch { killConfirmed = false; }
     killGrace = setTimeout(() => {
-      try { adapter.killProcessGroup(child.pid, 'SIGKILL'); } catch { /* already dead */ }
+      try { adapter.killProcessGroup(child.pid, 'SIGKILL'); } catch { killConfirmed = false; }
     }, KILL_GRACE_MS);
   }, intent.timeout_ms);
   let exit;
@@ -1014,7 +1639,6 @@ async function runApprovedOnce(adapter, intent, cwd, env, markSpawned) {
       child.once('error', reject);
       child.once('exit', (code, signal) => finish({ code, signal }));
       stuckTimer = setTimeout(() => {
-        timedOut = true;
         finish({ code: null, signal: null, stuck: true });
       }, intent.timeout_ms + KILL_GRACE_MS + STUCK_GRACE_MS);
     });
@@ -1023,42 +1647,50 @@ async function runApprovedOnce(adapter, intent, cwd, env, markSpawned) {
       new Promise((resolve) => setTimeout(resolve, STUCK_GRACE_MS)),
     ]);
   } catch {
+    closeQuiet(pin.execFd);
     deny('resource_bound_unavailable', 'execution');
   } finally {
     clearTimeout(timer);
     if (killGrace !== undefined) clearTimeout(killGrace);
     if (stuckTimer !== undefined) clearTimeout(stuckTimer);
   }
-  const leftovers = await adapter.listDescendants(child.pid);
-  if (capturedIsArray(leftovers) && leftovers.length > 0) {
-    for (let index = 0; index < leftovers.length; index += 1) {
-      try { adapter.killProcessGroup(leftovers[index], 'SIGKILL'); } catch { /* best effort */ }
+  try {
+    assertExecutableIdentityHeld(intent.executable, pin);
+    const leftovers = await listDescendantsOrUncertain(adapter, child.pid);
+    if (leftovers.length > 0) {
+      for (let index = 0; index < leftovers.length; index += 1) {
+        try { adapter.killProcessGroup(leftovers[index], 'SIGKILL'); } catch { /* best effort */ }
+      }
+      const still = await listDescendantsOrUncertain(adapter, child.pid);
+      if (still.length > 0) deny('escaped_descendants', 'execution');
+      deny('escaped_descendants', 'execution');
     }
-    const still = await adapter.listDescendants(child.pid);
-    if (capturedIsArray(still) && still.length > 0) deny('escaped_descendants', 'execution');
-    deny('escaped_descendants', 'execution');
+    if (exit.stuck === true) deny('cleanup_uncertain', 'execution');
+    if (killConfirmed === false) deny('cleanup_uncertain', 'execution');
+    if (flooded || stdoutCap.truncated() || stderrCap.truncated()) deny('output_flood', 'execution');
+    if (timedOut) deny('timeout', 'execution');
+    const code = exit.code;
+    const signal = exit.signal;
+    const hasCode = code !== null && code !== undefined;
+    const hasSignal = signal !== null && signal !== undefined;
+    if (hasCode === hasSignal) deny('signal_ambiguous', 'execution');
+    if (hasSignal) deny('signal_ambiguous', 'execution');
+    if (typeof code !== 'number' || !NUMBER_IS_SAFE_INTEGER(code) || code < 0 || code > 255) {
+      deny('signal_ambiguous', 'execution');
+    }
+    return {
+      exit_code: code,
+      signal: null,
+      stdout_bytes: stdoutCap.bytes(),
+      stderr_bytes: stderrCap.bytes(),
+      stdout_digest: stdoutCap.digest(),
+      stderr_digest: stderrCap.digest(),
+      stdout_truncated: false,
+      stderr_truncated: false,
+    };
+  } finally {
+    closeQuiet(pin.execFd);
   }
-  if (flooded || stdoutCap.truncated() || stderrCap.truncated()) deny('output_flood', 'execution');
-  if (timedOut) deny('timeout', 'execution');
-  const code = exit.code;
-  const signal = exit.signal;
-  const hasCode = code !== null && code !== undefined;
-  const hasSignal = signal !== null && signal !== undefined;
-  if (hasCode === hasSignal) deny('signal_ambiguous', 'execution');
-  if (hasSignal) deny('signal_ambiguous', 'execution');
-  if (typeof code !== 'number' || !NUMBER_IS_SAFE_INTEGER(code) || code < 0 || code > 255) {
-    deny('signal_ambiguous', 'execution');
-  }
-  return {
-    exit_code: code,
-    signal: null,
-    stdout_bytes: stdoutCap.bytes(),
-    stderr_bytes: stderrCap.bytes(),
-    stdout_digest: stdoutCap.digest(),
-    stderr_digest: stderrCap.digest(),
-    stdout_truncated: false,
-    stderr_truncated: false,
-  };
 }
 
 function requireEnum(allowed, value, path) {
@@ -1166,6 +1798,25 @@ function freezeCandidateAudit(snapshot) {
   });
 }
 
+function bindCopyIdentity(snapshot, copyDigest) {
+  return freezeRecord(capturedFreeze([
+    'base_sha', 'config_digest', 'filesystem_digest', 'gitdir', 'head_sha',
+    'refs_digest', 'status_digest', 'worktrees_digest',
+  ]), {
+    head_sha: snapshot.head_sha,
+    base_sha: snapshot.base_sha,
+    status_digest: snapshot.status_digest,
+    refs_digest: snapshot.refs_digest,
+    config_digest: snapshot.config_digest,
+    worktrees_digest: snapshot.worktrees_digest,
+    filesystem_digest: sha256Hex(BUFFER_FROM(canonicalJsonStringify({
+      copy: copyDigest,
+      source: snapshot.filesystem_digest,
+    }), 'utf8')),
+    gitdir: snapshot.gitdir,
+  });
+}
+
 export async function executeConstrainedVerificationV1(input, options = {}) {
   const request = parseRequest(input, 'request');
   const adapter = resolveAdapter(options, 'options');
@@ -1182,12 +1833,13 @@ export async function executeConstrainedVerificationV1(input, options = {}) {
   };
   try {
     workspace = await createWorkspace(adapter, candidate);
+    const boundBefore = bindCopyIdentity(before, workspace.copyDigest);
     const env = buildChildEnvironment(intent.environment);
     const started = adapter.nowMs();
     if (typeof started !== 'number' || !NUMBER_IS_SAFE_INTEGER(started) || started < 0) {
       deny('clock_denied', 'execution');
     }
-    const run = await runApprovedOnce(adapter, intent, workspace.path, env, markSpawned);
+    const run = await runApprovedOnce(adapter, intent, workspace, env, markSpawned);
     const ended = adapter.nowMs();
     if (typeof ended !== 'number' || !NUMBER_IS_SAFE_INTEGER(ended) || ended < started) {
       deny('clock_denied', 'execution');
@@ -1195,11 +1847,12 @@ export async function executeConstrainedVerificationV1(input, options = {}) {
     const durationMs = ended - started;
     const filesystemAfter = await assertCandidateSafe(adapter, candidate);
     const after = await snapshotCandidate(adapter, candidate, filesystemAfter, false);
-    assertUnchanged(before, after);
+    const boundAfter = bindCopyIdentity(after, workspace.copyDigest);
+    assertUnchanged(boundBefore, boundAfter);
     await removeExactWorkspace(adapter, workspace);
     workspace = undefined;
     const acceptance = freezeAcceptanceObservation(intent, run, durationMs);
-    const git = freezeGitObservation(after, durationMs, intent.plan_identity.digest);
+    const git = freezeGitObservation(boundAfter, durationMs, intent.plan_identity.digest);
     const observations = freezeRecord(OBSERVATION_KEYS, { acceptance, git_identity: git });
     const body = freezeRecord(RECEIPT_BODY_KEYS, {
       schema: CONSTRAINED_VERIFICATION_SCHEMA_ID,
@@ -1208,7 +1861,7 @@ export async function executeConstrainedVerificationV1(input, options = {}) {
       intent_identity: intent.plan_identity,
       policy_identity: intent.policy_identity,
       outcome: freezeOutcome(run, durationMs),
-      candidate_audit: freezeCandidateAudit(after),
+      candidate_audit: freezeCandidateAudit(boundAfter),
       cleanup: freezeRecord(CLEANUP_KEYS, { status: 'removed' }),
       observations,
       facts: freezeFacts(acceptance, git),
@@ -1232,6 +1885,7 @@ export async function executeConstrainedVerificationV1(input, options = {}) {
       try {
         await removeExactWorkspace(adapter, workspace);
       } catch (cleanupError) {
+        closeWorkspaceFds(workspace);
         if (cleanupError && cleanupError.name === 'RunContractV1Error') throw cleanupError;
         deny('cleanup_uncertain', 'cleanup');
       }
@@ -1249,6 +1903,7 @@ export const CONSTRAINED_VERIFICATION_CONTRACT_DESCRIPTOR = capturedFreeze({
   receipt_keys: RECEIPT_RESULT_KEYS,
   git_executable: GIT_EXECUTABLE,
   unshare_executable: UNSHARE_EXECUTABLE,
+  prlimit_executable: PRLIMIT_EXECUTABLE,
   reported_results: REPORTED_RESULTS,
   fact_kinds: capturedFreeze(['acceptance_results', 'git_identity']),
   default_deny: capturedFreeze({
@@ -1256,6 +1911,9 @@ export const CONSTRAINED_VERIFICATION_CONTRACT_DESCRIPTOR = capturedFreeze({
     env: capturedFreeze({}),
     network: 'deny',
     executions: 1,
+    cpu_seconds_cap: RESOURCE_CPU_SECONDS_CAP,
+    address_space_bytes: RESOURCE_ADDRESS_SPACE_BYTES,
+    nproc: RESOURCE_NPROC,
   }),
 });
 
