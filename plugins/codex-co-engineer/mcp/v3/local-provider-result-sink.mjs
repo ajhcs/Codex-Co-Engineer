@@ -8,7 +8,8 @@
 // final local Grok ACP, Cursor Local ACP, and DSH ACPX/CLI output into
 // the accepted P08/P09 raw+sanitized artifact store. It does not sanitize,
 // store, or range-read on its own: P09 `sanitizeAndPublishArtifactV1` and
-// P08 `verifyStoredArtifactV1` remain the publication/verify authorities.
+// P08 `verifyStoredArtifactV1` remain the publication/verify authorities,
+// and P10 `readSanitizedArtifactV1` is the only model-facing tail reader.
 //
 // Contract:
 //   - Exact run_id / assignment_id / provider / model / optional child
@@ -20,7 +21,11 @@
 //     and source_truncated/complete are recorded truthfully.
 //   - Only sanitized artifacts are model-readable. The return is detached
 //     deep-frozen content-free metadata: refs, provenance, digests, counts,
-//     truncation. Never raw bytes, secrets, prompt text, or live handles.
+//     truncation, and a default inline tail of at most 4,096 UTF-8 bytes
+//     derived through the accepted P10 sanitized reader/ref and aligned
+//     on a valid UTF-8 boundary. Tail metadata distinguishes inline
+//     clipping from upstream source truncation. Never raw bytes, secrets,
+//     prompt text, or live handles.
 //   - Empty output is not published and does not invent an artifact.
 //   - Crossing a class cap fails closed rather than clipping toward the cap.
 //   - Publication that does not verify is not reported.
@@ -42,6 +47,9 @@ import {
   artifactRefDigestV1,
   parseArtifactRefV1,
 } from './artifact-ref.mjs';
+import {
+  readSanitizedArtifactV1,
+} from './artifact-reader.mjs';
 import {
   ARTIFACT_SANITIZER_SCHEMA_ID,
   SANITIZER_CONTENT_ENCODING,
@@ -80,6 +88,7 @@ export const LOCAL_PROVIDER_RESULT_SINK_SCHEMA_ID =
 export const LOCAL_PROVIDER_RESULT_SINK_VERSION = 1;
 export const LOCAL_PROVIDER_RESULT_ARTIFACT_KIND = 'provider_report';
 export const LOCAL_PROVIDER_RESULT_STORE_DIR = 'artifacts';
+export const LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_MAX_BYTES = 4_096;
 
 export const LOCAL_PROVIDER_RESULT_SINK_PROVIDERS = capturedFreeze([
   'grok', 'cursor-local', 'dsh',
@@ -123,6 +132,21 @@ export const LOCAL_PROVIDER_RESULT_SINK_RECEIPT_KEYS = capturedFreeze([
   'complete',
   'source_truncated',
   'provenance',
+  'inline_tail',
+]);
+
+export const LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_KEYS = capturedFreeze([
+  'encoding',
+  'text',
+  'byte_length',
+  'offset',
+  'max_bytes',
+  'inline_clipped',
+  'source_truncated',
+  'complete',
+  'reader_clipped',
+  'more',
+  'next_offset',
 ]);
 
 export const LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS = capturedFreeze([
@@ -536,10 +560,54 @@ function emptyReceipt(identity, sourceTruncated) {
     complete: sourceTruncated !== true,
     source_truncated: sourceTruncated === true,
     provenance: null,
+    inline_tail: null,
   });
 }
 
-function publishedReceipt(identity, mediaType, relativePath, provenance) {
+function utf8BoundaryStart(bytes, fromOffset) {
+  if (fromOffset === 0) return 0;
+  let start = 0;
+  while (start < bytes.byteLength && (bytes[start] & 0xc0) === 0x80) start += 1;
+  return start;
+}
+
+async function readInlineTail(store, provenance) {
+  const length = provenance.sanitized_byte_length;
+  const maxBytes = LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_MAX_BYTES;
+  const offset = length > maxBytes ? length - maxBytes : 0;
+  const page = await readSanitizedArtifactV1(store, provenance.sanitized_ref, {
+    offset,
+    max_bytes: maxBytes,
+  });
+  const selected = BUFFER_FROM(page.selected_content, 'base64');
+  if (selected.byteLength !== page.selected_byte_length) {
+    failSink('invalid_format', 'inline_tail',
+      'The sanitized reader returned a tail whose encoding did not round-trip.');
+  }
+  const start = utf8BoundaryStart(selected, offset);
+  const aligned = start === 0 ? selected : selected.subarray(start);
+  const text = aligned.toString('utf8');
+  const tailBytes = BUFFER_FROM(text, 'utf8');
+  if (tailBytes.byteLength > maxBytes) {
+    failSink('invalid_format', 'inline_tail',
+      'The inline tail exceeded the 4096-byte UTF-8 cap after boundary alignment.');
+  }
+  return freezeData({
+    encoding: 'utf8',
+    text,
+    byte_length: tailBytes.byteLength,
+    offset: offset + start,
+    max_bytes: maxBytes,
+    inline_clipped: (offset + start) > 0 || tailBytes.byteLength < length,
+    source_truncated: provenance.source_truncated === true,
+    complete: provenance.complete === true,
+    reader_clipped: page.reader_clipped === true,
+    more: page.more === true,
+    next_offset: page.next_offset,
+  });
+}
+
+function publishedReceipt(identity, mediaType, relativePath, provenance, inlineTail) {
   const rawRef = provenance.raw_ref;
   const sanitizedRef = provenance.sanitized_ref;
   return freezeData({
@@ -569,6 +637,7 @@ function publishedReceipt(identity, mediaType, relativePath, provenance) {
     complete: provenance.complete === true,
     source_truncated: provenance.source_truncated === true,
     provenance,
+    inline_tail: inlineTail,
   });
 }
 
@@ -683,7 +752,8 @@ export async function sinkLocalProviderResultV1(store, input) {
       'Published provider-result artifacts did not verify; nothing is reported.');
   }
 
-  return publishedReceipt(identity, mediaType, relativePath, provenance);
+  const inlineTail = await readInlineTail(store, provenance);
+  return publishedReceipt(identity, mediaType, relativePath, provenance, inlineTail);
 }
 
 capturedFreeze(sinkLocalProviderResultV1);
@@ -695,5 +765,6 @@ capturedFreeze(localProviderResultIdentityFromTaskV1);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_PROVIDERS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_OPTION_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_RECEIPT_KEYS);
+capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_INLINE_TAIL_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_FAILURE_KEYS);
 capturedFreeze(LOCAL_PROVIDER_RESULT_SINK_ERROR_CODES);
