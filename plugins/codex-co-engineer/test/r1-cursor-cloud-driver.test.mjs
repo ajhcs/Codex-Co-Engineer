@@ -612,3 +612,131 @@ test('uncertain dispatch plus lost observation stays dispatch_uncertain without 
   assert.equal(observed.disposition, 'dispatch_uncertain');
   expectCode(() => driver.launch(requestFor('launch')), 'replay_denied');
 });
+
+test('cancel targets only the exact recorded run and reports archive truthfully', () => {
+  const transport = createScriptedCursorCloudTransportV1();
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const send = cursorCloudCallsOf(transport, 'send')[0];
+  const cancelled = driver.cancel(requestFor('cancel'));
+  assert.equal(cancelled.disposition, 'cancel_confirmed');
+  assert.equal(cancelled.detail_code, 'archive_confirmed');
+  assert.match(cancelled.detail_message, /archived=true/u);
+  const cancel = cursorCloudCallsOf(transport, 'cancel')[0];
+  assert.equal(cancel.agent_id, send.agent_id);
+  assert.equal(cancel.provider_run_id, CLOUD_FIXTURE_PROVIDER_RUN_ID);
+  assert.equal(cancel.request_id, send.request_id);
+});
+
+test('cancel reports a failed archive without claiming the agent was archived', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    cancel: [(request) => ({
+      outcome: 'cancel_confirmed',
+      archived: false,
+      agent_id: request.agent_id,
+      provider_run_id: request.provider_run_id,
+      request_id: request.request_id,
+      ...identityFields(),
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const cancelled = driver.cancel(requestFor('cancel'));
+  assert.equal(cancelled.disposition, 'cancel_confirmed');
+  assert.equal(cancelled.detail_code, 'archive_failed');
+  assert.match(cancelled.detail_message, /archived=false/u);
+});
+
+test('cancel_requested stays nonterminal so a later cancel may still reach transport', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    cancel: [
+      (request) => ({
+        outcome: 'cancel_requested',
+        archived: false,
+        agent_id: request.agent_id,
+        provider_run_id: request.provider_run_id,
+        request_id: request.request_id,
+        ...identityFields(),
+      }),
+      (request) => ({
+        outcome: 'cancel_confirmed',
+        archived: true,
+        agent_id: request.agent_id,
+        provider_run_id: request.provider_run_id,
+        request_id: request.request_id,
+        ...identityFields(),
+      }),
+    ],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const first = driver.cancel(requestFor('cancel'));
+  assert.equal(first.disposition, 'cancel_requested');
+  const second = driver.cancel(requestFor('cancel'));
+  assert.equal(second.disposition, 'cancel_confirmed');
+  assert.equal(transportCounts(transport).cancel, 2);
+});
+
+test('terminal reconcile latches later cancel as already_terminal without transport', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    observe: [(request) => ({
+      ...identityFields(),
+      agent_id: request.agent_id,
+      provider_run_id: request.provider_run_id ?? CLOUD_FIXTURE_PROVIDER_RUN_ID,
+      request_id: request.request_id,
+      branch: CLOUD_FIXTURE_BRANCH,
+      status: 'completed',
+      head_sha: fixture.base_sha,
+      merge_base_sha: fixture.base_sha,
+      linear_history: true,
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'terminal');
+  const cancelled = driver.cancel(requestFor('cancel'));
+  assert.equal(cancelled.disposition, 'already_terminal');
+  assert.equal(cancelled.detail_code, 'already_terminal');
+  assert.equal(transportCounts(transport).cancel, 0);
+  assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'terminal');
+  assert.equal(transportCounts(transport).observe, 1);
+});
+
+test('confirmed cancellation latches later cancel as already_terminal without transport', () => {
+  const transport = createScriptedCursorCloudTransportV1();
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  assert.equal(driver.cancel(requestFor('cancel')).disposition, 'cancel_confirmed');
+  assert.equal(transportCounts(transport).cancel, 1);
+  const again = driver.cancel(requestFor('cancel'));
+  assert.equal(again.disposition, 'already_terminal');
+  assert.equal(transportCounts(transport).cancel, 1);
+  assert.equal(driver.reconcile(requestFor('reconcile')).disposition, 'terminal');
+  assert.equal(transportCounts(transport).observe, 0);
+});
+
+test('cancel refuses a different Cloud agent or run identity', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    cancel: [(request) => ({
+      outcome: 'cancel_confirmed',
+      archived: true,
+      agent_id: 'bc-other-agent',
+      provider_run_id: request.provider_run_id,
+      request_id: request.request_id,
+      ...identityFields(),
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  expectCode(() => driver.cancel(requestFor('cancel')), 'stale_identity_denied');
+});
+
+test('inspect evidence after cancel exposes recorded identities without prompt text', () => {
+  const transport = createScriptedCursorCloudTransportV1();
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  driver.cancel(requestFor('cancel'));
+  const evidence = inspectCursorCloudLaneEvidenceV1(driver, {
+    run_id: fixture.run_id,
+    assignment_id: fixture.assignment_id,
+    child_envelope_digest: fixture.child_envelope_digest,
+  });
+  assert.equal(evidence.agent_id, cursorCloudCallsOf(transport, 'send')[0].agent_id);
+  assert.equal(evidence.provider_run_id, CLOUD_FIXTURE_PROVIDER_RUN_ID);
+  assert.equal(evidence.request_id, cursorCloudCallsOf(transport, 'send')[0].request_id);
+  assert.doesNotMatch(JSON.stringify(evidence), new RegExp(LEAK_MARKER, 'u'));
+  assert.doesNotMatch(JSON.stringify(evidence), /envelope_text|prompt/u);
+});
