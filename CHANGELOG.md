@@ -85,6 +85,25 @@
   a torn store stays torn and fails closed until an operator acts. Coverage
   lives in `test/r1-artifact-store.test.mjs` and
   `test/r1-artifact-store-adversarial.test.mjs`.
+- **GitIdentityV1 independent repository, ancestry, and merge-base
+  verifier.** Adds an additive v3 `git-identity.mjs` module for W13-P14.
+  It derives Git facts from the local repository through argv execution
+  (`/usr/bin/git`, no shell) and never from provider claims, then binds
+  repository identity, expected base ref/name, exact base SHA, candidate
+  head SHA, object types, reachability, ancestry, merge-base identity,
+  and rewritten/stale history into P13 `VerifiedFactV1` /
+  `EvidenceDiscrepancyV1` snapshots (`git_identity` and `head_sha` with
+  `platform_git` / `ancestry_check`). Observation uses a closed
+  environment that cannot inherit `GIT_*`, replace, graft, or config
+  influence; output, time, and command counts are bounded; typed errors
+  never echo hostile bytes. It rejects missing/wrong repos, symbolic-ref
+  drift, detached/unborn/ambiguous refs, non-commit objects, replace
+  refs, grafts, hostile names, extra keys, proxies/accessors, and bounds
+  abuse. It does not own P15 scope/read-only/merge-commit checks, P16A
+  trusted command policy, P28 Git mutation, or provider/workspace
+  dispatch. Coverage lives in `r1-git-identity` and
+  `r1-git-identity-adversarial` tests plus disposable forged/stale/
+  rewritten fixtures.
 - **ArtifactRefV1 and the strict relative artifact path policy.** Adds two
   additive, pure v3 modules for W3-P07. `artifact-path.mjs` owns one
   deterministic fail-closed question - is this string a strict portable
