@@ -18,3 +18,12 @@ export {
   inspectFutureHarnessTemplateBindingV1,
   validateFutureHarnessIdentityV1,
 } from './provider-driver-template.mjs';
+
+export {
+  FUTURE_HARNESS_CONFORMANCE_SCHEMA_ID,
+  FUTURE_HARNESS_CONFORMANCE_VERSION,
+  FUTURE_HARNESS_LEAK_PATTERN,
+  assertFutureHarnessContentFreeV1,
+  describeFutureHarnessConformanceKitV1,
+  runFutureHarnessConformanceKitV1,
+} from './provider-driver-conformance.mjs';
