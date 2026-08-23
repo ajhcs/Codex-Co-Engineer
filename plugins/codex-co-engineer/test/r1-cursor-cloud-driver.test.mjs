@@ -17,6 +17,7 @@ import {
   createCursorCloudDriverV1,
   cursorCloudDriverDeclarationV1,
   describeCursorCloudDriverV1,
+  inspectCursorCloudLaneEvidenceV1,
 } from '../mcp/v3/cursor-cloud-driver.mjs';
 import { childEnvelopeDigestV1 } from '../mcp/v3/identity.mjs';
 import { compileChildEnvelopeV1 } from '../mcp/v3/prompt-compiler.mjs';
@@ -399,4 +400,215 @@ test('cross-provider envelopes fail closed at the Cursor Cloud slot', () => {
     envelope_text: envelope.envelope_text,
     child_envelope_digest: childEnvelopeDigestV1(envelope).digest,
   }), 'provider_slot_mismatch');
+});
+
+function identityFields() {
+  return {
+    provider: 'cursor-cloud',
+    model: CLOUD_FIXTURE_MODEL,
+    run_id: fixture.run_id,
+    assignment_id: fixture.assignment_id,
+    lane_index: fixture.lane_index,
+    base_sha: fixture.base_sha,
+    child_envelope_digest: fixture.child_envelope_digest,
+    starting_sha: fixture.base_sha,
+    repository_identity: CLOUD_FIXTURE_REPO_IDENTITY,
+  };
+}
+
+function dispatched(driver = bindCursorCloudDriverV1(createScriptedCursorCloudTransportV1())) {
+  assert.equal(driver.preflight(requestFor('preflight')).disposition, 'ready');
+  assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatched');
+  return driver;
+}
+
+test('reconcile observes in-progress Cloud identity without claiming extra Git facts', () => {
+  const transport = createScriptedCursorCloudTransportV1();
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const observed = driver.reconcile(requestFor('reconcile', { include: ['live_progress'] }));
+  assert.equal(observed.disposition, 'in_progress');
+  assert.equal(observed.detail_code, 'live_progress');
+  assert.match(observed.detail_message, /^status=running events=1$/u);
+  const observe = cursorCloudCallsOf(transport, 'observe')[0];
+  assert.equal(observe.starting_sha, fixture.base_sha);
+  assert.equal(observe.run_id, fixture.run_id);
+  const evidence = inspectCursorCloudLaneEvidenceV1(driver, {
+    run_id: fixture.run_id,
+    assignment_id: fixture.assignment_id,
+    child_envelope_digest: fixture.child_envelope_digest,
+  });
+  assert.equal(evidence.branch, CLOUD_FIXTURE_BRANCH);
+  assert.equal(evidence.git.starting_sha, fixture.base_sha);
+  assert.equal(evidence.git.head_sha, fixture.base_sha);
+  assert.equal(evidence.status, 'running');
+  assert.equal(Object.hasOwn(evidence, 'tests_passed'), false);
+  assert.equal(Object.hasOwn(evidence, 'pr_url'), false);
+});
+
+test('terminal reconcile requires provider status plus independently verifiable Git evidence', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    observe: [(request) => ({
+      ...identityFields(),
+      agent_id: request.agent_id,
+      provider_run_id: request.provider_run_id ?? CLOUD_FIXTURE_PROVIDER_RUN_ID,
+      request_id: request.request_id,
+      branch: CLOUD_FIXTURE_BRANCH,
+      status: 'completed',
+      head_sha: fixture.base_sha,
+      merge_base_sha: fixture.base_sha,
+      linear_history: true,
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const terminal = driver.reconcile(requestFor('reconcile'));
+  assert.equal(terminal.disposition, 'terminal');
+  assert.equal(terminal.detail_code, 'terminal_evidence');
+  assert.match(terminal.detail_message, new RegExp(`branch=${CLOUD_FIXTURE_BRANCH}`));
+  const evidence = inspectCursorCloudLaneEvidenceV1(driver, {
+    run_id: fixture.run_id,
+    assignment_id: fixture.assignment_id,
+    child_envelope_digest: fixture.child_envelope_digest,
+  });
+  assert.equal(evidence.git.merge_base_sha, fixture.base_sha);
+  assert.equal(evidence.git.linear_history, true);
+});
+
+test('terminal reconcile fails closed when Git/branch/base evidence is missing', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    observe: [(request) => ({
+      ...identityFields(),
+      agent_id: request.agent_id,
+      provider_run_id: request.provider_run_id ?? CLOUD_FIXTURE_PROVIDER_RUN_ID,
+      request_id: request.request_id,
+      status: 'completed',
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  expectCode(() => driver.reconcile(requestFor('reconcile')), 'malformed_receipt');
+});
+
+test('invisible starting SHA blocks before create and is never launched', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    preflight: [{
+      ok: false,
+      ...identityFields(),
+      requested_model: CLOUD_FIXTURE_MODEL,
+      effective_model: CLOUD_FIXTURE_MODEL,
+      repository_url: CLOUD_FIXTURE_REPO_URL,
+      workspace_clean: true,
+      starting_ref_visible: false,
+      starting_ref_commit: true,
+      head_sha: fixture.base_sha,
+      duplicate_identities: false,
+      credential_bearing: false,
+      auto_create_pr: false,
+      detail_code: 'starting_ref_invisible',
+      detail_message: 'not pushed',
+    }],
+  });
+  const driver = bindCursorCloudDriverV1(transport);
+  const blocked = driver.preflight(requestFor('preflight'));
+  assert.equal(blocked.disposition, 'blocked');
+  assert.equal(blocked.detail_code, 'starting_ref_invisible');
+  expectCode(() => driver.launch(requestFor('launch')), 'blocked_lane_denied');
+  assert.equal(transportCounts(transport).create, 0);
+});
+
+test('duplicate or drifted Cloud run identity fails closed and is never substituted', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    observe: [(request) => ({
+      ...identityFields(),
+      agent_id: request.agent_id,
+      provider_run_id: 'run-other-cloud',
+      request_id: request.request_id,
+      branch: CLOUD_FIXTURE_BRANCH,
+      status: 'running',
+      head_sha: fixture.base_sha,
+      merge_base_sha: fixture.base_sha,
+      linear_history: true,
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  expectCode(() => driver.reconcile(requestFor('reconcile')), 'stale_identity_denied');
+  assert.equal(transportCounts(transport).create, 1);
+  assert.equal(transportCounts(transport).send, 1);
+});
+
+test('restart reattaches only the exact recorded agent, run, and request identity', () => {
+  const transport = createScriptedCursorCloudTransportV1();
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const send = cursorCloudCallsOf(transport, 'send')[0];
+  const restarted = driver.reconcile(requestFor('reconcile', { intent: 'restart_reattach' }));
+  assert.equal(restarted.disposition, 'in_progress');
+  const reattach = cursorCloudCallsOf(transport, 'reattach')[0];
+  assert.equal(reattach.agent_id, send.agent_id);
+  assert.equal(reattach.provider_run_id, CLOUD_FIXTURE_PROVIDER_RUN_ID);
+  assert.equal(reattach.request_id, send.request_id);
+  assert.equal(transportCounts(transport).create, 1);
+  assert.equal(transportCounts(transport).send, 1);
+});
+
+test('restart with a different recorded identity never starts a replacement run', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    reattach: [(request) => ({
+      reattached: true,
+      ...identityFields(),
+      agent_id: 'bc-other-agent',
+      provider_run_id: request.provider_run_id,
+      request_id: request.request_id,
+      branch: CLOUD_FIXTURE_BRANCH,
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  expectCode(
+    () => driver.reconcile(requestFor('reconcile', { intent: 'restart_reattach' })),
+    'stale_identity_denied',
+  );
+  assert.equal(transportCounts(transport).send, 1);
+});
+
+test('needs_attention is unresolved evidence and never a same-session reply or new run', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    observe: [(request) => ({
+      ...identityFields(),
+      agent_id: request.agent_id,
+      provider_run_id: request.provider_run_id ?? CLOUD_FIXTURE_PROVIDER_RUN_ID,
+      request_id: request.request_id,
+      branch: CLOUD_FIXTURE_BRANCH,
+      status: 'needs_attention',
+      head_sha: fixture.base_sha,
+      merge_base_sha: fixture.base_sha,
+      linear_history: true,
+      attention: { question_id: 'q-cloud-1' },
+    })],
+  });
+  const driver = dispatched(bindCursorCloudDriverV1(transport));
+  const attention = driver.reconcile(requestFor('reconcile'));
+  assert.equal(attention.disposition, 'unresolved_attention');
+  assert.equal(attention.detail_code, 'unresolved_attention');
+  assert.match(attention.detail_message, /unsupported/u);
+  expectCode(() => driver.launch(requestFor('launch')), 'replay_denied');
+  assert.equal(transportCounts(transport).send, 1);
+});
+
+test('uncertain dispatch plus lost observation stays dispatch_uncertain without replay', () => {
+  const transport = createScriptedCursorCloudTransportV1({
+    send: [{ throw: true, code: 'transport_lost', message: 'send dropped' }],
+    observe: [(request) => ({
+      ...identityFields(),
+      agent_id: request.agent_id,
+      request_id: request.request_id,
+      branch: CLOUD_FIXTURE_BRANCH,
+      status: 'lost',
+      head_sha: fixture.base_sha,
+      merge_base_sha: fixture.base_sha,
+      ...(request.provider_run_id ? { provider_run_id: request.provider_run_id } : {}),
+    })],
+  });
+  const driver = bindCursorCloudDriverV1(transport);
+  driver.preflight(requestFor('preflight'));
+  assert.equal(driver.launch(requestFor('launch')).disposition, 'dispatch_uncertain');
+  const observed = driver.reconcile(requestFor('reconcile'));
+  assert.equal(observed.disposition, 'dispatch_uncertain');
+  expectCode(() => driver.launch(requestFor('launch')), 'replay_denied');
 });
