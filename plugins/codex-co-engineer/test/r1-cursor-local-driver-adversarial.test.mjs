@@ -21,11 +21,13 @@ import {
   MAX_EVIDENCE_EVENTS,
   MAX_EVIDENCE_SEGMENT_BYTES,
   MAX_LANE_EVIDENCE_BYTES,
+  REDACTED_MARKER,
   createCursorLocalDriverV1,
 } from '../mcp/v3/cursor-local-driver.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import { childEnvelopeDigestV1 } from '../mcp/v3/identity.mjs';
 import {
+  FIXTURE_QUESTION_ID,
   SECRET_AWS_KEY,
   SECRET_BEARER_TOKEN,
   SECRET_SPLIT_HEAD,
@@ -66,6 +68,12 @@ function expectCode(fn, code, message) {
 
 function create(scenario = 'happy', options = {}) {
   const stub = createCursorLocalTransportStub(options.scenario ?? scenario);
+  // Wraps are installed BEFORE driver construction: the driver detaches its
+  // method references at creation, exactly like a real host would.
+  for (const [method, wrap] of Object.entries(options.wrap ?? {})) {
+    const original = stub.transport[method];
+    stub.transport[method] = (request) => wrap(original, request);
+  }
   const created = createCursorLocalDriverV1({
     declaration: cursorLocalDeclaration(),
     model: fixture.model,
@@ -368,10 +376,17 @@ test('lying transports produce content-free typed failures only', () => {
       },
     },
   });
+  // After a successful spawn launch may never throw: a getter-bearing spawn
+  // result leaves a live session with an unusable proof, which is honest
+  // dispatch_uncertain — and the getter itself is still never invoked.
   const poisonedBound = bindProviderDriverV1(poisoned.driver, poisoned.declaration);
   poisonedBound.preflight(buildDriverOperationRequestV1('preflight', fixture.envelope));
-  expectCode(() => poisonedBound.launch(buildDriverOperationRequestV1('launch', fixture.envelope)),
-    'accessor_property_denied', 'getter-bearing spawn results are refused structurally');
+  const poisonedReceipt =
+    poisonedBound.launch(buildDriverOperationRequestV1('launch', fixture.envelope));
+  assert.equal(poisonedReceipt.disposition, 'dispatch_uncertain',
+    'getter-bearing spawn results become post-spawn uncertainty, never a throw');
+  assert.equal(poisonedReceipt.child_envelope_digest, fixture.child_envelope_digest,
+    'the uncertain receipt keeps the exact child identity');
   assert.equal(getterCounter.reads, 0, 'result getters are never invoked');
 });
 
@@ -500,15 +515,17 @@ test('hostile control requests stay inside the content-free quarantine', () => {
 
   expectCode(() => context.created.controls.submitAttentionReply(new Proxy(replyBase(), {})),
     'proxy_denied', 'proxied replies are denied');
+  // Extra keys are rejected content-free BEFORE any value inspection, so
+  // hostility is exercised through closed keys below.
   const cyclic = replyBase();
-  cyclic.self = {};
-  cyclic.self.self = cyclic.self;
+  cyclic.answer_text = cyclic;
   expectCode(() => context.created.controls.submitAttentionReply(cyclic),
-    'aliased_reference_denied', 'cyclic replies are denied');
+    'aliased_reference_denied', 'cyclic replies are denied inside a closed key');
   const aliased = replyBase();
   const shared = { lane: 1 };
-  aliased.extra = shared;
-  expectCode(() => context.created.controls.submitAttentionReply({ ...aliased, extra2: shared }),
+  aliased.envelope_text = shared;
+  aliased.child_envelope_digest = shared;
+  expectCode(() => context.created.controls.submitAttentionReply(aliased),
     'aliased_reference_denied', 'aliased replies are denied inside the same quarantine');
   let depth = { v: 0 };
   for (let index = 0; index < 40; index += 1) depth = { nested: depth };
@@ -518,6 +535,53 @@ test('hostile control requests stay inside the content-free quarantine', () => {
   expectCode(() => context.created.controls.readEvidence(
     new Proxy(evidenceRequest(), {}),
   ), 'proxy_denied', 'proxied evidence requests are denied');
+
+  // Extra control-request keys are refused content-free: fixed code, fixed
+  // path, fixed message — and the hostile value is never inspected at all,
+  // so accessors never run and proxy traps never fire.
+  let extraGetterRuns = 0;
+  const getterValue = {};
+  Object.defineProperty(getterValue, 'polluted', {
+    enumerable: true,
+    get() {
+      extraGetterRuns += 1;
+      return '__proto__';
+    },
+  });
+  let trapCount = 0;
+  const trappedValue = new Proxy({}, {
+    get() {
+      trapCount += 1;
+      return undefined;
+    },
+    has() {
+      trapCount += 1;
+      return true;
+    },
+    ownKeys() {
+      trapCount += 1;
+      return [];
+    },
+    getOwnPropertyDescriptor() {
+      trapCount += 1;
+      return undefined;
+    },
+  });
+  expectCode(() => context.created.controls.submitAttentionReply(
+    { ...replyBase(), polluted: getterValue },
+  ), 'unknown_key', 'extra reply keys are rejected content-free');
+  assert.equal(extraGetterRuns, 0, 'extra-key values are never read');
+  expectCode(() => context.created.controls.readEvidence(
+    { ...evidenceRequest(), polluted: trappedValue },
+  ), 'unknown_key', 'extra evidence keys are rejected content-free');
+  assert.equal(trapCount, 0, 'extra-key proxies are never trapped');
+  const protoNamed = replyBase();
+  Object.defineProperty(protoNamed, '__proto__', {
+    enumerable: true,
+    value: { polluted: true },
+  });
+  expectCode(() => context.created.controls.submitAttentionReply(protoNamed),
+    'unknown_key', 'prototype-shaped extra key names stay content-free');
 });
 
 test('terminal receipts keep exact identity under repetition and hostile echoes', () => {
@@ -543,4 +607,325 @@ test('terminal receipts keep exact identity under repetition and hostile echoes'
   assert.equal(cancelReceipt.disposition, 'already_terminal');
   assert.equal(cancelReceipt.run_id, fixture.run_id);
   assert.equal(cancelReceipt.child_envelope_digest, fixture.child_envelope_digest);
+});
+
+function assertExactIdentity(receipt, label) {
+  assert.equal(receipt.run_id, fixture.run_id, `${label} echoes run_id`);
+  assert.equal(receipt.assignment_id, fixture.assignment_id, `${label} echoes assignment_id`);
+  assert.equal(receipt.lane_index, fixture.lane_index, `${label} echoes lane_index`);
+  assert.equal(receipt.base_sha, fixture.base_sha, `${label} echoes base_sha`);
+  assert.equal(receipt.child_envelope_digest, fixture.child_envelope_digest,
+    `${label} echoes child_envelope_digest`);
+}
+
+test('after spawn success launch never throws: unusable spawn proofs stay dispatch_uncertain', () => {
+  // Row 1 of the bound-driver rejection: a transport that returns from
+  // spawn but then lies, omits, adds keys, or hides accessors leaves a live
+  // session with an unusable proof. Launch must never throw past spawn; it
+  // reports dispatch_uncertain exactly once and can never respawn.
+  const spawnVariants = [
+    ['missing session id', () => ({}), 0],
+    ['extra key beside the spawn proof',
+      () => ({ binding_digest: `sha256:${'7'.repeat(64)}`, polluted: { x: 1 }, session_id: 'sess-x' }), 0],
+    ['garbage session id',
+      () => ({ binding_digest: `sha256:${'7'.repeat(64)}`, session_id: '../etc/passwd' }), 0],
+    ['wrong binding echo',
+      () => ({ binding_digest: `sha256:${'0'.repeat(64)}`, session_id: 'sess-x' }), 0],
+    ['accessor session id', () => {
+      const result = { binding_digest: `sha256:${'7'.repeat(64)}` };
+      Object.defineProperty(result, 'session_id', {
+        enumerable: true,
+        get() {
+          getterReads.spawn += 1;
+          return 'sess-x';
+        },
+      });
+      return result;
+    }, 0],
+  ];
+  const getterReads = { spawn: 0 };
+  for (const [label, mutate] of spawnVariants) {
+    const context = create('happy', { wrap: { spawn: (original, request) => mutate(original(request)) } });
+    context.bound.preflight(context.request('preflight'));
+    let receipt;
+    try {
+      receipt = context.bound.launch(context.request('launch'));
+    } catch (error) {
+      assert.fail(`${label}: launch threw after a successful spawn: ${error}`);
+    }
+    assert.equal(receipt.disposition, 'dispatch_uncertain', `${label}: honest uncertainty`);
+    assertExactIdentity(receipt, `${label}: uncertain receipt`);
+    assert.equal(JSON.stringify(receipt).includes('polluted'), false,
+      `${label}: no hostile name in the receipt`);
+    assert.equal(context.stub.state.spawnCalls, 1, `${label}: at most one spawn ever`);
+    expectCode(() => context.bound.launch(context.request('launch')), 'replay_denied',
+      `${label}: a possibly-spawned lane is never respawned or fallen back`);
+    assert.equal(context.stub.state.spawnCalls, 1,
+      `${label}: relaunch attempts spawn nothing`);
+    assert.equal(context.stub.state.sends, 0, `${label}: nothing is dispatched on a dead proof`);
+    expectCode(() => context.bound.reconcile(context.request('reconcile')), 'not_dispatched',
+      `${label}: no prompt was attempted, so there is nothing to reconcile`);
+    expectCode(() => context.bound.cancel(context.request('cancel')), 'not_dispatched',
+      `${label}: no prompt was attempted, so there is nothing to cancel`);
+  }
+  assert.equal(getterReads.spawn, 0, 'spawn-result getters are never invoked');
+});
+
+test('a live session without acknowledgement is dispatch_uncertain, never thrown and never resent', () => {
+  // Row 1 continuation: the send itself ran against a live session but its
+  // result cannot prove delivery — missing/false acknowledgement, lying
+  // echoes, extra keys, and accessor bombs all stay honest uncertainty.
+  const sendVariants = [
+    ['acknowledgement missing', (result) => {
+      const { acknowledged, ...rest } = result;
+      void acknowledged;
+      return rest;
+    }],
+    ['acknowledgement false', (result) => ({ ...result, acknowledged: false })],
+    ['extra key beside acknowledgement', (result) => ({ ...result, polluted: { deep: '__proto__' } })],
+    ['session echo substituted',
+      (result) => ({ ...result, session_id: `${result.session_id}-reborn` })],
+    ['binding echo corrupted', (result) => ({ ...result, binding_digest: `sha256:${'f'.repeat(64)}` })],
+    ['accessor acknowledgement', (result) => {
+      const forged = { ...result };
+      delete forged.acknowledged;
+      Object.defineProperty(forged, 'acknowledged', {
+        enumerable: true,
+        get() {
+          getterReads.send += 1;
+          return true;
+        },
+      });
+      return forged;
+    }],
+  ];
+  const getterReads = { send: 0 };
+  for (const [label, mutate] of sendVariants) {
+    const context = create('happy', { wrap: { send: (original, request) => mutate(original(request)) } });
+    context.bound.preflight(context.request('preflight'));
+    let receipt;
+    try {
+      receipt = context.bound.launch(context.request('launch'));
+    } catch (error) {
+      assert.fail(`${label}: launch threw after a successful spawn: ${error}`);
+    }
+    assert.equal(receipt.disposition, 'dispatch_uncertain', `${label}: honest uncertainty`);
+    assertExactIdentity(receipt, `${label}: uncertain receipt`);
+    assert.equal(receipt.detail_code, undefined,
+      `${label}: uncertainty carries no detail pair`);
+    assert.equal(context.stub.state.spawnCalls, 1, `${label}: exactly one spawn`);
+    assert.equal(context.stub.state.sends, 1, `${label}: exactly one dispatch attempt`);
+    expectCode(() => context.bound.launch(context.request('launch')), 'replay_denied',
+      `${label}: an unacknowledged live session is never resent`);
+    assert.equal(context.stub.state.sends, 1, `${label}: relaunch attempts send nothing`);
+    assert.equal(context.stub.state.spawnCalls, 1, `${label}: relaunch spawns nothing`);
+  }
+  assert.equal(getterReads.send, 0, 'send-result getters are never invoked');
+});
+
+test('pre_write_failure is not_sent only under a confirmed teardown, else dispatch_uncertain', () => {
+  // Row 2 of the bound-driver rejection: not_sent requires proof that no
+  // session survives. The confirmed-teardown path keeps the honest closed
+  // detail pair; every unproven teardown stays dispatch_uncertain.
+  const confirmed = create('pre_write_failure');
+  confirmed.bound.preflight(confirmed.request('preflight'));
+  const notSent = confirmed.bound.launch(confirmed.request('launch'));
+  assert.equal(notSent.disposition, 'not_sent');
+  assert.equal(notSent.detail_code, 'dispatch_not_written');
+  assert.equal(typeof notSent.detail_message, 'string');
+  assert.ok(!notSent.detail_message.includes('nothing was written'),
+    'transport failure text never leaks into the closed detail pair');
+  assertExactIdentity(notSent, 'confirmed-teardown not_sent');
+  assert.equal(confirmed.stub.state.spawnCalls, 1, 'exactly one spawn');
+  assert.equal(confirmed.stub.state.sends, 1, 'exactly one dispatch attempt');
+  assert.equal(confirmed.stub.state.cancelCalls, 1, 'teardown was proven via one cancel');
+  expectCode(() => confirmed.bound.launch(confirmed.request('launch')), 'replay_denied',
+    'not_sent lanes are never relaunched');
+  assert.equal(confirmed.stub.state.spawnCalls, 1);
+  assert.equal(confirmed.stub.state.sends, 1);
+
+  const teardownVariants = [
+    ['cancelling throws', () => {
+      throw new Error(`teardown exploded ${SECRET_BEARER_TOKEN}`);
+    }],
+    ['cancellation only requested', () => ({
+      binding_digest: `sha256:${'7'.repeat(64)}`,
+      outcome: 'requested',
+      session_id: 'sess-local-1',
+    })],
+    ['teardown echo corrupted', () => ({
+      binding_digest: `sha256:${'0'.repeat(64)}`,
+      outcome: 'confirmed',
+      session_id: 'sess-local-1',
+    })],
+    ['teardown carries an extra key', () => ({
+      binding_digest: `sha256:${'7'.repeat(64)}`,
+      outcome: 'confirmed',
+      polluted: true,
+      session_id: 'sess-local-1',
+    })],
+    ['teardown result malformed', () => 'confirmed'],
+  ];
+  for (const [label, cancelBehavior] of teardownVariants) {
+    let teardownAttempts = 0;
+    const context = create('pre_write_failure', { wrap: { cancel: () => {
+      teardownAttempts += 1;
+      return cancelBehavior();
+    } } });
+    context.bound.preflight(context.request('preflight'));
+    let receipt;
+    try {
+      receipt = context.bound.launch(context.request('launch'));
+    } catch (error) {
+      assert.fail(`${label}: launch threw after a successful spawn: ${error}`);
+    }
+    assert.equal(receipt.disposition, 'dispatch_uncertain',
+      `${label}: unproven teardown stays uncertain`);
+    assert.equal(receipt.detail_code, undefined, `${label}: no detail pair on uncertainty`);
+    assertExactIdentity(receipt, `${label}: uncertain receipt`);
+    assert.equal(teardownAttempts, 1, `${label}: teardown was attempted once`);
+    assert.equal(context.stub.state.spawnCalls, 1, `${label}: exactly one spawn`);
+    assert.equal(context.stub.state.sends, 1, `${label}: exactly one dispatch attempt`);
+    expectCode(() => context.bound.launch(context.request('launch')), 'replay_denied',
+      `${label}: a possibly-sent prompt is never sent twice`);
+    assert.equal(context.stub.state.sends, 1, `${label}: no redispatch after relaunch attempt`);
+  }
+});
+
+test('every transport result obeys its closed key vocabulary content-free', () => {
+  const extraKey = { polluted: { leaked: '__proto__' } };
+
+  const withExtra = (result) => ({ ...result, ...extraKey });
+
+  const availability = create('happy', { wrap: { availability: (original) => withExtra(original()) } });
+  expectCode(() => availability.bound.preflight(availability.request('preflight')),
+    'invalid_transport_result', 'availability results reject extra keys');
+  assert.equal(availability.stub.state.spawnCalls, 0,
+    'refused availability results never spawn');
+
+  const observe = create('happy', { wrap: { observe: (original, request) => withExtra(original(request)) } });
+  observe.bound.preflight(observe.request('preflight'));
+  observe.bound.launch(observe.request('launch'));
+  expectCode(() => observe.bound.reconcile(
+    observe.request('reconcile', { include: INCLUDE_ALL }),
+  ), 'invalid_transport_result', 'observe results reject extra keys');
+
+  const cancellation = create('happy', { wrap: { cancel: (original, request) => withExtra(original(request)) } });
+  cancellation.bound.preflight(cancellation.request('preflight'));
+  cancellation.bound.launch(cancellation.request('launch'));
+  expectCode(() => cancellation.bound.cancel(cancellation.request('cancel')),
+    'invalid_transport_result', 'cancel results reject extra keys');
+  assert.equal(cancellation.stub.state.cancelCalls, 1,
+    'the refused cancellation still reached the transport exactly once');
+
+  const reply = create('attention', { wrap: { reply: (original, request) => withExtra(original(request)) } });
+  dispatch(reply);
+  reply.bound.reconcile(reply.request('reconcile', { include: INCLUDE_ALL }));
+  expectCode(() => reply.created.controls.submitAttentionReply({
+    schema: CURSOR_LOCAL_REPLY_REQUEST_SCHEMA_ID,
+    version: PROVIDER_DRIVER_VERSION,
+    envelope_text: fixture.envelope_text,
+    child_envelope_digest: fixture.child_envelope_digest,
+    session_id: 'sess-local-1',
+    question_id: FIXTURE_QUESTION_ID,
+    answer_text: 'Approved.',
+  }), 'invalid_transport_result', 'reply results reject extra keys');
+  assert.equal(reply.stub.state.replies, 1, 'the refused reply consumed the one attempt');
+  expectCode(() => reply.created.controls.submitAttentionReply({
+    schema: CURSOR_LOCAL_REPLY_REQUEST_SCHEMA_ID,
+    version: PROVIDER_DRIVER_VERSION,
+    envelope_text: fixture.envelope_text,
+    child_envelope_digest: fixture.child_envelope_digest,
+    session_id: 'sess-local-1',
+    question_id: FIXTURE_QUESTION_ID,
+    answer_text: 'Approved again.',
+  }), 'reply_already_attempted', 'replies stay attempt-once across refusals');
+});
+
+test('sha256 and bare 64-hex signatures redact across chunks and reconciliations while receipts keep identity', () => {
+  const sha256Secret = `sha256:${'d4f10e2a'.repeat(8)}`;
+  const bareSecret = 'deadbeef'.repeat(8);
+  const upperSecret = `SHA256:${'ABCDEF01'.repeat(8)}`;
+  // Every hostile signature is split into two ADJACENT stream pieces; the
+  // sha256 pair additionally straddles a reconciliation boundary, which the
+  // persistent per-lane window must survive.
+  const shaHead = sha256Secret.slice(0, 35);
+  const shaTail = sha256Secret.slice(35);
+  const bareHead = bareSecret.slice(0, 32);
+  const bareTail = bareSecret.slice(32);
+  let observes = 0;
+  const scriptedObserve = (request) => {
+    observes += 1;
+    if (observes === 1) {
+      return {
+        binding_digest: request.binding_digest,
+        events: [`${shaTail} rotated`, `sum ${bareHead}`],
+        progress_text: `hashing ${shaHead}`,
+        session_id: request.session_id,
+        status: 'running',
+      };
+    }
+    if (observes === 2) {
+      return {
+        binding_digest: request.binding_digest,
+        events: ['x'.repeat(400), `upper ${upperSecret} end`],
+        progress_text: `${bareTail} sealed`,
+        session_id: request.session_id,
+        status: 'running',
+      };
+    }
+    return {
+      binding_digest: request.binding_digest,
+      session_id: request.session_id,
+      status: 'completed',
+    };
+  };
+  const context = create('happy', { wrap: { observe: (original, request) => {
+    void original;
+    return scriptedObserve(request);
+  } } });
+
+  context.bound.preflight(context.request('preflight'));
+  const launched = context.bound.launch(context.request('launch'));
+  assert.equal(launched.disposition, 'dispatched');
+  const first = context.bound.reconcile(
+    context.request('reconcile', { include: INCLUDE_ALL }));
+  assert.equal(first.disposition, 'in_progress');
+  const second = context.bound.reconcile(
+    context.request('reconcile', { include: INCLUDE_ALL }));
+  assert.equal(second.disposition, 'in_progress');
+
+  // Redaction happens at emission, not only at the terminal flush.
+  const midStream = context.created.controls.readEvidence(evidenceRequest());
+  const midText = midStream.events.map((segment) => segment.text).join('\u0001');
+  assert.ok(midText.includes(REDACTED_MARKER),
+    'signatures crossing chunks were redacted before the latch');
+  assert.equal(/[0-9a-f]{64}/iu.test(midText), false,
+    'no 64-hex signature survives in mid-stream evidence');
+
+  const terminal = context.bound.reconcile(
+    context.request('reconcile', { intent: 'restart_reattach' }));
+  assert.equal(terminal.disposition, 'terminal');
+  const receipts = [launched, first, second, terminal];
+  for (const receipt of receipts) {
+    // P17 identity receipts stay byte-exact even when the same digest
+    // shapes arrive inside provider evidence.
+    assertExactIdentity(receipt, 'hostile-digest receipt');
+  }
+
+  const drained = context.created.controls.readEvidence(evidenceRequest());
+  assert.equal(drained.truncated, false, 'nothing here needs truncation');
+  const allText = drained.events.map((segment) => segment.text).join('\u0001');
+  assert.ok(allText.includes(REDACTED_MARKER), 'digest signatures were redacted wholesale');
+  assert.equal(/[0-9a-f]{64}/iu.test(allText), false, 'no 64-hex signature survives anywhere');
+  assert.equal(allText.includes('d4f10e2a'), false, 'the sha256 body never recombines');
+  assert.equal(allText.includes('deadbeef'), false,
+    'the bare digest never recombines across reconciliations');
+  assert.equal(allText.includes('ABCDEF01'), false, 'uppercase digests never survive');
+  assert.equal(allText.includes('sha256:'), false, 'no digest prefix survives');
+  for (const segment of drained.events) {
+    assert.ok(segment.bytes <= MAX_EVIDENCE_SEGMENT_BYTES, 'segment byte bound holds');
+    assert.equal(Buffer.byteLength(segment.text, 'utf8'), segment.bytes,
+      'byte accounting stays UTF-8 exact');
+  }
 });

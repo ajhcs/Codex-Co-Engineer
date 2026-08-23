@@ -14,8 +14,11 @@
 //     substitute;
 //   - at most one spawn and at most one prompt dispatch per lane; the
 //     `dispatched` disposition requires the transport's authoritative
-//     acknowledgement; a pre-send spawn failure stays `not_sent` and is
-//     kept strictly distinct from post-spawn `dispatch_uncertain`;
+//     acknowledgement; after a successful spawn launch never throws — a
+//     pre-send spawn failure stays `not_sent`, a pre-write send failure is
+//     `not_sent` only once a confirmed teardown proves no session survives,
+//     and every other post-spawn failure (missing or thrown
+//     acknowledgement included) is honest `dispatch_uncertain`;
 //   - same-session attention replies are attempt-once and bound to the
 //     exact session, question, and answer; an unsupported reply posture
 //     refuses explicitly without touching the transport;
@@ -27,7 +30,8 @@
 //     token, Bearer, API-key, envelope-digest, and prompt signatures
 //     cannot recombine across leaves, chunks, events, or reconciliations;
 //   - every error surface is closed and content-free: hostile names and
-//     values never appear in codes, paths, or messages;
+//     values never appear in codes, paths, or messages, and every transport
+//     result must carry exactly its operation's closed key vocabulary;
 //   - managed local worktrees and run_base_sha only: no direct-mode
 //     widening, supervisor/registry/server cutover, durable store, or
 //     protected-ref mutation. Legacy 3.2.1 behavior and public receipts
@@ -44,6 +48,7 @@ import {
   capturedIncludes,
   capturedIsArray,
   capturedJoin,
+  capturedOwnKeys,
   capturedTest,
   capturedUtf8ByteLength,
 } from './grammar.mjs';
@@ -92,6 +97,22 @@ export const CURSOR_LOCAL_OPTION_KEYS = capturedFreeze([
 export const CURSOR_LOCAL_TRANSPORT_METHODS = capturedFreeze([
   'availability', 'cancel', 'observe', 'reply', 'send', 'spawn',
 ]);
+
+// Closed allowed-key vocabularies for every transport result. A result
+// carrying any key outside its operation's vocabulary is rejected before a
+// single value is inspected, so hostile extra keys (and their names and
+// values) can never reach an error surface or a host-visible field.
+export const CURSOR_LOCAL_TRANSPORT_RESULT_KEYS = capturedFreeze({
+  availability: capturedFreeze(['available']),
+  spawn: capturedFreeze(['binding_digest', 'session_id']),
+  send: capturedFreeze(['acknowledged', 'binding_digest', 'session_id']),
+  observe: capturedFreeze([
+    'binding_digest', 'events', 'progress_text', 'question', 'session_id',
+    'status',
+  ]),
+  cancel: capturedFreeze(['binding_digest', 'outcome', 'session_id']),
+  reply: capturedFreeze(['answered', 'binding_digest', 'session_id']),
+});
 
 export const CURSOR_LOCAL_EVIDENCE_REQUEST_SCHEMA_ID =
   'codex-co-engineer.cursor-local-evidence-request.v1';
@@ -144,6 +165,8 @@ const SIGNATURE_PATTERNS = capturedFreeze([
   /\b(?:sk|xai)-[A-Za-z0-9_-]{8,}\b/giu,
   /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{8,}\b/giu,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/giu,
+  /\bsha256:[0-9a-f]{64}\b/giu,
+  /\b[0-9a-f]{64}\b/giu,
   /\b(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|token|password|secret|cookie|credential|private[_-]?key)(?:\s*[:=]\s*)\s*(?:"[^"]*"|'[^']*'|[^\s,;&'"]+)/giu,
 ]);
 
@@ -310,17 +333,26 @@ function requireExactString(source, key, path, pattern, code) {
   return value;
 }
 
-function readTransportResult(result, path) {
+function readTransportResult(result, path, allowedKeys) {
   // One structural quarantine for every transport result: proxies,
   // accessors, symbols, non-enumerables, exotic prototypes, sparse arrays,
   // cycles, aliases, and unknown shapes are rejected without running any
-  // caller code, before a single field is read.
+  // caller code, before a single field is read. The closed allowed-key
+  // vocabulary is enforced BEFORE the deep walk, so an extra key is
+  // rejected content-free no matter how hostile its name, shape, or value
+  // is; no descriptor of an out-of-vocabulary value is ever taken.
   if (result === null || result === undefined) {
     fail('invalid_transport_result', path, 'The transport returned no result object.');
   }
   assertNotProxy(result, path);
-  assertDirectJsonClosure(result, path);
   assertPlainObject(result, 'invalid_transport_result', path, path);
+  for (const key of Object.keys(result)) {
+    if (!capturedIncludes(allowedKeys, key)) {
+      fail('invalid_transport_result', path,
+        'The transport result carries a key outside the closed schema.');
+    }
+  }
+  assertDirectJsonClosure(result, path);
   return result;
 }
 
@@ -424,14 +456,17 @@ function quarantineControlRequest(request, allowedKeys, schemaId, path) {
     fail('invalid_type', path, `${path} must be a plain request object.`);
   }
   assertNotProxy(request, path);
-  assertDirectJsonClosure(request, path);
   assertPlainObject(request, 'invalid_type', path, path);
+  // Extra keys are rejected BEFORE the deep closure walk: an unknown key is
+  // refused content-free (fixed code, fixed path, fixed message), so a
+  // hostile key name never enters an error surface and no descriptor,
+  // getter, or proxy trap of its value is ever touched.
   for (const key of Object.keys(request)) {
     if (!capturedIncludes(allowedKeys, key)) {
-      fail('unknown_key', `${path}.${key}`,
-        `${path} carries a key outside the closed schema.`);
+      fail('unknown_key', path, `${path} carries a key outside the closed schema.`);
     }
   }
+  assertDirectJsonClosure(request, path);
   for (const key of allowedKeys) {
     if (!hasOwn(request, key)) {
       fail('missing_key', `${path}.${key}`, `${path}.${key} is required; nothing is derived.`);
@@ -496,8 +531,8 @@ function requireFeature(declaration, feature, path) {
 const DETAIL_MESSAGES = freezeData({
   dispatch_not_written: freezeData({
     detail_code: 'dispatch_not_written',
-    detail_message: 'The transport guaranteed that no prompt bytes were written; '
-      + 'nothing reached the provider.',
+    detail_message: 'The transport guaranteed that no prompt bytes were written and '
+      + 'confirmed the session teardown; nothing reached the provider.',
   }),
   spawn_unavailable: freezeData({
     detail_code: 'spawn_unavailable',
@@ -527,9 +562,30 @@ export function createCursorLocalDriverV1(options) {
   // closure. Neither pass ever invokes caller code.
   assertNotProxy(options, path);
   assertPlainObject(options, 'invalid_type', path, path);
+  let optionOwnKeys;
+  try {
+    optionOwnKeys = capturedOwnKeys(options);
+  } catch {
+    fail('invalid_type', path, 'Option keys could not be inspected safely.');
+  }
+  for (const key of optionOwnKeys) {
+    if (typeof key === 'symbol') {
+      fail('symbol_key_denied', `${path}[symbol]`,
+        `${path} carries a symbol-keyed property; options are direct data only.`);
+    }
+  }
+  // Hostile property NAMES never appear in codes, paths, or messages: the
+  // closed templates below carry no caller-derived text at all.
+  for (const key of optionOwnKeys) {
+    const descriptor = capturedDescriptor(options, key);
+    if (!descriptor || !descriptor.enumerable) {
+      fail('non_enumerable_property_denied', path,
+        `${path} carries a non-enumerable own property; options are plain data.`);
+    }
+  }
   for (const key of Object.keys(options)) {
     if (!capturedIncludes(CURSOR_LOCAL_OPTION_KEYS, key)) {
-      fail('unknown_key', `${path}.${key}`, `${path} carries a key outside the closed option set.`);
+      fail('unknown_key', path, `${path} carries a key outside the closed option set.`);
     }
   }
   for (const key of ['declaration', 'model', 'run_base_sha', 'transport']) {
@@ -706,6 +762,41 @@ export function createCursorLocalDriverV1(options) {
     return receipt;
   }
 
+  // Post-spawn launch failures never throw. A session spawned by the
+  // transport may still be live, and only a confirmed teardown before the
+  // return can prove otherwise; every unproven case is therefore reported
+  // as dispatch_uncertain with the exact lane identity intact.
+  function uncertainDispatch(lane, view, request) {
+    lane.phase.sendUncertain = true;
+    lane.state = 'dispatch_uncertain';
+    return validateDriverLaunchResultV1(
+      receiptFor('launch', view, 'dispatch_uncertain'), request, declaration,
+    );
+  }
+
+  // The one path out of live-session classification: cancel the exact
+  // spawned session and accept only a well-formed confirmed result that
+  // echoes the exact binding digest and session id. Anything else — a
+  // throw, a lie, a malformed result, an unconfirmed outcome — leaves the
+  // classification honestly uncertain.
+  function confirmTeardown(lane) {
+    const cancelRequest = freezeData({
+      binding_digest: lane.bindingDigest,
+      session_id: lane.phase.sessionId,
+    });
+    const teardownOutcome = callTransport(transportMethods, 'cancel', cancelRequest);
+    if (!teardownOutcome.ok) return false;
+    try {
+      const tornDown = readTransportResult(teardownOutcome.value,
+        'driver.launch.teardown.result', CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.cancel);
+      if (!digestsEqual(optOwn(tornDown, 'binding_digest'), lane.bindingDigest)) return false;
+      if (optOwn(tornDown, 'session_id') !== lane.phase.sessionId) return false;
+      return optOwn(tornDown, 'outcome') === 'confirmed';
+    } catch {
+      return false;
+    }
+  }
+
   const driver = {};
 
   capturedDefineProperty(driver, 'preflight', {
@@ -736,7 +827,8 @@ export function createCursorLocalDriverV1(options) {
           request, declaration,
         );
       }
-      const availability = readTransportResult(outcome.value, 'driver.preflight.availability.result');
+      const availability = readTransportResult(outcome.value, 'driver.preflight.availability.result',
+        CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.availability);
       const available = optOwn(availability, 'available');
       if (available !== true && available !== false) {
         fail('invalid_transport_result', 'driver.preflight.availability.result.available',
@@ -788,10 +880,24 @@ export function createCursorLocalDriverV1(options) {
           request, declaration,
         );
       }
-      const spawned = readTransportResult(spawnOutcome.value, 'driver.launch.spawn.result');
-      const sessionId = requireExactString(spawned, 'session_id', 'driver.launch.spawn.result',
-        SESSION_ID_PATTERN, 'invalid_transport_result');
-      requireBindingEcho(spawned, lane.bindingDigest, 'driver.launch.spawn.result');
+      let sessionId;
+      try {
+        const spawned = readTransportResult(spawnOutcome.value, 'driver.launch.spawn.result',
+          CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.spawn);
+        sessionId = requireExactString(spawned, 'session_id', 'driver.launch.spawn.result',
+          SESSION_ID_PATTERN, 'invalid_transport_result');
+        requireBindingEcho(spawned, lane.bindingDigest, 'driver.launch.spawn.result');
+      } catch {
+        // The transport returned from spawn, so a session may be live and
+        // its result is unusable. Never throw past a successful spawn: mark
+        // the one spawn as spent (no respawn, no fallback) and report
+        // dispatch_uncertain with the exact lane identity.
+        lane.phase.spawned = true;
+        lane.state = 'dispatch_uncertain';
+        return validateDriverLaunchResultV1(
+          receiptFor('launch', view, 'dispatch_uncertain'), request, declaration,
+        );
+      }
       lane.phase.spawned = true;
       lane.phase.sessionId = sessionId;
       lane.state = 'spawned';
@@ -807,24 +913,38 @@ export function createCursorLocalDriverV1(options) {
       const sendOutcome = callTransport(transportMethods, 'send', sendRequest);
       if (!sendOutcome.ok) {
         if (safeErrorCode(sendOutcome.error) === TRANSPORT_PRE_WRITE_FAILURE_CODE) {
-          lane.state = 'not_sent';
-          return validateDriverLaunchResultV1(
-            receiptFor('launch', view, 'not_sent', DETAIL_FOR.launch_not_sent_prewrite),
-            request, declaration,
-          );
+          // not_sent is only honest once the spawned session is provably
+          // gone: cancel it and accept only a confirmed teardown. A live or
+          // unverifiable session is never classified not_sent.
+          if (confirmTeardown(lane)) {
+            lane.state = 'terminal';
+            lane.terminalReason = 'cancelled';
+            flushLaneWindow(lane);
+            return validateDriverLaunchResultV1(
+              receiptFor('launch', view, 'not_sent', DETAIL_FOR.launch_not_sent_prewrite),
+              request, declaration,
+            );
+          }
+          return uncertainDispatch(lane, view, request);
         }
-        lane.phase.sendUncertain = true;
-        lane.state = 'dispatch_uncertain';
-        return validateDriverLaunchResultV1(
-          receiptFor('launch', view, 'dispatch_uncertain'), request, declaration,
-        );
+        return uncertainDispatch(lane, view, request);
       }
-      const sent = readTransportResult(sendOutcome.value, 'driver.launch.send.result');
-      requireBindingEcho(sent, lane.bindingDigest, 'driver.launch.send.result');
-      requireSessionEcho(sent, sessionId, 'driver.launch.send.result');
+      let sent;
+      try {
+        sent = readTransportResult(sendOutcome.value, 'driver.launch.send.result',
+          CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.send);
+        requireBindingEcho(sent, lane.bindingDigest, 'driver.launch.send.result');
+        requireSessionEcho(sent, sessionId, 'driver.launch.send.result');
+      } catch {
+        // A malformed, lying, or extra-keyed send result leaves the prompt
+        // unacknowledged while the session may be live: honest uncertainty,
+        // never a thrown error and never a second attempt.
+        return uncertainDispatch(lane, view, request);
+      }
       if (optOwn(sent, 'acknowledged') !== true) {
-        fail('acknowledgement_required', 'driver.launch.send.result.acknowledged',
-          'The transport must authoritatively acknowledge the prompt before dispatched.');
+        // Missing or false acknowledgement keeps the session live without
+        // proof of delivery or of non-delivery: dispatch_uncertain.
+        return uncertainDispatch(lane, view, request);
       }
       lane.phase.acked = true;
       lane.state = 'dispatched';
@@ -868,7 +988,8 @@ export function createCursorLocalDriverV1(options) {
         fail('observe_failed', 'driver.reconcile.observe',
           'The transport observation failed; the lane keeps its exact identity and state.');
       }
-      const observed = readTransportResult(observeOutcome.value, 'driver.reconcile.observe.result');
+      const observed = readTransportResult(observeOutcome.value, 'driver.reconcile.observe.result',
+        CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.observe);
       requireBindingEcho(observed, lane.bindingDigest, 'driver.reconcile.observe.result');
       requireSessionEcho(observed, lane.phase.sessionId, 'driver.reconcile.observe.result');
       const status = requireExactString(observed, 'status', 'driver.reconcile.observe.result',
@@ -975,7 +1096,8 @@ export function createCursorLocalDriverV1(options) {
         fail('cancel_failed', 'driver.cancel',
           'The cancellation request failed; the lane keeps its exact identity and state.');
       }
-      const cancelled = readTransportResult(cancelOutcome.value, 'driver.cancel.result');
+      const cancelled = readTransportResult(cancelOutcome.value, 'driver.cancel.result',
+        CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.cancel);
       requireBindingEcho(cancelled, lane.bindingDigest, 'driver.cancel.result');
       requireSessionEcho(cancelled, lane.phase.sessionId, 'driver.cancel.result');
       const outcome = requireExactString(cancelled, 'outcome', 'driver.cancel.result',
@@ -1051,7 +1173,8 @@ export function createCursorLocalDriverV1(options) {
       fail('reply_transport_failed', 'cursor_local.reply',
         'The same-session reply failed once and will never be retried.');
     }
-    const replied = readTransportResult(replyOutcome.value, 'cursor_local.reply.result');
+    const replied = readTransportResult(replyOutcome.value, 'cursor_local.reply.result',
+      CURSOR_LOCAL_TRANSPORT_RESULT_KEYS.reply);
     requireBindingEcho(replied, lane.bindingDigest, 'cursor_local.reply.result');
     requireSessionEcho(replied, sessionId, 'cursor_local.reply.result');
     if (optOwn(replied, 'answered') !== true) {

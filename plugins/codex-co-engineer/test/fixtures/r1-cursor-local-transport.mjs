@@ -185,10 +185,12 @@ export function createCursorLocalTransportStub(scenario = 'happy', overrides = {
       state.observes += 1;
       record('observe', request);
       if (scenario === 'session_lost' && state.observes === 1) {
+        // The provider reports a different live session id: correlation is
+        // broken and the lane must refuse to bind the uncorrelated session.
         return {
           binding_digest: binding(request),
           events: ['progress line'],
-          session_id: request.session_id,
+          session_id: `${request.session_id}-reborn`,
           status: 'running',
         };
       }

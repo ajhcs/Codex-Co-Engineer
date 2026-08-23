@@ -404,4 +404,3 @@ test('control requests are quarantined by the same closed schema discipline', ()
     context.replyRequest({ answer_text: '' }),
   ), 'invalid_answer', 'empty answers are refused before the attempt');
 });
-
