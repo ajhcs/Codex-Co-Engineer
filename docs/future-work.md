@@ -46,11 +46,14 @@ runtime-changed: P11 fixtures `chmod 0700` after creating their own
 roots and do not include optional P08 umask test-fixture
 determinization.
 
-Cursor Local and Cursor Cloud adapters, registry cutover, scheduler,
-durable store, P12 evidence bundles, cloud-worker sinks, cleanup, run
-runtime, and `AttentionBatchV1` remain later work. Gate A remains the
-functional release authority; Gate B context-efficiency and Gate C
-credit economics stay advisory.
+The P23 provider registry (`mcp/v3/provider-registry.mjs`) now composes
+the four accepted adapters behind one closed, deterministic composition
+authority; see `docs/provider-registry.md`. Supervisor/server cutover onto
+that registry, real-route qualification, scheduler, durable store, P12
+evidence bundles, cloud-worker sinks, cleanup, run runtime, and
+`AttentionBatchV1` remain later work. Gate A remains the functional
+release authority; Gate B context-efficiency and Gate C credit economics
+stay advisory.
 This worktree does not implement the run runtime, candidate composition,
 or `AttentionBatchV1`. The P16A VerificationPolicyV1 schema and owner
 loader, the P16B approved-command resolver, and the P16C constrained

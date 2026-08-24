@@ -16,6 +16,38 @@
 
 ### Added
 
+- **Provider registry composition authority.** Adds the additive v3
+  `provider-registry.mjs` module (P23): the deterministic, closed
+  composition authority behind provider selection. It registers exactly the
+  four accepted `ProviderDriverV1` adapters (P18 Grok ACP `grok`, P19
+  Cursor Local `cursor-local`, P21 Cursor Cloud `cursor-cloud`, P20 DSH
+  ACPX `dsh`) in the frozen P02 grammar slot order, re-deriving that
+  vocabulary from the accepted grammar leaf so it cannot drift. Selection
+  (`resolveRegistrySelectionV1`) maps an exact `{provider, model}` pair
+  onto one entry under `exact_closed_slot_no_fallback` with no preference
+  walk, substitution, fallback, retry, or replay; closed model lists are
+  enforced against accepted constants and grammar-owned models stay with
+  their adapters, so no vocabulary is widened. Composition
+  (`composeProviderDriverV1`) gates the provider before reading any option
+  byte, quarantines hostile inputs content-free (Proxies, accessors,
+  symbols, non-enumerables, exotic prototypes, unknown keys fail closed
+  without running caller code), delegates to the one exact accepted factory,
+  and returns its value untouched so adapter lane stores, evidence maps,
+  and identity binding keep accepted semantics. Inventory
+  (`describeProviderRegistryV1`) quotes each accepted module's own describe
+  surface in detached frozen clones instead of restating capability claims.
+  The P22 future-harness template/conformance kit is inventoried as
+  mock/conformance evidence only: never a fifth provider slot, never
+  selectable, never composable here. The registry performs no ambient
+  discovery (no filesystem, environment, PATH, network, clock, random
+  source, process, or dynamic import), performs no supervisor/server/
+  scheduler/durable-store cutover, claims no live transport qualification,
+  merge/PR authority, or direct mode, and changes no version or 3.2.1
+  legacy behavior. Coverage lives in `test/r1-provider-registry.test.mjs`,
+  `test/r1-provider-registry-adversarial.test.mjs`, and
+  `test/r1-provider-registry-integration.test.mjs`; boundaries live in
+  `docs/provider-registry.md`.
+
 - **Local provider result sink.** Adds additive v3
   `local-provider-result-sink.mjs` (P11) that routes final local Grok ACP,
   Cursor Local ACP, and DSH ACPX/CLI provider output into the accepted
