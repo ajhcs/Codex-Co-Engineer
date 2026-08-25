@@ -2,18 +2,34 @@ import { spawn as nodeSpawn, execFile as nodeExecFile } from 'node:child_process
 import { randomUUID } from 'node:crypto';
 import { readFile as nodeReadFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
+import {
+  cleanupCredentialHandoff,
+  createCredentialHandoff,
+  extractCredentialEnv,
+  isCredentialEnvKey,
+  isForbiddenProviderEnvKey,
+  omitCredentialEnv,
+  systemdClientEnvironment,
+} from './credential-boundary.mjs';
 
 /**
  * A deliberately small Linux process boundary for local workers.
  *
- * This is not a provider sandbox: the command, environment, working directory,
- * credentials, network, and filesystem capabilities are inherited unchanged.
- * The only extra contract is a manager-owned systemd user service with
- * KillMode=control-group, so an owned stop reaches detached descendants as
- * well as the worker leader and the worker survives the launching client.
- * The module is provider-free and is not wired into the MCP surface by itself.
+ * This is not a provider sandbox: the command, working directory, network,
+ * and filesystem capabilities are inherited unchanged. Environment is a
+ * closed projection supplied by the caller. Credential values never appear
+ * in systemd-run argv; they use an owner-only no-follow regular-file handoff
+ * consumed by credential-handoff-loader.mjs. The extra lifecycle contract is
+ * a manager-owned systemd user service with KillMode=control-group, so an
+ * owned stop reaches detached descendants as well as the worker leader and
+ * the worker survives the launching client. The module is not wired into the
+ * MCP surface by itself.
  */
+
+const CREDENTIAL_HANDOFF_LOADER = fileURLToPath(new URL('./credential-handoff-loader.mjs', import.meta.url));
 
 export const PROCESS_BOUNDARY_VERSION = 1;
 export const PROCESS_BOUNDARY_DEFAULTS = Object.freeze({
@@ -144,13 +160,14 @@ function requireLogPath(logPath) {
   return logPath;
 }
 
-function requireEnvironment(env) {
+function requireEnvironment(env, { includeCredentials = false } = {}) {
   if (!env || typeof env !== 'object' || Array.isArray(env)) fail('invalid_env', 'env must be an environment object.');
-  return Object.entries(env).map(([name, value]) => {
+  return Object.entries(env).flatMap(([name, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || typeof value !== 'string' || value.includes('\0')) {
       fail('invalid_env', 'env must contain POSIX variable names and NUL-free string values.');
     }
-    return `--setenv=${name}=${value}`;
+    if (!includeCredentials && isCredentialEnvKey(name)) return [];
+    return [`--setenv=${name}=${value}`];
   });
 }
 
@@ -244,7 +261,7 @@ export async function probeProcessBoundary({ adapter } = {}) {
     boundary: 'systemd-user-service-cgroup',
     manager_version: compact(properties.Version, 80),
     control_group: properties.ControlGroup,
-    capabilities: { kill_mode: 'control-group', environment: 'inherited', provider_sandbox: false, manager_owned: true },
+    capabilities: { kill_mode: 'control-group', environment: 'closed_projection', provider_sandbox: false, manager_owned: true },
   });
 }
 
@@ -350,7 +367,7 @@ async function systemctlAction(host, args, timeoutMs) {
   if (!result.ok) fail('systemd_action_failed', `systemd user action failed (${compact(result.stderr || result.error?.message)}).`, { cause: result.error });
 }
 
-async function cleanupUnverifiedLaunch(host, unit, description) {
+async function cleanupUnverifiedLaunch(host, unit, description, handoffPath) {
   try {
     const shown = await showUnit(host, unit);
     if (!shown.found || shown.properties.Id !== unit || shown.properties.Description !== description) return;
@@ -367,6 +384,7 @@ async function cleanupUnverifiedLaunch(host, unit, description) {
   } catch {
     // Launch already failed; never replace the original error with cleanup noise.
   }
+  if (handoffPath) await cleanupCredentialHandoff(handoffPath).catch(() => {});
 }
 
 export async function inspectProcessBoundary(handle, { adapter } = {}) {
@@ -386,6 +404,8 @@ export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS
   const record = recordFromHandle(handle, adapter);
   if (record.stopped) return Object.freeze({ stopped: true, cgroup_empty: true, idempotent: true });
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100) fail('invalid_timeout', 'timeoutMs must be at least 100ms.');
+  if (record.handoffPath) await cleanupCredentialHandoff(record.handoffPath).catch(() => {});
+  record.handoffPath = undefined;
 
   const initial = await showUnit(record.host, record.receipt.unit);
   if (!initial.found) {
@@ -422,7 +442,7 @@ export function restoreProcessBoundary(receipt, { adapter } = {}) {
   const host = requireAdapter(adapter);
   requireLinux(host);
   const handle = Object.freeze({ kind: 'systemd-user-process-boundary', ...normalized });
-  HANDLES.set(handle, { host, receipt: normalized, child: null, stopped: false });
+  HANDLES.set(handle, { host, receipt: normalized, child: null, stopped: false, handoffPath: undefined });
   return handle;
 }
 
@@ -437,18 +457,32 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
   if (taskId !== undefined && (typeof taskId !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/u.test(taskId))) {
     fail('invalid_task_id', 'taskId must contain only safe task identifier characters.');
   }
+  const secrets = extractCredentialEnv(env);
+  const publicEnv = omitCredentialEnv(env);
+  for (const key of Object.keys(publicEnv)) {
+    if (isForbiddenProviderEnvKey(key)) delete publicEnv[key];
+  }
+  requireEnvironment(publicEnv);
+  let serviceCommand = command;
+  let serviceArgs = normalizedArgs;
+  let handoffPath;
+  if (Object.keys(secrets).length > 0) {
+    const handoff = await createCredentialHandoff(secrets);
+    handoffPath = handoff.path;
+    serviceCommand = process.execPath;
+    serviceArgs = [CREDENTIAL_HANDOFF_LOADER, handoff.path, '--', command, ...normalizedArgs];
+  }
   const token = randomUUID().replaceAll('-', '');
   const unit = `codex-co-engineer-${token}.service`;
   const description = `codex-co-engineer-task:${token}`;
   const child = host.spawn(SYSTEMD_RUN, buildProcessBoundaryArgv({
-    unit, description, command, args: normalizedArgs, cwd: workingDirectory, env, logPath: outputPath,
+    unit, description, command: serviceCommand, args: serviceArgs, cwd: workingDirectory, env: publicEnv, logPath: outputPath,
   }), {
     cwd: workingDirectory,
-    // The transient service receives exactly `env` through --setenv above.
-    // The short-lived systemd-run client also needs the caller's D-Bus session
-    // variables so a deliberately minimal provider environment cannot make
-    // the manager lookup fail before the service is queued.
-    env: { ...process.env, ...env },
+    // Credential values live in the owner-only handoff file, not in
+    // systemd-run argv. The short-lived client receives only D-Bus session
+    // keys so a minimal provider environment cannot hide the user manager.
+    env: systemdClientEnvironment(process.env),
     detached: false,
     shell: false,
     stdio,
@@ -476,17 +510,17 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
         });
         const worker = Object.freeze({ pid: mainPid, unref() {} });
         const handle = Object.freeze({ kind: 'systemd-user-process-boundary', ...receipt });
-        HANDLES.set(handle, { host, receipt, child: worker, launcher: child, stopped: false });
+        HANDLES.set(handle, { host, receipt, child: worker, launcher: child, stopped: false, handoffPath });
         return { handle, child: worker, receipt };
       }
       await host.sleep(PROCESS_BOUNDARY_DEFAULTS.pollMs);
     }
   } catch (error) {
-    await cleanupUnverifiedLaunch(host, unit, description);
+    await cleanupUnverifiedLaunch(host, unit, description, handoffPath);
     child.kill?.('SIGTERM');
     throw error;
   }
-  await cleanupUnverifiedLaunch(host, unit, description);
+  await cleanupUnverifiedLaunch(host, unit, description, handoffPath);
   child.kill?.('SIGTERM');
   fail('unit_verification_failed', 'The transient service could not be verified before its launch deadline.');
 }
