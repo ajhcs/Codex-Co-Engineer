@@ -911,6 +911,194 @@ function processGroupAlive(processGroup) {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+export const SUPERVISOR_FALSE_SUCCESS_REASON = Object.freeze({
+  code: 'completed_with_terminal_error',
+  message: 'Completed receipt carried a terminal error.',
+});
+
+const WHOLE_RESULT_TERMINAL_TEXT = /^(?:[A-Za-z][\w.]*Error\s+)?(?:\[[A-Za-z0-9._-]{1,64}\]\s+)?PING timed out\.?$/u;
+const TERMINAL_TRANSPORT_PROVIDER_CODES = new Set([
+  'unavailable',
+  'retriable',
+  'retriable_error',
+  'ping_timeout',
+  'ping_timed_out',
+  'transport_error',
+  'provider_error',
+  'provider_unavailable',
+  'connection_lost',
+  'etimedout',
+  'econnreset',
+  'econnrefused',
+]);
+
+function freezeTerminalClassification({
+  stored_status,
+  projected_status,
+  public_state,
+  corrected,
+  reason = null,
+}) {
+  return Object.freeze({
+    stored_status,
+    projected_status,
+    public_state,
+    corrected,
+    reason,
+    error: reason ? Object.freeze({ ...SUPERVISOR_FALSE_SUCCESS_REASON }) : null,
+  });
+}
+
+function isWholeResultTerminalText(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (text.length === 0 || text.length > 256) return false;
+  return WHOLE_RESULT_TERMINAL_TEXT.test(text);
+}
+
+function explicitTerminalErrorEnvelope(error) {
+  if (error == null) return false;
+  if (typeof error === 'string') {
+    const text = error.trim();
+    return text.length > 0 && text !== 'ok';
+  }
+  if (typeof error !== 'object' || Array.isArray(error)) return false;
+  let code;
+  let name;
+  let message;
+  try {
+    code = error.code;
+    name = error.name;
+    message = error.message;
+  } catch {
+    return true;
+  }
+  if (typeof code === 'string' && code.length > 0 && code !== 'ok') return true;
+  if (typeof name === 'string' && /error$/iu.test(name.trim())) return true;
+  if (typeof message === 'string' && isWholeResultTerminalText(message)) return true;
+  return false;
+}
+
+function wholeResultTerminalError(result) {
+  if (result == null) return false;
+  if (typeof result === 'string') return isWholeResultTerminalText(result);
+  if (typeof result !== 'object' || Array.isArray(result)) return false;
+  let code;
+  let name;
+  let message;
+  let nested;
+  let text;
+  try {
+    code = result.code;
+    name = result.name;
+    message = result.message;
+    nested = result.error;
+    text = result.text ?? result.result ?? result.output ?? result.value;
+  } catch {
+    return true;
+  }
+  if (typeof name === 'string' && /error$/iu.test(name.trim())) return true;
+  if (typeof code === 'string' && TERMINAL_TRANSPORT_PROVIDER_CODES.has(code.trim().toLowerCase())) return true;
+  if (typeof message === 'string' && isWholeResultTerminalText(message)) return true;
+  if (explicitTerminalErrorEnvelope(nested)) {
+    if (text == null || text === '') return true;
+    if (typeof text === 'string' && isWholeResultTerminalText(text)) return true;
+    return false;
+  }
+  return typeof text === 'string' && isWholeResultTerminalText(text);
+}
+
+/**
+ * Deterministic terminal-receipt classifier at the supervisor projection
+ * seam. Callers map `projected_status` through `publicState` and must not
+ * write the overlay back onto `codex-co-engineer.task.v1` stored bytes.
+ */
+export function classifySupervisorTerminalReceipt(task) {
+  if (!task || typeof task !== 'object' || Array.isArray(task)) {
+    return freezeTerminalClassification({
+      stored_status: null,
+      projected_status: null,
+      public_state: publicState(undefined),
+      corrected: false,
+    });
+  }
+  let storedStatus = null;
+  try {
+    storedStatus = typeof task.status === 'string' ? task.status : null;
+  } catch {
+    return freezeTerminalClassification({
+      stored_status: null,
+      projected_status: null,
+      public_state: publicState(undefined),
+      corrected: false,
+    });
+  }
+  if (storedStatus === 'transport_lost') {
+    return freezeTerminalClassification({
+      stored_status: 'transport_lost',
+      projected_status: 'transport_lost',
+      public_state: publicState('transport_lost'),
+      corrected: false,
+    });
+  }
+  const wouldSucceed = storedStatus === 'completed' || storedStatus === 'succeeded';
+  if (wouldSucceed) {
+    let envelope = false;
+    let whole = false;
+    try {
+      envelope = explicitTerminalErrorEnvelope(task.error);
+    } catch {
+      envelope = true;
+    }
+    try {
+      whole = wholeResultTerminalError(task.result);
+    } catch {
+      whole = true;
+    }
+    if (envelope || whole) {
+      return freezeTerminalClassification({
+        stored_status: storedStatus,
+        projected_status: 'failed',
+        public_state: publicState('failed'),
+        corrected: true,
+        reason: SUPERVISOR_FALSE_SUCCESS_REASON.code,
+      });
+    }
+  }
+  return freezeTerminalClassification({
+    stored_status: storedStatus,
+    projected_status: storedStatus,
+    public_state: publicState(storedStatus ?? undefined),
+    corrected: false,
+  });
+}
+
+export function projectSupervisorPublicState(task) {
+  return classifySupervisorTerminalReceipt(task).public_state;
+}
+
+export function projectSupervisorTerminalReceipt(task) {
+  const classified = classifySupervisorTerminalReceipt(task);
+  if (!classified.corrected) return task;
+  try {
+    return {
+      ...task,
+      status: classified.projected_status,
+      error: classified.error,
+    };
+  } catch {
+    return {
+      status: classified.projected_status,
+      error: classified.error,
+    };
+  }
+}
+
+export function projectSupervisorTaskRecords(tasks) {
+  if (!Array.isArray(tasks)) return [];
+  return tasks.map((task) => projectSupervisorTerminalReceipt(task));
+}
+
 async function probeCommand(command, args, authenticatedPattern, env) {
   try {
     const { stdout, stderr } = await execFile(command, args, {
@@ -968,7 +1156,7 @@ async function providerReadiness(env = process.env) {
 
 export async function cancelTask(root, taskId, dependencies = {}) {
   const { task } = await readTask(root, taskId);
-  if (!ACTIVE.has(task.status)) return task;
+  if (!ACTIVE.has(task.status)) return projectSupervisorTerminalReceipt(task);
   if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
     const runtime = await readRuntimeRecord(root, taskId);
     await updateTask(root, taskId, { status: 'cancelling' });
@@ -983,7 +1171,7 @@ export async function cancelTask(root, taskId, dependencies = {}) {
     if (identity) {
       try { process.kill(-identity.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
     }
-    return terminal;
+    return projectSupervisorTerminalReceipt(terminal);
   }
   const runtime = taskRuntime(await readRuntimeRecord(root, taskId), task);
   const identity = currentProcessIdentity(runtime);
@@ -995,23 +1183,23 @@ export async function cancelTask(root, taskId, dependencies = {}) {
       await (dependencies.stopBoundary ?? stopRuntimeBoundary)(runtime);
     } catch (error) {
       await recordManagedCleanup(root, task, dependencies.execute);
-      return updateTask(root, taskId, {
+      return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
         status: 'transport_lost',
         error: { code: error?.code ?? 'cancel_incomplete', message: 'The owned local task cgroup could not be proven empty.' },
-      });
+      }));
     }
     await recordManagedCleanup(root, task, dependencies.execute);
     await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', boundary: runtime.process_boundary.boundary });
-    return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
+    return projectSupervisorTerminalReceipt(await updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() }));
   }
   if (!identity && !providerIdentity) {
     await recordManagedCleanup(root, task, dependencies.execute);
     await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', reason: 'worker_not_running' });
-    return updateTask(root, taskId, {
+    return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
       status: 'cancelled',
       error: { code: 'worker_not_running', message: 'Recorded worker was not running; no owned process remained to signal.' },
       finished_at: new Date().toISOString(),
-    });
+    }));
   }
   for (const owned of [providerIdentity, identity].filter(Boolean)) {
     try { process.kill(-owned.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
@@ -1028,14 +1216,14 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   }
   if ((identity && processGroupAlive(identity.process_group)) || (providerIdentity && processGroupAlive(providerIdentity.process_group))) {
     await recordManagedCleanup(root, task, dependencies.execute);
-    return updateTask(root, taskId, {
+    return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
       status: 'transport_lost',
       error: { code: 'cancel_incomplete', message: 'Owned process group remained after SIGKILL.' },
-    });
+    }));
   }
   await recordManagedCleanup(root, task, dependencies.execute);
   await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled' });
-  return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
+  return projectSupervisorTerminalReceipt(await updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() }));
 }
 
 export async function taskStatus(root, taskId, options = {}) {
@@ -1051,10 +1239,10 @@ export async function taskStatus(root, taskId, options = {}) {
     signal: options.signal,
   });
   const latestRuntime = taskRuntime(await readRuntimeRecord(root, taskId), waited.task);
-  const task = await projectLiveLastEvent(
+  const task = projectSupervisorTerminalReceipt(await projectLiveLastEvent(
     root,
     await reconcileInactiveTask(root, waited.task, latestRuntime),
-  );
+  ));
   const progress = {
     ...waited.progress,
     last_event: task.last_event ?? waited.progress.last_event,
@@ -1147,7 +1335,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
       mcp_pending_call: mcpPendingCallReport(),
       local_boundary: boundary,
       readiness,
-      tasks: await Promise.all(tasksAll.slice(0, 20).map((task) => projectLiveLastEvent(root, task))),
+      tasks: projectSupervisorTaskRecords(await Promise.all(tasksAll.slice(0, 20).map((task) => projectLiveLastEvent(root, task)))),
     };
   }
   const detail = options.detail ?? 'full';
@@ -1194,6 +1382,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
     if (detail === 'full') {
       windowTasks = await Promise.all(windowTasks.map((task) => projectLiveLastEvent(root, task)));
     }
+    windowTasks = projectSupervisorTaskRecords(windowTasks);
   }
   const result = {
     version: VERSION,
