@@ -4,13 +4,19 @@ import test from 'node:test';
 
 import {
   buildProcessBoundaryArgv,
+  inspectExactProcessBoundary,
   inspectProcessBoundary,
   launchProcessBoundary,
   probeProcessBoundary,
   ProcessBoundaryError,
   restoreProcessBoundary,
+  stopExactProcessBoundary,
   stopProcessBoundary,
 } from '../mcp/v3/process-boundary.mjs';
+import {
+  createBoundaryHarness,
+  lifecycleReceipt,
+} from './fixtures/r1-terminal-boundary-lifecycle-fixtures.mjs';
 
 function receipt(overrides = {}) {
   return {
@@ -256,4 +262,60 @@ test('rejects forged or mismatched ownership receipts before systemd mutation', 
   assert.throws(() => restoreProcessBoundary({ ...receipt(), control_group: '/tmp/not-a-cgroup' }, {
     adapter: { platform: 'linux', uid: 1000, spawn: () => fakeChild(), execFile: async () => ({ stdout: '' }), readFile: async () => '', sleep: async () => {} },
   }), (error) => error.code === 'invalid_control_group');
+});
+
+test('exact inspection is inactive_empty only when the unit and cgroup path are both gone', async () => {
+  const harness = createBoundaryHarness({ found: false, populated: false, activeState: 'inactive' });
+  harness.state.found = false;
+  harness.state.populated = false;
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+  assert.equal(inspection.stop_allowed, false);
+});
+
+test('exact inspection is unknown when the unit is gone but the cgroup stays populated', async () => {
+  const harness = createBoundaryHarness({ found: false, populated: true });
+  harness.state.found = false;
+  harness.state.populated = true;
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'unknown');
+  assert.equal(inspection.stop_allowed, false);
+});
+
+test('exact stop uses systemctl --user stop for the verified unit only', async () => {
+  const harness = createBoundaryHarness();
+  const stopped = await stopExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    timeoutMs: 100,
+  });
+  assert.equal(stopped.state, 'inactive_empty');
+  assert.equal(stopped.cgroup_empty, true);
+  assert.equal(harness.state.stopCalls, 1);
+  assert.equal(harness.state.actions.some((args) => args[1] === 'kill'), false);
+  const second = await stopExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    timeoutMs: 100,
+  });
+  assert.equal(second.idempotent, true);
+  assert.equal(harness.state.stopCalls, 1);
+});
+
+test('exact inspection does not treat a mismatched generation as this task', async () => {
+  const harness = createBoundaryHarness();
+  const forged = lifecycleReceipt({ invocation_id: 'ffffffffffffffffffffffffffffffff' });
+  const inspection = await inspectExactProcessBoundary(forged, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'unknown');
+  assert.equal(inspection.identity_matched, false);
+  assert.equal(inspection.stop_allowed, false);
 });

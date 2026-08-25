@@ -42,6 +42,12 @@ export const PROCESS_BOUNDARY_DEFAULTS = Object.freeze({
   stopTimeoutMs: 5_000,
   pollMs: 25,
 });
+export const PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS = Object.freeze({
+  natural_boundary_and_lock_drain: 2_000,
+  exact_unit_stop_and_empty_proof: 5_000,
+  cgroup_poll_interval: 25,
+});
+export const PROCESS_BOUNDARY_STATES = Object.freeze(['inactive_empty', 'active', 'unknown']);
 
 const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const SYSTEMCTL = '/usr/bin/systemctl';
@@ -563,4 +569,509 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
   await cleanupUnverifiedLaunch(host, unit, description, handoffPath);
   child.kill?.('SIGTERM');
   fail('unit_verification_failed', 'The transient service could not be verified before its launch deadline.');
+}
+
+const ACTIVE_UNIT_STATES = new Set(['active', 'activating', 'deactivating']);
+const INACTIVE_UNIT_STATES = new Set(['inactive', 'failed']);
+
+function freezeBoundaryInspection(inspection) {
+  return Object.freeze({
+    state: inspection.state,
+    found: inspection.found === true,
+    empty: inspection.empty ?? null,
+    active_state: inspection.active_state ?? null,
+    main_pid: inspection.main_pid ?? null,
+    populated: inspection.populated ?? null,
+    members: Object.freeze([...(inspection.members ?? [])]),
+    identity_matched: inspection.identity_matched === true,
+    visibility: inspection.visibility ?? 'unknown',
+    stop_allowed: inspection.stop_allowed === true,
+    code: inspection.code ?? null,
+    receipt: inspection.receipt,
+  });
+}
+
+function parsePopulated(events) {
+  const matches = [...String(events ?? '').matchAll(/^populated\s+(\d+)\s*$/gmu)];
+  if (matches.length !== 1) return { ok: false, populated: null };
+  const value = Number(matches[0][1]);
+  if (value !== 0 && value !== 1) return { ok: false, populated: null };
+  return { ok: true, populated: value === 1 };
+}
+
+function parseProcStat(text) {
+  const raw = String(text ?? '');
+  const close = raw.lastIndexOf(')');
+  if (close < 0) return null;
+  const fields = raw.slice(close + 2).trim().split(/\s+/u);
+  const ppid = Number(fields[1]);
+  const startTicks = fields[19];
+  if (!Number.isInteger(ppid) || ppid < 0 || !startTicks) return null;
+  return { ppid, start_ticks: startTicks };
+}
+
+function parseProcCgroup(text) {
+  const match = /^0::(\/.*)$/mu.exec(String(text ?? ''));
+  return match ? match[1] : null;
+}
+
+function parseCgroupProcs(text) {
+  const pids = [];
+  for (const line of String(text ?? '').split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (!/^[0-9]+$/u.test(trimmed)) return null;
+    const pid = Number(trimmed);
+    if (!Number.isSafeInteger(pid) || pid < 1) return null;
+    pids.push(pid);
+  }
+  return pids;
+}
+
+function omittedIdentityProperties(properties, { requireControlGroup }) {
+  if (!properties || typeof properties !== 'object') return true;
+  for (const key of ['Id', 'Description', 'LoadState', 'ActiveState', 'KillMode', 'InvocationID']) {
+    if (typeof properties[key] !== 'string' || properties[key].length === 0) return true;
+  }
+  if (requireControlGroup && (typeof properties.ControlGroup !== 'string' || properties.ControlGroup.length === 0)) {
+    return true;
+  }
+  return false;
+}
+
+function generationMatches(receipt, properties, { requireControlGroup }) {
+  if (properties.Id !== receipt.unit) return false;
+  if (properties.Description !== receipt.description) return false;
+  if (properties.InvocationID !== receipt.invocation_id) return false;
+  if (properties.KillMode !== 'control-group') return false;
+  if (requireControlGroup && properties.ControlGroup !== receipt.control_group) return false;
+  if (!requireControlGroup && properties.ControlGroup && properties.ControlGroup !== receipt.control_group) return false;
+  return true;
+}
+
+async function inspectCgroupPath(host, controlGroup) {
+  const eventsPath = `${CGROUP_ROOT}${controlGroup}/cgroup.events`;
+  const procsPath = `${CGROUP_ROOT}${controlGroup}/cgroup.procs`;
+  let events;
+  try {
+    events = await host.readFile(eventsPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { present: false, populated: false, members: [], visibility: 'complete' };
+    return { present: true, populated: null, members: null, visibility: 'unknown', code: 'worker_boundary_inspect_failed' };
+  }
+  const parsed = parsePopulated(events);
+  if (!parsed.ok) {
+    return { present: true, populated: null, members: null, visibility: 'unknown', code: 'worker_boundary_inspect_failed' };
+  }
+  let procsText;
+  try {
+    procsText = await host.readFile(procsPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return parsed.populated
+        ? { present: true, populated: true, members: null, visibility: 'unknown', code: 'worker_boundary_membership_unknown' }
+        : { present: false, populated: false, members: [], visibility: 'complete' };
+    }
+    return { present: true, populated: parsed.populated, members: null, visibility: 'unknown', code: 'worker_boundary_membership_unknown' };
+  }
+  const members = parseCgroupProcs(procsText);
+  if (members == null) {
+    return { present: true, populated: parsed.populated, members: null, visibility: 'unknown', code: 'worker_boundary_membership_unknown' };
+  }
+  if (parsed.populated && members.length === 0) {
+    return { present: true, populated: true, members: null, visibility: 'unknown', code: 'worker_boundary_membership_unknown' };
+  }
+  if (!parsed.populated && members.length > 0) {
+    return { present: true, populated: null, members, visibility: 'unknown', code: 'worker_boundary_inspect_failed' };
+  }
+  return { present: true, populated: parsed.populated, members, visibility: 'complete' };
+}
+
+async function inspectProcMember(host, pid, controlGroup) {
+  try {
+    const [statText, cgroupText] = await Promise.all([
+      host.readFile(`/proc/${pid}/stat`),
+      host.readFile(`/proc/${pid}/cgroup`),
+    ]);
+    const parsed = parseProcStat(statText);
+    const cgroup = parseProcCgroup(cgroupText);
+    if (!parsed || !cgroup) {
+      return { pid, visible: false, unknown: true, code: 'worker_boundary_pid_visibility_unknown' };
+    }
+    if (cgroup !== controlGroup) {
+      return { pid, visible: true, unknown: false, identity_mismatch: true, start_ticks: parsed.start_ticks, ppid: parsed.ppid, cgroup };
+    }
+    return { pid, visible: true, unknown: false, start_ticks: parsed.start_ticks, ppid: parsed.ppid, cgroup };
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ESRCH') {
+      return { pid, visible: false, missing: true };
+    }
+    return { pid, visible: false, unknown: true, code: 'worker_boundary_pid_visibility_unknown' };
+  }
+}
+
+function leaderFromRuntime(expectedLeader) {
+  if (!expectedLeader || typeof expectedLeader !== 'object' || Array.isArray(expectedLeader)) return null;
+  const pid = Number(expectedLeader.pid);
+  const ticks = expectedLeader.process_start_ticks;
+  if (!Number.isSafeInteger(pid) || pid < 2 || typeof ticks !== 'string' || ticks.length === 0) return null;
+  return { pid, process_start_ticks: ticks };
+}
+
+function membersRootedInLeader(members, leaderPid) {
+  const byPid = new Map(members.map((member) => [member.pid, member]));
+  for (const member of members) {
+    if (member.pid === leaderPid) continue;
+    const seen = new Set();
+    let current = member;
+    let rooted = false;
+    while (current && !seen.has(current.pid)) {
+      seen.add(current.pid);
+      if (current.pid === leaderPid) {
+        rooted = true;
+        break;
+      }
+      const parent = byPid.get(current.ppid);
+      if (!parent) {
+        // Reparented descendants remain task-owned when they still sit in the
+        // exact cgroup; they are not proof of a foreign identity.
+        rooted = true;
+        break;
+      }
+      current = parent;
+    }
+    if (!rooted) return false;
+  }
+  return true;
+}
+
+export async function inspectExactProcessBoundary(receipt, { adapter, expectedLeader } = {}) {
+  const host = requireAdapter(adapter);
+  let normalized;
+  try {
+    requireLinux(host);
+    const legacyScope = receipt?.boundary === 'systemd-user-scope-cgroup';
+    normalized = receiptFromRecord(receipt, legacyScope ? 'systemd-user-scope-cgroup' : 'systemd-user-service-cgroup');
+  } catch (error) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: false,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: error?.code === 'linux_required' || error?.code === 'posix_uid_required'
+        ? 'worker_boundary_inspect_failed'
+        : (error?.code ?? 'invalid_receipt'),
+      receipt,
+    });
+  }
+
+  let shown;
+  try {
+    shown = await showUnit(host, normalized.unit);
+  } catch {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: false,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_inspect_failed',
+      receipt: normalized,
+    });
+  }
+
+  const cgroup = await inspectCgroupPath(host, normalized.control_group);
+  if (cgroup.visibility === 'unknown') {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: shown.found,
+      empty: null,
+      active_state: shown.properties?.ActiveState ?? null,
+      populated: cgroup.populated,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: cgroup.code ?? 'worker_boundary_inspect_failed',
+      receipt: normalized,
+    });
+  }
+
+  if (!shown.found) {
+    if (!cgroup.present && cgroup.populated === false) {
+      return freezeBoundaryInspection({
+        state: 'inactive_empty',
+        found: false,
+        empty: true,
+        populated: false,
+        members: [],
+        identity_matched: true,
+        visibility: 'complete',
+        stop_allowed: false,
+        receipt: normalized,
+      });
+    }
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: false,
+      empty: false,
+      populated: cgroup.populated,
+      members: cgroup.members ?? [],
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_inspect_failed',
+      receipt: normalized,
+    });
+  }
+
+  const activeState = shown.properties.ActiveState;
+  const live = ACTIVE_UNIT_STATES.has(activeState);
+  const idle = INACTIVE_UNIT_STATES.has(activeState);
+  if (!live && !idle) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      active_state: activeState,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_inspect_failed',
+      receipt: normalized,
+    });
+  }
+  if (omittedIdentityProperties(shown.properties, { requireControlGroup: live })) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      active_state: activeState,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_identity_mismatch',
+      receipt: normalized,
+    });
+  }
+  if (!generationMatches(normalized, shown.properties, { requireControlGroup: live })) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      active_state: activeState,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_identity_mismatch',
+      receipt: normalized,
+    });
+  }
+
+  if (idle) {
+    if (cgroup.present && cgroup.populated) {
+      return freezeBoundaryInspection({
+        state: 'unknown',
+        found: true,
+        empty: false,
+        active_state: activeState,
+        populated: true,
+        identity_matched: true,
+        visibility: 'unknown',
+        stop_allowed: false,
+        code: 'worker_boundary_not_empty',
+        receipt: normalized,
+      });
+    }
+    return freezeBoundaryInspection({
+      state: 'inactive_empty',
+      found: true,
+      empty: true,
+      active_state: activeState,
+      main_pid: Number(shown.properties.MainPID) || 0,
+      populated: false,
+      members: [],
+      identity_matched: true,
+      visibility: 'complete',
+      stop_allowed: false,
+      receipt: normalized,
+    });
+  }
+
+  if (!cgroup.populated) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      empty: true,
+      active_state: activeState,
+      populated: false,
+      identity_matched: true,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_inspect_failed',
+      receipt: normalized,
+    });
+  }
+
+  const leader = leaderFromRuntime(expectedLeader);
+  const mainPid = Number(shown.properties.MainPID);
+  if (!leader || !Number.isSafeInteger(mainPid) || mainPid < 2 || mainPid !== leader.pid) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      empty: false,
+      active_state: activeState,
+      main_pid: Number.isSafeInteger(mainPid) ? mainPid : null,
+      populated: true,
+      members: cgroup.members,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: leader && Number.isSafeInteger(mainPid) && mainPid >= 2 && mainPid !== leader.pid
+        ? 'worker_boundary_identity_mismatch'
+        : 'worker_boundary_pid_visibility_unknown',
+      receipt: normalized,
+    });
+  }
+  if (!Array.isArray(cgroup.members) || !cgroup.members.includes(leader.pid)) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      empty: false,
+      active_state: activeState,
+      main_pid: mainPid,
+      populated: true,
+      members: cgroup.members,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_membership_unknown',
+      receipt: normalized,
+    });
+  }
+
+  const inspectedMembers = [];
+  for (const pid of cgroup.members) {
+    const member = await inspectProcMember(host, pid, normalized.control_group);
+    if (member.unknown || member.missing) {
+      return freezeBoundaryInspection({
+        state: 'unknown',
+        found: true,
+        empty: false,
+        active_state: activeState,
+        main_pid: mainPid,
+        populated: true,
+        members: cgroup.members,
+        identity_matched: false,
+        visibility: 'unknown',
+        stop_allowed: false,
+        code: member.code ?? 'worker_boundary_pid_visibility_unknown',
+        receipt: normalized,
+      });
+    }
+    if (member.identity_mismatch) {
+      return freezeBoundaryInspection({
+        state: 'unknown',
+        found: true,
+        empty: false,
+        active_state: activeState,
+        main_pid: mainPid,
+        populated: true,
+        members: cgroup.members,
+        identity_matched: false,
+        visibility: 'unknown',
+        stop_allowed: false,
+        code: 'worker_boundary_identity_mismatch',
+        receipt: normalized,
+      });
+    }
+    inspectedMembers.push(member);
+  }
+
+  const leaderMember = inspectedMembers.find((member) => member.pid === leader.pid);
+  if (!leaderMember || leaderMember.start_ticks !== leader.process_start_ticks) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      empty: false,
+      active_state: activeState,
+      main_pid: mainPid,
+      populated: true,
+      members: cgroup.members,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_identity_mismatch',
+      receipt: normalized,
+    });
+  }
+  if (!membersRootedInLeader(inspectedMembers, leader.pid)) {
+    return freezeBoundaryInspection({
+      state: 'unknown',
+      found: true,
+      empty: false,
+      active_state: activeState,
+      main_pid: mainPid,
+      populated: true,
+      members: cgroup.members,
+      identity_matched: false,
+      visibility: 'unknown',
+      stop_allowed: false,
+      code: 'worker_boundary_identity_mismatch',
+      receipt: normalized,
+    });
+  }
+
+  return freezeBoundaryInspection({
+    state: 'active',
+    found: true,
+    empty: false,
+    active_state: activeState,
+    main_pid: mainPid,
+    populated: true,
+    members: cgroup.members,
+    identity_matched: true,
+    visibility: 'complete',
+    stop_allowed: true,
+    receipt: normalized,
+  });
+}
+
+export async function stopExactProcessBoundary(receipt, {
+  adapter,
+  expectedLeader,
+  timeoutMs = PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.exact_unit_stop_and_empty_proof,
+} = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100) fail('invalid_timeout', 'timeoutMs must be at least 100ms.');
+  const host = requireAdapter(adapter);
+  const initial = await inspectExactProcessBoundary(receipt, { adapter: host, expectedLeader });
+  if (initial.state === 'inactive_empty') {
+    return Object.freeze({
+      stopped: true,
+      cgroup_empty: true,
+      state: 'inactive_empty',
+      forced: false,
+      idempotent: true,
+    });
+  }
+  if (initial.state !== 'active' || initial.stop_allowed !== true) {
+    fail(initial.code ?? 'worker_boundary_inspect_failed', 'Exact process-boundary stop is refused without complete task-owned identity.');
+  }
+  await systemctlAction(host, ['--user', 'stop', initial.receipt.unit], timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  let latest = initial;
+  while (Date.now() < deadline) {
+    latest = await inspectExactProcessBoundary(initial.receipt, { adapter: host, expectedLeader });
+    if (latest.state === 'inactive_empty') {
+      return Object.freeze({
+        stopped: true,
+        cgroup_empty: true,
+        state: 'inactive_empty',
+        forced: false,
+        idempotent: false,
+      });
+    }
+    if (latest.state !== 'active' && latest.state !== 'inactive_empty') {
+      fail(latest.code ?? 'worker_boundary_inspect_failed', 'Exact process-boundary stop lost identity or visibility before empty proof.');
+    }
+    await host.sleep(PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.cgroup_poll_interval);
+  }
+  fail('cgroup_not_empty', 'Owned systemd process boundary still has descendants after exact unit stop.');
 }

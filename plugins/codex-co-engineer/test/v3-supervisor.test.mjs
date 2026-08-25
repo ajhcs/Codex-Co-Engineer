@@ -9,9 +9,11 @@ import { promisify } from 'node:util';
 
 import {
   cancelTask,
+  cleanupLocalTaskLifecycle,
   cleanupManagedWorkspace,
   createWriterWorkspace,
   launchWorker,
+  settleLocalTaskLifecycle,
   submitTask,
   supervisorStatus,
   taskStatus,
@@ -784,6 +786,37 @@ test('completed receipts with a terminal transport error do not project succeede
     const cancelled = await cancelTask(root, 'ping-timeout');
     assert.equal(cancelled.status, 'failed');
     assert.equal((await readTask(root, 'ping-timeout')).task.status, 'completed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('exports identity-bound local lifecycle settlement without rewriting stored terminal status', async () => {
+  assert.equal(typeof settleLocalTaskLifecycle, 'function');
+  assert.equal(typeof cleanupLocalTaskLifecycle, 'function');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-lifecycle-export-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'legacy terminal',
+      record: {
+        id: 'legacy-lifecycle',
+        status: 'completed',
+        provider: 'grok',
+        cwd: root,
+        result: 'ok',
+        finished_at: new Date().toISOString(),
+      },
+    });
+    const task = (await readTask(root, 'legacy-lifecycle')).task;
+    const settled = await settleLocalTaskLifecycle(root, task, null, { drainGraceMs: 0 });
+    assert.equal(settled.version, 1);
+    assert.equal(settled.final, true);
+    assert.equal(settled.boundary, 'not_applicable');
+    assert.equal(settled.cleanup, 'normal');
+    assert.equal((await readTask(root, 'legacy-lifecycle')).task.status, 'completed');
+    assert.equal((await readTask(root, 'legacy-lifecycle')).task.cleanup, undefined);
+    assert.equal(await cleanupLocalTaskLifecycle(root, task, null, { drainGraceMs: 0 }).then((value) => value.final), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
