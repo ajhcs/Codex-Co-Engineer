@@ -50,6 +50,21 @@ submission's word alone. One observation proves all of:
 Detached HEAD is deliberately irrelevant: the base identity comes from the
 object database, never from where HEAD happens to point.
 
+## Bounded independent fanout
+
+The launch boundary owns the fanout invariant as frozen literals:
+`PREFLIGHT_MIN_CHILDREN = 1`, `PREFLIGHT_MAX_CHILDREN = 8`. The child count
+is enforced against those literals **before** the composed upstream contract
+runs, so a routine quota change anywhere else can never widen the public
+maximum: even a future grammar that tolerated more children would still fail
+preflight with the boundary's own `preflight_child_count_exceeded` denial.
+Independence is re-asserted over the detached frozen snapshot — no
+dependency edge of any shape (`preflight_dependency_edge_denied`) and no
+duplicate child id (`preflight_duplicate_child_id`) — and writer-scope
+disjointness is re-checked pairwise with the accepted conservative
+static-prefix intersection, so overlapping writer scopes are detected at
+this boundary even though upstream already denies them.
+
 ## Composition
 
 Preflight composes accepted surfaces and invents none of their semantics:

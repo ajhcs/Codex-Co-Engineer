@@ -61,6 +61,7 @@ import {
 } from './git-identity.mjs';
 import { buildGitIdentityV1 } from './protected-identity.mjs';
 import {
+  ASSIGNMENT_ALLOWED_KEYS,
   RunContractV1Error,
   isPlainObject,
   writerScopesOverlap,
@@ -125,7 +126,9 @@ const PRIVATE_GITDIR_LINE_PATTERN = /^gitdir: (\/[^\n\r\0]*)$/u;
 
 export const RUN_PREFLIGHT_CHECKS = capturedFreeze([
   'request_quarantine',
+  'child_bounds',
   'complete_run_manifest',
+  'independent_fanout',
   'canonical_repository',
   'exact_base_commit',
   'no_replace_refs',
@@ -144,6 +147,10 @@ export const RUN_PREFLIGHT_SIDE_EFFECT_NONCLAIMS = capturedFreeze([
 // by the composed accepted validators pass through unchanged and stay
 // authoritative for their surfaces.
 export const RUN_PREFLIGHT_ERROR_CODES = capturedFreeze([
+  'preflight_child_count_below_minimum',
+  'preflight_child_count_exceeded',
+  'preflight_dependency_edge_denied',
+  'preflight_duplicate_child_id',
   'spawn_invalid',
   'host_facts_invalid',
   'observation_failed',
@@ -290,6 +297,57 @@ function parseRequest(request) {
   assertClosedKeySet(request, PREFLIGHT_REQUEST_ALLOWED_KEYS, 'request');
   const manifest = requiredKey(request, 'manifest', 'request');
   return manifest;
+}
+
+// The public maximum eight children per run is enforced HERE, at the launch
+// boundary, against this module's own frozen literals and BEFORE the composed
+// upstream contract runs. A routine quota change anywhere else therefore can
+// never widen this invariant: even a future grammar that tolerates more
+// children still fails preflight with the boundary's own denial.
+function enforceChildBounds(manifest) {
+  assertNotProxy(manifest, 'request.manifest');
+  if (!isPlainObject(manifest)) {
+    failPreflight('invalid_type', 'request.manifest',
+      'request.manifest must be a plain JSON data object.');
+  }
+  if (!hasOwn(manifest, 'assignments')) return; // upstream owns missing_key
+  const assignments = ownDataValue(manifest, 'assignments', 'request.manifest.assignments');
+  if (!capturedIsArray(assignments)) return; // upstream owns invalid_type
+  const count = assignments.length;
+  if (count < PREFLIGHT_MIN_CHILDREN) {
+    failPreflight('preflight_child_count_below_minimum', 'assignments',
+      `A run must carry at least ${PREFLIGHT_MIN_CHILDREN} child assignment.`);
+  }
+  if (count > PREFLIGHT_MAX_CHILDREN) {
+    failPreflight('preflight_child_count_exceeded', 'assignments',
+      `A run exceeds the public maximum of ${PREFLIGHT_MAX_CHILDREN} independent child assignments.`);
+  }
+}
+
+// Independent fanout: no submitted child may carry a dependency edge of any
+// shape, and every child id must be unique within the run. The accepted P02
+// contract already denies both; this boundary re-asserts it over the detached
+// frozen snapshot so the launch gate keeps its own evidence.
+function assertIndependentFanout(snapshot) {
+  const assignments = snapshot.assignments;
+  const seenIds = new Set();
+  for (let index = 0; index < assignments.length; index += 1) {
+    const assignment = assignments[index];
+    const assignmentPath = `assignments[${index}]`;
+    for (const key of sortedOwnKeys(assignment)) {
+      if (!capturedIncludes(ASSIGNMENT_ALLOWED_KEYS, key)) {
+        failPreflight('preflight_dependency_edge_denied', `${assignmentPath}.${key}`,
+          'Child assignments are independent; dependency edges of any shape are denied.');
+      }
+    }
+    const idPath = `${assignmentPath}.assignment_id`;
+    const assignmentId = assignment.assignment_id;
+    if (seenIds.has(assignmentId)) {
+      failPreflight('preflight_duplicate_child_id', idPath,
+        'Child assignment ids must be unique within one run.');
+    }
+    seenIds.add(assignmentId);
+  }
 }
 
 function summarizeChildren(snapshot) {
@@ -710,8 +768,10 @@ function buildReceipt(manifest, summary, repositoryFacts, hostFacts) {
 export async function validateRunPreflightV1(request, options) {
   const parsedOptions = parseOptions(options);
   const manifestInput = parseRequest(request);
+  enforceChildBounds(manifestInput);
   const snapshot = parseRunManifestV1(manifestInput);
   const childrenSummary = summarizeChildren(snapshot);
+  assertIndependentFanout(snapshot);
   assertSnapshotDisjointWriterScopes(snapshot);
   const hostFactsSource = parsedOptions.host ?? ambientHostFacts();
   const hostFacts = capturedFreeze({

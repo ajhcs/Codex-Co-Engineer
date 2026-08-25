@@ -380,6 +380,105 @@ test('preflight errors carry bounded content-free messages from a closed code se
   }
 });
 
+test('nine children exceed the public maximum with zero git spawns', async () => {
+  const repo = await createLinearRepo();
+  try {
+    let spawned = false;
+    const error = await preflightError(
+      laneManifestsForCount(9, { repositoryPath: repo.root, baseSha: repo.baseSha }),
+      { spawn: () => { spawned = true; throw new Error('no observation may run'); } },
+    );
+    assert.equal(error.code, 'preflight_child_count_exceeded');
+    assert.equal(error.path, 'assignments');
+    assert.equal(spawned, false);
+    assert.doesNotMatch(error.message, /9/u);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('an empty child set is below the public minimum', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const error = await preflightError(
+      laneManifestsForCount(0, { repositoryPath: repo.root, baseSha: repo.baseSha }),
+    );
+    assert.equal(error.code, 'preflight_child_count_below_minimum');
+    assert.equal(error.path, 'assignments');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('absent or non-array child sets defer to the accepted upstream denials', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const missing = twoLaneManifest({ repositoryPath: repo.root, baseSha: repo.baseSha });
+    delete missing.assignments;
+    const missingError = await preflightError(missing);
+    assert.equal(missingError.code, 'missing_key');
+
+    const foreign = twoLaneManifest({ repositoryPath: repo.root, baseSha: repo.baseSha });
+    foreign.assignments = { not: 'an array' };
+    const typeError = await preflightError(foreign);
+    assert.equal(typeError.code, 'invalid_type');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('dependency edges keep their precise denial inside the composed pipeline', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const { writerLane, preflightManifest } = await import('./fixtures/r1-run-preflight-fixtures.mjs');
+    const edged = writerLane(ASSIGNMENT_ID_A, ['src/alpha/**']);
+    edged.depends_on = [ASSIGNMENT_ID_B];
+    const manifest = preflightManifest([
+      edged,
+      writerLane(ASSIGNMENT_ID_B, ['src/beta/**']),
+    ], { repositoryPath: repo.root, baseSha: repo.baseSha });
+    const error = await preflightError(manifest);
+    assert.ok(
+      ['dependency_not_allowed', 'unknown_key', 'preflight_dependency_edge_denied'].includes(error.code),
+      error.code,
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('duplicate child ids keep their precise denial inside the composed pipeline', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const { writerLane, preflightManifest } = await import('./fixtures/r1-run-preflight-fixtures.mjs');
+    const manifest = preflightManifest([
+      writerLane(ASSIGNMENT_ID_A, ['src/alpha/**']),
+      writerLane(ASSIGNMENT_ID_A, ['src/beta/**']),
+    ], { repositoryPath: repo.root, baseSha: repo.baseSha });
+    const error = await preflightError(manifest);
+    assert.ok(
+      ['duplicate_assignment_id', 'preflight_duplicate_child_id'].includes(error.code),
+      error.code,
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('the ready receipt proves the independent bounded fanout', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const manifest = laneManifestsForCount(3, { repositoryPath: repo.root, baseSha: repo.baseSha });
+    const receipt = await preflightOk(manifest);
+    assert.equal(receipt.children.independent, true);
+    assert.deepEqual([...receipt.checks], [...RUN_PREFLIGHT_CHECKS]);
+    assert.ok(RUN_PREFLIGHT_CHECKS.includes('child_bounds'));
+    assert.ok(RUN_PREFLIGHT_CHECKS.includes('independent_fanout'));
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('duplicate writer scopes across lanes keep the accepted overlap denial', async () => {
   const repo = await createLinearRepo();
   try {
