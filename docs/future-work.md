@@ -34,6 +34,12 @@ fail-closed identity/correlation drift denials. Neither adapter's
 deterministic transport port substitutes for the remaining real
 lifecycle routes documented in `docs/dsh-acpx-driver.md`.
 
+The P28 `GitAuthorityPolicyV1` is in-tree as a pure authority-seam
+policy: protected/default refs, the allowed task-branch namespace,
+credential-free repository identity, and denied merge/push/create-PR/
+tag/release operations. It does not mutate Git, isolate credentials
+(P29), or audit live refs (P30).
+
 The P11 local provider result sink is in-tree as an additive
 provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
 ACPX/CLI output is published through the accepted P09 sanitizer and P08
