@@ -41,6 +41,7 @@ import {
   RUN_ID,
   SECRET_TEXT,
   captureInput,
+  digestOf,
   cleanupInput,
   decodeSelected,
   makeBridge,
@@ -306,6 +307,67 @@ test('bounded projection clips selected bytes and reports paging facts', async (
   }));
   assert.equal(decodeSelected(page.artifacts[0]) + decodeSelected(rest.artifacts[0]),
     source.slice(0, 32));
+});
+
+test('complete, redacted, and versioned capture readback bind stored bytes', async () => {
+  const { bridge, rawStore } = makeBridge({
+    sanitizer: makeSanitizer({ sanitizerVersion: 7 }),
+  });
+  const complete = await bridge.captureAssignmentArtifacts(captureInput());
+  assert.equal(complete.source_truncated, false);
+  assert.equal(complete.complete, true);
+  assert.equal(complete.redaction_count, 0);
+  assert.equal(complete.sanitizer_version, 7);
+  const storedComplete = await rawStore.get({
+    run_id: RUN_ID,
+    assignment_id: ASSIGNMENT_A,
+    relative_path: RELATIVE_A,
+  });
+  assert.equal(digestOf(storedComplete.bytes), complete.raw_ref.sha256);
+  assert.equal(Buffer.from(storedComplete.bytes).byteLength, complete.raw_ref.byte_length);
+  const completeProjection = await bridge.projectAssignmentArtifacts(projectInput());
+  assert.equal(completeProjection.artifacts[0].complete, true);
+  assert.equal(completeProjection.artifacts[0].source_truncated, false);
+  assert.equal(completeProjection.artifacts[0].redaction_count, 0);
+  assert.equal(completeProjection.artifacts[0].sanitizer_version, 7);
+
+  const redactedBridge = makeBridge({
+    sanitizer: makeSanitizer({ sanitizerVersion: 7 }),
+  });
+  const redacted = await redactedBridge.bridge.captureAssignmentArtifacts(captureInput({
+    source: SECRET_TEXT,
+  }));
+  assert.equal(redacted.redaction_count > 0, true);
+  assert.equal(redacted.sanitizer_version, 7);
+  assert.equal(redacted.complete, true);
+  const storedRedacted = await redactedBridge.rawStore.get({
+    run_id: RUN_ID,
+    assignment_id: ASSIGNMENT_A,
+    relative_path: RELATIVE_A,
+  });
+  assert.equal(digestOf(storedRedacted.bytes), redacted.raw_ref.sha256);
+  const redactedProjection = await redactedBridge.bridge.projectAssignmentArtifacts(projectInput());
+  assert.equal(redactedProjection.artifacts[0].redaction_count, redacted.redaction_count);
+  assert.equal(redactedProjection.artifacts[0].sanitizer_version, 7);
+  assert.equal(decodeSelected(redactedProjection.artifacts[0]).includes(REDACTED), true);
+});
+
+test('truncated capture stays incomplete across projection and restart', async () => {
+  const rawStore = makeRawStore();
+  const first = makeBridge({ rawStore });
+  const captured = await first.bridge.captureAssignmentArtifacts(captureInput({
+    source_truncated: true,
+  }));
+  assert.equal(captured.source_truncated, true);
+  assert.equal(captured.complete, false);
+  const projected = await first.bridge.projectAssignmentArtifacts(projectInput());
+  assert.equal(projected.artifacts[0].source_truncated, true);
+  assert.equal(projected.artifacts[0].complete, false);
+
+  const restarted = makeBridge({ rawStore, sanitizer: makeSanitizer() });
+  const again = await restarted.bridge.projectAssignmentArtifacts(projectInput());
+  assert.equal(again.artifacts[0].source_truncated, true);
+  assert.equal(again.artifacts[0].complete, false);
 });
 
 test('factory rejects missing injected seams', () => {

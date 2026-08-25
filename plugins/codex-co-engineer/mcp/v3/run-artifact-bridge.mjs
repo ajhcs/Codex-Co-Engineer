@@ -9,17 +9,22 @@
 //   - cleanupRunArtifacts removes only proof-bound artifacts of that run
 //
 // Raw bytes never become model-facing. Sanitized projections are size-capped
-// and credential-scanned. Cleanup cannot name another run, broaden a path,
-// or delete worktrees, branches, locks, candidate refs, or task receipts.
-// Restart rereads injected raw storage and re-projects; it does not invent
-// captures or claim cleanup that the store cannot prove.
+// and credential-scanned. Projection may keep or downgrade truncation and
+// completeness; it never upgrades them, and missing redaction, version, or
+// completeness evidence stays unknown instead of becoming a reassuring
+// default. Capture readback hashes stored bytes and fails closed on
+// mismatch, substitution, a partial read, or a stale identity. Cleanup
+// cannot name another run, broaden a path, or delete worktrees, branches,
+// locks, candidate refs, or task receipts. Restart rereads injected raw
+// storage and re-projects; it does not invent captures or claim cleanup
+// that the store cannot prove.
 //
 // This module does not import or own the P08 store, P09 sanitizer, P13
 // evidence bundle, run runtime, scheduler, lifecycle, server, or candidate
 // surfaces. Callers inject those seams. It does not claim Gate A or release.
 
 import { Buffer as NodeBuffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
 
 import { validateArtifactRelativePathV1 } from './artifact-path.mjs';
@@ -150,6 +155,7 @@ export const PROJECTION_ARTIFACT_KEYS = capturedFreeze([
   'relative_path',
   'sanitized_byte_length',
   'sanitized_ref',
+  'sanitizer_version',
   'selected',
   'selected_byte_length',
   'selected_encoding',
@@ -270,6 +276,7 @@ const BUFFER_FROM = NodeBuffer.from.bind(NodeBuffer);
 const BUFFER_ALLOC = NodeBuffer.alloc.bind(NodeBuffer);
 const BUFFER_IS_BUFFER = NodeBuffer.isBuffer.bind(NodeBuffer);
 const CREATE_HASH = createHash;
+const TIMING_SAFE_EQUAL = timingSafeEqual;
 const IS_PROXY = utilTypes.isProxy;
 const IS_UINT8_ARRAY = utilTypes.isUint8Array;
 const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
@@ -402,6 +409,38 @@ function snapshotSource(source, field) {
 
 function digestOf(bytes) {
   return CREATE_HASH(HASH_ALGORITHM).update(bytes).digest('hex');
+}
+
+function hashesEqual(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string' || left.length !== right.length) {
+    return false;
+  }
+  const leftBytes = BUFFER_FROM(left, 'utf8');
+  const rightBytes = BUFFER_FROM(right, 'utf8');
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false;
+  return TIMING_SAFE_EQUAL(leftBytes, rightBytes);
+}
+
+function optionalBoolean(container, key, field, code) {
+  if (!hasOwn(container, key)) return null;
+  const flag = optOwn(container, key);
+  if (flag !== true && flag !== false) {
+    failBridge(code, field, CONTENT_FREE[code]);
+  }
+  return flag === true;
+}
+
+function latchTruncation(authoritative, incoming) {
+  if (authoritative === true || incoming === true) return true;
+  if (authoritative === false) return false;
+  if (incoming === false) return false;
+  return null;
+}
+
+function latchComplete(truncated, incoming) {
+  if (truncated === true) return false;
+  if (incoming === true || incoming === false) return incoming;
+  return null;
 }
 
 function copyBytes(bytes, field) {
@@ -594,7 +633,9 @@ function unwrapStoreRecord(record, field) {
   if (hasOwn(record, 'bytes')) {
     bytes = copyBytes(optOwn(record, 'bytes'), `${field}.bytes`);
   }
-  return { artifact_ref: artifactRef, bytes };
+  const sourceTruncated = optionalBoolean(record, 'source_truncated',
+    `${field}.source_truncated`, 'artifact_bridge_store_failed');
+  return { artifact_ref: artifactRef, bytes, source_truncated: sourceTruncated };
 }
 
 async function callInjected(method, args, code, field) {
@@ -674,7 +715,7 @@ function parseSanitizedProjection(rawRef, sanitized, field) {
       CONTENT_FREE.artifact_bridge_sanitizer_failed);
   }
   assertNoCredentialLeak(bytes, `${field}.bytes`);
-  let redactionCount = 0;
+  let redactionCount = null;
   if (hasOwn(sanitized, 'redaction_count')) {
     redactionCount = optOwn(sanitized, 'redaction_count');
     if (typeof redactionCount !== 'number' || !NUMBER_IS_SAFE_INTEGER(redactionCount)
@@ -683,7 +724,7 @@ function parseSanitizedProjection(rawRef, sanitized, field) {
         CONTENT_FREE.artifact_bridge_sanitizer_failed);
     }
   }
-  let sanitizerVersion = 1;
+  let sanitizerVersion = null;
   if (hasOwn(sanitized, 'sanitizer_version')) {
     sanitizerVersion = optOwn(sanitized, 'sanitizer_version');
     if (typeof sanitizerVersion !== 'number' || !NUMBER_IS_SAFE_INTEGER(sanitizerVersion)
@@ -692,24 +733,10 @@ function parseSanitizedProjection(rawRef, sanitized, field) {
         CONTENT_FREE.artifact_bridge_sanitizer_failed);
     }
   }
-  let sourceTruncated = false;
-  if (hasOwn(sanitized, 'source_truncated')) {
-    const flag = optOwn(sanitized, 'source_truncated');
-    if (flag !== true && flag !== false) {
-      failBridge('artifact_bridge_sanitizer_failed', `${field}.source_truncated`,
-        CONTENT_FREE.artifact_bridge_sanitizer_failed);
-    }
-    sourceTruncated = flag === true;
-  }
-  let complete = sourceTruncated !== true;
-  if (hasOwn(sanitized, 'complete')) {
-    const flag = optOwn(sanitized, 'complete');
-    if (flag !== true && flag !== false) {
-      failBridge('artifact_bridge_sanitizer_failed', `${field}.complete`,
-        CONTENT_FREE.artifact_bridge_sanitizer_failed);
-    }
-    complete = flag === true;
-  }
+  const sourceTruncated = optionalBoolean(sanitized, 'source_truncated',
+    `${field}.source_truncated`, 'artifact_bridge_sanitizer_failed');
+  const complete = optionalBoolean(sanitized, 'complete', `${field}.complete`,
+    'artifact_bridge_sanitizer_failed');
   return {
     sanitized_ref: sanitizedRef,
     bytes,
@@ -770,6 +797,7 @@ function projectionArtifact(rawRef, projection, offset, maxBytes) {
     selected_byte_length: window.selected_byte_length,
     offset: window.offset,
     redaction_count: projection.redaction_count,
+    sanitizer_version: projection.sanitizer_version,
     source_truncated: projection.source_truncated,
     complete: projection.complete,
     reader_clipped: window.reader_clipped,
@@ -842,13 +870,38 @@ async function loadAssignmentRaw(rawStore, runId, assignmentId) {
   return matched;
 }
 
+function bindCapturedReadback(expectedRef, record, field) {
+  if (record === null || record.bytes === null) {
+    failBridge('artifact_bridge_store_failed', field, CONTENT_FREE.artifact_bridge_store_failed);
+  }
+  const ref = record.artifact_ref;
+  assertSameIdentity(ref, expectedRef.run_id, expectedRef.assignment_id, field);
+  assertRawClass(ref, `${field}.artifact_class`);
+  if (compareArtifactRefsV1(ref, expectedRef) !== 0) {
+    failBridge('artifact_bridge_store_failed', field, CONTENT_FREE.artifact_bridge_store_failed);
+  }
+  const bytes = record.bytes;
+  if (bytes.byteLength !== expectedRef.byte_length) {
+    failBridge('artifact_bridge_store_failed', field, CONTENT_FREE.artifact_bridge_store_failed);
+  }
+  const byteHash = digestOf(bytes);
+  if (!hashesEqual(byteHash, expectedRef.sha256) || !hashesEqual(ref.sha256, byteHash)) {
+    failBridge('artifact_bridge_store_failed', field, CONTENT_FREE.artifact_bridge_store_failed);
+  }
+  return {
+    artifact_ref: ref,
+    bytes: BUFFER_FROM(bytes),
+    byte_hash: byteHash,
+    source_truncated: record.source_truncated,
+  };
+}
+
 async function materializeRaw(rawStore, record, runId, assignmentId) {
   const ref = record.artifact_ref;
   assertSameIdentity(ref, runId, assignmentId, 'artifact_ref');
   assertRawClass(ref, 'artifact_ref.artifact_class');
-  if (record.bytes && record.bytes.byteLength === ref.byte_length
-    && digestOf(record.bytes) === ref.sha256) {
-    return { artifact_ref: ref, bytes: BUFFER_FROM(record.bytes) };
+  if (record.bytes !== null) {
+    return bindCapturedReadback(ref, record, 'rawStore.list');
   }
   const fetched = unwrapStoreRecord(
     await callInjected(rawStore.get, {
@@ -862,23 +915,29 @@ async function materializeRaw(rawStore, record, runId, assignmentId) {
     failBridge('artifact_bridge_not_found', 'rawStore.get',
       CONTENT_FREE.artifact_bridge_not_found);
   }
-  assertSameIdentity(fetched.artifact_ref, runId, assignmentId, 'rawStore.get');
-  assertRawClass(fetched.artifact_ref, 'rawStore.get.artifact_class');
-  if (fetched.bytes.byteLength !== fetched.artifact_ref.byte_length
-    || digestOf(fetched.bytes) !== fetched.artifact_ref.sha256) {
-    failBridge('artifact_bridge_store_failed', 'rawStore.get',
-      CONTENT_FREE.artifact_bridge_store_failed);
-  }
-  return fetched;
+  return bindCapturedReadback(ref, fetched, 'rawStore.get');
 }
 
 async function projectOne(sanitizer, rawRecord, sourceTruncated) {
-  const sanitized = await callInjected(sanitizer.sanitize, {
+  const request = {
     artifact_ref: rawRecord.artifact_ref,
     source: BUFFER_FROM(rawRecord.bytes),
-    source_truncated: sourceTruncated === true,
-  }, 'artifact_bridge_sanitizer_failed', 'sanitizer');
-  return parseSanitizedProjection(rawRecord.artifact_ref, sanitized, 'sanitizer');
+  };
+  if (sourceTruncated === true || sourceTruncated === false) {
+    request.source_truncated = sourceTruncated;
+  }
+  const sanitized = await callInjected(sanitizer.sanitize, request,
+    'artifact_bridge_sanitizer_failed', 'sanitizer');
+  const projection = parseSanitizedProjection(rawRecord.artifact_ref, sanitized, 'sanitizer');
+  const truncated = latchTruncation(sourceTruncated, projection.source_truncated);
+  return {
+    sanitized_ref: projection.sanitized_ref,
+    bytes: projection.bytes,
+    redaction_count: projection.redaction_count,
+    sanitizer_version: projection.sanitizer_version,
+    source_truncated: truncated,
+    complete: latchComplete(truncated, projection.complete),
+  };
 }
 
 export function describeRunArtifactBridgeV1() {
@@ -938,17 +997,13 @@ export function createRunArtifactBridge(options) {
         failBridge('artifact_bridge_restart_conflict', 'options.source',
           CONTENT_FREE.artifact_bridge_restart_conflict);
       }
-      const replayBytes = existing.bytes === null
-        ? fields.bytes
-        : existing.bytes;
-      if (digestOf(replayBytes) !== rawRef.sha256) {
+      const bound = bindCapturedReadback(existing.artifact_ref, existing, 'rawStore.get');
+      if (!hashesEqual(bound.byte_hash, rawRef.sha256)) {
         failBridge('artifact_bridge_restart_conflict', 'options.source',
           CONTENT_FREE.artifact_bridge_restart_conflict);
       }
-      const projection = await projectOne(sanitizer, {
-        artifact_ref: existing.artifact_ref,
-        bytes: replayBytes,
-      }, fields.sourceTruncated);
+      const latchedTruncated = latchTruncation(bound.source_truncated, fields.sourceTruncated);
+      const projection = await projectOne(sanitizer, bound, latchedTruncated);
       await appendEvidence(evidenceBundle, {
         kind: 'capture',
         code: 'replayed',
@@ -958,7 +1013,10 @@ export function createRunArtifactBridge(options) {
         artifact_digest: rawRef.sha256,
         recorded_at: now,
       });
-      return captureReceipt(fields, existing.artifact_ref, projection, now, false);
+      return captureReceipt({
+        ...fields,
+        sourceTruncated: latchedTruncated === true,
+      }, existing.artifact_ref, projection, now, false);
     }
 
     const siblings = await loadAssignmentRaw(rawStore, fields.runId, fields.assignmentId);
@@ -969,6 +1027,7 @@ export function createRunArtifactBridge(options) {
     await callInjected(rawStore.publish, {
       artifact_ref: rawRef,
       bytes: BUFFER_FROM(fields.bytes),
+      source_truncated: fields.sourceTruncated === true,
     }, 'artifact_bridge_store_failed', 'rawStore.publish');
 
     const verified = unwrapStoreRecord(
@@ -979,13 +1038,9 @@ export function createRunArtifactBridge(options) {
       }, 'artifact_bridge_store_failed', 'rawStore.get'),
       'rawStore.get',
     );
-    if (verified === null || verified.bytes === null
-      || verified.artifact_ref.sha256 !== rawRef.sha256) {
-      failBridge('artifact_bridge_store_failed', 'rawStore.get',
-        CONTENT_FREE.artifact_bridge_store_failed);
-    }
-    assertRawClass(verified.artifact_ref, 'rawStore.get.artifact_class');
-    const projection = await projectOne(sanitizer, verified, fields.sourceTruncated);
+    const bound = bindCapturedReadback(rawRef, verified, 'rawStore.get');
+    const latchedTruncated = latchTruncation(bound.source_truncated, fields.sourceTruncated);
+    const projection = await projectOne(sanitizer, bound, latchedTruncated);
     await appendEvidence(evidenceBundle, {
       kind: 'capture',
       code: 'captured',
@@ -995,7 +1050,10 @@ export function createRunArtifactBridge(options) {
       artifact_digest: rawRef.sha256,
       recorded_at: now,
     });
-    return captureReceipt(fields, verified.artifact_ref, projection, now, true);
+    return captureReceipt({
+      ...fields,
+      sourceTruncated: latchedTruncated === true,
+    }, bound.artifact_ref, projection, now, true);
   }
 
   async function projectAssignmentArtifacts(input) {
@@ -1006,7 +1064,7 @@ export function createRunArtifactBridge(options) {
     for (let index = 0; index < listed.length; index += 1) {
       const rawRecord = await materializeRaw(rawStore, listed[index], fields.runId,
         fields.assignmentId);
-      const projection = await projectOne(sanitizer, rawRecord, false);
+      const projection = await projectOne(sanitizer, rawRecord, rawRecord.source_truncated);
       artifacts.push(projectionArtifact(rawRecord.artifact_ref, projection, fields.offset,
         fields.maxBytes));
     }

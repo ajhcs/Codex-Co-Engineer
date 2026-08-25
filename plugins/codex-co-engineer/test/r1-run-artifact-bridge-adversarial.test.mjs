@@ -298,3 +298,141 @@ test('store exceptions become content-free store failures', async () => {
   assert.equal(error.code, 'artifact_bridge_store_failed');
   assertContentFree(error);
 });
+
+function wrapGet(inner, mutate) {
+  return {
+    publish: inner.publish.bind(inner),
+    list: inner.list.bind(inner),
+    remove: inner.remove.bind(inner),
+    async get(query) {
+      const record = await inner.get(query);
+      return mutate(record);
+    },
+  };
+}
+
+test('projection never upgrades truncation or completeness from a lying sanitizer', async () => {
+  const upgrading = {
+    async sanitize({ artifact_ref, source }) {
+      const honest = await makeSanitizer().sanitize({
+        artifact_ref,
+        source,
+        source_truncated: false,
+      });
+      return {
+        ...honest,
+        source_truncated: false,
+        complete: true,
+      };
+    },
+  };
+  const rawStore = makeRawStore();
+  const { bridge } = makeBridge({ rawStore, sanitizer: upgrading });
+  const captured = await bridge.captureAssignmentArtifacts(captureInput({
+    source_truncated: true,
+  }));
+  assert.equal(captured.source_truncated, true);
+  assert.equal(captured.complete, false);
+  const projection = await bridge.projectAssignmentArtifacts(projectInput());
+  assert.equal(projection.artifacts[0].source_truncated, true);
+  assert.equal(projection.artifacts[0].complete, false);
+
+  const restarted = makeBridge({ rawStore, sanitizer: upgrading });
+  const again = await restarted.bridge.projectAssignmentArtifacts(projectInput());
+  assert.equal(again.artifacts[0].source_truncated, true);
+  assert.equal(again.artifacts[0].complete, false);
+});
+
+test('projection represents missing redaction, version, and completeness as unknown', async () => {
+  const mute = {
+    async sanitize({ artifact_ref, source }) {
+      const honest = await makeSanitizer().sanitize({ artifact_ref, source });
+      return {
+        sanitized_ref: honest.sanitized_ref,
+        bytes: honest.bytes,
+      };
+    },
+  };
+  const { bridge } = makeBridge({ sanitizer: mute });
+  const captured = await bridge.captureAssignmentArtifacts(captureInput());
+  assert.equal(captured.redaction_count, null);
+  assert.equal(captured.sanitizer_version, null);
+  const projection = await bridge.projectAssignmentArtifacts(projectInput());
+  const artifact = projection.artifacts[0];
+  assert.equal(artifact.redaction_count, null);
+  assert.equal(artifact.sanitizer_version, null);
+  assert.equal(artifact.complete, null);
+  assert.notEqual(artifact.redaction_count, 0);
+  assert.notEqual(artifact.sanitizer_version, 1);
+  assert.notEqual(artifact.complete, true);
+  assert.notEqual(artifact.complete, false);
+});
+
+test('capture readback fails closed on substituted, partial, mismatched, or stale bytes', async () => {
+  const inner = makeRawStore();
+  const swapped = wrapGet(inner, (record) => {
+    if (record === null) return null;
+    return {
+      artifact_ref: record.artifact_ref,
+      bytes: Buffer.alloc(record.bytes.byteLength, 0x78),
+      source_truncated: record.source_truncated,
+    };
+  });
+  const swappedBridge = makeBridge({ rawStore: swapped }).bridge;
+  const swappedError = await errorOf(() => swappedBridge.captureAssignmentArtifacts(captureInput()));
+  assert.equal(swappedError.code, 'artifact_bridge_store_failed');
+  assertContentFree(swappedError);
+
+  const partialInner = makeRawStore();
+  const partial = wrapGet(partialInner, (record) => {
+    if (record === null) return null;
+    return {
+      artifact_ref: record.artifact_ref,
+      bytes: record.bytes.subarray(0, 4),
+      source_truncated: record.source_truncated,
+    };
+  });
+  const partialError = await errorOf(() => makeBridge({ rawStore: partial }).bridge
+    .captureAssignmentArtifacts(captureInput()));
+  assert.equal(partialError.code, 'artifact_bridge_store_failed');
+  assertContentFree(partialError);
+
+  const missingBytesInner = makeRawStore();
+  const missingBytes = wrapGet(missingBytesInner, (record) => {
+    if (record === null) return null;
+    return { artifact_ref: record.artifact_ref };
+  });
+  const missingError = await errorOf(() => makeBridge({ rawStore: missingBytes }).bridge
+    .captureAssignmentArtifacts(captureInput()));
+  assert.equal(missingError.code, 'artifact_bridge_store_failed');
+  assertContentFree(missingError);
+
+  const staleInner = makeRawStore();
+  const stale = wrapGet(staleInner, (record) => {
+    if (record === null) return null;
+    return {
+      artifact_ref: {
+        ...record.artifact_ref,
+        relative_path: FOREIGN_RELATIVE,
+      },
+      bytes: record.bytes,
+      source_truncated: record.source_truncated,
+    };
+  });
+  const staleError = await errorOf(() => makeBridge({ rawStore: stale }).bridge
+    .captureAssignmentArtifacts(captureInput()));
+  assert.equal(staleError.code, 'artifact_bridge_store_failed');
+  assertContentFree(staleError);
+
+  const honest = makeBridge();
+  await honest.bridge.captureAssignmentArtifacts(captureInput());
+  const replayInner = honest.rawStore;
+  const replayMissing = wrapGet(replayInner, (record) => {
+    if (record === null) return null;
+    return { artifact_ref: record.artifact_ref };
+  });
+  const replayError = await errorOf(() => makeBridge({ rawStore: replayMissing }).bridge
+    .captureAssignmentArtifacts(captureInput()));
+  assert.equal(replayError.code, 'artifact_bridge_store_failed');
+  assertContentFree(replayError);
+});

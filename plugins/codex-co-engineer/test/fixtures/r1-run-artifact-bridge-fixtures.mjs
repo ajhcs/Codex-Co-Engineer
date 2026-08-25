@@ -44,30 +44,42 @@ export function makeRawStore() {
     `${runId}\u0000${assignmentId}\u0000${relativePath}`;
 
   return {
-    async publish({ artifact_ref, bytes }) {
+    async publish({ artifact_ref, bytes, source_truncated }) {
       const key = keyOf(artifact_ref.run_id, artifact_ref.assignment_id, artifact_ref.relative_path);
-      records.set(key, {
+      const record = {
         artifact_ref: { ...artifact_ref },
         bytes: Buffer.from(bytes),
-      });
+      };
+      if (source_truncated === true || source_truncated === false) {
+        record.source_truncated = source_truncated;
+      }
+      records.set(key, record);
       return { artifact_ref: { ...artifact_ref } };
     },
     async get({ run_id, assignment_id, relative_path }) {
       const record = records.get(keyOf(run_id, assignment_id, relative_path));
       if (!record) return null;
-      return {
+      const view = {
         artifact_ref: { ...record.artifact_ref },
         bytes: Buffer.from(record.bytes),
       };
+      if (record.source_truncated === true || record.source_truncated === false) {
+        view.source_truncated = record.source_truncated;
+      }
+      return view;
     },
     async list({ run_id }) {
       const listed = [];
       for (const record of records.values()) {
         if (record.artifact_ref.run_id !== run_id) continue;
-        listed.push({
+        const view = {
           artifact_ref: { ...record.artifact_ref },
           bytes: Buffer.from(record.bytes),
-        });
+        };
+        if (record.source_truncated === true || record.source_truncated === false) {
+          view.source_truncated = record.source_truncated;
+        }
+        listed.push(view);
       }
       return listed;
     },
@@ -86,7 +98,10 @@ export function makeRawStore() {
   };
 }
 
-export function makeSanitizer({ secrets = [HOSTILE_SECRET, HOSTILE_TOKEN, HOSTILE_BEARER] } = {}) {
+export function makeSanitizer({
+  secrets = [HOSTILE_SECRET, HOSTILE_TOKEN, HOSTILE_BEARER],
+  sanitizerVersion = 1,
+} = {}) {
   return {
     async sanitize({ artifact_ref, source, source_truncated }) {
       let text = Buffer.from(source).toString('utf8');
@@ -112,7 +127,7 @@ export function makeSanitizer({ secrets = [HOSTILE_SECRET, HOSTILE_TOKEN, HOSTIL
         },
         bytes,
         redaction_count: redactionCount,
-        sanitizer_version: 1,
+        sanitizer_version: sanitizerVersion,
         source_truncated: source_truncated === true,
         complete: source_truncated !== true,
       };

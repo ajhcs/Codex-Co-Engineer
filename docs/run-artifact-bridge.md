@@ -43,8 +43,10 @@ with exactly:
 The bridge never imports those implementations. Tests use scoped in-memory
 stubs. A later runtime lane may inject the accepted P08/P09/P13 authorities.
 
-Raw store records are `{ artifact_ref, bytes }`. `list({ run_id })` must
-return only that run; a foreign `run_id` fails closed and prevents cleanup.
+Raw store records are `{ artifact_ref, bytes }` and may round-trip
+capture provenance `source_truncated`. Missing provenance is unknown.
+`list({ run_id })` must return only that run; a foreign `run_id` fails
+closed and prevents cleanup.
 
 `sanitize({ artifact_ref, source, source_truncated })` must return a
 sanitized-class `ArtifactRefV1` for the same run, assignment, kind, and
@@ -67,10 +69,14 @@ must stay under `runs/<run_id>/<assignment_id>/`. Path authority cannot
 broaden to another run, a parent segment, a worktree, or a candidate ref.
 
 The raw ref is published through `rawStore.publish` and re-read before the
-receipt is returned. The sanitizer is asked for the matching sanitized
+receipt is returned. Readback is bound to the captured bytes: the stored
+payload is hashed and must match the captured digest and identity. A
+hash mismatch, substituted payload, partial read, missing bytes, or stale
+artifact fails closed. The sanitizer is asked for the matching sanitized
 ref. The receipt is detached and frozen. It carries raw and sanitized
-refs, redaction metadata, and `created`. It never includes source bytes,
-store roots, or live handles.
+refs, redaction metadata, truncation/completeness, and `created`. It
+never includes source bytes, store roots, or live handles. Missing
+sanitizer redaction or version evidence is `null`, never `0` or `1`.
 
 An identical digest at the same identity is a restart replay
 (`created: false`) and does not duplicate storage. A different payload at
@@ -91,6 +97,15 @@ and returns only sanitized refs plus a base64 selected window. Raw class,
 raw bytes, credentials, prompt text, and store roots are absent. A
 credential pattern that survives the sanitizer fails closed rather than
 being projected.
+
+Projection preserves authoritative `redaction_count`, `sanitizer_version`,
+`source_truncated`, and `complete` when the sanitizer supplies them.
+Missing values stay `null`; the bridge never fabricates `0`, `1`, `false`,
+or `true`. Truncation is absorbing: projection may keep or mark a source
+truncated/incomplete, but it never upgrades truncated evidence to
+complete. Capture provenance `source_truncated` is passed through on
+restart rather than reset to `false`. `reader_clipped` / `more` remain
+paging facts and are distinct from source completeness.
 
 Restart constructs a new bridge over the same injected raw store. Projection
 re-reads raw bytes and re-sanitizes; it does not invent artifacts.
