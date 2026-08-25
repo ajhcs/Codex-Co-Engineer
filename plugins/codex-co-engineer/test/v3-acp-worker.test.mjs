@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText } from '../mcp/v3/acp-worker.mjs';
+import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText, workerSeamIncident } from '../mcp/v3/acp-worker.mjs';
 import { installClosedProviderTestInjection } from '../mcp/v3/credential-boundary.mjs';
 import { submitReply } from '../mcp/v3/mailbox.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
@@ -79,6 +79,10 @@ test('runs a prompt through ACP and persists a compact receipt', async () => {
   assert.match(events, /session_ready/u);
   assert.match(events, /fake-chunk-1/u);
   assert.match(events, /"status":"completed"/u);
+  assert.equal(terminal.cleanup.status, 'pending');
+  assert.equal(terminal.cleanup.acp_close, 'closed');
+  assert.equal(workerSeamIncident(terminal), false);
+  assert.match(events, /"type":"cleanup"/u);
 });
 
 for (const provider of ['grok', 'cursor-local']) {
@@ -229,6 +233,8 @@ test('provider failure after dispatch is never marked safe to replay', async () 
   assert.equal(task.status, 'failed');
   assert.equal(task.prompt_dispatched, true);
   assert.equal(task.fallback_safe, false);
+  assert.equal(task.cleanup.status, 'pending');
+  assert.equal(workerSeamIncident(task), false);
 });
 
 test('DSH scopes ACPX artifacts to the task and removes them after persistence', async () => {
