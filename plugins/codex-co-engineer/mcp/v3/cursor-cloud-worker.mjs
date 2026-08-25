@@ -1,12 +1,20 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { watch as watchDirectory } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import {
+  CredentialBoundaryError,
+  GIT_INSPECT_ENV,
+  assertCredentialFreeRemote,
+  denyWorkerRemoteMutation,
+  loadProviderCredential,
+  projectProviderEnvironment,
+  redactExactValues,
+} from './credential-boundary.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 import { boundedProviderResult, boundedProviderValue } from './provider-result.mjs';
 
@@ -182,11 +190,7 @@ function cleanupCall(factory, label) {
 
 function redactProviderText(value, sensitiveValues = []) {
   let message = String(value ?? 'Cursor Cloud task failed.');
-  for (const secret of [...sensitiveValues]
-    .filter((entry) => typeof entry === 'string' && entry.length >= 3)
-    .sort((left, right) => right.length - left.length)) {
-    message = message.split(secret).join('[redacted]');
-  }
+  message = redactExactValues(message, sensitiveValues);
   // Provider errors are persisted in the owner-local receipt and returned by
   // the MCP facade. Remove common credential-bearing URL and header forms
   // before anything reaches a task receipt or worker log.
@@ -253,22 +257,26 @@ function sanitizeProviderValue(value, sensitiveValues = [], depth = 0, seen = ne
 }
 
 export async function loadCursorApiKey(env = process.env) {
-  if (env.CURSOR_API_KEY?.trim()) return env.CURSOR_API_KEY.trim();
-  const base = env.XDG_CONFIG_HOME
-    ? path.resolve(env.XDG_CONFIG_HOME)
-    : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config');
-  const file = env.CURSOR_API_KEY_FILE?.trim() || path.join(base, 'cursor-cloud-control', 'api-key');
-  const metadata = await stat(file);
-  if (!metadata.isFile() || (metadata.mode & 0o077) !== 0) fail('cursor_key_permissions', 'Cursor API key file must be owner-only.');
-  const key = (await readFile(file, 'utf8')).trim();
-  if (!key || key.includes('\0')) fail('cursor_credentials_missing', 'Cursor API key is empty.');
-  return key;
+  try {
+    const loaded = await loadProviderCredential({ provider: 'cursor-cloud', source: env });
+    if (!loaded?.value) fail('cursor_credentials_missing', 'Cursor API key is empty.');
+    return loaded.value;
+  } catch (error) {
+    if (error instanceof CredentialBoundaryError) {
+      if (error.code === 'credential_permissions' || error.code === 'credential_owner_denied') {
+        fail('cursor_key_permissions', 'Cursor API key file must be owner-only.');
+      }
+      fail('cursor_credentials_missing', 'Cursor API key is empty.');
+    }
+    throw error;
+  }
 }
 
 export async function loadCursorSdk() {
   const { stdout } = await runFile('npm', ['root', '--global'], {
     encoding: 'utf8',
     timeout: PROVIDER_CALL_TIMEOUT_MS,
+    env: projectProviderEnvironment({ operation: 'sdk_probe', source: process.env }),
   });
   const module = path.join(stdout.trim(), '@cursor', 'sdk', 'dist', 'esm', 'index.js');
   try { return await import(pathToFileURL(module).href); } catch (error) {
@@ -281,6 +289,7 @@ async function gitValue(cwd, args) {
     cwd,
     encoding: 'utf8',
     timeout: PROVIDER_CALL_TIMEOUT_MS,
+    env: GIT_INSPECT_ENV,
   });
   return stdout.trim();
 }
@@ -617,6 +626,7 @@ function uncertainDispatchError(cause) {
 }
 
 function cloudCreateOptions(task, { apiKey, agentId, repoUrl, startingRef } = {}) {
+  const url = assertCredentialFreeRemote(repoUrl);
   return {
     apiKey,
     agentId,
@@ -624,11 +634,15 @@ function cloudCreateOptions(task, { apiKey, agentId, repoUrl, startingRef } = {}
     name: task.id,
     mode: task.role === 'review' ? 'plan' : 'agent',
     cloud: {
-      repos: [{ url: repoUrl, startingRef }],
+      repos: [{ url, startingRef }],
       autoCreatePR: task.create_pr === true,
       metadata: { co_engineer_task: task.id },
     },
   };
+}
+
+export function rejectCursorCloudLocalMutation(operation) {
+  denyWorkerRemoteMutation(operation);
 }
 
 function assertExactRunIdentity(run, agentId, expectedRequestId) {
