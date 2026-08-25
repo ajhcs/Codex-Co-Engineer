@@ -16,6 +16,7 @@ import {
   HOSTILE_TOKEN,
   TASK_ID,
   createClock,
+  createFreshRuntime,
   createLifecycleFns,
   createMemoryAggregateAnchor,
   createMemoryArtifactBridge,
@@ -233,6 +234,75 @@ test('forged inspect receipts cannot broaden path or candidate authority', async
     ].includes(error.code), key);
     assertContentFree(error);
   }
+});
+
+test('fresh inspect then a different assignment body conflicts without a second dispatch', async () => {
+  const harnessA = createRuntime();
+  const request = makeSubmitRequest();
+  await harnessA.runtime.submitRun(request);
+  const fresh = createFreshRuntime(harnessA);
+  await fresh.runtime.inspectRun({ run_id: request.run_id });
+  const error = await errorOf(() => fresh.runtime.submitRun({
+    ...request,
+    assignments: [makeAssignment({ taskId: 'task-hostile' })],
+  }));
+  assert.equal(error.code, 'runtime_identity_conflict');
+  assertContentFree(error);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+  assert.equal(harnessA.scheduler.calls.delegate.length, 1);
+});
+
+test('fresh submit-first of a different immutable identity conflicts without replay', async () => {
+  const harnessA = createRuntime();
+  const request = makeSubmitRequest();
+  await harnessA.runtime.submitRun(request);
+  const fresh = createFreshRuntime(harnessA);
+  const error = await errorOf(() => fresh.runtime.submitRun({
+    ...request,
+    request_idempotency_key: `sha256:${'ab'.repeat(32)}`,
+  }));
+  assert.equal(error.code, 'runtime_identity_conflict');
+  assertContentFree(error);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+  assert.equal(fresh.scheduler.calls.submit, 1);
+});
+
+test('incomplete stored identity stays unknown and does not fabricate conflict or success', async () => {
+  const inner = createMemoryRunStore();
+  const store = {
+    async submit(input) {
+      return inner.submit(input);
+    },
+    async getByRunId(runId) {
+      const record = await inner.getByRunId(runId);
+      return { run_id: record.run_id };
+    },
+  };
+  const harnessA = createRuntime({ runStore: store });
+  const request = makeSubmitRequest();
+  const first = await harnessA.runtime.submitRun(request);
+  assert.equal(first.created, true);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+
+  const fresh = createFreshRuntime(harnessA, { runStore: store });
+  const inspected = await fresh.runtime.inspectRun({ run_id: request.run_id });
+  assert.equal(inspected.created, false);
+  const replay = await fresh.runtime.submitRun(request);
+  assert.equal(replay.created, false);
+  assert.equal(replay.status, 'idempotent');
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+
+  const unknown = await errorOf(() => fresh.runtime.inspectRun({ run_id: 'missing-run-id' }));
+  assert.equal(unknown.code, 'runtime_run_unknown');
+  assertContentFree(unknown);
+  const fabricated = await errorOf(() => createFreshRuntime(harnessA, { runStore: store })
+    .runtime.submitRun({
+      ...request,
+      request_idempotency_key: `sha256:${'cd'.repeat(32)}`,
+    }));
+  assert.equal(fabricated.code, 'runtime_identity_conflict');
+  assertContentFree(fabricated);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
 });
 
 test('resume of a cancelled lane does not redispatch', async () => {

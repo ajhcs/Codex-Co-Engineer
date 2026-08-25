@@ -562,3 +562,17 @@ export function createRuntime(overrides = {}) {
     clock,
   };
 }
+
+export function createFreshRuntime(harness, overrides = {}) {
+  return createRuntime({
+    runStore: harness.runStore,
+    runJournal: harness.runJournal,
+    aggregateAnchor: harness.aggregateAnchor,
+    attentionBatch: harness.attentionBatch,
+    scheduler: harness.scheduler,
+    artifactBridge: harness.artifactBridge,
+    lifecycle: harness.lifecycle,
+    clock: harness.clock,
+    ...overrides,
+  });
+}

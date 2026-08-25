@@ -26,6 +26,7 @@ import {
   TASK_ID,
   createLifecycleFns,
   createMemoryScheduler,
+  createFreshRuntime,
   createRuntime,
   makeAssignment,
   makeSubmitRequest,
@@ -135,6 +136,70 @@ test('a conflicting body for the same run id fails closed without a second dispa
   assert.equal(error.code, 'runtime_identity_conflict');
   assert.equal(harness.scheduler.calls.submit, 1);
   assertNoSecret(error);
+});
+
+test('A submits, fresh B inspects then identical submits, fresh C submit-first: one dispatch', async () => {
+  const harnessA = createRuntime();
+  const request = makeSubmitRequest();
+  const first = await harnessA.runtime.submitRun(request);
+  assert.equal(first.created, true);
+  assert.equal(first.status, 'dispatched');
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+
+  const harnessB = createFreshRuntime(harnessA);
+  const inspected = await harnessB.runtime.inspectRun({ run_id: request.run_id });
+  assert.equal(inspected.created, false);
+  assert.equal(inspected.status, 'inspected');
+  const replayB = await harnessB.runtime.submitRun(request);
+  assert.equal(replayB.status, 'idempotent');
+  assert.equal(replayB.created, false);
+  assert.equal(replayB.side_effects.task_dispatched, false);
+  assert.equal(replayB.side_effects.replay, false);
+  assert.equal(replayB.side_effects.fallback, false);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+
+  const harnessC = createFreshRuntime(harnessA);
+  const replayC = await harnessC.runtime.submitRun(request);
+  assert.equal(replayC.status, 'idempotent');
+  assert.equal(replayC.created, false);
+  assert.equal(replayC.side_effects.task_dispatched, false);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+  assert.deepEqual(harnessA.scheduler.calls.delegate, [ASSIGNMENT_ID]);
+});
+
+test('inspect-first, status-first, remember-first, and submit-first resubmits stay created=false', async () => {
+  const harnessA = createRuntime();
+  const request = makeSubmitRequest();
+  await harnessA.runtime.submitRun(request);
+  assert.equal(harnessA.scheduler.calls.submit, 1);
+
+  const orders = [
+    ['submit-first', async (runtime) => runtime.submitRun(request)],
+    ['inspect-first', async (runtime) => {
+      await runtime.inspectRun({ run_id: request.run_id });
+      return runtime.submitRun(request);
+    }],
+    ['status-first', async (runtime) => {
+      await runtime.resumeRun({ run_id: request.run_id });
+      return runtime.submitRun(request);
+    }],
+    ['remember-first', async (runtime) => {
+      await runtime.inspectRun({ run_id: request.run_id });
+      await runtime.resumeRun({ run_id: request.run_id });
+      return runtime.submitRun(request);
+    }],
+  ];
+  for (const [order, act] of orders) {
+    const fresh = createFreshRuntime(harnessA);
+    const receipt = await act(fresh.runtime);
+    assert.equal(receipt.created, false, order);
+    assert.equal(receipt.status, 'idempotent', order);
+    assert.equal(receipt.side_effects.task_dispatched, false, order);
+    assert.equal(receipt.side_effects.duplicate_dispatch, false, order);
+    assert.equal(receipt.side_effects.replay, false, order);
+    assert.equal(receipt.side_effects.fallback, false, order);
+    assert.equal(harnessA.scheduler.calls.submit, 1, order);
+  }
 });
 
 test('R24A/P27 awaiting_selection fails closed before scheduler dispatch', async () => {
@@ -380,6 +445,7 @@ test('the runtime module does not import worker, boundary, supervisor, server, o
   assert.doesNotMatch(MODULE_SOURCE, /github\.com/u);
   assert.doesNotMatch(MODULE_SOURCE, /CHANGELOG/u);
   assert.doesNotMatch(MODULE_SOURCE, /future-work/u);
+  assert.doesNotMatch(MODULE_SOURCE, /00'\.repeat\(32\)/u);
 });
 
 test('lifecycle secret fields are stripped from receipts', async () => {

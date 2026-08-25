@@ -67,37 +67,53 @@ function wrapJournal({ journalRoot, store, anchor }) {
   };
 }
 
+function missingAggregateAnchor() {
+  return {
+    async getCoordination() {
+      throw new RunContractV1Error('aggregate_run_not_found', 'run_id', 'missing');
+    },
+  };
+}
+
+function bindLegacyRuntime({
+  runStore,
+  runJournal,
+  attentionBatch,
+  scheduler,
+  artifactBridge,
+  lifecycle,
+}) {
+  return createRunRuntime({
+    runStore,
+    runJournal,
+    aggregateAnchor: missingAggregateAnchor(),
+    attentionBatch,
+    scheduler,
+    artifactBridge,
+    settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
+    cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
+    clock: createClock(),
+  });
+}
+
 async function withLegacyRuntime(fn) {
   const storeRoot = await makeStoreRoot('r1-p33-dep-store-');
   const journalRoot = await makePrivateRoot('r1-p33-dep-journal-');
   const attentionRoot = await makePrivateRoot('r1-p33-dep-attention-');
   try {
     const runStore = await openRunStore(storeRoot);
-    const runJournal = wrapJournal({ journalRoot, store: runStore, anchor: {
-      async getCoordination() {
-        throw new RunContractV1Error('aggregate_run_not_found', 'run_id', 'missing');
-      },
-    } });
+    const runJournal = wrapJournal({ journalRoot, store: runStore, anchor: missingAggregateAnchor() });
     const attentionBatch = await openAttentionRoot(attentionRoot);
     const scheduler = createMemoryScheduler();
     const artifactBridge = createMemoryArtifactBridge();
     const lifecycle = createLifecycleFns({ final: true });
-    const runtime = createRunRuntime({
-      runStore,
-      runJournal,
-      aggregateAnchor: {
-        async getCoordination() {
-          throw new RunContractV1Error('aggregate_run_not_found', 'run_id', 'missing');
-        },
-      },
-      attentionBatch,
-      scheduler,
-      artifactBridge,
-      settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
-      cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
-      clock: createClock(),
+    const runtime = bindLegacyRuntime({
+      runStore, runJournal, attentionBatch, scheduler, artifactBridge, lifecycle,
     });
-    return await fn({ runtime, runStore, scheduler, lifecycle, journalRoot });
+    return await fn({
+      runtime, runStore, runJournal, attentionBatch, scheduler, artifactBridge,
+      lifecycle, journalRoot,
+    });
   } finally {
     await rm(storeRoot, { recursive: true, force: true });
     await rm(journalRoot, { recursive: true, force: true });
@@ -126,6 +142,47 @@ test('legacy P24/P25 submit is durable, idempotent, and reopens the journal afte
     const inspected = await runtime.inspectRun({ run_id: request.run_id });
     assert.equal(inspected.journal.run_opened, true);
     assert.equal(inspected.remote_mutated, false);
+  });
+});
+
+test('A submits, fresh B inspects then identical submits, fresh C submit-first against P24', async () => {
+  await withLegacyRuntime(async (harness) => {
+    const request = makeSubmitRequest();
+    const first = await harness.runtime.submitRun(request);
+    assert.equal(first.created, true);
+    assert.equal(harness.scheduler.calls.submit, 1);
+    const stored = await harness.runStore.getByRunId(request.run_id);
+    assert.equal(stored.request_idempotency_key, request.request_idempotency_key);
+
+    const runtimeB = bindLegacyRuntime(harness);
+    const inspected = await runtimeB.inspectRun({ run_id: request.run_id });
+    assert.equal(inspected.created, false);
+    const replayB = await runtimeB.submitRun(request);
+    assert.equal(replayB.created, false);
+    assert.equal(replayB.status, 'idempotent');
+    assert.equal(harness.scheduler.calls.submit, 1);
+
+    const runtimeC = bindLegacyRuntime(harness);
+    const replayC = await runtimeC.submitRun(request);
+    assert.equal(replayC.created, false);
+    assert.equal(replayC.status, 'idempotent');
+    assert.equal(harness.scheduler.calls.submit, 1);
+    assert.equal(harness.scheduler.calls.delegate.length, 1);
+    assert.equal(replayC.side_effects.replay, false);
+    assert.equal(replayC.side_effects.fallback, false);
+    assert.equal(replayC.side_effects.duplicate_dispatch, false);
+
+    const conflict = makeSubmitRequest({
+      submission: makeSubmission({ attempt: 2 }),
+    });
+    await assert.rejects(() => bindLegacyRuntime(harness).submitRun(conflict), (error) => {
+      assert.equal(error.code, 'runtime_identity_conflict');
+      return true;
+    });
+    assert.equal(harness.scheduler.calls.submit, 1);
+    const afterConflict = await harness.runStore.getByRunId(request.run_id);
+    assert.equal(afterConflict.canonical_digest, stored.canonical_digest);
+    assert.equal(afterConflict.request_idempotency_key, stored.request_idempotency_key);
   });
 });
 

@@ -5,9 +5,11 @@
 // handles and functions; it does not open roots, import scheduler or
 // artifact-bridge implementations, or own worker/boundary/lock recovery.
 // Exact P24 identity is the durable one-submission authority. Scheduler
-// dispatch happens only when P24 reports created=true. Child terminal
-// journal facts are accepted only after settleLocalTaskLifecycle returns
-// final=true. cleanupLocalTaskLifecycle is invoked idempotently on
+// dispatch happens only when P24 reports created=true. inspect/remember
+// recover stored submission identity and never invent a placeholder
+// digest. Child terminal journal facts are accepted only after
+// settleLocalTaskLifecycle returns final=true.
+// cleanupLocalTaskLifecycle is invoked idempotently on
 // terminal, cancel, and restart. Artifact cleanup is proof-bound and
 // never runs without that finality. P27 is composed as R24A
 // resolution_ready (ask-once selection already persisted). R25B is the
@@ -218,6 +220,18 @@ const AGGREGATE_MISSING_CODES = capturedFreeze([
 ]);
 const JOURNAL_MISSING_CODES = capturedFreeze([
   'run_journal_not_found',
+]);
+const STORE_MISSING_CODES = capturedFreeze([
+  'run_store_not_found',
+  'runtime_run_unknown',
+]);
+const STORE_IDENTITY_CONFLICT_CODES = capturedFreeze([
+  'run_identity_conflict',
+  'run_idempotency_conflict',
+]);
+const SCHEDULER_MISSING_CODES = capturedFreeze([
+  'scheduler_run_unknown',
+  'runtime_run_unknown',
 ]);
 const TERMINAL_LANE_STATUSES = capturedFreeze([
   'completed', 'failed', 'cancelled', 'unresolved', 'timeout',
@@ -593,6 +607,68 @@ function identityDigest(runId, baseSha, idempotencyKey, assignments) {
     run_id: runId,
   });
   return `sha256:${CREATE_HASH(HASH_ALGORITHM).update(payload).digest('hex')}`;
+}
+
+function assignmentsFromLanes(lanes) {
+  return lanes.map((lane) => ({
+    access: lane.access,
+    assignment_id: lane.assignment_id,
+    model: lane.model,
+    provider: lane.provider,
+    required: lane.required !== false,
+    role: lane.role,
+    starting_ref: lane.starting_ref ?? null,
+    task_id: lane.task_id,
+    write_scope: lane.write_scope,
+  }));
+}
+
+function storedSubmissionFacts(stored) {
+  if (stored === undefined || stored === null || typeof stored !== 'object'
+    || ARRAY_IS_ARRAY(stored) || IS_PROXY(stored)) {
+    return { durable: false, request_idempotency_key: null, base_sha: null };
+  }
+  const key = stored.request_idempotency_key;
+  const requestKey = typeof key === 'string' && capturedTest(IDEMPOTENCY_KEY_PATTERN, key)
+    ? key
+    : null;
+  let baseSha = null;
+  const git = stored.git;
+  if (git !== undefined && git !== null && typeof git === 'object' && !ARRAY_IS_ARRAY(git)
+    && !IS_PROXY(git) && hasOwn(git, 'base_sha') && typeof git.base_sha === 'string') {
+    try {
+      assertBaseSha(git.base_sha, 'git.base_sha');
+      baseSha = git.base_sha;
+    } catch (error) {
+      if (!(isTypedError(error) && error.code === 'invalid_format')) throw error;
+    }
+  }
+  return { durable: true, request_idempotency_key: requestKey, base_sha: baseSha };
+}
+
+function recoveredIdentityDigest(runId, facts, assignments) {
+  if (facts.request_idempotency_key === null || facts.base_sha === null
+    || !ARRAY_IS_ARRAY(assignments) || assignments.length === 0) {
+    return null;
+  }
+  return identityDigest(runId, facts.base_sha, facts.request_idempotency_key, assignments);
+}
+
+function assertNoIdentityConflict(known, digest, idempotencyKey) {
+  if (!known) return;
+  if (typeof known.request_idempotency_key === 'string'
+    && known.request_idempotency_key !== idempotencyKey) {
+    failRuntime('runtime_identity_conflict', 'run_id', CONTENT_FREE.runtime_identity_conflict);
+  }
+  if (typeof known.digest === 'string' && known.digest !== digest) {
+    failRuntime('runtime_identity_conflict', 'run_id', CONTENT_FREE.runtime_identity_conflict);
+  }
+}
+
+function mapStoreConflict(error) {
+  if (isTypedError(error) && capturedIncludes(STORE_IDENTITY_CONFLICT_CODES, error.code)) {
+    failRuntime('runtime_identity_conflict', 'run_id', CONTENT_FREE.runtime_identity_conflict);
+  }
 }
 
 function baseShaFromGit(git) {
@@ -1165,18 +1241,29 @@ export function createRunRuntime(dependencies) {
   const queues = new Map();
   const journals = new Map();
 
-  async function rememberFromStore(runId) {
+  async function recoverDurableRecord(runId, requireLanes) {
+    // Recover authoritative stored identity only. Never invent a digest.
     const existing = runs.get(runId);
     if (existing) return existing;
+    let stored = null;
     try {
-      await callInjected(injected.runStore.getByRunId, [runId], 'runtime_store_failed',
+      stored = await callInjected(injected.runStore.getByRunId, [runId], 'runtime_store_failed',
         'runStore.getByRunId');
     } catch (error) {
-      if (isTypedError(error) && (error.code === 'run_store_not_found'
-        || error.code === 'runtime_run_unknown')) {
-        failRuntime('runtime_run_unknown', 'run_id', CONTENT_FREE.runtime_run_unknown);
+      if (isTypedError(error) && capturedIncludes(STORE_MISSING_CODES, error.code)) {
+        if (requireLanes) {
+          failRuntime('runtime_run_unknown', 'run_id', CONTENT_FREE.runtime_run_unknown);
+        }
+        return null;
       }
       throw error;
+    }
+    const facts = storedSubmissionFacts(stored);
+    if (!facts.durable) {
+      if (requireLanes) {
+        failRuntime('runtime_run_unknown', 'run_id', CONTENT_FREE.runtime_run_unknown);
+      }
+      return null;
     }
     let schedulerReceipt = null;
     try {
@@ -1184,39 +1271,33 @@ export function createRunRuntime(dependencies) {
         run_id: runId,
       }], 'runtime_scheduler_failed', 'scheduler.resumeAssignments');
     } catch (error) {
-      if (!(isTypedError(error) && (error.code === 'scheduler_run_unknown'
-        || error.code === 'runtime_run_unknown'))) {
+      if (!(isTypedError(error) && capturedIncludes(SCHEDULER_MISSING_CODES, error.code))) {
         throw error;
       }
     }
     const lanes = ARRAY_IS_ARRAY(schedulerReceipt?.lanes) ? schedulerReceipt.lanes : [];
-    if (lanes.length === 0) {
+    if (requireLanes && lanes.length === 0) {
       failRuntime('runtime_run_unknown', 'run_id', CONTENT_FREE.runtime_run_unknown);
     }
-    const assignments = lanes.map((lane) => ({
-      access: lane.access,
-      assignment_id: lane.assignment_id,
-      model: lane.model,
-      provider: lane.provider,
-      required: lane.required !== false,
-      role: lane.role,
-      starting_ref: lane.starting_ref ?? null,
-      task_id: lane.task_id,
-      write_scope: lane.write_scope,
-    }));
+    const assignments = assignmentsFromLanes(lanes);
     const coordination = await loadCoordination(injected.aggregateAnchor, runId);
     const record = {
       run_id: runId,
-      base_sha: schedulerReceipt.base_sha,
-      digest: identityDigest(runId, schedulerReceipt.base_sha, 'sha256:' + '00'.repeat(32),
-        assignments),
+      base_sha: facts.base_sha
+        ?? (typeof schedulerReceipt?.base_sha === 'string' ? schedulerReceipt.base_sha : null),
+      digest: recoveredIdentityDigest(runId, facts, assignments),
       assignments,
-      request_idempotency_key: null,
+      request_idempotency_key: facts.request_idempotency_key,
       journal_mode: coordination !== null ? 'aggregate' : 'legacy',
       dispatched: true,
+      durable: true,
     };
     runs.set(runId, record);
     return record;
+  }
+
+  async function rememberFromStore(runId) {
+    return recoverDurableRecord(runId, true);
   }
 
   async function submitRun(request) {
@@ -1245,18 +1326,23 @@ export function createRunRuntime(dependencies) {
             CONTENT_FREE.runtime_selection_unresolved);
         }
       }
-      const known = runs.get(runId);
-      if (known && known.digest !== digest) {
-        failRuntime('runtime_identity_conflict', 'run_id', CONTENT_FREE.runtime_identity_conflict);
-      }
+      const known = await recoverDurableRecord(runId, false);
+      assertNoIdentityConflict(known, digest, idempotencyKey);
 
-      const stored = await callInjected(injected.runStore.submit, [storeInputFrom(parsed)],
-        'runtime_store_failed', 'runStore.submit');
-      const created = stored?.created === true;
-      if (!created && known && known.digest !== digest) {
-        failRuntime('runtime_identity_conflict', 'run_id', CONTENT_FREE.runtime_identity_conflict);
+      let stored;
+      try {
+        stored = await callInjected(injected.runStore.submit, [storeInputFrom(parsed)],
+          'runtime_store_failed', 'runStore.submit');
+      } catch (error) {
+        mapStoreConflict(error);
+        throw error;
       }
-      if (!created && known && known.digest === digest) {
+      const created = stored?.created === true;
+      if (created && known?.durable === true) {
+        failRuntime('runtime_store_failed', 'runStore.submit', CONTENT_FREE.runtime_store_failed);
+      }
+      assertNoIdentityConflict(known, digest, idempotencyKey);
+      if (!created && known && typeof known.digest === 'string' && known.digest === digest) {
         const handle = await bindJournal(injected, journals, known, false);
         const state = await journalState(handle);
         const schedulerReceipt = await callInjected(injected.scheduler.resumeAssignments, [{

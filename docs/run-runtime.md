@@ -52,6 +52,17 @@ one-submission authority: `scheduler.submitAssignments` runs only when
 `status: "idempotent"` and does not call the scheduler again. A different
 assignment body for the same `run_id` fails `runtime_identity_conflict`.
 
+`inspectRun` and `rememberFromStore` never invent a placeholder digest or
+identity fact. After restart they recover the authoritative stored
+submission identity from `runStore.getByRunId` when that record is
+durably available. Incomplete or unknown identity stays unknown and
+fails closed: no fabricated conflict and no fabricated `created: true`
+success. Conflict arbitration then belongs to `runStore.submit`.
+Byte-identical resubmission returns `created: false` for inspect-first,
+status-first, remember-first, and submit-first order. Every restart
+permutation keeps exactly one provider dispatch. A genuinely different
+immutable identity still fails `runtime_identity_conflict`.
+
 Replay, fallback, direct-mode, merge/push/create-PR, GitHub/remote,
 worktree/branch/lock, candidate, and `lifecycle_root` keys fail closed
 with precise codes.
