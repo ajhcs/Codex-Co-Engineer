@@ -235,6 +235,12 @@ export const PREFLIGHT_CAPACITY_SOURCES = capturedFreeze(['ambient', 'injected']
 export const COMPARISON_OUTCOMES = capturedFreeze([
   'aliased_ref', 'match', 'missing_ref', 'moved_ref', 'symbolic_ref',
 ]);
+const FAILING_COMPARISON_OUTCOMES = capturedFreeze([
+  'aliased_ref', 'missing_ref', 'moved_ref', 'symbolic_ref',
+]);
+const PREPARE_FORBIDDEN_SIDE_EFFECTS = capturedFreeze([
+  'provider_process_started', 'task_dispatched',
+]);
 export const RESULT_KEYS = capturedFreeze([
   'assignment_id', 'audit', 'base_sha', 'checks', 'invariants', 'lifecycle',
   'orchestration', 'provider', 'run_id', 'schema', 'side_effects', 'status',
@@ -970,6 +976,7 @@ function parseOrchestrationReceipt(input, identity) {
     RUN_ORCHESTRATION_ALWAYS_FALSE_SIDE_EFFECTS,
     pathLabel,
   );
+  assertPrepareSideEffects(status, intent, sideEffects, pathLabel);
   parseChecks(ownDataValue(input, 'checks', pathLabel), RUN_ORCHESTRATION_CHECKS, pathLabel);
   return {
     kind: 'receipt',
@@ -1037,7 +1044,7 @@ function parseLifecycle(input) {
   if (hasOwn(input, 'missing')) values.missing = ownBoolean(input, 'missing', pathLabel);
   if (hasOwn(input, 'restarted')) values.restarted = ownBoolean(input, 'restarted', pathLabel);
   if (hasOwn(input, 'side_effects')) {
-    parseBooleanMap(
+    values.side_effects = parseBooleanMap(
       ownDataValue(input, 'side_effects', pathLabel),
       RUN_ORCHESTRATION_SIDE_EFFECTS,
       RUN_ORCHESTRATION_ALWAYS_FALSE_SIDE_EFFECTS,
@@ -1047,8 +1054,36 @@ function parseLifecycle(input) {
   return freezeRecord(LIFECYCLE_ALLOWED_KEYS, values);
 }
 
+function claimsPrepareForbiddenSideEffects(sideEffects) {
+  if (sideEffects == null) return false;
+  for (let i = 0; i < PREPARE_FORBIDDEN_SIDE_EFFECTS.length; i += 1) {
+    if (sideEffects[PREPARE_FORBIDDEN_SIDE_EFFECTS[i]] === true) return true;
+  }
+  return false;
+}
+
+function isPreparedReceipt(orchestration) {
+  return orchestration.kind === 'receipt'
+    && (orchestration.status === 'prepared' || orchestration.intent === 'prepare');
+}
+
+function assertPrepareSideEffects(status, intent, sideEffects, pathLabel) {
+  if (status !== 'prepared' && intent !== 'prepare') return;
+  if (claimsPrepareForbiddenSideEffects(sideEffects)) deny('invalid_format', pathLabel);
+}
+
+function assertLifecycleSideEffectConsistency(orchestration, lifecycle) {
+  if (!isPreparedReceipt(orchestration)) return;
+  if (lifecycle != null && claimsPrepareForbiddenSideEffects(lifecycle.side_effects)) {
+    deny('invalid_format', 'lifecycle');
+  }
+}
+
 function auditIsNegative(audit) {
   if (audit.status === 'failed') return true;
+  for (let i = 0; i < audit.comparisons.length; i += 1) {
+    if (capturedIncludes(FAILING_COMPARISON_OUTCOMES, audit.comparisons[i].outcome)) return true;
+  }
   for (let i = 0; i < audit.findings.length; i += 1) {
     if (capturedIncludes(PROTECTED_REF_AUDIT_FAILING_CODES, audit.findings[i].code)) return true;
   }
@@ -1194,6 +1229,7 @@ export function projectRunApiBoundaryV1(input) {
   const orchestration = parseOrchestration(ownDataValue(input, 'orchestration', pathLabel), identity);
   const lifecycle = parseLifecycle(optOwn(input, 'lifecycle'));
   bindLaneProvider(identity, orchestration, audit.assignment_id);
+  assertLifecycleSideEffectConsistency(orchestration, lifecycle);
   const status = deriveStatus(audit, orchestration, lifecycle);
   const resultValues = {
     schema: RUN_API_BOUNDARY_SCHEMA_ID,

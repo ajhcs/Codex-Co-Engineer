@@ -42,6 +42,7 @@ import {
   validLane,
   validLifecycle,
   validOrchestration,
+  verifiedDriftAudit,
 } from './fixtures/r1-run-api-boundary-fixtures.mjs';
 
 function errorOf(action) {
@@ -167,6 +168,27 @@ test('P30 moved missing and hostile-ref receipts remain failed without side effe
     assert.equal(result.audit.facts[0].status, 'failed', code);
     assert.equal(result.audit.discrepancies[0].code, 'security_boundary', code);
     assert.equal(result.orchestration.status, 'prepared', code);
+    assertAdapterNonclaims(result);
+    assertContentFree(result);
+  }
+});
+
+test('verified P30 comparison drift remains failed and is not upgraded to ready', () => {
+  for (const outcome of ['moved_ref', 'missing_ref', 'symbolic_ref', 'aliased_ref']) {
+    const result = projectRunApiBoundaryV1(validInput({
+      audit: verifiedDriftAudit(outcome),
+      orchestration: dispatchedOrchestration(),
+      lifecycle: validLifecycle(),
+    }));
+    assert.equal(result.status, 'failed', outcome);
+    assert.equal(result.audit.status, 'verified', outcome);
+    assert.equal(result.audit.comparisons[0].outcome, outcome, outcome);
+    assert.equal(result.audit.findings.length, 0, outcome);
+    assert.equal(result.audit.observed_classes.length, 0, outcome);
+    assert.equal(result.audit.facts[0].status, 'verified', outcome);
+    assert.equal(result.audit.discrepancies.length, 0, outcome);
+    assert.equal(result.orchestration.status, 'dispatched', outcome);
+    assert.equal(result.lifecycle.cleaned, true, outcome);
     assertAdapterNonclaims(result);
     assertContentFree(result);
   }

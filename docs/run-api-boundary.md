@@ -40,11 +40,15 @@ lifecycle summaries:
 | Overall status | Meaning |
 | --- | --- |
 | `ready` | P30 verified and P31 receipt is clean; lifecycle is absent, cleaned, or a live restart |
-| `failed` | P30 receipt is failed or carries failing ref-drift findings |
+| `failed` | P30 receipt is failed, carries failing ref-drift findings, or records a `moved_ref`, `missing_ref`, `symbolic_ref`, or `aliased_ref` comparison |
 | `denied` | P31/P26 failed-preflight or capacity-denied input |
 | `unresolved` | P31 lifecycle is not clean |
 
-A failed or ref-drift audit remains `failed`. A non-clean lifecycle remains
+A failed or ref-drift audit remains `failed`, including a verified P30
+receipt whose comparisons still record `moved_ref`, `missing_ref`,
+`symbolic_ref`, or `aliased_ref`. A prepared P31 receipt, or a lifecycle
+attached to one, that claims `task_dispatched` or
+`provider_process_started` fails closed. A non-clean lifecycle remains
 `unresolved`. The adapter does not upgrade, normalize away, or reinterpret
 upstream negative evidence. Nested P30 and P31 statuses stay as supplied.
 

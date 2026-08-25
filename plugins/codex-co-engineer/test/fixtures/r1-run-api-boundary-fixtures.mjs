@@ -203,6 +203,27 @@ export function validAudit(overrides = {}) {
   return receipt;
 }
 
+export function verifiedDriftAudit(outcome = 'moved_ref', overrides = {}) {
+  const storage = outcome === 'missing_ref'
+    ? 'absent'
+    : outcome === 'symbolic_ref'
+      ? 'symbolic'
+      : 'loose';
+  return validAudit({
+    comparisons: [validComparison({ outcome, storage })],
+    observation: {
+      command_count: 2,
+      compared_count: 1,
+      duration_ms: 1,
+      loose_count: storage === 'loose' ? 1 : 0,
+      missing_count: storage === 'absent' ? 1 : 0,
+      packed_count: 0,
+      symbolic_count: storage === 'symbolic' ? 1 : 0,
+    },
+    ...overrides,
+  });
+}
+
 export function failedAudit(code = 'moved_ref', overrides = {}) {
   const finding = validFinding({ code, ...(code === 'missing_ref' ? { storage: 'absent' } : {}) });
   return validAudit({

@@ -32,11 +32,14 @@ import {
   countingProxy,
   failedAudit,
   orchestrationDenial,
+  orchestrationSideEffects,
   trapTotal,
   validAudit,
   validComparison,
   validInput,
+  validLifecycle,
   validOrchestration,
+  verifiedDriftAudit,
 } from './fixtures/r1-run-api-boundary-fixtures.mjs';
 
 const ADAPTER_SOURCE = readFileSync(
@@ -317,6 +320,76 @@ test('adapter source and dynamic projection never invoke I/O credential or lifec
     net.connect = connectOrig;
     http.request = requestOrig;
   }
+});
+
+test('verified comparison drift cannot be upgraded to ready by a clean P31 receipt', () => {
+  for (const outcome of ['moved_ref', 'missing_ref', 'symbolic_ref', 'aliased_ref']) {
+    const result = projectRunApiBoundaryV1(validInput({ audit: verifiedDriftAudit(outcome) }));
+    assert.equal(result.status, 'failed', outcome);
+    assert.equal(result.audit.status, 'verified', outcome);
+    assert.equal(result.audit.comparisons[0].outcome, outcome, outcome);
+    assert.equal(result.orchestration.status, 'prepared', outcome);
+    assert.equal(result.orchestration.side_effects.task_dispatched, false, outcome);
+    assertContentFree(result);
+  }
+
+  const mixed = projectRunApiBoundaryV1(validInput({
+    audit: verifiedDriftAudit('moved_ref', {
+      comparisons: [validComparison(), validComparison({ outcome: 'moved_ref' })],
+      observation: {
+        command_count: 2,
+        compared_count: 2,
+        duration_ms: 1,
+        loose_count: 2,
+        missing_count: 0,
+        packed_count: 0,
+        symbolic_count: 0,
+      },
+    }),
+  }));
+  assert.equal(mixed.status, 'failed');
+  assert.equal(mixed.audit.status, 'verified');
+  assert.equal(mixed.audit.comparisons[0].outcome, 'match');
+  assert.equal(mixed.audit.comparisons[1].outcome, 'moved_ref');
+});
+
+test('prepared receipts claiming dispatch side effects fail closed', () => {
+  for (const flag of ['task_dispatched', 'provider_process_started']) {
+    const error = assertRejected(() => projectRunApiBoundaryV1(validInput({
+      orchestration: validOrchestration({
+        side_effects: orchestrationSideEffects({
+          credentials_projected: true,
+          [flag]: true,
+        }),
+      }),
+    })));
+    assert.equal(error.code, 'invalid_format', flag);
+  }
+
+  const both = assertRejected(() => projectRunApiBoundaryV1(validInput({
+    orchestration: validOrchestration({
+      side_effects: orchestrationSideEffects({
+        credentials_projected: true,
+        task_dispatched: true,
+        provider_process_started: true,
+      }),
+    }),
+  })));
+  assert.equal(both.code, 'invalid_format');
+
+  const lifecycle = assertRejected(() => projectRunApiBoundaryV1(validInput({
+    lifecycle: validLifecycle({
+      side_effects: orchestrationSideEffects({ task_dispatched: true }),
+    }),
+  })));
+  assert.equal(lifecycle.code, 'invalid_format');
+
+  const processLifecycle = assertRejected(() => projectRunApiBoundaryV1(validInput({
+    lifecycle: validLifecycle({
+      side_effects: orchestrationSideEffects({ provider_process_started: true }),
+    }),
+  })));
+  assert.equal(processLifecycle.code, 'invalid_format');
 });
 
 test('nested hostile credential env argv and handoff-shaped fields are not projected', () => {
