@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  applyClosedProviderTestInjection,
   collectLaneSecrets,
   denyWorkerRemoteMutation,
   projectProviderEnvironment,
@@ -445,14 +446,7 @@ async function removeAcpxTaskHome(root, taskId, home) {
 function acpxTaskEnvironment(home, task) {
   const env = providerChildEnvironment(task, { HOME: home });
   if (process.platform === 'win32') env.USERPROFILE = home;
-  // In-process tests inject a fake ACPX via FAKE_ACPX_* process env. Production
-  // workers never have these keys; copying them does not widen the lane.
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith('FAKE_ACPX_') && typeof process.env[key] === 'string' && !process.env[key].includes('\0')) {
-      env[key] = process.env[key];
-    }
-  }
-  return env;
+  return applyClosedProviderTestInjection(env);
 }
 
 async function awaitSupervisorRegistration(root, taskId, signal) {
@@ -890,7 +884,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   }
 }
 
-async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal }) {
+async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env }) {
   const stateDir = path.join(path.resolve(root), 'acp');
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await chmod(stateDir, 0o700);
@@ -903,6 +897,7 @@ async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal
     mcpServers: [],
     permissionMode: 'approve-all',
     timeoutMs,
+    closedProviderEnv: env,
     onPermissionRequest: (params, extra = {}) => handlePermissionRequest(root, taskId, params, extra.signal ?? signal),
   });
 }
@@ -927,7 +922,8 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     return runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
   }
 
-  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal });
+  const childEnv = providerChildEnvironment(task);
+  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env: childEnv });
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort(signal?.reason ?? new AcpWorkerError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'ACP task exceeded its recorded deadline.' : 'Task cancelled.'));

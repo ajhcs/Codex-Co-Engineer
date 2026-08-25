@@ -54,6 +54,11 @@ if (argv.some((entry) => entry === value.prompt)) {
 }
 
 const fakeMode = process.env.FAKE_ACPX_MODE ?? 'success';
+await writeFile(
+  path.join(cwd, '.fake-acpx-env-keys.json'),
+  `${JSON.stringify(Object.keys(process.env).sort())}\n`,
+  { mode: 0o600 },
+);
 const home = process.env.HOME;
 if (typeof home !== 'string' || !path.isAbsolute(home)) {
   process.stderr.write('task-scoped HOME is required\n');

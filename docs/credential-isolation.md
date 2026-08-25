@@ -10,11 +10,13 @@ boundary. P30 live protected-ref audit remains later work.
 
 ## Closed environment projection
 
-Supervisor launch and readiness children receive a **closed**
-provider/operation environment. Projection starts empty and copies only
-allowlisted operational keys plus the selected provider's required route.
-It does not enumerate caller objects, so hostile getters on unrelated keys
-never run.
+Supervisor launch, the systemd service, the credential-handoff loader
+child, nested Grok/Cursor Local ACP children, and readiness children
+receive a **closed** provider/operation environment. Projection starts
+empty and copies only allowlisted operational keys plus the selected
+provider's required route. It does not enumerate caller objects, so
+hostile getters on unrelated keys never run. It does not spread
+`process.env` and does not rely on a denylist.
 
 The following never reach provider or readiness children:
 
@@ -25,7 +27,9 @@ The following never reach provider or readiness children:
   state-root tokens);
 - owner-only key-file **paths** (`*_API_KEY_FILE` and Co-Engineer file
   pointers);
-- unrelated ambient secrets and `NODE_OPTIONS` / `NODE_PATH`.
+- unrelated ambient secrets, `FAKE_ACPX_*`, and `NODE_OPTIONS` / `NODE_PATH`.
+  Explicit test injection of `FAKE_ACPX_*` is a closed in-process hook, not
+  ambient `process.env`.
 
 Lane hardening always sets `GIT_TERMINAL_PROMPT=0`, empty `GIT_ASKPASS`,
 and `GIT_PUSH_OPTION_COUNT=0`. That is not a git sandbox; it removes the
@@ -52,10 +56,12 @@ by leaking the value into an unrelated child.
 Credential values may come from the selected env key or from an owner-only
 file. File reads require:
 
-- an absolute, normalized path;
+- an absolute, normalized path. Credential-file overrides are checked
+  before any `path.resolve` conversion; relative, non-normalized, and
+  double-separator inputs fail closed;
 - `O_NOFOLLOW|O_RDONLY|O_NONBLOCK` open of a regular file;
 - owner equal to the effective UID;
-- mode `0600` (no group/other bits);
+- exact mode `0600`;
 - link count 1 (hardlinks denied);
 - size in `1..=16 KiB`;
 - a post-read `fstat` identity match (dev/ino/mode/nlink/uid/size/mtime/ctime).
@@ -68,21 +74,33 @@ between checks is the documented non-sandbox residual.
 ## systemd-run argv handoff
 
 Credential values never appear in `systemd-run` argv. Non-secret projected
-keys may use `--setenv`. Secret keys are written to a bounded owner-only
-no-follow regular file under `XDG_RUNTIME_DIR` (else the process temp
-dir), mode `0600`, directory `0700`, and the service command is wrapped by
-`credential-handoff-loader.mjs`.
+keys may use `--setenv`. `systemd-run --setenv` is additive to the
+user-manager environment, so the unit also sets `UnsetEnvironment=` for
+inherited names that are not in the closed projection and exec's the
+service through `env -i` of that same allowlist. Secret keys are written
+to a bounded owner-only no-follow regular file under `XDG_RUNTIME_DIR`
+(else the process temp dir), mode `0600`, directory `0700`. The service
+command is always wrapped by `credential-handoff-loader.mjs`, including
+Cursor Local which has no provider secrets of its own, so the worker is
+never the manager-inherited leader.
 
 The loader opens the file with the same no-follow rules, applies the
 values, unlinks the file (and best-effort the directory), then runs the
-original command as a child. The loader stays the service leader so
+original command as a child with a closed service projection plus those
+credentials. It does not spread `process.env`. Nested Grok and Cursor
+Local ACP children receive that same closed projection through
+`createAcpRuntime` / `closedProviderEnv`; ACPX does not start from
+ambient `process.env`. The loader stays the service leader so
 `KillMode=control-group` still reaches descendants.
 
 Cleanup unlinks any remaining handoff file after spawn failure, cancel,
 terminal stop, or a later restart (a restart creates a new file). The
-short-lived `systemd-run` client receives only the D-Bus session keys
-needed to talk to the user manager (`DBUS_SESSION_BUS_ADDRESS`,
-`XDG_RUNTIME_DIR`, `XDG_SESSION_ID`).
+bounded internal identity is the process-boundary unit token, from which
+the owner-only handoff path is reconstructed without persisting the path
+or credential values on the public receipt. Stale identity directories
+can be recovered the same way. The short-lived `systemd-run` client
+receives only the D-Bus session keys needed to talk to the user manager
+(`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `XDG_SESSION_ID`).
 
 Cursor Cloud workers are local Node processes, not systemd services; they
 still receive the closed projection and never put secrets in argv.
@@ -90,10 +108,11 @@ still receive the closed projection and never put secrets in argv.
 ## Exact-value redaction
 
 ACP events, public errors, worker logs, and Cursor Cloud receipts redact
-the exact credential values for the selected route, including 16 KiB
-secrets split across events. Redaction uses the full value plus overlapping
-32-byte fragments so a chunked log line cannot reassemble the secret.
-Pattern redaction for common token shapes remains as defense in depth.
+the exact credential values for the selected route, including values of
+length 1–3 and 16 KiB secrets split across chunks, events, errors, and
+logs. Redaction uses the full value plus overlapping 32-byte fragments so
+a chunked log line cannot reassemble the secret. Pattern redaction for
+common token shapes remains as defense in depth.
 
 ## No worker remote-mutation authority
 

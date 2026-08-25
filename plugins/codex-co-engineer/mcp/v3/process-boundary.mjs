@@ -9,6 +9,7 @@ import {
   cleanupCredentialHandoff,
   createCredentialHandoff,
   extractCredentialEnv,
+  handoffPathFromProcessIdentity,
   isCredentialEnvKey,
   isForbiddenProviderEnvKey,
   omitCredentialEnv,
@@ -20,13 +21,17 @@ import {
  *
  * This is not a provider sandbox: the command, working directory, network,
  * and filesystem capabilities are inherited unchanged. Environment is a
- * closed projection supplied by the caller. Credential values never appear
- * in systemd-run argv; they use an owner-only no-follow regular-file handoff
- * consumed by credential-handoff-loader.mjs. The extra lifecycle contract is
- * a manager-owned systemd user service with KillMode=control-group, so an
- * owned stop reaches detached descendants as well as the worker leader and
- * the worker survives the launching client. The module is not wired into the
- * MCP surface by itself.
+ * closed projection supplied by the caller. systemd-run `--setenv` is
+ * additive to the user-manager block, so the unit also UnsetEnvironment's
+ * inherited names that are not in the projection and exec's through
+ * `env -i` of that same allowlist. Credential values never appear in
+ * systemd-run argv; they use an owner-only no-follow regular-file handoff
+ * consumed by credential-handoff-loader.mjs, which is always the service
+ * command so Cursor Local is never the manager-inherited leader. The extra
+ * lifecycle contract is a manager-owned systemd user service with
+ * KillMode=control-group, so an owned stop reaches detached descendants as
+ * well as the worker leader and the worker survives the launching client.
+ * The module is not wired into the MCP surface by itself.
  */
 
 const CREDENTIAL_HANDOFF_LOADER = fileURLToPath(new URL('./credential-handoff-loader.mjs', import.meta.url));
@@ -40,6 +45,7 @@ export const PROCESS_BOUNDARY_DEFAULTS = Object.freeze({
 
 const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const SYSTEMCTL = '/usr/bin/systemctl';
+const ENV_RESET = '/usr/bin/env';
 const CGROUP_ROOT = '/sys/fs/cgroup';
 const UNIT = /^codex-co-engineer-[a-f0-9]{32}\.(?:service|scope)$/u;
 const SERVICE_UNIT = /^codex-co-engineer-[a-f0-9]{32}\.service$/u;
@@ -171,6 +177,34 @@ function requireEnvironment(env, { includeCredentials = false } = {}) {
   });
 }
 
+function closedEnvAssignments(env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) fail('invalid_env', 'env must be an environment object.');
+  return Object.entries(env).flatMap(([name, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || typeof value !== 'string' || value.includes('\0')) {
+      fail('invalid_env', 'env must contain POSIX variable names and NUL-free string values.');
+    }
+    if (isCredentialEnvKey(name)) return [];
+    return [`${name}=${value}`];
+  });
+}
+
+function inheritedUnsetNames(publicEnv, inherited) {
+  if (inherited == null) return [];
+  if (typeof inherited !== 'object' || Array.isArray(inherited)) fail('invalid_env', 'inherited must be an environment object.');
+  const assigned = new Set();
+  for (const name of Object.keys(publicEnv ?? {})) {
+    if (isCredentialEnvKey(name)) continue;
+    assigned.add(name);
+  }
+  const names = [];
+  for (const name of Object.keys(inherited)) {
+    if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) continue;
+    if (assigned.has(name)) continue;
+    names.push(name);
+  }
+  return names.sort();
+}
+
 function receiptFromRecord(record, boundary = 'systemd-user-service-cgroup') {
   const unit = requireUnit(record.unit);
   if ((boundary === 'systemd-user-service-cgroup' && !SERVICE_UNIT.test(unit))
@@ -265,21 +299,24 @@ export async function probeProcessBoundary({ adapter } = {}) {
   });
 }
 
-export function buildProcessBoundaryArgv({ unit, description, command, args = [], cwd, env = {}, logPath } = {}) {
+export function buildProcessBoundaryArgv({ unit, description, command, args = [], cwd, env = {}, logPath, inherited } = {}) {
   requireServiceUnit(unit);
   requireDescription(description);
   requireCommand(command);
   const normalizedArgs = requireArgs(args);
   const workingDirectory = requireCwd(cwd);
   const outputPath = requireLogPath(logPath);
+  const publicAssignments = closedEnvAssignments(env);
+  const unset = inheritedUnsetNames(env, inherited);
   return [
     '--user', '--quiet', '--collect', '--no-block', '--service-type=exec', `--unit=${unit}`,
     `--property=Description=${description}`,
     '--property=KillMode=control-group',
+    ...(unset.length > 0 ? [`--property=UnsetEnvironment=${unset.join(' ')}`] : []),
     ...(workingDirectory ? [`--working-directory=${workingDirectory}`] : []),
     ...(outputPath ? [`--property=StandardOutput=append:${outputPath}`, `--property=StandardError=append:${outputPath}`] : []),
     ...requireEnvironment(env),
-    '--', command, ...normalizedArgs,
+    '--', ENV_RESET, '-i', ...publicAssignments, command, ...normalizedArgs,
   ];
 }
 
@@ -442,7 +479,14 @@ export function restoreProcessBoundary(receipt, { adapter } = {}) {
   const host = requireAdapter(adapter);
   requireLinux(host);
   const handle = Object.freeze({ kind: 'systemd-user-process-boundary', ...normalized });
-  HANDLES.set(handle, { host, receipt: normalized, child: null, stopped: false, handoffPath: undefined });
+  const identity = /^codex-co-engineer-([a-f0-9]{32})\./u.exec(normalized.unit)?.[1];
+  let handoffPath;
+  try {
+    handoffPath = identity ? handoffPathFromProcessIdentity(identity) : undefined;
+  } catch {
+    handoffPath = undefined;
+  }
+  HANDLES.set(handle, { host, receipt: normalized, child: null, stopped: false, handoffPath });
   return handle;
 }
 
@@ -463,20 +507,16 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
     if (isForbiddenProviderEnvKey(key)) delete publicEnv[key];
   }
   requireEnvironment(publicEnv);
-  let serviceCommand = command;
-  let serviceArgs = normalizedArgs;
-  let handoffPath;
-  if (Object.keys(secrets).length > 0) {
-    const handoff = await createCredentialHandoff(secrets);
-    handoffPath = handoff.path;
-    serviceCommand = process.execPath;
-    serviceArgs = [CREDENTIAL_HANDOFF_LOADER, handoff.path, '--', command, ...normalizedArgs];
-  }
   const token = randomUUID().replaceAll('-', '');
   const unit = `codex-co-engineer-${token}.service`;
   const description = `codex-co-engineer-task:${token}`;
+  const handoff = await createCredentialHandoff(secrets, { identity: token });
+  const handoffPath = handoff.path;
+  const serviceCommand = process.execPath;
+  const serviceArgs = [CREDENTIAL_HANDOFF_LOADER, handoff.path, '--', command, ...normalizedArgs];
   const child = host.spawn(SYSTEMD_RUN, buildProcessBoundaryArgv({
     unit, description, command: serviceCommand, args: serviceArgs, cwd: workingDirectory, env: publicEnv, logPath: outputPath,
+    inherited: process.env,
   }), {
     cwd: workingDirectory,
     // Credential values live in the owner-only handoff file, not in

@@ -2,13 +2,18 @@
 // Owner-only credential handoff loader for P29. Reads a bounded regular
 // file, applies credential env values, unlinks the file, then runs the
 // wrapped command as a child so systemd-run argv never carries secrets.
-// This process remains the service leader; KillMode=control-group still
-// reaches the provider child.
+// The child environment is a closed service projection plus those
+// credentials; ambient process.env is never spread. This process remains
+// the service leader; KillMode=control-group still reaches the provider
+// child.
 
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 
-import { consumeCredentialHandoff } from './credential-boundary.mjs';
+import {
+  consumeCredentialHandoff,
+  projectProviderEnvironment,
+  spawnProviderChild,
+} from './credential-boundary.mjs';
 
 function failUsage() {
   process.stderr.write('Usage: credential-handoff-loader.mjs /absolute/handoff.json -- command [args...]\n');
@@ -28,17 +33,16 @@ const args = process.argv.slice(separator + 2);
 if (typeof command !== 'string' || command.length === 0 || command.includes('\0')) failUsage();
 
 const secrets = await consumeCredentialHandoff(handoffPath);
-const env = { ...process.env };
+const env = projectProviderEnvironment({ source: process.env, operation: 'service' });
 for (const [name, value] of Object.entries(secrets)) {
   if (typeof name === 'string' && typeof value === 'string') env[name] = value;
 }
 delete env.CODEX_CO_ENGINEER_CREDENTIAL_HANDOFF;
 
-const child = spawn(command, args, {
+const child = spawnProviderChild(command, args, {
   env,
   stdio: 'inherit',
   detached: false,
-  shell: false,
 });
 
 const forward = (signal) => {

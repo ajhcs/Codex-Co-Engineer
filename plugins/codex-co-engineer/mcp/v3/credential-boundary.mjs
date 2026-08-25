@@ -14,8 +14,10 @@ import {
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   open,
+  readdir,
   rmdir,
   unlink,
 } from 'node:fs/promises';
@@ -137,7 +139,12 @@ const CREDENTIAL_KEY_PATTERN = /(?:api[_-]?key|authorization|access[_-]?token|re
 const HOSTING_KEY_PATTERN = /^(?:GH|GITHUB|GITLAB|GL|BITBUCKET|BB|HG|GITEA|FORGEJO|SOURCEHUT)_/u;
 const GIT_KEY_PATTERN = /^GIT_/u;
 const SSH_KEY_PATTERN = /^SSH_/u;
-const CONTROL_KEY_PATTERN = /^(?:WORKTREE_BOOTSTRAP_|CODEX_CO_ENGINEER_STATE_DIR$|MCP_|SUPERVISOR_)/u;
+const CONTROL_KEY_PATTERN = /^(?:WORKTREE_BOOTSTRAP_|CODEX_CO_ENGINEER_STATE_DIR$|MCP_|SUPERVISOR_|FAKE_ACPX_)/u;
+const CLOSED_TEST_INJECTION_KEY = /^FAKE_ACPX_[A-Z0-9_]+$/u;
+const HANDOFF_IDENTITY = /^[a-f0-9]{32}$/u;
+const HANDOFF_IDENTITY_DIR = /^cce-p29-[a-f0-9]{32}$/u;
+
+let closedProviderTestInjection = null;
 const PUSH_URL_KEY_PATTERN = /(?:pushurl|insteadOf|askpass|credential)/iu;
 const USERINFO_URL = /^(?:[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/iu;
 const TOKEN_QUERY = /[?&](?:token|access_token|api[_-]?key|secret|password|credential)=/iu;
@@ -282,6 +289,16 @@ export function projectProviderEnvironment({
     copyKeys(envSource, SYSTEMD_CLIENT_ENV_KEYS, output);
     return output;
   }
+  if (operation === 'service') {
+    const output = Object.create(null);
+    copyKeys(envSource, OPERATIONAL_ENV_KEYS, output);
+    copyKeys(envSource, PROVIDER_COMMAND_KEYS, output);
+    Object.assign(output, GIT_HARDENING_ENV);
+    for (const key of CREDENTIAL_ENV_KEYS) delete output[key];
+    for (const key of CREDENTIAL_FILE_ENV_KEYS) delete output[key];
+    delete output[HANDOFF_ENV_KEY];
+    return output;
+  }
   const output = Object.create(null);
   copyKeys(envSource, providerAllowlist(provider, dshModel, operation), output);
   if (operation === 'lane' || operation === 'readiness') {
@@ -344,7 +361,11 @@ function requireAbsolutePath(filePath) {
   if (typeof filePath !== 'string' || filePath.length === 0 || filePath.includes('\0')) {
     fail('invalid_credential_path');
   }
-  if (!path.isAbsolute(filePath) || path.resolve(filePath) !== filePath || filePath.includes('//')) {
+  // Overrides must fail before path.resolve would convert a relative path.
+  if (!path.isAbsolute(filePath) || filePath.includes('//') || filePath.includes('\\')) {
+    fail('invalid_credential_path');
+  }
+  if (path.normalize(filePath) !== filePath || path.resolve(filePath) !== filePath) {
     fail('invalid_credential_path');
   }
   return filePath;
@@ -371,18 +392,18 @@ function validateCredentialStat(metadata, maxBytes = MAX_CREDENTIAL_BYTES) {
   const uid = typeof process.geteuid === 'function' ? process.geteuid() : process.getuid?.();
   if (Number.isInteger(uid) && Number(metadata.uid) !== uid) fail('credential_owner_denied');
   const mode = Number(metadata.mode);
-  if ((mode & 0o077) !== 0) fail('credential_permissions');
+  if ((mode & 0o7777) !== 0o600) fail('credential_permissions');
   const size = Number(metadata.size);
   if (!Number.isFinite(size) || size < 0) fail('invalid_credential_file');
   if (size === 0) fail('credential_empty');
   if (size > maxBytes) fail('credential_too_large');
 }
 
-export async function loadCredentialFile(filePath, { maxBytes = MAX_CREDENTIAL_BYTES } = {}) {
+export async function loadCredentialFile(filePath, { maxBytes = MAX_CREDENTIAL_BYTES, openFile = open } = {}) {
   const resolved = requireAbsolutePath(filePath);
   let handle;
   try {
-    handle = await open(resolved, OPEN_READ_FLAGS);
+    handle = await openFile(resolved, OPEN_READ_FLAGS);
   } catch (error) {
     if (error?.code === 'ELOOP' || error?.code === 'EMLINK') fail('credential_symlink_denied', { cause: error });
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') fail('invalid_credential_file', { cause: error });
@@ -440,8 +461,11 @@ export async function loadProviderCredential({ provider, source = process.env, d
   }
   if (!spec.defaultFile && !spec.credentialFileEnv) return null;
   const override = spec.credentialFileEnv ? ownString(envSource, spec.credentialFileEnv)?.trim() : undefined;
-  const file = override || path.join(configHome(envSource), ...spec.defaultFile);
-  return { name: spec.credentialEnv, value: await loadCredentialFile(requireAbsolutePath(path.resolve(file))) };
+  if (override) {
+    return { name: spec.credentialEnv, value: await loadCredentialFile(requireAbsolutePath(override)) };
+  }
+  const file = path.join(configHome(envSource), ...spec.defaultFile);
+  return { name: spec.credentialEnv, value: await loadCredentialFile(requireAbsolutePath(file)) };
 }
 
 export async function materializeProviderEnvironment({
@@ -451,7 +475,7 @@ export async function materializeProviderEnvironment({
   if (operation === 'readiness_probe' && (provider === 'dsh' || provider === undefined)) {
     return projected;
   }
-  if (operation === 'sdk_probe' || operation === 'git_inspect' || operation === 'systemd_client') {
+  if (operation === 'sdk_probe' || operation === 'git_inspect' || operation === 'systemd_client' || operation === 'service') {
     return projected;
   }
   try {
@@ -489,9 +513,10 @@ export function credentialRedactionFragments(secret) {
 }
 
 function redactSecretSlices(text, secret, minimum = REDACTION_FRAGMENT_BYTES) {
-  if (typeof secret !== 'string' || secret.length < 4 || text.length === 0) return text;
+  if (typeof secret !== 'string' || secret.length === 0 || text.length === 0) return text;
   if (text.includes(secret)) return text.split(secret).join(REDACTED);
-  if (secret.includes(text) && text.length >= 4) return REDACTED;
+  if (secret.includes(text)) return REDACTED;
+  if (secret.length < 4) return text;
   const needle = Math.min(minimum, secret.length);
   let output = text;
   let index = 0;
@@ -516,7 +541,7 @@ function redactSecretSlices(text, secret, minimum = REDACTION_FRAGMENT_BYTES) {
 export function redactExactValues(value, secrets = []) {
   let text = String(value ?? '');
   const ordered = [...secrets]
-    .filter((secret) => typeof secret === 'string' && secret.length >= 4)
+    .filter((secret) => typeof secret === 'string' && secret.length > 0)
     .sort((left, right) => right.length - left.length);
   for (const secret of ordered) text = redactSecretSlices(text, secret);
   return text;
@@ -530,7 +555,88 @@ function runtimeHandoffRoot() {
   return tmpdir();
 }
 
-export async function createCredentialHandoff(secrets, { directory } = {}) {
+export function handoffPathFromProcessIdentity(identity) {
+  if (typeof identity !== 'string' || !HANDOFF_IDENTITY.test(identity)) fail('invalid_handoff');
+  return requireAbsolutePath(path.join(runtimeHandoffRoot(), `cce-p29-${identity}`, 'env.json'));
+}
+
+async function prepareHandoffDirectory({ directory, identity } = {}) {
+  if (directory) return requireAbsolutePath(directory);
+  if (identity !== undefined) {
+    const root = path.dirname(handoffPathFromProcessIdentity(identity));
+    await cleanupCredentialHandoff(path.join(root, 'env.json')).catch(() => {});
+    try {
+      await mkdir(root, { recursive: false, mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') fail('invalid_handoff', { cause: error });
+    }
+    return root;
+  }
+  return mkdtemp(path.join(runtimeHandoffRoot(), 'cce-p29-handoff-'));
+}
+
+export function installClosedProviderTestInjection(source) {
+  if (source == null) {
+    closedProviderTestInjection = null;
+    return;
+  }
+  const envSource = requirePlainSource(source, 'testInjection');
+  const output = Object.create(null);
+  for (const key of Reflect.ownKeys(envSource)) {
+    if (typeof key !== 'string') fail('symbol_key_denied');
+    if (!CLOSED_TEST_INJECTION_KEY.test(key)) continue;
+    const value = ownString(envSource, key);
+    if (value !== undefined && value.length > 0) output[key] = value;
+  }
+  closedProviderTestInjection = output;
+}
+
+export function applyClosedProviderTestInjection(env) {
+  if (!closedProviderTestInjection) return env;
+  const output = env ?? Object.create(null);
+  for (const [key, value] of Object.entries(closedProviderTestInjection)) output[key] = value;
+  return output;
+}
+
+export async function recoverCredentialHandoffByIdentity(identity) {
+  try {
+    return await cleanupCredentialHandoff(handoffPathFromProcessIdentity(identity));
+  } catch (error) {
+    if (error instanceof CredentialBoundaryError && error.code === 'invalid_handoff') {
+      return { cleaned: false, missing: true };
+    }
+    throw error;
+  }
+}
+
+export async function recoverStaleCredentialHandoffs({ directory } = {}) {
+  const root = directory ?? runtimeHandoffRoot();
+  if (typeof root !== 'string' || !path.isAbsolute(root) || path.normalize(root) !== root) {
+    return { recovered: 0 };
+  }
+  let entries = [];
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return { recovered: 0 };
+  }
+  let recovered = 0;
+  for (const entry of entries) {
+    if (!HANDOFF_IDENTITY_DIR.test(entry.name)) continue;
+    const candidate = path.join(root, entry.name);
+    try {
+      const metadata = await lstat(candidate);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) continue;
+      await cleanupCredentialHandoff(path.join(candidate, 'env.json'));
+      recovered += 1;
+    } catch {
+      // Best-effort stale recovery must stay content-free and non-throwing.
+    }
+  }
+  return { recovered };
+}
+
+export async function createCredentialHandoff(secrets, { directory, identity } = {}) {
   const payloadEnv = Object.create(null);
   const source = requirePlainSource(secrets);
   for (const key of Reflect.ownKeys(source)) {
@@ -541,7 +647,7 @@ export async function createCredentialHandoff(secrets, { directory } = {}) {
   }
   const json = `${JSON.stringify({ schema: CREDENTIAL_BOUNDARY_SCHEMA_ID, version: CREDENTIAL_BOUNDARY_VERSION, env: payloadEnv })}\n`;
   if (BYTE_LENGTH(json) > MAX_HANDOFF_BYTES) fail('credential_too_large');
-  const root = directory ?? await mkdtemp(path.join(runtimeHandoffRoot(), 'cce-p29-handoff-'));
+  const root = await prepareHandoffDirectory({ directory, identity });
   await chmod(root, 0o700).catch(() => {});
   const filePath = path.join(root, 'env.json');
   const handle = await open(requireAbsolutePath(filePath), OPEN_WRITE_FLAGS, 0o600);
@@ -654,7 +760,7 @@ export function spawnProviderChild(command, args, { cwd, env, stdio = 'pipe', de
 export function inspectEnvForSecrets(env, secrets = []) {
   const serialized = JSON.stringify(env ?? {});
   for (const secret of secrets) {
-    if (typeof secret === 'string' && secret.length >= 4 && serialized.includes(secret)) return true;
+    if (typeof secret === 'string' && secret.length > 0 && serialized.includes(secret)) return true;
   }
   return false;
 }
@@ -662,7 +768,7 @@ export function inspectEnvForSecrets(env, secrets = []) {
 export function inspectArgvForSecrets(argv, secrets = []) {
   const serialized = JSON.stringify(argv ?? []);
   for (const secret of secrets) {
-    if (typeof secret === 'string' && secret.length >= 4 && serialized.includes(secret)) return true;
+    if (typeof secret === 'string' && secret.length > 0 && serialized.includes(secret)) return true;
   }
   return false;
 }

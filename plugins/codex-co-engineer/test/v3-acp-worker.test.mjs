@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText } from '../mcp/v3/acp-worker.mjs';
+import { installClosedProviderTestInjection } from '../mcp/v3/credential-boundary.mjs';
 import { submitReply } from '../mcp/v3/mailbox.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 
@@ -36,17 +37,17 @@ async function fixture(extra = {}) {
 }
 
 async function withFakeAcpx(mode, callback, options = {}) {
-  const names = ['CODEX_CO_ENGINEER_ACPX_COMMAND', 'FAKE_ACPX_MODE', 'FAKE_ACPX_ARTIFACT_MARKER', 'FAKE_ACPX_DESCENDANT_PID_FILE'];
+  const names = ['CODEX_CO_ENGINEER_ACPX_COMMAND'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = FAKE_ACPX;
-  process.env.FAKE_ACPX_MODE = mode;
-  if (options.artifactMarker) process.env.FAKE_ACPX_ARTIFACT_MARKER = options.artifactMarker;
-  else delete process.env.FAKE_ACPX_ARTIFACT_MARKER;
-  if (options.descendantPidFile) process.env.FAKE_ACPX_DESCENDANT_PID_FILE = options.descendantPidFile;
-  else delete process.env.FAKE_ACPX_DESCENDANT_PID_FILE;
+  const injection = { FAKE_ACPX_MODE: mode };
+  if (options.artifactMarker) injection.FAKE_ACPX_ARTIFACT_MARKER = options.artifactMarker;
+  if (options.descendantPidFile) injection.FAKE_ACPX_DESCENDANT_PID_FILE = options.descendantPidFile;
+  installClosedProviderTestInjection(injection);
   try {
     return await callback();
   } finally {
+    installClosedProviderTestInjection(null);
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
       else process.env[name] = previous[name];
