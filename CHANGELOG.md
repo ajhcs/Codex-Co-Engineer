@@ -16,6 +16,21 @@
 
 ### Added
 
+- **Live protected-ref audit.** Adds additive v3 `protected-ref-audit.mjs`
+  (P30): a read-only live comparison of declared protected and default refs
+  against immutable expected identities. Local, bare, and linked-worktree
+  repositories are observed argv-only under the accepted P29 inspect
+  environment. Missing, moved, aliased, symbolic, packed, hostile, and raced
+  refs produce deterministic content-free evidence; packed storage that still
+  matches its expected SHA verifies. The audit consumes accepted P28
+  classification and P29 remote-mutation denial without wrapping or weakening
+  them, never materializes credentials, and never mutates refs, worktrees,
+  indexes, config, or remotes. Receipts project P13
+  `protected_ref_snapshot_compare` facts plus an all-false side-effect
+  nonclaim map. No API, run orchestration, release, or Gate A scope.
+  Coverage lives in `test/r1-protected-ref-audit.test.mjs` and
+  `test/r1-protected-ref-audit-adversarial.test.mjs`; boundaries live in
+  `docs/protected-ref-audit.md`.
 - **Provider registry composition authority.** Adds the additive v3
   `provider-registry.mjs` module (P23): the deterministic, closed
   composition authority behind provider selection. It registers exactly the

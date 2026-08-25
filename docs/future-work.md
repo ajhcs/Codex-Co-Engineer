@@ -6,7 +6,7 @@ Status: specified, not implemented.
 
 Priority: high
 Component: Codex-Co-Engineer
-Last updated: 2026-08-23
+Last updated: 2026-08-25
 
 The accepted architecture for R1 is
 [ADR 0001](adr/0001-r1-bounded-run-architecture.md). It defines a 3.3.0 run
@@ -39,6 +39,17 @@ policy: protected/default refs, the allowed task-branch namespace,
 credential-free repository identity, and denied merge/push/create-PR/
 tag/release operations. It does not mutate Git, isolate credentials
 (P29), or audit live refs (P30).
+
+The P30 `ProtectedRefAuditV1` is in-tree as a read-only live comparison of
+declared protected/default refs against immutable expected identities. It
+consumes accepted P28 classification and P29 inspect-environment /
+remote-mutation denial without wrapping them. Local, bare, and
+linked-worktree layouts, packed vs loose storage, symbolic/aliased refs,
+and snapshot races are covered with content-free evidence. It does not
+mutate refs, worktrees, indexes, or config; it does not materialize
+credentials or access remotes; it does not expose an API, run
+orchestration, release, or Gate A authority. See
+[protected-ref-audit.md](protected-ref-audit.md).
 
 The P11 local provider result sink is in-tree as an additive
 provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
