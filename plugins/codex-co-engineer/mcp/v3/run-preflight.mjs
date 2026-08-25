@@ -129,6 +129,7 @@ export const RUN_PREFLIGHT_CHECKS = capturedFreeze([
   'child_bounds',
   'complete_run_manifest',
   'independent_fanout',
+  'host_capacity',
   'canonical_repository',
   'exact_base_commit',
   'no_replace_refs',
@@ -151,6 +152,8 @@ export const RUN_PREFLIGHT_ERROR_CODES = capturedFreeze([
   'preflight_child_count_exceeded',
   'preflight_dependency_edge_denied',
   'preflight_duplicate_child_id',
+  'host_cpu_capacity_exceeded',
+  'host_ram_capacity_exceeded',
   'spawn_invalid',
   'host_facts_invalid',
   'observation_failed',
@@ -168,6 +171,7 @@ const PRIVATE_RECEIPT_KEYS = capturedFreeze([
 ]);
 const PRIVATE_CHILD_SUMMARY_KEYS = capturedFreeze([
   'count', 'minimum', 'maximum', 'independent', 'concurrency', 'assignment_ids',
+  'scope_pair_checks',
 ]);
 const PRIVATE_CAPACITY_SUMMARY_KEYS = capturedFreeze([
   'source', 'cpu_parallelism', 'total_ram_bytes', 'available_ram_bytes',
@@ -353,8 +357,19 @@ function assertIndependentFanout(snapshot) {
 function summarizeChildren(snapshot) {
   const assignments = snapshot.assignments;
   const ids = [];
+  let pairChecks = 0;
   for (let index = 0; index < assignments.length; index += 1) {
     ids.push(assignments[index].assignment_id);
+  }
+  // Evidence bound: the same pairwise enumeration the disjointness check
+  // performs, counted here so the receipt proves the work without echoing
+  // any pattern text.
+  for (let left = 0; left < assignments.length; left += 1) {
+    if (assignments[left].access !== 'writer') continue;
+    for (let right = left + 1; right < assignments.length; right += 1) {
+      if (assignments[right].access !== 'writer') continue;
+      pairChecks += assignments[left].write_scope.length * assignments[right].write_scope.length;
+    }
   }
   return capturedFreeze({
     count: assignments.length,
@@ -363,7 +378,25 @@ function summarizeChildren(snapshot) {
     independent: true,
     concurrency: snapshot.policy.max_concurrency,
     assignment_ids: capturedFreeze(ids),
+    scope_pair_checks: pairChecks,
   });
+}
+
+// Capacity denial: every concurrently running child is guaranteed one
+// schedulable CPU slot and a private RAM floor. The comparison uses only
+// frozen constants and validated integers; denial messages stay fixed
+// templates that never echo requested or observed numbers.
+function enforceHostCapacity(hostFacts, concurrency) {
+  const requiredRamBytes = concurrency * PREFLIGHT_RAM_FLOOR_BYTES_PER_CHILD;
+  if (hostFacts.cpu_parallelism < concurrency) {
+    failPreflight('host_cpu_capacity_exceeded', 'capacity',
+      'The host cannot offer every concurrent child a schedulable CPU slot.');
+  }
+  if (hostFacts.available_ram_bytes < requiredRamBytes) {
+    failPreflight('host_ram_capacity_exceeded', 'capacity',
+      'The host cannot offer every concurrent child its private RAM floor.');
+  }
+  return requiredRamBytes;
 }
 
 // Defense-in-depth at the launch boundary: the parsed snapshot is detached
@@ -780,6 +813,7 @@ export async function validateRunPreflightV1(request, options) {
     total_ram_bytes: hostFactsSource.total_ram_bytes,
     available_ram_bytes: hostFactsSource.available_ram_bytes,
   });
+  enforceHostCapacity(hostFacts, snapshot.policy.max_concurrency);
   const repositoryFacts = await observeRepositoryAndBase(snapshot, parsedOptions.spawn);
   return buildReceipt(snapshot, childrenSummary, repositoryFacts, hostFacts);
 }

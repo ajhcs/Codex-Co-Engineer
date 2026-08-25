@@ -65,6 +65,24 @@ disjointness is re-checked pairwise with the accepted conservative
 static-prefix intersection, so overlapping writer scopes are detected at
 this boundary even though upstream already denies them.
 
+## Capacity denial
+
+Every concurrently running child is guaranteed a schedulable CPU slot and a
+private RAM floor:
+
+| Resource | Rule | Denial code |
+| --- | --- | --- |
+| CPU | `host.cpu_parallelism >= policy.max_concurrency` | `host_cpu_capacity_exceeded` |
+| RAM | `host.available_ram_bytes >= max_concurrency * PREFLIGHT_RAM_FLOOR_BYTES_PER_CHILD` (256 MiB) | `host_ram_capacity_exceeded` |
+
+Host facts are read from the ambient host when not injected; tests inject
+exact values through the closed `options.host` seam (validated as
+non-negative safe integers — hostile facts fail with
+`host_facts_invalid`). The capacity check runs after the pure-data checks
+and before any process spawns, so a denied run costs zero git observations.
+Denial messages are fixed templates that never echo requested or observed
+numbers.
+
 ## Composition
 
 Preflight composes accepted surfaces and invents none of their semantics:

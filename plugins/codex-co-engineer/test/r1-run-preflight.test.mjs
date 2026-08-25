@@ -36,7 +36,9 @@ import {
   forgeGitDirFileRepo,
   hostFacts,
   laneManifestsForCount,
+  preflightManifest,
   twoLaneManifest,
+  writerLane,
 } from './fixtures/r1-run-preflight-fixtures.mjs';
 
 const SUFFICIENT_HOST = hostFacts();
@@ -134,9 +136,10 @@ test('injected host facts are reported as injected', async () => {
   const repo = await createLinearRepo();
   try {
     const manifest = twoLaneManifest({ repositoryPath: repo.root, baseSha: repo.baseSha });
-    const receipt = await preflightOk(manifest, { host: hostFacts({ cpu_parallelism: 3 }) });
+    const receipt = await preflightOk(manifest, { host: hostFacts({ total_ram_bytes: 12_345_678_901 }) });
     assert.equal(receipt.capacity.source, 'injected');
-    assert.equal(receipt.capacity.cpu_parallelism, 3);
+    assert.equal(receipt.capacity.cpu_parallelism, 8);
+    assert.equal(receipt.capacity.total_ram_bytes, 12_345_678_901);
   } finally {
     await repo.cleanup();
   }
@@ -487,8 +490,107 @@ test('duplicate writer scopes across lanes keep the accepted overlap denial', as
       writerLane(ASSIGNMENT_ID_A, ['src/shared/**']),
       writerLane(ASSIGNMENT_ID_B, ['src/shared/nested/**']),
     ], { repositoryPath: repo.root, baseSha: repo.baseSha });
-    const error = await preflightError(manifest);
+    let spawned = false;
+    const error = await preflightError(manifest, {
+      spawn: () => { spawned = true; throw new Error('no observation may run'); },
+    });
     assert.equal(error.code, 'overlapping_writer_scope');
+    assert.equal(spawned, false);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('CPU capacity denial fires before any git observation', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const manifest = laneManifestsForCount(8, {
+      repositoryPath: repo.root,
+      baseSha: repo.baseSha,
+      policy: { max_concurrency: 8 },
+    });
+    let spawned = false;
+    const error = await preflightError(manifest, {
+      host: hostFacts({ cpu_parallelism: 7 }),
+      spawn: () => { spawned = true; throw new Error('no observation may run'); },
+    });
+    assert.equal(error.code, 'host_cpu_capacity_exceeded');
+    assert.equal(error.path, 'capacity');
+    assert.equal(spawned, false);
+    assert.doesNotMatch(error.message, /7|8/u);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('RAM capacity denial honors the per-child floor at exact boundaries', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const manifest = twoLaneManifest({
+      repositoryPath: repo.root,
+      baseSha: repo.baseSha,
+      policy: { max_concurrency: 2 },
+    });
+    const oneByteShort = 2 * PREFLIGHT_RAM_FLOOR_BYTES_PER_CHILD - 1;
+    const error = await preflightError(manifest, {
+      host: hostFacts({ available_ram_bytes: oneByteShort, total_ram_bytes: oneByteShort + 4096 }),
+    });
+    assert.equal(error.code, 'host_ram_capacity_exceeded');
+    assert.doesNotMatch(error.message, /536870911|536870912/u);
+
+    const receipt = await preflightOk(manifest, {
+      host: hostFacts({ available_ram_bytes: 2 * PREFLIGHT_RAM_FLOOR_BYTES_PER_CHILD }),
+    });
+    assert.equal(receipt.capacity.ram_ok, true);
+    assert.equal(receipt.capacity.required_ram_bytes, 2 * PREFLIGHT_RAM_FLOOR_BYTES_PER_CHILD);
+    assert.equal(receipt.capacity.cpu_ok, true);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('single-lane runs need exactly one CPU slot and one RAM floor', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const manifest = preflightManifest([writerLane(ASSIGNMENT_ID_A, ['src/alpha/**'])], {
+      repositoryPath: repo.root,
+      baseSha: repo.baseSha,
+      policy: { max_concurrency: 1 },
+    });
+    const receipt = await preflightOk(manifest, { host: hostFacts({ cpu_parallelism: 1 }) });
+    assert.equal(receipt.capacity.source, 'injected');
+    assert.equal(receipt.capacity.cpu_parallelism, 1);
+    assert.equal(receipt.children.scope_pair_checks, 0);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('the receipt counts every writer-scope pair the disjointness check compares', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const manifest = laneManifestsForCount(8, { repositoryPath: repo.root, baseSha: repo.baseSha });
+    const receipt = await preflightOk(manifest);
+    assert.equal(receipt.children.scope_pair_checks, 8 * 7 / 2);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('duplicate writer scopes across lanes keep the accepted overlap denial', async () => {
+  const repo = await createLinearRepo();
+  try {
+    const { writerLane, preflightManifest } = await import('./fixtures/r1-run-preflight-fixtures.mjs');
+    const manifest = preflightManifest([
+      writerLane(ASSIGNMENT_ID_A, ['src/shared/**']),
+      writerLane(ASSIGNMENT_ID_B, ['src/shared/nested/**']),
+    ], { repositoryPath: repo.root, baseSha: repo.baseSha });
+    let spawned = false;
+    const error = await preflightError(manifest, {
+      spawn: () => { spawned = true; throw new Error('no observation may run'); },
+    });
+    assert.equal(error.code, 'overlapping_writer_scope');
+    assert.equal(spawned, false);
   } finally {
     await repo.cleanup();
   }
