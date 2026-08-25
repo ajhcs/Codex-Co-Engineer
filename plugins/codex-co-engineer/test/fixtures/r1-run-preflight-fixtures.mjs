@@ -272,3 +272,9 @@ export function createRecordingSpawn() {
     },
   };
 }
+
+// Read-only observation helper for side-effect proofs: runs argv git inside
+// a fixture repository without touching product modules.
+export async function runFixtureGitIn(root, args) {
+  return runFixtureGit(root, args);
+}

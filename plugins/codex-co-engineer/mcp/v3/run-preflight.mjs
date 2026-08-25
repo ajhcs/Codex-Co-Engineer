@@ -41,11 +41,9 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { lstat as nodeLstat, readFile as nodeReadFile, realpath as nodeRealpath } from 'node:fs/promises';
 import * as nodeOs from 'node:os';
 import * as nodePath from 'node:path';
-import { types as utilTypes } from 'node:util';
 
 import {
   capturedFreeze,
-  capturedHasOwn,
   capturedIncludes,
   capturedIsArray,
   capturedOwnKeys,
@@ -72,7 +70,6 @@ import {
   fail,
   freezeData,
   hasOwn,
-  optOwn,
   ownDataValue,
 } from './selection-json.mjs';
 import { parseRunManifestV1 } from './run-policy.mjs';
