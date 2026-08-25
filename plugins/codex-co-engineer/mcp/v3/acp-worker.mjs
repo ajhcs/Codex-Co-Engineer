@@ -50,6 +50,20 @@ const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
 const ACPX_TERMINATION_POLL_MS = 25;
+export const ACP_RESOURCE_CLOSE_MS = 3_000;
+export const WTB_HANDOFF_MS = 5_000;
+export const WORKER_EXIT_MS = 1_000;
+export const WORKER_CLEANUP_CODES = Object.freeze({
+  ACP_RESOURCE_CLOSE_TIMEOUT: 'acp_resource_close_timeout',
+  ACP_RESOURCE_CLOSE_FAILED: 'acp_resource_close_failed',
+  WORKER_EXIT_TIMEOUT: 'worker_exit_timeout',
+  LOCK_RELEASE_UNPROVEN: 'lock_release_unproven',
+  LOCK_CLEANUP_REFUSED: 'lock_cleanup_refused',
+  CLEANUP_FAILED: 'cleanup_failed',
+});
+const WORKER_CLEANUP_CODE_SET = new Set(Object.values(WORKER_CLEANUP_CODES));
+const ACP_CLOSE_STATES = new Set(['closed', 'timeout', 'failed', 'not_applicable']);
+const WTB_HANDOFF_STATES = new Set(['recorded', 'timeout', 'failed', 'not_applicable']);
 const OMIT_EVENT_KEYS = new Set(['rawinput', 'rawoutput', 'content', 'availablecommands']);
 const SENSITIVE_EVENT_KEY = /(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|token|password|secret|cookie|credential|private[_-]?key)/iu;
 const TOKEN_PATTERNS = [
@@ -73,6 +87,259 @@ export class AcpWorkerError extends Error {
 
 function fail(code, message) {
   throw new AcpWorkerError(code, message);
+}
+
+export function contentFreeCleanupCode(code) {
+  const raw = typeof code === 'string' ? code : '';
+  if (WORKER_CLEANUP_CODE_SET.has(raw)) return raw;
+  return WORKER_CLEANUP_CODES.CLEANUP_FAILED;
+}
+
+export function workerSeamIncident(task) {
+  const terminal = ['completed', 'failed', 'cancelled', 'timeout', 'environment_blocked'].includes(task?.status);
+  const finished = typeof task?.finished_at === 'string' && task.finished_at.length > 0;
+  const closeRecorded = task?.cleanup?.status === 'pending'
+    || task?.cleanup?.status === 'normal'
+    || task?.cleanup?.status === 'recovered';
+  return terminal === true && finished === true && closeRecorded !== true;
+}
+
+export function composeWorkerCleanup(closeEvidence = {}, handoffEvidence = {}) {
+  const acpClose = ACP_CLOSE_STATES.has(closeEvidence?.acp_close) ? closeEvidence.acp_close : 'not_applicable';
+  const wtbHandoff = WTB_HANDOFF_STATES.has(handoffEvidence?.wtb_handoff)
+    ? handoffEvidence.wtb_handoff
+    : 'not_applicable';
+  const codes = [];
+  if (acpClose === 'timeout') codes.push(WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT);
+  else if (acpClose === 'failed') codes.push(WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_FAILED);
+  if (wtbHandoff === 'timeout') codes.push(WORKER_CLEANUP_CODES.LOCK_RELEASE_UNPROVEN);
+  else if (wtbHandoff === 'failed') codes.push(WORKER_CLEANUP_CODES.CLEANUP_FAILED);
+  if (Array.isArray(closeEvidence?.codes)) {
+    for (const code of closeEvidence.codes) {
+      const safe = contentFreeCleanupCode(code);
+      if (!codes.includes(safe)) codes.push(safe);
+    }
+  }
+  if (handoffEvidence?.code) {
+    const safe = contentFreeCleanupCode(handoffEvidence.code);
+    if (!codes.includes(safe)) codes.push(safe);
+  }
+  const cleanup = {
+    status: 'pending',
+    acp_close: acpClose,
+    wtb_handoff: wtbHandoff,
+  };
+  if (codes[0]) cleanup.code = codes[0];
+  return Object.freeze(cleanup);
+}
+
+export async function withBound(work, ms, code, message) {
+  const timeoutMs = Number.isFinite(ms) && ms >= 1 ? ms : 1;
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => (typeof work === 'function' ? work() : work)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new AcpWorkerError(code, message));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function closeRetainedAcpResources({
+  runtime = null,
+  handle = null,
+  child = null,
+  stopDeadline = null,
+  extraClosers = [],
+  timeoutMs = ACP_RESOURCE_CLOSE_MS,
+} = {}) {
+  try { stopDeadline?.(); } catch { /* already closed */ }
+  if (Array.isArray(extraClosers)) {
+    for (const closer of extraClosers) {
+      try { closer?.(); } catch { /* already closed */ }
+    }
+  }
+
+  let acpClose = 'not_applicable';
+  const codes = [];
+  const mark = (state, code) => {
+    acpClose = state;
+    if (code && !codes.includes(code)) codes.push(code);
+  };
+
+  if (runtime && handle) {
+    mark('closed', null);
+    try {
+      await withBound(
+        () => runtime.close({ handle, reason: 'worker_exit', discardPersistentState: false }),
+        timeoutMs,
+        WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT,
+        'ACP resource close exceeded 3s.',
+      );
+    } catch (error) {
+      if (error?.code === WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT) {
+        mark('timeout', WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT);
+      } else {
+        mark('failed', WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_FAILED);
+      }
+    }
+  }
+
+  if (child) {
+    if (acpClose === 'not_applicable') mark('closed', null);
+    try {
+      const stopped = await withBound(
+        () => Promise.resolve(requestChildTreeTermination(child)),
+        timeoutMs,
+        WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT,
+        'Retained child tree close exceeded 3s.',
+      );
+      if (stopped === false) mark('failed', WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_FAILED);
+    } catch (error) {
+      if (error?.code === WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT) {
+        mark('timeout', WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT);
+      } else {
+        mark('failed', WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_FAILED);
+      }
+    }
+  }
+
+  try {
+    await secureAcpxSessions();
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      if (acpClose === 'not_applicable') mark('failed', WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_FAILED);
+    }
+  }
+
+  return Object.freeze({
+    acp_close: acpClose,
+    codes: Object.freeze([...codes]),
+  });
+}
+
+export async function persistWorkerTerminal(root, taskId, patch, closeEvidence, handoffEvidence) {
+  const cleanup = composeWorkerCleanup(closeEvidence, handoffEvidence);
+  const nextPatch = { ...patch, cleanup };
+  if (nextPatch.finished_at === undefined) nextPatch.finished_at = new Date().toISOString();
+  const terminal = await updateTask(root, taskId, nextPatch);
+  await appendTaskEvent(root, taskId, {
+    type: 'terminal',
+    status: terminal.status,
+    ...(nextPatch.stop_reason !== undefined ? { stop_reason: nextPatch.stop_reason } : {}),
+    ...(nextPatch.error ? { error: nextPatch.error } : {}),
+  }).catch(() => {});
+  await appendTaskEvent(root, taskId, {
+    type: 'cleanup',
+    status: cleanup.status,
+    acp_close: cleanup.acp_close,
+    wtb_handoff: cleanup.wtb_handoff,
+    ...(cleanup.code ? { code: cleanup.code } : {}),
+  }).catch(() => {});
+  return terminal;
+}
+
+export function emitWorkerTerminalStdout(task, write = (chunk) => process.stdout.write(chunk)) {
+  if (!plainObject(task) || typeof task.id !== 'string') {
+    fail(WORKER_CLEANUP_CODES.CLEANUP_FAILED, 'Terminal stdout requires a recorded task.');
+  }
+  if (!plainObject(task.cleanup) || task.cleanup.status !== 'pending') {
+    fail(WORKER_CLEANUP_CODES.CLEANUP_FAILED, 'Terminal stdout requires recorded close evidence.');
+  }
+  write(`${JSON.stringify({ task_id: task.id, status: task.status })}\n`);
+}
+
+export function requestWorkerExit(code = 0, {
+  exitMs = WORKER_EXIT_MS,
+  exit = (value) => { process.exit(value); },
+  setTimeoutFn = setTimeout,
+} = {}) {
+  const timer = setTimeoutFn(() => {
+    exit(code);
+  }, Number.isFinite(exitMs) && exitMs >= 0 ? exitMs : WORKER_EXIT_MS);
+  try { timer.unref?.(); } catch { /* ignore */ }
+  exit(code);
+  return timer;
+}
+
+export async function boundedWtbHandoff({
+  root,
+  taskId,
+  env = process.env,
+  cwd = process.cwd(),
+  timeoutMs = WTB_HANDOFF_MS,
+  runFileImpl = runFile,
+} = {}) {
+  const taskName = env?.WORKTREE_BOOTSTRAP_TASK;
+  if (typeof taskName !== 'string' || taskName.length === 0) {
+    return Object.freeze({ attempted: false, wtb_handoff: 'not_applicable' });
+  }
+  const existing = await readTask(root, taskId).catch(() => ({ task: {} }));
+  const closeEvidence = {
+    acp_close: existing.task?.cleanup?.acp_close ?? 'not_applicable',
+    codes: existing.task?.cleanup?.code ? [existing.task.cleanup.code] : [],
+  };
+  try {
+    const { stdout } = await withBound(
+      () => runFileImpl('worktree-bootstrap', [
+        'handoff',
+        taskName,
+        '--repo',
+        cwd,
+        '--format',
+        'json',
+      ], {
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024,
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+      }),
+      timeoutMs,
+      WORKER_CLEANUP_CODES.LOCK_RELEASE_UNPROVEN,
+      'WTB handoff exceeded 5s.',
+    );
+    const handoff = JSON.parse(stdout);
+    if (!plainObject(handoff)) fail(WORKER_CLEANUP_CODES.CLEANUP_FAILED, 'WTB handoff was not an object.');
+    const cleanup = composeWorkerCleanup(closeEvidence, { wtb_handoff: 'recorded' });
+    const task = await updateTask(root, taskId, { handoff, cleanup });
+    await appendTaskEvent(root, taskId, {
+      type: 'cleanup',
+      status: cleanup.status,
+      acp_close: cleanup.acp_close,
+      wtb_handoff: 'recorded',
+    }).catch(() => {});
+    return Object.freeze({ attempted: true, wtb_handoff: 'recorded', task, handoff });
+  } catch (error) {
+    const timedOut = error?.code === WORKER_CLEANUP_CODES.LOCK_RELEASE_UNPROVEN
+      || error?.code === 'ETIMEDOUT'
+      || error?.killed === true;
+    const wtbHandoff = timedOut ? 'timeout' : 'failed';
+    const cleanup = composeWorkerCleanup(closeEvidence, {
+      wtb_handoff: wtbHandoff,
+      code: timedOut
+        ? WORKER_CLEANUP_CODES.LOCK_RELEASE_UNPROVEN
+        : WORKER_CLEANUP_CODES.CLEANUP_FAILED,
+    });
+    const task = await updateTask(root, taskId, { cleanup }).catch(() => existing.task ?? null);
+    await appendTaskEvent(root, taskId, {
+      type: 'cleanup',
+      status: cleanup.status,
+      acp_close: cleanup.acp_close,
+      wtb_handoff: wtbHandoff,
+      code: cleanup.code,
+    }).catch(() => {});
+    return Object.freeze({
+      attempted: true,
+      wtb_handoff: wtbHandoff,
+      task,
+      code: cleanup.code,
+    });
+  }
 }
 
 export async function attachLocalProviderResultSink(
@@ -618,6 +885,22 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
   let termination;
   let cancel;
   let timedOut = false;
+  let closePromise;
+  const closeOnce = () => {
+    closePromise ??= closeRetainedAcpResources({
+      child,
+      stopDeadline,
+      extraClosers: [
+        () => { clearTimeout(timer); },
+        () => { if (cancel) signal?.removeEventListener('abort', cancel); },
+      ],
+    }).then((evidence) => {
+      stopDeadline = undefined;
+      if (child) termination ??= Promise.resolve(true);
+      return evidence;
+    });
+    return closePromise;
+  };
   try {
     if (signal?.aborted) fail('cancelled', 'CLI fallback was cancelled before startup.');
     rejectFallbackStart((await readTask(root, task.id)).task);
@@ -687,8 +970,8 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     }
     const compact = { type: 'text_delta', text: result ?? 'CLI fallback completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
-    await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed' });
-    const terminal = await updateTask(root, task.id, {
+    const closeEvidence = await closeOnce();
+    const terminal = await persistWorkerTerminal(root, task.id, {
       status: 'completed',
       result,
       ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
@@ -696,8 +979,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       provider_process_group: null,
       provider_process_start_ticks: null,
       fallback_safe: false,
-      finished_at: new Date().toISOString(),
-    });
+    }, closeEvidence, { wtb_handoff: 'not_applicable' });
     return attachLocalProviderResultSink(
       root, terminal, collectCliProviderOutputV1(stdout), stdoutTruncated,
     );
@@ -706,21 +988,17 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     const terminalStatus = signal?.aborted || error?.code === 'cancelled'
       ? 'cancelled'
       : error?.code === 'timeout' || timedOut ? 'timeout' : 'failed';
-    await appendTaskEvent(root, task.id, { type: 'terminal', status: terminalStatus, error: failure }).catch(() => {});
-    await updateTask(root, task.id, {
+    const closeEvidence = await closeOnce();
+    await persistWorkerTerminal(root, task.id, {
       status: terminalStatus,
       error: failure,
       provider_process_group: null,
       provider_process_start_ticks: null,
       fallback_safe: false,
-      finished_at: new Date().toISOString(),
-    }).catch(() => {});
+    }, closeEvidence, { wtb_handoff: 'not_applicable' }).catch(() => {});
     throw error;
   } finally {
-    stopDeadline?.();
-    clearTimeout(timer);
-    if (cancel) signal?.removeEventListener('abort', cancel);
-    if (child) await (termination ??= requestChildTreeTermination(child));
+    await closeOnce();
     await rm(promptFile, { force: true });
   }
 }
@@ -766,6 +1044,22 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   let timedOut = false;
   let cancel;
   let dispatchUncertain = false;
+  let closePromise;
+  const closeOnce = () => {
+    closePromise ??= closeRetainedAcpResources({
+      child,
+      stopDeadline,
+      extraClosers: [
+        () => { clearTimeout(timer); },
+        () => { if (cancel) signal?.removeEventListener('abort', cancel); },
+      ],
+    }).then((evidence) => {
+      stopDeadline = undefined;
+      if (child) termination ??= Promise.resolve(true);
+      return evidence;
+    });
+    return closePromise;
+  };
   try {
     if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled before startup.');
     await mkdir(acpxHome, { recursive: true, mode: 0o700 });
@@ -842,8 +1136,8 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     const output = bounded.value;
     const compact = { type: 'text_delta', text: typeof output === 'string' ? output : 'DSH ACP task completed.' };
     await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
-    await appendTaskEvent(root, task.id, { type: 'terminal', status: 'completed', stop_reason: 'end_turn' });
-    const terminal = await updateTask(root, task.id, {
+    const closeEvidence = await closeOnce();
+    const terminal = await persistWorkerTerminal(root, task.id, {
       status: 'completed',
       error: null,
       stop_reason: 'end_turn',
@@ -853,8 +1147,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       provider_process_group: null,
       provider_process_start_ticks: null,
       acp_session_id: Object.values(flow.sessionBindings ?? {})[0]?.acpSessionId ?? null,
-      finished_at: new Date().toISOString(),
-    });
+    }, closeEvidence, { wtb_handoff: 'not_applicable' });
     return attachLocalProviderResultSink(root, terminal, outputValue, false);
   } catch (error) {
     if (!dispatchUncertain && !authenticationFailure(error)) {
@@ -864,21 +1157,17 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     const current = (await readTask(root, task.id)).task;
     const status = signal?.aborted ? 'cancelled' : (error?.code === 'timeout' || timedOut ? 'timeout' : 'failed');
     const failure = publicError(error, prompt);
-    await appendTaskEvent(root, task.id, { type: 'terminal', status, error: failure }).catch(() => {});
-    await updateTask(root, task.id, {
+    const closeEvidence = await closeOnce();
+    await persistWorkerTerminal(root, task.id, {
       status,
       error: failure,
       provider_process_group: null,
       provider_process_start_ticks: null,
       fallback_safe: fallbackStartAllowed(current) && cliFallbackMatchesTask(current) && cliFallbackMatchesTask(task),
-      finished_at: new Date().toISOString(),
-    }).catch(() => {});
+    }, closeEvidence, { wtb_handoff: 'not_applicable' }).catch(() => {});
     throw error;
   } finally {
-    stopDeadline?.();
-    clearTimeout(timer);
-    if (cancel) signal?.removeEventListener('abort', cancel);
-    if (child) await (termination ??= requestChildTreeTermination(child));
+    await closeOnce();
     await removeAcpxTaskHome(root, task.id, acpxHome);
     await rm(inputFile, { force: true });
   }
@@ -929,13 +1218,28 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   const abort = () => controller.abort(signal?.reason ?? new AcpWorkerError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'ACP task exceeded its recorded deadline.' : 'Task cancelled.'));
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
-  const stopDeadline = startDeadlineWatch(root, taskId, () => {
+  let stopDeadline = startDeadlineWatch(root, taskId, () => {
     timedOut = true;
     abort();
   });
 
   let turn;
   let handle;
+  let closePromise;
+  const closeOnce = () => {
+    closePromise ??= closeRetainedAcpResources({
+      runtime,
+      handle,
+      stopDeadline,
+      extraClosers: [
+        () => signal?.removeEventListener('abort', abort),
+      ],
+    }).then((evidence) => {
+      stopDeadline = undefined;
+      return evidence;
+    });
+    return closePromise;
+  };
   try {
     await updateTask(root, taskId, { status: 'starting', transport: 'acp', started_at: new Date().toISOString() });
     handle = await runtime.ensureSession({
@@ -985,16 +1289,15 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     const result = await turn.result;
     const status = result.status === 'completed' ? 'completed' : result.status;
     const bounded = output.finish();
-    const terminal = await updateTask(root, taskId, {
+    const closeEvidence = await closeOnce();
+    const terminal = await persistWorkerTerminal(root, taskId, {
       status,
       stop_reason: result.stopReason ?? null,
       last_event: lastEvent,
       result: bounded.value,
       ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
       ...(result.status === 'failed' ? { error: publicError(result.error, prompt), fallback_safe: false } : {}),
-      finished_at: new Date().toISOString(),
-    });
-    await appendTaskEvent(root, taskId, { type: 'terminal', status, stop_reason: result.stopReason ?? null });
+    }, closeEvidence, { wtb_handoff: 'not_applicable' });
     const snapshot = complete.snapshot();
     return attachLocalProviderResultSink(
       root, terminal, snapshot.source, false, snapshot.overflow === true,
@@ -1009,70 +1312,82 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     const status = timedOut || error?.code === 'timeout'
       ? 'timeout'
       : controller.signal.aborted ? 'cancelled' : 'failed';
-    await updateTask(root, taskId, {
+    const closeEvidence = await closeOnce();
+    await persistWorkerTerminal(root, taskId, {
       status,
       error: failure,
-      finished_at: new Date().toISOString(),
       fallback_safe: fallbackStartAllowed(current),
-    }).catch(() => {});
-    await appendTaskEvent(root, taskId, { type: 'terminal', status, error: failure }).catch(() => {});
+    }, closeEvidence, { wtb_handoff: 'not_applicable' }).catch(() => {});
     throw error;
   } finally {
-    stopDeadline?.();
-    signal?.removeEventListener('abort', abort);
-    // This closes the retained stdio client but does not send session/close or
-    // discard the persisted ACP identity. A later worker can resume it.
-    if (handle) await runtime.close({ handle, reason: 'worker_exit' }).catch(() => {});
-    await secureAcpxSessions();
+    await closeOnce();
   }
 }
 
-async function runCli(argv) {
+export async function runAcpWorkerCli(argv, {
+  env = process.env,
+  cwd = process.cwd(),
+  readFileImpl = readFile,
+  runAcpTaskImpl = runAcpTask,
+  handoffImpl = boundedWtbHandoff,
+  runFileImpl = runFile,
+  stdoutWrite = (chunk) => process.stdout.write(chunk),
+  stderrWrite = (chunk) => process.stderr.write(chunk),
+  exit = (code) => { process.exit(code); },
+  exitMs = WORKER_EXIT_MS,
+} = {}) {
   if (argv.length !== 2 || argv[0] !== '--request') {
-    process.stderr.write('Usage: node acp-worker.mjs --request /absolute/path/to/request.json\n');
-    process.exitCode = 2;
+    stderrWrite('Usage: node acp-worker.mjs --request /absolute/path/to/request.json\n');
+    requestWorkerExit(2, { exit, exitMs });
     return;
   }
   const requestPath = argv[1];
   if (!path.isAbsolute(requestPath)) fail('invalid_request', 'Request path must be absolute.');
-  const request = JSON.parse(await readFile(requestPath, 'utf8'));
+  const request = JSON.parse(await readFileImpl(requestPath, 'utf8'));
   const controller = new AbortController();
   const cancel = () => controller.abort(new AcpWorkerError('cancelled', 'Worker signal received.'));
   process.once('SIGINT', cancel);
   process.once('SIGTERM', cancel);
+
+  const finish = async (task, code) => {
+    const handoff = await handoffImpl({
+      root: request.root,
+      taskId: request.task_id,
+      env,
+      cwd,
+      runFileImpl,
+    }).catch(() => ({ attempted: false, wtb_handoff: 'not_applicable', task }));
+    const recorded = handoff.task ?? task ?? (await readTask(request.root, request.task_id)).task;
+    emitWorkerTerminalStdout(recorded, stdoutWrite);
+    requestWorkerExit(code, { exit, exitMs });
+    return recorded;
+  };
+
   try {
     await awaitSupervisorRegistration(request.root, request.task_id, controller.signal);
     await removeStalePromptTransports(request.root, request.task_id);
-    if (process.env.WORKTREE_BOOTSTRAP_TASK) {
-      await runFile('worktree-bootstrap', [
+    if (env.WORKTREE_BOOTSTRAP_TASK) {
+      await runFileImpl('worktree-bootstrap', [
         'verify',
-        process.env.WORKTREE_BOOTSTRAP_TASK,
+        env.WORKTREE_BOOTSTRAP_TASK,
         '--repo',
-        process.cwd(),
+        cwd,
         '--require-writer',
       ]);
     }
-    let task = await runAcpTask({ root: request.root, taskId: request.task_id, signal: controller.signal });
-    if (process.env.WORKTREE_BOOTSTRAP_TASK) {
-      try {
-        const { stdout } = await runFile('worktree-bootstrap', [
-          'handoff',
-          process.env.WORKTREE_BOOTSTRAP_TASK,
-          '--repo',
-          process.cwd(),
-          '--format',
-          'json',
-        ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
-        const handoff = JSON.parse(stdout);
-        task = await updateTask(request.root, request.task_id, { handoff });
-      } catch (error) {
-        await appendTaskEvent(request.root, request.task_id, {
-          type: 'cleanup_warning',
-          code: error?.code ?? 'handoff_failed',
-        }).catch(() => {});
-      }
+    const task = await runAcpTaskImpl({ root: request.root, taskId: request.task_id, signal: controller.signal });
+    await finish(task, 0);
+  } catch (error) {
+    const latest = await readTask(request.root, request.task_id).catch(() => null);
+    if (latest?.task?.cleanup?.status === 'pending') {
+      await finish(latest.task, 1).catch(() => {
+        requestWorkerExit(1, { exit, exitMs });
+      });
+      return;
     }
-    process.stdout.write(`${JSON.stringify({ task_id: task.id, status: task.status })}\n`);
+    const failure = publicError(error);
+    stderrWrite(`acp-worker: ${failure.code}: ${failure.message}\n`);
+    requestWorkerExit(1, { exit, exitMs });
   } finally {
     process.off('SIGINT', cancel);
     process.off('SIGTERM', cancel);
@@ -1080,9 +1395,9 @@ async function runCli(argv) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runCli(process.argv.slice(2)).catch((error) => {
+  runAcpWorkerCli(process.argv.slice(2)).catch((error) => {
     const failure = publicError(error);
     process.stderr.write(`acp-worker: ${failure.code}: ${failure.message}\n`);
-    process.exitCode = 1;
+    requestWorkerExit(1);
   });
 }
