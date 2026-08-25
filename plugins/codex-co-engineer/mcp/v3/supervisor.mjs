@@ -1,10 +1,16 @@
 import { spawn as nodeSpawn, execFile as nodeExecFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { open, readFile, realpath, stat } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
+import {
+  CredentialBoundaryError,
+  materializeProviderEnvironment,
+  projectProviderEnvironment,
+} from './credential-boundary.mjs';
 
 import {
   ACTIVE_STATUSES,
@@ -140,7 +146,10 @@ function fail(code, message) {
 }
 
 function publicStartupError(error, fallbackCode = 'worker_start_failed') {
-  const rawCode = typeof error?.code === 'string' ? error.code : fallbackCode;
+  const mapped = error instanceof CredentialBoundaryError
+    ? (PUBLIC_STARTUP_MESSAGES[error.code] ? error.code : (error.code === 'credential_too_large' || error.code === 'credential_empty' || error.code === 'credential_file_changed' || error.code === 'credential_hardlink_denied' || error.code === 'credential_owner_denied' || error.code === 'credential_symlink_denied' || error.code === 'credential_unreadable' || error.code === 'invalid_credential_path' || error.code === 'invalid_handoff' ? 'invalid_credential_file' : error.code))
+    : (typeof error?.code === 'string' ? error.code : fallbackCode);
+  const rawCode = typeof mapped === 'string' ? mapped : fallbackCode;
   const code = /^[A-Za-z0-9._-]{1,96}$/u.test(rawCode) ? rawCode : fallbackCode;
   const message = PUBLIC_STARTUP_MESSAGES[code] ?? PUBLIC_STARTUP_MESSAGES[fallbackCode] ?? 'The worker failed to start.';
   // Startup failures cross the MCP boundary. Keep the public error bounded and
@@ -181,21 +190,20 @@ function providerArgv(provider, env = process.env, dshModel) {
 }
 
 async function workerEnvironment(provider, source = process.env, dshModel) {
-  const env = { ...source };
-  if (provider !== 'dsh') return env;
-  const selection = DSH_MODELS[resolveDshModel(dshModel)];
-  if (env[selection.credentialEnv]) return env;
-  const file = env[selection.credentialFileEnv] ?? path.join(
-    env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config'),
-    'codex-co-engineer',
-    selection.credentialFile,
-  );
-  const metadata = await stat(file);
-  if ((metadata.mode & 0o077) !== 0) fail('credential_permissions', 'DSH credential file must be owner-only.');
-  const key = (await readFile(file, 'utf8')).trim();
-  if (!key || key.includes('\0') || Buffer.byteLength(key) > 16 * 1024) fail('invalid_credential_file', 'DSH credential file is invalid.');
-  env[selection.credentialEnv] = key;
-  return env;
+  try {
+    return await materializeProviderEnvironment({
+      provider,
+      source,
+      dshModel: provider === 'dsh' ? resolveDshModel(dshModel) : undefined,
+      operation: 'lane',
+    });
+  } catch (error) {
+    if (error instanceof CredentialBoundaryError) {
+      const code = PUBLIC_STARTUP_MESSAGES[error.code] ? error.code : 'invalid_credential_file';
+      fail(code === 'credential_permissions' ? 'credential_permissions' : 'invalid_credential_file', error.message);
+    }
+    throw error;
+  }
 }
 
 async function localBoundaryReadiness(probe = probeProcessBoundary) {
@@ -903,10 +911,11 @@ function processGroupAlive(processGroup) {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function probeCommand(command, args, authenticatedPattern) {
+async function probeCommand(command, args, authenticatedPattern, env) {
   try {
     const { stdout, stderr } = await execFile(command, args, {
       cwd: '/tmp', encoding: 'utf8', timeout: 5_000, maxBuffer: 256 * 1024,
+      env,
     });
     const output = `${stdout}${stderr}`;
     if (/not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu.test(output)) {
@@ -919,17 +928,20 @@ async function probeCommand(command, args, authenticatedPattern) {
 }
 
 async function providerReadiness(env = process.env) {
-  const grokCommand = env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
-  const cursorCommand = env.CODEX_CO_ENGINEER_CURSOR_COMMAND ?? 'cursor-agent';
-  const dshCommand = env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
-  const acpxCommand = env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
-  const dshAcpCommand = env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
+  const grokEnv = projectProviderEnvironment({ provider: 'grok', source: env, operation: 'readiness' });
+  const cursorLocalEnv = projectProviderEnvironment({ provider: 'cursor-local', source: env, operation: 'readiness' });
+  const dshProbeEnv = projectProviderEnvironment({ provider: 'dsh', source: env, dshModel: DEFAULT_DSH_MODEL, operation: 'readiness_probe' });
+  const grokCommand = grokEnv.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
+  const cursorCommand = cursorLocalEnv.CODEX_CO_ENGINEER_CURSOR_COMMAND ?? 'cursor-agent';
+  const dshCommand = dshProbeEnv.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
+  const acpxCommand = dshProbeEnv.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
+  const dshAcpCommand = dshProbeEnv.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
   const [grok, cursorLocal, dshCli, acpx, dshAcp, dshMuseCredential, dshOxCredential, cursorCloud] = await Promise.all([
-    probeCommand(grokCommand, ['models']),
-    probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu),
-    probeCommand(dshCommand, ['--version']),
-    probeCommand(acpxCommand, ['--version']),
-    probeCommand('which', [dshAcpCommand]),
+    probeCommand(grokCommand, ['models'], undefined, grokEnv),
+    probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu, cursorLocalEnv),
+    probeCommand(dshCommand, ['--version'], undefined, dshProbeEnv),
+    probeCommand(acpxCommand, ['--version'], undefined, dshProbeEnv),
+    probeCommand('which', [dshAcpCommand], undefined, dshProbeEnv),
     workerEnvironment('dsh', env, DEFAULT_DSH_MODEL).then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
     workerEnvironment('dsh', env, 'stealth/ox-alpha').then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
     Promise.all([loadCursorApiKey(env), loadCursorSdk()])
