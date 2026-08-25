@@ -51,6 +51,17 @@ credentials or access remotes; it does not expose an API, run
 orchestration, release, or Gate A authority. See
 [protected-ref-audit.md](protected-ref-audit.md).
 
+The P31 run dispatch orchestration boundary is in-tree as an additive
+v3 module. It binds accepted P26 preflight to accepted P29 closed
+credential/environment projection before any workspace, branch/ref,
+reservation, dispatch, credential handoff, or provider process exists.
+Preflight failure and capacity denial fail closed with zero side
+effects. Successful dispatch preserves provider isolation, cleanup on
+failure/cancel/terminal/restart, content-free errors, and denied remote
+mutation. It does not implement P30 live-ref audit, public API,
+supervisor/server cutover, workspace provisioning, or Gate A. The
+separate supervisor false-success reliability issue is unchanged.
+
 The P11 local provider result sink is in-tree as an additive
 provider-neutral router: final local Grok ACP, Cursor Local ACP, and DSH
 ACPX/CLI output is published through the accepted P09 sanitizer and P08

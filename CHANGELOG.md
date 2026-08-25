@@ -31,6 +31,22 @@
   Coverage lives in `test/r1-protected-ref-audit.test.mjs` and
   `test/r1-protected-ref-audit-adversarial.test.mjs`; boundaries live in
   `docs/protected-ref-audit.md`.
+- **Run dispatch orchestration boundary.** Adds additive v3
+  `run-orchestration.mjs` (P31): it binds accepted P26 preflight to
+  accepted P29 closed credential/environment projection before any
+  workspace, branch or ref, reservation, dispatch, credential handoff, or
+  provider process exists. Preflight failure and host CPU/RAM capacity
+  denial fail closed with zero side effects. Prepare projects isolated
+  per-lane environments and still creates no handoff and no process.
+  Explicit dispatch uses an injected seam with closed env, credential-free
+  argv, owner-only identity-bound handoff files, cleanup on
+  failure/cancel/terminal/restart, content-free errors, and denied worker
+  remote mutation. The boundary never provisions workspaces, never audits
+  live refs (P30), never exposes a public API, and does not claim Gate A
+  or supervisor/server cutover. Coverage lives in
+  `test/r1-run-orchestration.test.mjs` and
+  `test/r1-run-orchestration-adversarial.test.mjs`; the boundary lives in
+  `docs/run-orchestration.md`.
 - **Provider registry composition authority.** Adds the additive v3
   `provider-registry.mjs` module (P23): the deterministic, closed
   composition authority behind provider selection. It registers exactly the
