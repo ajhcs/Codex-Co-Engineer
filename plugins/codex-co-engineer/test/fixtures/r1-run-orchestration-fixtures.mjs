@@ -4,7 +4,7 @@
 // substitutes a provider.
 
 import { createHash } from 'node:crypto';
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 import { DENIED_OPERATIONS } from '../../mcp/v3/git-authority.mjs';
@@ -76,9 +76,12 @@ export function mixedProviderManifest(overrides = {}) {
   ], overrides);
 }
 
-export function createRecordingDispatcher() {
+export function createRecordingDispatcher({ failStopFor } = {}) {
   const calls = [];
   const stopped = [];
+  const failStop = failStopFor == null
+    ? null
+    : new Set(Array.isArray(failStopFor) ? failStopFor : [failStopFor]);
   const dispatch = async (plan) => {
     calls.push({
       assignment_id: plan.assignment_id,
@@ -93,10 +96,25 @@ export function createRecordingDispatcher() {
       identity: plan.identity,
       stop: async () => {
         stopped.push(plan.identity);
+        if (failStop && failStop.has(plan.assignment_id)) {
+          throw new Error('injected dispatcher stop failure');
+        }
       },
     };
   };
   return { dispatch, calls, stopped };
+}
+
+export async function injectHandoffUnlinkFailure(identity) {
+  const filePath = handoffPathFromProcessIdentity(identity);
+  const directory = path.dirname(filePath);
+  await unlink(filePath);
+  await mkdir(filePath);
+  return { filePath, directory };
+}
+
+export async function restoreInjectedHandoffUnlinkFailure(filePath) {
+  await rm(filePath, { recursive: true, force: true });
 }
 
 export async function snapshotState(root) {

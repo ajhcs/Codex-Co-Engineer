@@ -217,6 +217,8 @@ test('cancel, terminal, and restart clean credential handoffs and stop children'
     const cancelled = await cancelRunDispatchV1(receipt);
     assert.equal(cancelled.status, 'cancelled');
     assert.equal(cancelled.cleaned, true);
+    assert.equal(cancelled.missing, false);
+    assert.deepEqual([...cancelled.unresolved], []);
     assert.deepEqual(dispatcher.stopped, identities);
     for (const identity of identities) {
       await expectMissing(handoffPathFromProcessIdentity(identity));
@@ -230,6 +232,8 @@ test('cancel, terminal, and restart clean credential handoffs and stop children'
     const restarted = await restartRunDispatchV1(again, { dispatch: restartDispatcher.dispatch });
     assert.equal(restarted.status, 'dispatched');
     assert.equal(restarted.restarted, true);
+    assert.equal(restarted.cleaned, false);
+    assert.deepEqual([...restarted.unresolved], []);
     assert.equal(restartDispatcher.stopped.length, identities.length);
     for (const identity of again.lanes.map((lane) => lane.identity)) {
       const metadata = await lstat(handoffPathFromProcessIdentity(identity));
@@ -237,6 +241,8 @@ test('cancel, terminal, and restart clean credential handoffs and stop children'
     }
     const terminal = await completeRunDispatchV1(again);
     assert.equal(terminal.status, 'terminal');
+    assert.equal(terminal.cleaned, true);
+    assert.deepEqual([...terminal.unresolved], []);
     for (const identity of again.lanes.map((lane) => lane.identity)) {
       await expectMissing(handoffPathFromProcessIdentity(identity));
     }
@@ -270,6 +276,46 @@ test('dispatch failure cleans any created handoff and does not leave a workspace
     for (const identity of identities) {
       await expectMissing(handoffPathFromProcessIdentity(identity));
     }
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('concurrent identical run_id and assignment_id keep distinct handoff identities', async () => {
+  const repo = await createLinearRepo('p31-collide-');
+  const firstDispatcher = createRecordingDispatcher();
+  const secondDispatcher = createRecordingDispatcher();
+  try {
+    const manifest = twoLaneOrchestrationManifest({
+      repositoryPath: repo.root, baseSha: repo.baseSha, runId: 'orchestration-collide',
+    });
+    const [first, second] = await Promise.all([
+      orchestrateRunDispatchV1(
+        { manifest, intent: 'dispatch' },
+        { host: SUFFICIENT_HOST, env: HOSTILE_ENV, dispatch: firstDispatcher.dispatch },
+      ),
+      orchestrateRunDispatchV1(
+        { manifest, intent: 'dispatch' },
+        { host: SUFFICIENT_HOST, env: HOSTILE_ENV, dispatch: secondDispatcher.dispatch },
+      ),
+    ]);
+    const firstIdentities = first.lanes.map((lane) => lane.identity);
+    const secondIdentities = second.lanes.map((lane) => lane.identity);
+    assert.equal(new Set([...firstIdentities, ...secondIdentities]).size, 4);
+    for (const identity of [...firstIdentities, ...secondIdentities]) {
+      const metadata = await lstat(handoffPathFromProcessIdentity(identity));
+      assert.equal(metadata.isFile(), true);
+    }
+    const cancelled = await cancelRunDispatchV1(first);
+    assert.equal(cancelled.cleaned, true);
+    for (const identity of firstIdentities) {
+      await expectMissing(handoffPathFromProcessIdentity(identity));
+    }
+    for (const identity of secondIdentities) {
+      const metadata = await lstat(handoffPathFromProcessIdentity(identity));
+      assert.equal(metadata.isFile(), true);
+    }
+    await cancelRunDispatchV1(second);
   } finally {
     await repo.cleanup();
   }
