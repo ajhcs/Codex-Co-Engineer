@@ -17,6 +17,15 @@ import {
 } from './credential-boundary.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 import { boundedProviderResult, boundedProviderValue } from './provider-result.mjs';
+import {
+  assertCursorCloudResultCorrelationV1,
+  contentFreeCloudResultSourceFailureV1,
+  cursorCloudResultSourceIdentityFromTaskV1,
+  isCursorCloudResultIdentityMismatchV1,
+  materializeCursorCloudResultSourceV1,
+  openCursorCloudResultArtifactStoreV1,
+  projectCursorCloudResultSourcesV1,
+} from './cursor-cloud-result-source.mjs';
 
 process.umask(0o077);
 
@@ -764,10 +773,76 @@ async function archiveAgent(client, agentId, key) {
   return true;
 }
 
+async function attachCursorCloudResultSource(root, task, sources) {
+  const identity = cursorCloudResultSourceIdentityFromTaskV1(task);
+  if (identity == null) return task;
+  try {
+    const store = await openCursorCloudResultArtifactStoreV1(root);
+    const receipt = await materializeCursorCloudResultSourceV1(store, {
+      ...identity,
+      observed: sources.observed,
+      provider_report: sources.provider_report == null ? undefined : {
+        ...sources.provider_report,
+        // 3.2.1 result_* bounding is local clipping, never upstream truncation.
+        source_truncated: sources.provider_report.source_truncated === true,
+      },
+      git_evidence: sources.git_evidence,
+    });
+    return await updateTask(root, task.id, { cursor_cloud_result_source: receipt });
+  } catch (error) {
+    if (isCursorCloudResultIdentityMismatchV1(error)) {
+      fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a mismatched run, branch, or request identity at completion.');
+    }
+    const evidence = contentFreeCloudResultSourceFailureV1(error);
+    try {
+      return await updateTask(root, task.id, { cursor_cloud_result_source: evidence });
+    } catch {
+      return task;
+    }
+  }
+}
+
+function assertTerminalResultSources(task, run, agentId, result) {
+  let sources;
+  try {
+    sources = projectCursorCloudResultSourcesV1(result);
+    const identity = cursorCloudResultSourceIdentityFromTaskV1(task);
+    const recorded = {
+      provider_run_id: run.id,
+      request_id: task.run_idempotency_key,
+      agent_id: agentId,
+    };
+    // 3.2.1 receipts may carry untrusted SDK git.branches for redaction. Trusted
+    // Git/branch/base correlation is only applied when exact R1 identity exists.
+    if (identity != null) {
+      recorded.run_id = identity.run_id;
+      recorded.assignment_id = identity.assignment_id;
+      recorded.repository_url = identity.repository_url;
+      recorded.repository_identity = identity.repository_identity;
+      recorded.starting_sha = identity.starting_sha;
+      recorded.branch = identity.branch;
+      recorded.head_sha = identity.head_sha;
+    }
+    assertCursorCloudResultCorrelationV1({
+      recorded,
+      observed: sources.observed,
+      git_evidence: identity == null ? null : sources.git_evidence,
+    });
+  } catch (error) {
+    if (isCursorCloudResultIdentityMismatchV1(error) || error?.code === 'source_confusion_denied' || error?.code === 'malformed_result') {
+      fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a mismatched or malformed run, branch, or request identity at completion.');
+    }
+    throw error;
+  }
+  return sources;
+}
+
 async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, result }) {
   if (result?.id !== undefined && result.id !== run.id) {
     fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a different run identity at completion.');
   }
+  const { task: current } = await readTask(root, taskId);
+  const sources = assertTerminalResultSources(current, run, agentId, result);
   const status = result.status === 'finished' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
   const providerSecrets = [key, prompt];
   const sanitizedBranches = sanitizeProviderValue(result.git?.branches ?? [], providerSecrets);
@@ -798,7 +873,7 @@ async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, 
     finished_at: new Date().toISOString(),
   });
   await appendTaskEvent(root, taskId, { type: 'terminal', status, run_id: result.id });
-  return terminal;
+  return attachCursorCloudResultSource(root, terminal, sources);
 }
 
 async function persistCancelledRun({ root, taskId, client, task, key, runId }) {

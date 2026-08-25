@@ -94,6 +94,21 @@
   mutation, no P29 credential isolation, and no P30 protected-ref audit.
   Coverage lives in `test/r1-git-authority.test.mjs` and
   `test/r1-git-authority-adversarial.test.mjs`.
+- **Cursor Cloud result source.** Adds additive v3
+  `cursor-cloud-result-source.mjs` (P12) that materializes Cursor Cloud
+  provider-reported result/output/status and independently observed
+  Git/branch/commit/PR evidence as distinct typed sources through the
+  accepted P09 sanitizer, P08 store, and P10 sanitized reader. Trusted Git
+  facts are never synthesized from provider text. Receipts expose only
+  bounded sanitized tails, refs, digests, and provenance; upstream
+  `source_truncated` is recorded separately from local inline clipping and
+  fail-closed storage limits. Exact run, assignment, request, repository,
+  branch, and head/base identity is bound into ArtifactRef paths; mismatch
+  fails closed with no replay. The Cursor Cloud worker is the only
+  serialized seam and preserves 3.2.1 `task.result` / `result_*` public
+  bytes when exact R1 identity is absent. Coverage lives in
+  `test/r1-cursor-cloud-result-source.test.mjs` and
+  `test/r1-cursor-cloud-result-source-adversarial.test.mjs`.
 - **Local provider result sink.** Adds additive v3
   `local-provider-result-sink.mjs` (P11) that routes final local Grok ACP,
   Cursor Local ACP, and DSH ACPX/CLI provider output into the accepted
