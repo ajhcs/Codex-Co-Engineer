@@ -33,6 +33,7 @@ import {
   SCOPE_SEGMENT_MAX_BYTES,
   RunContractV1Error,
   SHA40_PATTERN,
+  utf8ByteLength,
   validateRunManifestEnvelopeV1,
 } from '../mcp/v3/run-manifest.mjs';
 import { validateResolvedStartingRefV1 } from '../mcp/v3/assignment-manifest.mjs';
@@ -584,6 +585,29 @@ test('first-error reporting is independent of input key insertion order', () => 
   assert.equal(getterCalls, 0);
 });
 
+test('captured byte counting and key ordering survive hostile intrinsic patches', () => {
+  const originalByteLength = Buffer.byteLength;
+  const originalSort = Array.prototype.sort;
+  let bytes;
+  let error;
+  try {
+    Buffer.byteLength = () => 0;
+    Array.prototype.sort = function poisonedSort() { return this; };
+    bytes = utf8ByteLength('café');
+    error = violation((manifest) => {
+      manifest.zzz_unknown = 1;
+      manifest.aaa_unknown = 2;
+    });
+  } finally {
+    Buffer.byteLength = originalByteLength;
+    Array.prototype.sort = originalSort;
+  }
+
+  assert.equal(bytes, 5);
+  assert.equal(error.code, 'unknown_key');
+  assert.equal(error.path, '$.aaa_unknown');
+});
+
 test('the public validator is always complete and the envelope composer fails closed without hooks', () => {
   const manifest = validRun();
   const safe = validateRunManifestV1(manifest);
@@ -741,6 +765,34 @@ test('each scope segment enforces the exported byte limit', () => {
   assert.equal(error.code, 'out_of_range');
   assert.equal(error.path, 'assignments[0].write_scope[0]');
   assert.match(error.message, new RegExp(String(SCOPE_SEGMENT_MAX_BYTES), 'u'));
+});
+
+test('every write_scope pattern is matchable under the exact matcher grammar', () => {
+  // The manifest alphabet alone would accept these; the matchability parity
+  // gate rejects them at submission with bounded, content-free diagnostics.
+  const unmatchable = ['[', '[]', '[z-a]', '[a-a]', 'a**b', '***', 'src/[ab'];
+  for (const pattern of unmatchable) {
+    const error = violation((manifest) => { manifest.assignments[0].write_scope = [pattern]; });
+    assert.ok(error instanceof RunContractV1Error);
+    assert.equal(error.code, 'invalid_format');
+    assert.equal(error.path, 'assignments[0].write_scope[0]');
+    assert.ok(error.message.length < 256);
+    if (pattern.length > 2) assert.equal(error.message.includes(pattern), false);
+  }
+  // Extglob openers are rejected at submission too.
+  for (const opener of ['@(a|b)', '+(a)', '!(a)', '?(a)', '*(a)']) {
+    const error = violation((manifest) => { manifest.assignments[0].write_scope = [opener]; });
+    assert.equal(error.code, 'invalid_format');
+  }
+  // Every previously accepted shape stays accepted. Braces and a bare '|'
+  // are matcher-level literals; the retained manifest alphabet never admitted
+  // their characters, so acceptance here covers manifest-legal shapes only.
+  for (const pattern of ['src/**', '[a-z]*/x', 'dir-?.md', '**/reports']) {
+    const summary = validateCompleteRunManifestV1(
+      { ...validRun(), assignments: [writer('lane-0', [pattern])] },
+    );
+    assert.deepEqual([...summary.assignment_ids], ['lane-0']);
+  }
 });
 
 test('the maximum legal lane, scope, command, and parameter cross-product fits the total budget', () => {
