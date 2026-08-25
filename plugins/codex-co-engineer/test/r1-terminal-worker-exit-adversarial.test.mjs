@@ -34,6 +34,52 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = path.join(HERE, 'acpx-fake-agent.mjs');
+const WTB_RELATED_KEYS = [
+  'WORKTREE_BOOTSTRAP_TASK',
+  'WORKTREE_BOOTSTRAP_BRANCH',
+  'WORKTREE_BOOTSTRAP_MANIFEST',
+  'WORKTREE_BOOTSTRAP_START_SHA',
+  'WORKTREE_BOOTSTRAP_WRITER_TOKEN',
+];
+
+function deploymentShapedWtbEnv(taskName) {
+  return {
+    WORKTREE_BOOTSTRAP_TASK: taskName,
+    WORKTREE_BOOTSTRAP_BRANCH: 'codex/cli-close-timeout',
+    WORKTREE_BOOTSTRAP_MANIFEST: '/nonexistent/wtb-manifest.json',
+    WORKTREE_BOOTSTRAP_START_SHA: '0'.repeat(40),
+    WORKTREE_BOOTSTRAP_WRITER_TOKEN: 'hostile-writer-token',
+  };
+}
+
+function sanitizedWtbEnv() {
+  return {};
+}
+
+function stubWtbRunFile(calls) {
+  return async (command, argv = []) => {
+    calls.push({ command, argv: [...argv] });
+    assert.equal(command, 'worktree-bootstrap');
+    assert.equal(path.basename(command), command);
+    return { stdout: '{}' };
+  };
+}
+
+function assertStubbedWtbOnly(calls, { env, cwd }) {
+  assert.notEqual(env, process.env);
+  for (const key of WTB_RELATED_KEYS) {
+    if (!env.WORKTREE_BOOTSTRAP_TASK) assert.equal(Object.hasOwn(env, key), false);
+  }
+  if (env.WORKTREE_BOOTSTRAP_TASK) {
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], {
+      command: 'worktree-bootstrap',
+      argv: ['verify', env.WORKTREE_BOOTSTRAP_TASK, '--repo', cwd, '--require-writer'],
+    });
+  } else {
+    assert.equal(calls.length, 0);
+  }
+}
 
 async function fixture(extra = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-worker-exit-adv-'));
@@ -153,55 +199,75 @@ test('failed WTB handoff is cleanup_failed and content-free', async () => {
 });
 
 test('CLI timeout of resource close still emits stdout and exits without replay', async () => {
-  const value = await fixture({ id: 'cli-close-timeout' });
-  await writeRuntimeRecord(value.root, value.taskId, { pid: process.pid });
-  const requestPath = path.join(value.root, 'tasks', value.taskId, 'worker-request.json');
-  await writeFile(requestPath, `${JSON.stringify({ root: value.root, task_id: value.taskId })}\n`);
-  const writes = [];
-  const exits = [];
-  await runAcpWorkerCli(['--request', requestPath], {
-    runAcpTaskImpl: async () => persistWorkerTerminal(value.root, value.taskId, {
-      status: 'completed',
-      fallback_safe: false,
-    }, {
-      acp_close: 'timeout',
-      codes: [WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT],
-    }, { wtb_handoff: 'not_applicable' }),
-    handoffImpl: async () => {
-      const current = (await readTask(value.root, value.taskId)).task;
-      assert.equal(current.fallback_safe, false);
-      assert.equal(current.cleanup.code, WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT);
-      return { attempted: false, wtb_handoff: 'not_applicable', task: current };
-    },
-    stdoutWrite: (chunk) => writes.push(chunk),
-    stderrWrite() {},
-    exit: (code) => exits.push(code),
-  });
-  assert.equal(exits[0], 0);
-  assert.equal(JSON.parse(writes[0]).task_id, value.taskId);
-  assert.equal((await readTask(value.root, value.taskId)).task.fallback_safe, false);
+  for (const env of [
+    deploymentShapedWtbEnv('cli-close-timeout'),
+    sanitizedWtbEnv(),
+  ]) {
+    const value = await fixture({ id: 'cli-close-timeout' });
+    await writeRuntimeRecord(value.root, value.taskId, { pid: process.pid });
+    const requestPath = path.join(value.root, 'tasks', value.taskId, 'worker-request.json');
+    await writeFile(requestPath, `${JSON.stringify({ root: value.root, task_id: value.taskId })}\n`);
+    const writes = [];
+    const exits = [];
+    const wtbCalls = [];
+    await runAcpWorkerCli(['--request', requestPath], {
+      env,
+      cwd: value.cwd,
+      runFileImpl: stubWtbRunFile(wtbCalls),
+      runAcpTaskImpl: async () => persistWorkerTerminal(value.root, value.taskId, {
+        status: 'completed',
+        fallback_safe: false,
+      }, {
+        acp_close: 'timeout',
+        codes: [WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT],
+      }, { wtb_handoff: 'not_applicable' }),
+      handoffImpl: async () => {
+        const current = (await readTask(value.root, value.taskId)).task;
+        assert.equal(current.fallback_safe, false);
+        assert.equal(current.cleanup.code, WORKER_CLEANUP_CODES.ACP_RESOURCE_CLOSE_TIMEOUT);
+        return { attempted: false, wtb_handoff: 'not_applicable', task: current };
+      },
+      stdoutWrite: (chunk) => writes.push(chunk),
+      stderrWrite() {},
+      exit: (code) => exits.push(code),
+    });
+    assert.equal(exits[0], 0);
+    assert.equal(JSON.parse(writes[0]).task_id, value.taskId);
+    assert.equal((await readTask(value.root, value.taskId)).task.fallback_safe, false);
+    assertStubbedWtbOnly(wtbCalls, { env, cwd: value.cwd });
+  }
 });
 
 test('incident-shaped CLI success without cleanup is denied stdout', async () => {
-  const value = await fixture({ id: 'incident-cli' });
-  await writeRuntimeRecord(value.root, value.taskId, { pid: process.pid });
-  const requestPath = path.join(value.root, 'tasks', value.taskId, 'worker-request.json');
-  await writeFile(requestPath, `${JSON.stringify({ root: value.root, task_id: value.taskId })}\n`);
-  const writes = [];
-  const exits = [];
-  await runAcpWorkerCli(['--request', requestPath], {
-    runAcpTaskImpl: async () => incidentReceipt(INCIDENT_1, { id: value.taskId }),
-    handoffImpl: async () => ({
-      attempted: false,
-      wtb_handoff: 'not_applicable',
-      task: incidentReceipt(INCIDENT_1, { id: value.taskId }),
-    }),
-    stdoutWrite: (chunk) => writes.push(chunk),
-    stderrWrite() {},
-    exit: (code) => exits.push(code),
-  });
-  assert.equal(writes.length, 0);
-  assert.equal(exits[0], 1);
+  for (const env of [
+    deploymentShapedWtbEnv('incident-cli'),
+    sanitizedWtbEnv(),
+  ]) {
+    const value = await fixture({ id: 'incident-cli' });
+    await writeRuntimeRecord(value.root, value.taskId, { pid: process.pid });
+    const requestPath = path.join(value.root, 'tasks', value.taskId, 'worker-request.json');
+    await writeFile(requestPath, `${JSON.stringify({ root: value.root, task_id: value.taskId })}\n`);
+    const writes = [];
+    const exits = [];
+    const wtbCalls = [];
+    await runAcpWorkerCli(['--request', requestPath], {
+      env,
+      cwd: value.cwd,
+      runFileImpl: stubWtbRunFile(wtbCalls),
+      runAcpTaskImpl: async () => incidentReceipt(INCIDENT_1, { id: value.taskId }),
+      handoffImpl: async () => ({
+        attempted: false,
+        wtb_handoff: 'not_applicable',
+        task: incidentReceipt(INCIDENT_1, { id: value.taskId }),
+      }),
+      stdoutWrite: (chunk) => writes.push(chunk),
+      stderrWrite() {},
+      exit: (code) => exits.push(code),
+    });
+    assert.equal(writes.length, 0);
+    assert.equal(exits[0], 1);
+    assertStubbedWtbOnly(wtbCalls, { env, cwd: value.cwd });
+  }
 });
 
 test('timeout, cancel, and transport_lost keep their semantics and do not replay', async () => {
