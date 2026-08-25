@@ -11,6 +11,7 @@ import {
   PROVIDER_SILENCE_WATCHDOG_MIN_MS,
   STORED_TERMINAL,
   TASK_TERMINAL_WATCH_FALLBACK_MS,
+  publicState,
 } from './contract.mjs';
 import { parseDeadlineAt, remainingDeadlineMs } from './deadline.mjs';
 
@@ -1355,6 +1356,10 @@ export function parseTasksState(value) {
   return value;
 }
 
+function matchesClassifiedTasksState(classifiedPublicState, stateFilter) {
+  return classifiedPublicState === stateFilter || classifiedPublicState === publicState(stateFilter);
+}
+
 // Keyset cursor: opaque base64 of JSON {v, ca, id, p, s, d}
 // Ordered by created_at DESC then id DESC. Cursor binds canonical provider/state/detail.
 function compareTaskToAnchor(task, anchor) {
@@ -1454,8 +1459,11 @@ export async function listTasksPage(root = stateRoot(), options = {}) {
   let tasks = await listTasks(root);
   if (provider) tasks = tasks.filter((t) => t.provider === provider);
   if (stateFilter) {
-    const { publicState: ps } = await import('./contract.mjs');
-    tasks = tasks.filter((t) => ps(t.status) === stateFilter || t.status === stateFilter);
+    // Classifier-derived public state is the membership key. Apply it before
+    // filter, total, keyset pagination, and slicing. Stored task.v1 bytes stay
+    // unmodified; a deferred import avoids a static cycle with supervisor.mjs.
+    const { projectSupervisorPublicState } = await import('./supervisor.mjs');
+    tasks = tasks.filter((t) => matchesClassifiedTasksState(projectSupervisorPublicState(t), stateFilter));
   }
   const total = tasks.length;
   // Apply keyset pagination

@@ -10,15 +10,18 @@ import {
   EVENT_TAIL_PEEK_BYTES,
   MAX_EVENT_READ_BYTES,
   MAX_TASK_WAIT_MS,
+  TASK_SCHEMA,
   TEXT_DELTA_COALESCE_MS,
   appendTaskEvent,
   clearTaskLaunchReservation,
   createLaunchReservation,
   createTask,
+  decodeTasksCursor,
   isImmediateProgressEvent,
   isTextDeltaEvent,
   launchReservationActive,
   listTasks,
+  listTasksPage,
   parseEventCursor,
   parseTaskWaitMs,
   projectLiveLastEvent,
@@ -34,6 +37,16 @@ import {
   waitForTaskProgress,
   writeRuntimeRecord,
 } from '../mcp/v3/task-store.mjs';
+import {
+  legitimateCancelledReceipt,
+  legitimateCompletedReceipt,
+  legitimateEnvironmentBlockedReceipt,
+  legitimateFailedReceipt,
+  legitimateTimeoutReceipt,
+  legitimateTransportLostReceipt,
+  quotedPingInSuccessfulResultReceipt,
+  zeroWorkPingTimeoutReceipt,
+} from './fixtures/r1-supervisor-result-truthfulness-fixtures.mjs';
 
 async function temporaryRoot() {
   return mkdtemp(path.join(tmpdir(), 'co-engineer-task-store-'));
@@ -771,6 +784,152 @@ test('cursorless progress wait still wakes immediately on terminal, attention, a
     assert.equal(aborted.progress.wait_reason, 'disconnected');
     assert.ok(aborted.progress.waited_ms < 200);
     assert.equal(state.closed, state.opened);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('listTasksPage applies classifier-derived public state before filter, total, and keyset pagination', async () => {
+  const root = await temporaryRoot();
+  try {
+    const stamp = (second, receipt) => ({
+      ...receipt,
+      cwd: root,
+      created_at: `2026-08-20T00:00:0${second}.000Z`,
+      updated_at: `2026-08-20T00:00:0${second}.000Z`,
+    });
+    const stored = {};
+    const writes = [
+      ['rtruth-legit-b', legitimateCompletedReceipt(stamp(8, { id: 'rtruth-legit-b' }))],
+      ['rtruth-ping-timeout', zeroWorkPingTimeoutReceipt(stamp(7, {}))],
+      ['rtruth-legit-a', legitimateCompletedReceipt(stamp(6, { id: 'rtruth-legit-a' }))],
+      ['rtruth-legitimate-failed', legitimateFailedReceipt(stamp(5, {}))],
+      ['rtruth-quoted-ping', quotedPingInSuccessfulResultReceipt(stamp(4, {}))],
+      ['rtruth-legitimate-cancelled', legitimateCancelledReceipt(stamp(3, {}))],
+      ['rtruth-legitimate-timeout', legitimateTimeoutReceipt(stamp(2, {}))],
+      ['rtruth-legitimate-environment-blocked', legitimateEnvironmentBlockedReceipt(stamp(1, {}))],
+      ['rtruth-legitimate-transport-lost', legitimateTransportLostReceipt(stamp(0, {}))],
+    ];
+    for (const [id, record] of writes) {
+      const created = await createTask({ root, prompt: 'keep this prompt private', record });
+      stored[id] = await readFile(created.paths.record, 'utf8');
+    }
+
+    const omitted = await listTasksPage(root, { detail: 'full' });
+    assert.equal(omitted.total, 9);
+    assert.equal(omitted.has_more, false);
+    assert.equal(omitted.next_cursor, null);
+    assert.deepEqual(omitted.tasks.map((task) => task.id), [
+      'rtruth-legit-b',
+      'rtruth-ping-timeout',
+      'rtruth-legit-a',
+      'rtruth-legitimate-failed',
+      'rtruth-quoted-ping',
+      'rtruth-legitimate-cancelled',
+      'rtruth-legitimate-timeout',
+      'rtruth-legitimate-environment-blocked',
+      'rtruth-legitimate-transport-lost',
+    ]);
+    assert.equal(omitted.tasks.find((task) => task.id === 'rtruth-ping-timeout').status, 'completed');
+
+    const succeeded = await listTasksPage(root, { detail: 'full', state: 'succeeded' });
+    assert.deepEqual(succeeded.tasks.map((task) => task.id), [
+      'rtruth-legit-b',
+      'rtruth-legit-a',
+      'rtruth-quoted-ping',
+    ]);
+    assert.equal(succeeded.total, 3);
+    assert.equal(succeeded.has_more, false);
+    assert.equal(succeeded.next_cursor, null);
+    assert.equal(succeeded.tasks.some((task) => task.id === 'rtruth-ping-timeout'), false);
+    assert.equal(succeeded.tasks.some((task) => task.id === 'rtruth-legitimate-failed'), false);
+
+    const succeededAlias = await listTasksPage(root, { detail: 'full', status: 'completed' });
+    assert.deepEqual(succeededAlias.tasks.map((task) => task.id), succeeded.tasks.map((task) => task.id));
+    assert.equal(succeededAlias.total, 3);
+
+    const failed = await listTasksPage(root, { detail: 'full', state: 'failed' });
+    assert.deepEqual(failed.tasks.map((task) => task.id), [
+      'rtruth-ping-timeout',
+      'rtruth-legitimate-failed',
+    ]);
+    assert.equal(failed.total, 2);
+    assert.equal(failed.tasks.find((task) => task.id === 'rtruth-ping-timeout').status, 'completed');
+    assert.equal(failed.tasks.find((task) => task.id === 'rtruth-legitimate-failed').status, 'failed');
+
+    const failedAlias = await listTasksPage(root, { detail: 'full', status: 'failed' });
+    assert.deepEqual(failedAlias.tasks.map((task) => task.id), failed.tasks.map((task) => task.id));
+
+    const cancelled = await listTasksPage(root, { state: 'cancelled' });
+    const timedOut = await listTasksPage(root, { state: 'timed_out' });
+    const timeoutAlias = await listTasksPage(root, { status: 'timeout' });
+    const blocked = await listTasksPage(root, { state: 'environment_blocked' });
+    const lost = await listTasksPage(root, { state: 'transport_lost' });
+    assert.deepEqual(cancelled.tasks.map((task) => task.id), ['rtruth-legitimate-cancelled']);
+    assert.deepEqual(timedOut.tasks.map((task) => task.id), ['rtruth-legitimate-timeout']);
+    assert.deepEqual(timeoutAlias.tasks.map((task) => task.id), ['rtruth-legitimate-timeout']);
+    assert.deepEqual(blocked.tasks.map((task) => task.id), ['rtruth-legitimate-environment-blocked']);
+    assert.deepEqual(lost.tasks.map((task) => task.id), ['rtruth-legitimate-transport-lost']);
+
+    const page1 = await listTasksPage(root, { detail: 'compact', state: 'succeeded', limit: 1 });
+    assert.deepEqual(page1.tasks.map((task) => task.id), ['rtruth-legit-b']);
+    assert.equal(page1.total, 3);
+    assert.equal(page1.has_more, true);
+    assert.ok(page1.next_cursor);
+    const page1Anchor = decodeTasksCursor(page1.next_cursor);
+    assert.equal(page1Anchor.id, 'rtruth-legit-b');
+    assert.equal(page1Anchor.s, 'succeeded');
+    assert.equal(page1Anchor.d, 'compact');
+
+    const page2 = await listTasksPage(root, {
+      detail: 'compact',
+      state: 'succeeded',
+      limit: 1,
+      cursor: page1.next_cursor,
+    });
+    assert.deepEqual(page2.tasks.map((task) => task.id), ['rtruth-legit-a']);
+    assert.equal(page2.total, 3);
+    assert.equal(page2.has_more, true);
+    assert.equal(page2.tasks.some((task) => task.id === 'rtruth-ping-timeout'), false);
+
+    const page3 = await listTasksPage(root, {
+      detail: 'compact',
+      state: 'succeeded',
+      limit: 1,
+      cursor: page2.next_cursor,
+    });
+    assert.deepEqual(page3.tasks.map((task) => task.id), ['rtruth-quoted-ping']);
+    assert.equal(page3.total, 3);
+    assert.equal(page3.has_more, false);
+    assert.equal(page3.next_cursor, null);
+
+    const failedPage1 = await listTasksPage(root, { detail: 'full', state: 'failed', limit: 1 });
+    assert.deepEqual(failedPage1.tasks.map((task) => task.id), ['rtruth-ping-timeout']);
+    assert.equal(failedPage1.total, 2);
+    assert.equal(failedPage1.has_more, true);
+    const failedPage2 = await listTasksPage(root, {
+      detail: 'full',
+      state: 'failed',
+      limit: 1,
+      cursor: failedPage1.next_cursor,
+    });
+    assert.deepEqual(failedPage2.tasks.map((task) => task.id), ['rtruth-legitimate-failed']);
+    assert.equal(failedPage2.total, 2);
+    assert.equal(failedPage2.has_more, false);
+    assert.equal(failedPage2.next_cursor, null);
+
+    await assert.rejects(
+      () => listTasksPage(root, { detail: 'compact', state: 'failed', limit: 1, cursor: page1.next_cursor }),
+      (error) => error.code === 'invalid_cursor',
+    );
+
+    for (const [id, bytes] of Object.entries(stored)) {
+      assert.equal(await readFile(taskPaths(root, id).record, 'utf8'), bytes);
+      assert.match(bytes, /"schema": "codex-co-engineer.task.v1"/u);
+    }
+    assert.match(stored['rtruth-ping-timeout'], /"status": "completed"/u);
+    assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.status, 'completed');
+    assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.schema, TASK_SCHEMA);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

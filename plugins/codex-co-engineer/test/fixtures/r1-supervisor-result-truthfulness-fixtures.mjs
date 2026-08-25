@@ -196,6 +196,71 @@ export function legitimateCompletedReceipt(overrides = {}) {
   });
 }
 
+export function legitimateFailedReceipt(overrides = {}) {
+  return terminalReceipt({
+    id: 'rtruth-legitimate-failed',
+    status: 'failed',
+    result: null,
+    error: {
+      code: 'task_failed',
+      message: 'implementation failed',
+    },
+    ...overrides,
+  });
+}
+
+export function legitimateCancelledReceipt(overrides = {}) {
+  return terminalReceipt({
+    id: 'rtruth-legitimate-cancelled',
+    status: 'cancelled',
+    result: null,
+    error: {
+      code: 'cancelled',
+      message: 'cancelled',
+    },
+    ...overrides,
+  });
+}
+
+export function legitimateTimeoutReceipt(overrides = {}) {
+  return terminalReceipt({
+    id: 'rtruth-legitimate-timeout',
+    status: 'timeout',
+    result: null,
+    error: {
+      code: 'timeout',
+      message: 'timeout',
+    },
+    ...overrides,
+  });
+}
+
+export function legitimateEnvironmentBlockedReceipt(overrides = {}) {
+  return terminalReceipt({
+    id: 'rtruth-legitimate-environment-blocked',
+    status: 'environment_blocked',
+    result: null,
+    error: {
+      code: 'environment_blocked',
+      message: 'environment blocked',
+    },
+    ...overrides,
+  });
+}
+
+export function legitimateTransportLostReceipt(overrides = {}) {
+  return terminalReceipt({
+    id: 'rtruth-legitimate-transport-lost',
+    status: 'transport_lost',
+    result: null,
+    error: {
+      code: 'transport_lost',
+      message: 'transport lost',
+    },
+    ...overrides,
+  });
+}
+
 export function quotedPingInSuccessfulResultReceipt(overrides = {}) {
   return terminalReceipt({
     id: 'rtruth-quoted-ping',

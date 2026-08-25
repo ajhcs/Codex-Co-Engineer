@@ -24,7 +24,7 @@ import {
   supervisorStatus,
   taskStatus,
 } from '../mcp/v3/supervisor.mjs';
-import { TASK_SCHEMA, createTask, listTasks, readTask, taskPaths } from '../mcp/v3/task-store.mjs';
+import { TASK_SCHEMA, createTask, listTasks, listTasksPage, readTask, taskPaths } from '../mcp/v3/task-store.mjs';
 import {
   AUTHORITATIVE_PING_TIMEOUT,
   COMPACT_CARD_KEYS,
@@ -43,7 +43,12 @@ import {
   WAIT_ANY_KEYS,
   countingProxy,
   envelopeOnlyCompletedReceipt,
+  legitimateCancelledReceipt,
   legitimateCompletedReceipt,
+  legitimateEnvironmentBlockedReceipt,
+  legitimateFailedReceipt,
+  legitimateTimeoutReceipt,
+  legitimateTransportLostReceipt,
   quotedPingInSuccessfulResultReceipt,
   readyBoundary,
   readyProviderReadiness,
@@ -553,6 +558,133 @@ test('server tasks list, paged full/compact, and wait-any cannot project PING-ti
     assert.throws(() => denyWorkerRemoteMutation('push'), (error) => error.code === 'remote_mutation_denied');
     const after = await readFile(paths.record, 'utf8');
     assert.equal(after, stored);
+    assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.status, 'completed');
+    assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.schema, TASK_SCHEMA);
+  });
+});
+
+test('classifier-derived filter membership, totals, and page cursors exclude corrected PING-timeout from succeeded', async () => {
+  await withRoot(async (root) => {
+    const stamp = (second, receipt) => ({
+      ...receipt,
+      cwd: root,
+      created_at: `2026-08-20T00:00:0${second}.000Z`,
+      updated_at: `2026-08-20T00:00:0${second}.000Z`,
+    });
+    const { paths, stored } = await storeReceipt(root, zeroWorkPingTimeoutReceipt(stamp(5, {})));
+    await storeReceipt(root, legitimateCompletedReceipt(stamp(4, { id: 'rtruth-legit-b' })));
+    await storeReceipt(root, legitimateFailedReceipt(stamp(3, {})));
+    await storeReceipt(root, legitimateCompletedReceipt(stamp(2, { id: 'rtruth-legit-a' })));
+    await storeReceipt(root, legitimateCancelledReceipt(stamp(1, {})));
+    await storeReceipt(root, legitimateTimeoutReceipt(stamp(0, {})));
+    await storeReceipt(root, legitimateEnvironmentBlockedReceipt(stamp(6, {})));
+    await storeReceipt(root, legitimateTransportLostReceipt(stamp(7, {})));
+
+    const omitted = await listTasksPage(root, {});
+    assert.equal(omitted.total, 8);
+    assert.equal(omitted.tasks.some((task) => task.id === 'rtruth-ping-timeout'), true);
+    assert.equal(omitted.tasks.find((task) => task.id === 'rtruth-ping-timeout').status, 'completed');
+
+    const succeeded = await listTasksPage(root, { state: 'succeeded', limit: 1, detail: 'full' });
+    assert.deepEqual(succeeded.tasks.map((task) => task.id), ['rtruth-legit-b']);
+    assert.equal(succeeded.total, 2);
+    assert.equal(succeeded.has_more, true);
+    assert.equal(succeeded.tasks.some((task) => task.id === 'rtruth-ping-timeout'), false);
+    const succeededPage2 = await listTasksPage(root, {
+      state: 'succeeded',
+      limit: 1,
+      detail: 'full',
+      cursor: succeeded.next_cursor,
+    });
+    assert.deepEqual(succeededPage2.tasks.map((task) => task.id), ['rtruth-legit-a']);
+    assert.equal(succeededPage2.total, 2);
+    assert.equal(succeededPage2.has_more, false);
+    assert.equal(succeededPage2.next_cursor, null);
+
+    const failed = await listTasksPage(root, { state: 'failed', limit: 1, detail: 'compact' });
+    assert.deepEqual(failed.tasks.map((task) => task.id), ['rtruth-ping-timeout']);
+    assert.equal(failed.total, 2);
+    assert.equal(failed.has_more, true);
+    assert.equal(failed.tasks[0].status, 'completed');
+    const failedPage2 = await listTasksPage(root, {
+      state: 'failed',
+      limit: 1,
+      detail: 'compact',
+      cursor: failed.next_cursor,
+    });
+    assert.deepEqual(failedPage2.tasks.map((task) => task.id), ['rtruth-legitimate-failed']);
+    assert.equal(failedPage2.total, 2);
+    assert.equal(failedPage2.has_more, false);
+
+    await withServerAt(root, async ({ request }) => {
+      const succeededPage = (await request({
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { detail: 'full', state: 'succeeded', limit: 1 } },
+      })).result.structuredContent;
+      assert.deepEqual(Object.keys(succeededPage).sort(), [...TASKS_PAGED_KEYS].sort());
+      assert.deepEqual(succeededPage.tasks.map((task) => task.id), ['rtruth-legit-b']);
+      assert.equal(succeededPage.tasks[0].state, 'succeeded');
+      assert.equal(succeededPage.total, 2);
+      assert.equal(succeededPage.has_more, true);
+      assert.equal(succeededPage.tasks.some((task) => task.id === 'rtruth-ping-timeout'), false);
+
+      const failedPage = (await request({
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { detail: 'compact', state: 'failed', limit: 20 } },
+      })).result.structuredContent;
+      assert.deepEqual(Object.keys(failedPage).sort(), [...TASKS_PAGED_KEYS].sort());
+      for (const card of failedPage.tasks) {
+        assert.deepEqual(Object.keys(card).sort(), [...COMPACT_CARD_KEYS].sort());
+      }
+      assert.deepEqual(failedPage.tasks.map((task) => task.id), [
+        'rtruth-ping-timeout',
+        'rtruth-legitimate-failed',
+      ]);
+      assert.equal(failedPage.tasks[0].state, 'failed');
+      assertNotSucceeded(failedPage.tasks[0].state);
+      assert.equal(failedPage.total, 2);
+      assert.equal(failedPage.has_more, false);
+
+      const cancelledPage = (await request({
+        jsonrpc: '2.0',
+        id: 12,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { state: 'cancelled' } },
+      })).result.structuredContent;
+      assert.deepEqual(cancelledPage.tasks.map((task) => task.id), ['rtruth-legitimate-cancelled']);
+      const timedOutPage = (await request({
+        jsonrpc: '2.0',
+        id: 13,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { state: 'timed_out' } },
+      })).result.structuredContent;
+      assert.deepEqual(timedOutPage.tasks.map((task) => task.id), ['rtruth-legitimate-timeout']);
+      const blockedPage = (await request({
+        jsonrpc: '2.0',
+        id: 14,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { state: 'environment_blocked' } },
+      })).result.structuredContent;
+      assert.deepEqual(blockedPage.tasks.map((task) => task.id), ['rtruth-legitimate-environment-blocked']);
+      const lostPage = (await request({
+        jsonrpc: '2.0',
+        id: 15,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { state: 'transport_lost' } },
+      })).result.structuredContent;
+      assert.deepEqual(lostPage.tasks.map((task) => task.id), ['rtruth-legitimate-transport-lost']);
+    });
+
+    assert.throws(() => denyWorkerRemoteMutation('push'), (error) => error.code === 'remote_mutation_denied');
+    assert.throws(() => denyWorkerRemoteMutation('create_pr'), (error) => error.code === 'remote_mutation_denied');
+    const after = await readFile(paths.record, 'utf8');
+    assert.equal(after, stored);
+    assert.match(after, /"schema": "codex-co-engineer.task.v1"/u);
+    assert.match(after, /"status": "completed"/u);
     assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.status, 'completed');
     assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.schema, TASK_SCHEMA);
   });
