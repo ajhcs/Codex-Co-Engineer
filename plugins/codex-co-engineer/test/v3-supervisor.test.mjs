@@ -759,3 +759,32 @@ test('boundary rollback failure preserves a recoverable runtime and transport-lo
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('completed receipts with a terminal transport error do not project succeeded', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-rtruth-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'zero-work ping timeout',
+      record: {
+        id: 'ping-timeout',
+        status: 'completed',
+        provider: 'cursor-local',
+        cwd: root,
+        result: 'RetriableError [unavailable] PING timed out',
+        finished_at: new Date().toISOString(),
+      },
+    });
+    const value = await taskStatus(root, 'ping-timeout');
+    assert.equal(value.state, 'failed');
+    assert.equal(value.task.status, 'failed');
+    assert.equal(value.task.error.code, 'completed_with_terminal_error');
+    assert.doesNotMatch(value.task.error.message, /PING|RetriableError|unavailable/u);
+    assert.equal((await readTask(root, 'ping-timeout')).task.status, 'completed');
+    const cancelled = await cancelTask(root, 'ping-timeout');
+    assert.equal(cancelled.status, 'failed');
+    assert.equal((await readTask(root, 'ping-timeout')).task.status, 'completed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
