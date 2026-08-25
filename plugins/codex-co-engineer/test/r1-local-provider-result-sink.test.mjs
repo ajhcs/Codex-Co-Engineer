@@ -36,6 +36,7 @@ import {
 } from '../mcp/v3/local-provider-result-sink.mjs';
 import { ARTIFACT_SANITIZER_VERSION } from '../mcp/v3/artifact-sanitizer.mjs';
 import { attachLocalProviderResultSink, runAcpTask, runCliFallback } from '../mcp/v3/acp-worker.mjs';
+import { installClosedProviderTestInjection } from '../mcp/v3/credential-boundary.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 import {
@@ -413,13 +414,14 @@ async function workerFixture(extra = {}) {
 }
 
 async function withFakeAcpx(mode, callback) {
-  const names = ['CODEX_CO_ENGINEER_ACPX_COMMAND', 'FAKE_ACPX_MODE'];
+  const names = ['CODEX_CO_ENGINEER_ACPX_COMMAND'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   process.env.CODEX_CO_ENGINEER_ACPX_COMMAND = FAKE_ACPX;
-  process.env.FAKE_ACPX_MODE = mode;
+  installClosedProviderTestInjection({ FAKE_ACPX_MODE: mode });
   try {
     return await callback();
   } finally {
+    installClosedProviderTestInjection(null);
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
       else process.env[name] = previous[name];

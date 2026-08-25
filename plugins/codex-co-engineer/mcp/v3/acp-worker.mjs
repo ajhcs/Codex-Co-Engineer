@@ -8,6 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  applyClosedProviderTestInjection,
+  collectLaneSecrets,
+  denyWorkerRemoteMutation,
+  projectProviderEnvironment,
+  redactExactValues,
+} from './credential-boundary.mjs';
+import {
   collectCliProviderOutputV1,
   contentFreeSinkFailureV1,
   createLocalProviderResultCollectorV1,
@@ -184,14 +191,25 @@ function normalizeArgv(value) {
   return [...value];
 }
 
+function rejectWorkerPushArgv(argv) {
+  if (!Array.isArray(argv)) return argv;
+  for (const arg of argv) {
+    if (typeof arg === 'string' && /(?:pushurl|insteadof|--push-url|git\s+push|gh\s+pr)/iu.test(arg)) {
+      denyWorkerRemoteMutation('push');
+    }
+  }
+  return argv;
+}
+
 function providerConfiguration(task) {
   const definition = PROVIDERS[task.provider];
   if (!definition) fail('unsupported_provider', `Unsupported ACP provider: ${task.provider}`);
+  if (task.create_pr === true) denyWorkerRemoteMutation('create_pr');
   if (definition.custom) {
-    return { agent: definition.agent, override: normalizeArgv(task.agent_argv) };
+    return { agent: definition.agent, override: rejectWorkerPushArgv(normalizeArgv(task.agent_argv)) };
   }
   if (task.agent_argv !== undefined) {
-    return { agent: definition.agent, override: normalizeArgv(task.agent_argv) };
+    return { agent: definition.agent, override: rejectWorkerPushArgv(normalizeArgv(task.agent_argv)) };
   }
   return { agent: definition.agent, override: null };
 }
@@ -263,8 +281,19 @@ export function publicError(error, prompt = '') {
 export function sanitizeText(value, prompt) {
   let text = String(value ?? '');
   if (prompt) text = text.replaceAll(prompt, '[REDACTED_PROMPT]');
+  text = redactExactValues(text, collectLaneSecrets(process.env));
   for (const pattern of TOKEN_PATTERNS) text = text.replace(pattern, REDACTED);
   return text;
+}
+
+function providerChildEnvironment(task, extra = {}) {
+  const env = projectProviderEnvironment({
+    provider: task.provider,
+    dshModel: task.dsh_model,
+    source: process.env,
+    operation: 'lane',
+  });
+  return Object.assign(env, extra);
 }
 
 function processStartTicks(pid) {
@@ -414,10 +443,10 @@ async function removeAcpxTaskHome(root, taskId, home) {
   }
 }
 
-function acpxTaskEnvironment(home) {
-  const env = { ...process.env, HOME: home };
+function acpxTaskEnvironment(home, task) {
+  const env = providerChildEnvironment(task, { HOME: home });
   if (process.platform === 'win32') env.USERPROFILE = home;
-  return env;
+  return applyClosedProviderTestInjection(env);
 }
 
 async function awaitSupervisorRegistration(root, taskId, signal) {
@@ -598,7 +627,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
     const argv = cliCommand(task, promptFile, prompt);
     child = spawn(argv[0], argv.slice(1), {
       cwd: task.cwd,
-      env: process.env,
+      env: providerChildEnvironment(task),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -745,7 +774,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     await updateTask(root, task.id, { status: 'starting', transport: 'acp', acp_client: 'acpx-cli', started_at: new Date().toISOString() });
     child = spawn(process.env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx', argv, {
       cwd,
-      env: acpxTaskEnvironment(acpxHome),
+      env: acpxTaskEnvironment(acpxHome, task),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -855,7 +884,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   }
 }
 
-async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal }) {
+async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env }) {
   const stateDir = path.join(path.resolve(root), 'acp');
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await chmod(stateDir, 0o700);
@@ -868,6 +897,7 @@ async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal
     mcpServers: [],
     permissionMode: 'approve-all',
     timeoutMs,
+    closedProviderEnv: env,
     onPermissionRequest: (params, extra = {}) => handlePermissionRequest(root, taskId, params, extra.signal ?? signal),
   });
 }
@@ -892,7 +922,8 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     return runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
   }
 
-  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal });
+  const childEnv = providerChildEnvironment(task);
+  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env: childEnv });
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort(signal?.reason ?? new AcpWorkerError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'ACP task exceeded its recorded deadline.' : 'Task cancelled.'));

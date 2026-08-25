@@ -37,7 +37,38 @@ function fakeChild(exitCode = 0) {
   return child;
 }
 
-test('builds a manager-owned systemd service without narrowing provider argv or environment', () => {
+test('resets inherited manager environment and execs a closed env -i projection', () => {
+  const argv = buildProcessBoundaryArgv({
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+    description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    command: '/usr/bin/node',
+    args: ['worker.mjs'],
+    cwd: '/workspace/repo',
+    env: { HOME: '/home/test-user', PATH: '/bin' },
+    inherited: {
+      HOME: '/home/test-user',
+      PATH: '/usr/bin',
+      SSH_AUTH_SOCK: '/tmp/hostile-agent.sock',
+      GH_TOKEN: 'ghp_manager-token',
+      GIT_SSH: '/tmp/hostile-ssh',
+    },
+  });
+  const unset = argv.find((entry) => String(entry).startsWith('--property=UnsetEnvironment='));
+  assert.equal(typeof unset, 'string');
+  assert.equal(unset.includes('SSH_AUTH_SOCK'), true);
+  assert.equal(unset.includes('GH_TOKEN'), true);
+  assert.equal(unset.includes('GIT_SSH'), true);
+  assert.equal(unset.includes('HOME'), false);
+  assert.equal(unset.includes('PATH'), false);
+  assert.equal(argv.includes('--setenv=SSH_AUTH_SOCK=/tmp/hostile-agent.sock'), false);
+  assert.equal(argv.includes('SSH_AUTH_SOCK=/tmp/hostile-agent.sock'), false);
+  assert.equal(argv.includes('/usr/bin/env'), true);
+  assert.equal(argv.includes('-i'), true);
+  assert.equal(argv.includes('HOME=/home/test-user'), true);
+  assert.equal(argv.includes('PATH=/bin'), true);
+});
+
+test('builds a manager-owned systemd service without putting credential values in argv', () => {
   const argv = buildProcessBoundaryArgv({
     unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
     description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -55,9 +86,9 @@ test('builds a manager-owned systemd service without narrowing provider argv or 
     '--property=StandardOutput=append:/state/task.log',
     '--property=StandardError=append:/state/task.log',
     '--setenv=HOME=/home/test-user',
-    '--setenv=MODEL_API_KEY=provider-secret',
-    '--', '/usr/bin/node', 'worker.mjs', '--provider-capability', 'full',
+    '--', '/usr/bin/env', '-i', 'HOME=/home/test-user', '/usr/bin/node', 'worker.mjs', '--provider-capability', 'full',
   ]);
+  assert.equal(argv.some((entry) => entry.includes('provider-secret')), false);
   assert.equal(argv.some((entry) => /MemoryMax|TasksMax|NoNewPrivileges|Private|Restrict|Protect/iu.test(entry)), false);
 });
 
@@ -115,16 +146,26 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/bin/systemd-run');
-  assert.equal(calls[0].options.env.MODEL_API_KEY, environment.MODEL_API_KEY);
-  assert.equal(calls[0].options.env.HOME, environment.HOME);
+  assert.equal(calls[0].options.env.MODEL_API_KEY, undefined);
+  assert.equal(JSON.stringify(calls[0].options.env).includes('provider-secret'), false);
   assert.equal(calls[0].options.cwd, '/workspace/repo');
   assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
-  assert.deepEqual(calls[0].args.slice(-3), ['/usr/bin/node', 'worker.mjs', '--full-capability']);
+  assert.equal(calls[0].args.at(-1), '--full-capability');
+  assert.equal(calls[0].args.includes('worker.mjs'), true);
+  assert.equal(calls[0].args.includes('--setenv=HOME=/home/test-user'), true);
+  assert.equal(calls[0].args.includes('--setenv=PATH=/bin'), true);
+  assert.equal(calls[0].args.includes('/usr/bin/env'), true);
+  assert.equal(calls[0].args.includes('-i'), true);
+  assert.equal(calls[0].args.includes('HOME=/home/test-user'), true);
+  assert.equal(calls[0].args.some((entry) => String(entry).includes('provider-secret')), false);
+  assert.equal(calls[0].args.includes('--setenv=MODEL_API_KEY=provider-secret'), false);
   assert.equal(value.receipt.boundary, 'systemd-user-service-cgroup');
   assert.equal(value.receipt.unit.endsWith('.service'), true);
   assert.equal(value.child.pid, 4242);
-  assert.equal(calls[0].args.includes('--setenv=MODEL_API_KEY=provider-secret'), true);
   assert.equal(calls[0].args.includes('--property=StandardOutput=append:/state/task.log'), true);
+  assert.equal(calls[0].args.some((entry) => String(entry).includes('credential-handoff-loader.mjs')), true);
+  host.readFile = async () => 'populated 0\nfrozen 0\n';
+  await stopProcessBoundary(value.handle, { adapter: host, timeoutMs: 100 });
 });
 
 test('reports a failed systemd-run client before attempting unit ownership verification', async () => {
