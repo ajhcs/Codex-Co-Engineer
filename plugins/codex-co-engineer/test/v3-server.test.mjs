@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { readFileSync } from 'node:fs';
 import {
   WAIT_ANY_PROGRESS_DETAIL_HINT,
   WAIT_ANY_PROGRESS_EVENT_BYTES_MAX,
@@ -15,7 +15,11 @@ import {
   WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX,
   WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
 } from '../mcp/v3/compact-task.mjs';
-import { appendTaskEvent, createTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
+import { appendTaskEvent, createTask, taskPaths, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
+import {
+  legitimateCompletedReceipt,
+  zeroWorkPingTimeoutReceipt,
+} from './fixtures/r1-supervisor-result-truthfulness-fixtures.mjs';
 
 function currentRuntime() {
   const proc = readFileSync(`/proc/${process.pid}/stat`, 'utf8');
@@ -528,6 +532,81 @@ test('live MCP tool results use structured-first text fallback when response_mod
       JSON.stringify(legacy.result.structuredContent),
       'omitted response_mode must preserve full text duplication',
     );
+  });
+});
+
+test('tasks list, paged full/compact, and wait-any cannot project a completed PING-timeout as succeeded', async () => {
+  await withServer(async ({ state, request }) => {
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: zeroWorkPingTimeoutReceipt({ cwd: state }),
+    });
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: legitimateCompletedReceipt({ cwd: state }),
+    });
+
+    const listed = (await request({
+      jsonrpc: '2.0',
+      id: 60,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: {} },
+    })).result.structuredContent;
+    const pingListed = listed.tasks.find((task) => task.id === 'rtruth-ping-timeout');
+    const legitListed = listed.tasks.find((task) => task.id === 'rtruth-legitimate-completed');
+    assert.equal(pingListed.state, 'failed');
+    assert.equal(pingListed.status, 'failed');
+    assert.notEqual(pingListed.state, 'succeeded');
+    assert.equal(legitListed.state, 'succeeded');
+    assert.equal(legitListed.status, 'completed');
+
+    const fullPage = (await request({
+      jsonrpc: '2.0',
+      id: 61,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'full', limit: 20 } },
+    })).result.structuredContent;
+    assert.equal(fullPage.detail, 'full');
+    assert.equal(fullPage.tasks.find((task) => task.id === 'rtruth-ping-timeout').state, 'failed');
+    assert.equal(fullPage.tasks.find((task) => task.id === 'rtruth-legitimate-completed').state, 'succeeded');
+
+    const compactPage = (await request({
+      jsonrpc: '2.0',
+      id: 62,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'compact', limit: 20 } },
+    })).result.structuredContent;
+    assert.equal(compactPage.detail, 'compact');
+    assert.equal(compactPage.tasks.find((task) => task.id === 'rtruth-ping-timeout').state, 'failed');
+    assert.equal(compactPage.tasks.find((task) => task.id === 'rtruth-legitimate-completed').state, 'succeeded');
+
+    const waitAny = (await request({
+      jsonrpc: '2.0',
+      id: 63,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: {
+          task_ids: ['rtruth-ping-timeout', 'rtruth-legitimate-completed'],
+          wait_ms: 0,
+          wait_until: 'terminal',
+        },
+      },
+    })).result.structuredContent;
+    const pingWait = waitAny.tasks.find((entry) => entry.task_id === 'rtruth-ping-timeout');
+    const legitWait = waitAny.tasks.find((entry) => entry.task_id === 'rtruth-legitimate-completed');
+    assert.equal(pingWait.state, 'failed');
+    assert.equal(pingWait.task.state, 'failed');
+    assert.equal(pingWait.task.status, 'failed');
+    assert.notEqual(pingWait.state, 'succeeded');
+    assert.equal(legitWait.state, 'succeeded');
+    assert.equal(legitWait.task.status, 'completed');
+
+    const stored = await readFile(taskPaths(state, 'rtruth-ping-timeout').record, 'utf8');
+    assert.match(stored, /"schema": "codex-co-engineer.task.v1"/u);
+    assert.match(stored, /"status": "completed"/u);
   });
 });
 

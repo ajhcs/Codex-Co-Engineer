@@ -21,7 +21,15 @@ import { deadlineProjection } from './deadline.mjs';
 import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
 import { buildToolResult, normalizeResponseMode } from './response.mjs';
 import { listTasks, listTasksPage, stateRoot, waitForAnyTaskProgress } from './task-store.mjs';
-import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
+import {
+  cancelTask,
+  inspectTask,
+  projectSupervisorPublicState,
+  projectSupervisorTaskRecords,
+  projectSupervisorTerminalReceipt,
+  submitTask,
+  supervisorStatus,
+} from './supervisor.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
@@ -284,6 +292,24 @@ function publicTask(task) {
   });
 }
 
+function projectWaitAnyEntry(entry) {
+  const projectedTask = entry.task ? projectSupervisorTerminalReceipt(entry.task) : null;
+  return {
+    task_id: entry.task_id,
+    // Wait-any can return up to eight receipts at once. Keep the fresh
+    // event stream in the separate progress envelope, while each task
+    // is a bounded coordination projection instead of a full receipt.
+    task: projectedTask ? projectCompactTask({
+      task: projectedTask,
+      progress: entry.progress,
+      maxBytes: WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
+    }) : null,
+    progress: projectWaitAnyProgress(entry.progress),
+    state: entry.task ? projectSupervisorPublicState(entry.task) : null,
+    error: entry.error,
+  };
+}
+
 function takePresentationArgs(args = {}) {
   const { response_mode: responseModeRaw, ...businessArgs } = args;
   return {
@@ -354,20 +380,7 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
         signal,
       });
       const waitAny = {
-        tasks: value.tasks.map((entry) => ({
-          task_id: entry.task_id,
-          // Wait-any can return up to eight receipts at once. Keep the fresh
-          // event stream in the separate progress envelope, while each task
-          // is a bounded coordination projection instead of a full receipt.
-          task: entry.task ? projectCompactTask({
-            task: entry.task,
-            progress: entry.progress,
-            maxBytes: WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
-          }) : null,
-          progress: projectWaitAnyProgress(entry.progress),
-          state: entry.task ? publicState(entry.task.status) : null,
-          error: entry.error,
-        })),
+        tasks: value.tasks.map(projectWaitAnyEntry),
         wait_reason: value.wait_reason,
         wait_until: value.wait_until,
         waited_ms: value.waited_ms,
@@ -376,16 +389,17 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
       return result(enforceWaitAnyResponseBudget(waitAny), { responseMode });
     }
     if (!hasListArgs) {
-      return result({ tasks: (await listTasks(root)).map(publicTask) }, { responseMode });
+      return result({ tasks: projectSupervisorTaskRecords(await listTasks(root)).map(publicTask) }, { responseMode });
     }
     const page = await listTasksPage(root, args);
-    // Filter and page before projecting full public receipts; only project sliced results.
-    // Provide pagination metadata total/limit as required by contract; preserve detail echo.
+    // Filter and page before projecting public receipts; classify the sliced
+    // window only. Stored task.v1 bytes stay unmodified.
+    const windowTasks = projectSupervisorTaskRecords(page.tasks);
     if (page.detail === 'compact') {
-      const compactTasks = page.tasks.map((t) => compactTaskCard(t));
+      const compactTasks = windowTasks.map((t) => compactTaskCard(t));
       return result({ tasks: compactTasks, next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
     }
-    return result({ tasks: page.tasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
+    return result({ tasks: windowTasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
   }
   if (name === 'cancel') return result({ task: publicTask(await cancelTask(root, args.task_id)) }, { responseMode });
   throw Object.assign(new Error(`Unknown tool: ${name}`), { code: 'unknown_tool' });

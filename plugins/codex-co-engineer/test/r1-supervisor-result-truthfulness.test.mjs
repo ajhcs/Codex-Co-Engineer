@@ -2,11 +2,14 @@
 // terminal-receipt classifier. Stored task.v1 bytes are compared, not rewritten.
 
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { denyWorkerRemoteMutation } from '../mcp/v3/credential-boundary.mjs';
 import { publicState } from '../mcp/v3/contract.mjs';
@@ -24,6 +27,7 @@ import {
 import { TASK_SCHEMA, createTask, listTasks, readTask, taskPaths } from '../mcp/v3/task-store.mjs';
 import {
   AUTHORITATIVE_PING_TIMEOUT,
+  COMPACT_CARD_KEYS,
   COMPACT_OMITTED_TASKS_KEYS,
   CONTENT_FREE,
   HOSTILE_PATH,
@@ -32,7 +36,11 @@ import {
   LEGACY_STATUS_KEYS,
   PUBLIC_STATE_VOCABULARY,
   STORED_STATUS_VOCABULARY,
+  TASKS_LIST_KEYS,
+  TASKS_PAGED_KEYS,
   TASK_STATUS_KEYS,
+  WAIT_ANY_ENTRY_KEYS,
+  WAIT_ANY_KEYS,
   countingProxy,
   envelopeOnlyCompletedReceipt,
   legitimateCompletedReceipt,
@@ -45,6 +53,8 @@ import {
   wholeResultPingTimeoutReceipt,
   zeroWorkPingTimeoutReceipt,
 } from './fixtures/r1-supervisor-result-truthfulness-fixtures.mjs';
+
+const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'v3', 'server.mjs');
 
 function assertContentFreeReason(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
@@ -91,6 +101,50 @@ async function statusOf(root) {
     probeBoundary: async () => readyBoundary(),
     readProviderReadiness: async () => readyProviderReadiness(),
   });
+}
+
+async function withServerAt(root, fn) {
+  const child = spawn(process.execPath, ['--no-warnings', SERVER], {
+    env: {
+      ...process.env,
+      CODEX_CO_ENGINEER_STATE_DIR: root,
+      CODEX_CO_ENGINEER_GROK_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_CURSOR_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_DSH_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_ACPX_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_DSH_ACP_COMMAND: 'false',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const pending = [];
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-4096); });
+  const nextValue = () => new Promise((resolve, reject) => {
+    pending.push({ resolve, reject });
+  });
+  lines.on('line', (line) => {
+    const waiter = pending.shift();
+    if (waiter) waiter.resolve(JSON.parse(line));
+  });
+  child.once('error', (error) => {
+    for (const waiter of pending.splice(0)) waiter.reject(error);
+  });
+  child.once('exit', (code, signal) => {
+    const error = new Error(`MCP server exited (${code ?? signal}): ${stderr}`);
+    for (const waiter of pending.splice(0)) waiter.reject(error);
+  });
+  const request = async (message) => {
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+    return nextValue();
+  };
+  try {
+    return await fn({ request });
+  } finally {
+    child.stdin.end();
+    child.kill('SIGTERM');
+    lines.close();
+  }
 }
 
 test('authoritative zero-work PING timeout cannot project state=succeeded', () => {
@@ -402,4 +456,104 @@ test('classifier is pure, content-free, and does not mutate remotes', () => {
   assert.equal(json.includes('git@'), false);
   assert.equal(json.includes('push'), false);
   assert.equal(json.includes(HOSTILE_SECRET), false);
+});
+
+test('server tasks list, paged full/compact, and wait-any cannot project PING-timeout as succeeded', async () => {
+  await withRoot(async (root) => {
+    const { paths, stored } = await storeReceipt(root, zeroWorkPingTimeoutReceipt({ cwd: root }));
+    await storeReceipt(root, legitimateCompletedReceipt({ cwd: root }));
+    await withServerAt(root, async ({ request }) => {
+      const catalog = await request({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+      assert.deepEqual(catalog.result.tools.map((tool) => tool.name), [
+        'status', 'delegate', 'task', 'tasks', 'cancel',
+      ]);
+
+      const listed = (await request({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: {} },
+      })).result.structuredContent;
+      assert.deepEqual(Object.keys(listed), [...TASKS_LIST_KEYS]);
+      const pingListed = listed.tasks.find((task) => task.id === 'rtruth-ping-timeout');
+      const legitListed = listed.tasks.find((task) => task.id === 'rtruth-legitimate-completed');
+      assert.equal(pingListed.status, 'failed');
+      assert.equal(pingListed.state, 'failed');
+      assert.equal(pingListed.error.code, SUPERVISOR_FALSE_SUCCESS_REASON.code);
+      assertNotSucceeded(pingListed.state);
+      assertContentFreeReason(pingListed.error);
+      assert.equal(legitListed.status, 'completed');
+      assert.equal(legitListed.state, 'succeeded');
+
+      const fullPage = (await request({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { detail: 'full', limit: 20 } },
+      })).result.structuredContent;
+      assert.deepEqual(Object.keys(fullPage).sort(), [...TASKS_PAGED_KEYS].sort());
+      assert.equal(fullPage.detail, 'full');
+      const pingFull = fullPage.tasks.find((task) => task.id === 'rtruth-ping-timeout');
+      const legitFull = fullPage.tasks.find((task) => task.id === 'rtruth-legitimate-completed');
+      assert.equal(pingFull.state, 'failed');
+      assert.equal(pingFull.status, 'failed');
+      assertNotSucceeded(pingFull.state);
+      assert.equal(legitFull.state, 'succeeded');
+
+      const compactPage = (await request({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'tasks', arguments: { detail: 'compact', limit: 20 } },
+      })).result.structuredContent;
+      assert.deepEqual(Object.keys(compactPage).sort(), [...TASKS_PAGED_KEYS].sort());
+      assert.equal(compactPage.detail, 'compact');
+      for (const card of compactPage.tasks) {
+        assert.deepEqual(Object.keys(card).sort(), [...COMPACT_CARD_KEYS].sort());
+      }
+      const pingCompact = compactPage.tasks.find((task) => task.id === 'rtruth-ping-timeout');
+      const legitCompact = compactPage.tasks.find((task) => task.id === 'rtruth-legitimate-completed');
+      assert.equal(pingCompact.state, 'failed');
+      assertNotSucceeded(pingCompact.state);
+      assert.equal(legitCompact.state, 'succeeded');
+
+      const waitAny = (await request({
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'tools/call',
+        params: {
+          name: 'tasks',
+          arguments: {
+            task_ids: ['rtruth-ping-timeout', 'rtruth-legitimate-completed'],
+            wait_ms: 0,
+            wait_until: 'terminal',
+          },
+        },
+      })).result.structuredContent;
+      assert.deepEqual(Object.keys(waitAny).sort(), [...WAIT_ANY_KEYS].sort());
+      assert.equal(waitAny.tasks.length, 2);
+      for (const entry of waitAny.tasks) {
+        assert.deepEqual(Object.keys(entry).sort(), [...WAIT_ANY_ENTRY_KEYS].sort());
+      }
+      const pingWait = waitAny.tasks.find((entry) => entry.task_id === 'rtruth-ping-timeout');
+      const legitWait = waitAny.tasks.find((entry) => entry.task_id === 'rtruth-legitimate-completed');
+      assert.equal(pingWait.state, 'failed');
+      assert.equal(pingWait.task.state, 'failed');
+      assert.equal(pingWait.task.status, 'failed');
+      assertNotSucceeded(pingWait.state);
+      assertNotSucceeded(pingWait.task.state);
+      assert.equal(pingWait.task.summary.error_code, SUPERVISOR_FALSE_SUCCESS_REASON.code);
+      assertContentFreeReason(pingWait.task.summary.error_code);
+      assertContentFreeReason(pingWait.task.diagnostic);
+      assert.equal(legitWait.state, 'succeeded');
+      assert.equal(legitWait.task.state, 'succeeded');
+      assert.equal(legitWait.task.status, 'completed');
+    });
+
+    assert.throws(() => denyWorkerRemoteMutation('push'), (error) => error.code === 'remote_mutation_denied');
+    const after = await readFile(paths.record, 'utf8');
+    assert.equal(after, stored);
+    assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.status, 'completed');
+    assert.equal((await readTask(root, 'rtruth-ping-timeout')).task.schema, TASK_SCHEMA);
+  });
 });

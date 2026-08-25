@@ -69,6 +69,44 @@ export const TASK_STATUS_KEYS = Object.freeze([
   'view',
 ]);
 
+export const TASKS_LIST_KEYS = Object.freeze(['tasks']);
+
+export const TASKS_PAGED_KEYS = Object.freeze([
+  'tasks',
+  'next_cursor',
+  'has_more',
+  'detail',
+  'total',
+  'limit',
+]);
+
+export const WAIT_ANY_KEYS = Object.freeze([
+  'tasks',
+  'wait_reason',
+  'wait_until',
+  'waited_ms',
+  'triggered_task_id',
+]);
+
+export const WAIT_ANY_ENTRY_KEYS = Object.freeze([
+  'task_id',
+  'task',
+  'progress',
+  'state',
+  'error',
+]);
+
+export const COMPACT_CARD_KEYS = Object.freeze([
+  'id',
+  'state',
+  'provider',
+  'created_at',
+  'updated_at',
+  'deadline',
+  'branch',
+  'start_sha',
+]);
+
 export function readyBoundary() {
   return {
     ready: true,
