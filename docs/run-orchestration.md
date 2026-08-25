@@ -33,17 +33,27 @@ When `intent` is `dispatch` and a dispatcher function is injected:
 
 - every lane must already carry an exact provider/model pair
   (`orchestration_selection_unresolved` otherwise, with no handoff);
-- owner-only P29 handoff files are created from the process identity;
+- owner-only P29 handoff files are created from a session-unique
+  lifecycle identity (a nonce bound into the P29 identity, never a
+  collidable `run_id`+`assignment_id` digest);
 - the dispatcher receives the closed env and credential-free argv;
 - secrets never appear in argv;
 - worker remote mutation stays denied (`denyRunRemoteMutationV1` /
   P29 `denyWorkerRemoteMutation`).
 
 Cleanup unlinks remaining handoff files and stops injected children on
-dispatch failure, cancel, terminal completion, and restart. A restart
-creates a new handoff for the same identity after the previous file is
-gone. This boundary still never creates a workspace, branch, ref, or
-reservation.
+dispatch failure, cancel, terminal completion, and restart. Concurrent
+executions that share `run_id` and `assignment_id` still receive distinct
+handoff identities, so cancelling one run never deletes another run's
+handoff. Cancel, terminal, and restart require the internally registered
+receipt/session object; unknown or forged caller-supplied receipts, lane
+identities, and paths are rejected without touching live handoffs. Unlink
+or stop failures are not swallowed: remaining genuine lanes are still
+cleaned best-effort, and the caller receives `cleaned: false` with
+deterministic sanitized per-lane `unresolved` evidence. A restart creates
+a new handoff for the same lifecycle identity only after the previous
+cleanup fully succeeded. This boundary still never creates a workspace,
+branch, ref, or reservation.
 
 ## Composition
 
@@ -71,7 +81,10 @@ supervisor false-success reliability issue is out of scope.
   intent). Returns a detached frozen receipt or throws a typed
   content-free `RunContractV1Error` / `CredentialBoundaryError`.
 - `cancelRunDispatchV1(receipt)` / `completeRunDispatchV1(receipt)` /
-  `restartRunDispatchV1(receipt, options?)` — cleanup and restart.
+  `restartRunDispatchV1(receipt, options?)` — cleanup and restart of a
+  genuine internally registered receipt only. Returns `cleaned` plus
+  sanitized `unresolved` evidence; unknown receipts throw
+  `orchestration_session_unknown` and do not touch live handoffs.
 - `denyRunRemoteMutationV1(operation)` — P29 worker remote-mutation denial.
 - `describeRunOrchestrationV1()` — deterministic frozen inventory.
 

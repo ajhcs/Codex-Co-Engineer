@@ -19,14 +19,19 @@
 //   5. dispatch creates owner-only P29 handoffs (secrets never in argv),
 //      invokes the injected dispatcher with the closed map, and on
 //      failure/cancel/terminal/restart unlinks remaining handoff files
-//      via the process identity P29 already owns.
+//      via a session-unique lifecycle identity (never a collidable
+//      run_id+assignment_id digest). Cleanup uses only internally
+//      registered receipt/session provenance. Unlink/stop failures are
+//      not swallowed: remaining genuine lanes are still cleaned, and
+//      the caller receives cleaned=false with sanitized per-lane
+//      unresolved evidence.
 //
 // This boundary never provisions a workspace, never creates a branch or
 // ref, never holds a reservation, never audits live refs (P30), never
 // exposes a public API, and never claims Gate A. P23 composition is not
 // invoked. Upstream P26/P29 denial codes pass through unchanged.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import {
   CREDENTIAL_BOUNDARY_ERROR_CODES,
@@ -141,6 +146,11 @@ const PRIVATE_CONTENT_FREE = capturedFreeze({
 });
 
 const PRIVATE_SESSIONS = new WeakMap();
+const RANDOM_BYTES = randomBytes;
+const PRIVATE_CLEANUP_FAILURE_CODES = capturedFreeze([
+  'handoff_cleanup_failed',
+  'dispatcher_stop_failed',
+]);
 
 function failOrchestration(code, errorPath) {
   fail(code, errorPath, PRIVATE_CONTENT_FREE[code] ?? 'The orchestration request failed closed.');
@@ -168,9 +178,13 @@ function emptySideEffects() {
   return sideEffects;
 }
 
-function laneIdentity(runId, assignmentId) {
+function newSessionNonce() {
+  return RANDOM_BYTES(16).toString('hex');
+}
+
+function laneIdentity(runId, assignmentId, nonce) {
   return createHash('sha256')
-    .update(`p31:${runId}:${assignmentId}`)
+    .update(`p31:${runId}:${assignmentId}:${nonce}`)
     .digest('hex')
     .slice(0, 32);
 }
@@ -317,12 +331,12 @@ function resolveLaneExecution(assignment) {
   };
 }
 
-async function projectManifestLanes(runId, assignments, envSource) {
+async function projectManifestLanes(runId, assignments, envSource, nonce) {
   const publicLanes = [];
   const internal = [];
   for (const assignment of assignments) {
     const assignmentId = assignment.assignment_id;
-    const identity = laneIdentity(runId, assignmentId);
+    const identity = laneIdentity(runId, assignmentId, nonce);
     const resolved = resolveLaneExecution(assignment);
     if (!resolved.resolved) {
       const lane = capturedFreeze({
@@ -412,34 +426,86 @@ function buildReceipt({
   return freezeData(receipt);
 }
 
-async function cleanupIdentities(identities) {
-  for (const identity of identities) {
+function sanitizeUnresolved(entries) {
+  const unresolved = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const assignmentId = entry.assignment_id;
+    const code = entry.code;
+    if (typeof assignmentId !== 'string' || assignmentId.length === 0) continue;
+    if (typeof code !== 'string' || !capturedIncludes(PRIVATE_CLEANUP_FAILURE_CODES, code)) continue;
+    unresolved.push(capturedFreeze({ assignment_id: assignmentId, code }));
+  }
+  unresolved.sort((left, right) => {
+    if (left.assignment_id !== right.assignment_id) {
+      return left.assignment_id < right.assignment_id ? -1 : 1;
+    }
+    if (left.code !== right.code) return left.code < right.code ? -1 : 1;
+    return 0;
+  });
+  return capturedFreeze(unresolved);
+}
+
+function cleanupOutcome(unresolved) {
+  const sanitized = sanitizeUnresolved(unresolved);
+  return capturedFreeze({
+    cleaned: sanitized.length === 0,
+    missing: false,
+    unresolved: sanitized,
+  });
+}
+
+async function cleanupIdentities(lanes) {
+  const unresolved = [];
+  for (const lane of lanes) {
+    const assignmentId = lane?.assignmentId;
     try {
-      await recoverCredentialHandoffByIdentity(identity);
+      const recovered = await recoverCredentialHandoffByIdentity(lane.identity);
+      if (recovered?.cleaned !== true) {
+        unresolved.push({ assignment_id: assignmentId, code: 'handoff_cleanup_failed' });
+      }
     } catch {
-      // Best-effort cleanup must stay content-free and non-throwing.
+      unresolved.push({ assignment_id: assignmentId, code: 'handoff_cleanup_failed' });
     }
   }
+  return unresolved;
 }
 
 async function stopDispatchers(stops) {
-  for (const stop of stops) {
+  const unresolved = [];
+  for (const entry of stops) {
+    const stop = typeof entry === 'function' ? entry : entry?.stop;
     if (typeof stop !== 'function') continue;
     try {
       await stop();
     } catch {
-      // Stop failures must not resurrect secrets or skip remaining cleanup.
+      unresolved.push({
+        assignment_id: typeof entry === 'object' && entry ? entry.assignmentId : undefined,
+        code: 'dispatcher_stop_failed',
+      });
     }
   }
+  return unresolved;
 }
 
 async function cleanupSession(session) {
-  if (!session) return { cleaned: true, missing: true };
-  session.cleaned = true;
-  await stopDispatchers(session.stops);
-  await cleanupIdentities(session.identities);
+  if (!session) {
+    return capturedFreeze({
+      cleaned: false,
+      missing: true,
+      unresolved: capturedFreeze([]),
+    });
+  }
+  const unresolved = [];
+  const stopFailures = await stopDispatchers(session.stops ?? []);
+  for (const entry of stopFailures) unresolved.push(entry);
+  const lanes = Array.isArray(session.internal) ? session.internal : [];
+  const handoffFailures = await cleanupIdentities(lanes);
+  for (const entry of handoffFailures) unresolved.push(entry);
   session.stops = [];
-  return { cleaned: true, missing: false };
+  const outcome = cleanupOutcome(unresolved);
+  session.cleaned = outcome.cleaned;
+  return outcome;
 }
 
 async function createLaneHandoff(lane) {
@@ -476,7 +542,9 @@ async function dispatchLanes(internal, parsed, sideEffects) {
       }));
       sideEffects.task_dispatched = true;
       sideEffects.provider_process_started = true;
-      if (result && typeof result.stop === 'function') stops.push(result.stop);
+      if (result && typeof result.stop === 'function') {
+        stops.push({ assignmentId: lane.assignmentId, identity: lane.identity, stop: result.stop });
+      }
     }
   } catch (error) {
     await cleanupSession(session);
@@ -495,10 +563,12 @@ export async function orchestrateRunDispatchV1(request, options) {
     preflightOptionsFrom(parsedOptions),
   );
   const envSource = takeEnvAfterPreflight(parsedOptions);
+  const sessionNonce = newSessionNonce();
   const projected = await projectManifestLanes(
     preflight.run_id,
     parsedRequest.manifest.assignments,
     envSource,
+    sessionNonce,
   );
   sideEffects.credentials_projected = projected.internal.some((lane) => !lane.unresolved);
   let session = null;
@@ -527,50 +597,47 @@ export async function orchestrateRunDispatchV1(request, options) {
 
 function requireSession(receipt) {
   assertNotProxy(receipt, 'receipt');
-  if (!isPlainObject(receipt) && typeof receipt !== 'object') {
+  if (receipt === undefined || receipt === null || (typeof receipt !== 'object' && typeof receipt !== 'function')) {
     failOrchestration('orchestration_session_unknown', 'receipt');
   }
-  const session = PRIVATE_SESSIONS.get(receipt);
+  let session;
+  try {
+    session = PRIVATE_SESSIONS.get(receipt);
+  } catch {
+    failOrchestration('orchestration_session_unknown', 'receipt');
+  }
   if (!session) failOrchestration('orchestration_session_unknown', 'receipt');
   return session;
 }
 
-function identitiesFromReceipt(receipt) {
-  const lanes = receipt?.lanes;
-  if (!Array.isArray(lanes)) return [];
-  const identities = [];
-  for (const lane of lanes) {
-    if (lane && typeof lane.identity === 'string') identities.push(lane.identity);
-  }
-  return identities;
+function lifecycleResult(status, cleanup, extra = {}) {
+  return freezeData({
+    status,
+    cleaned: cleanup.cleaned === true,
+    missing: cleanup.missing === true,
+    unresolved: cleanup.unresolved,
+    ...extra,
+  });
 }
 
 export async function cancelRunDispatchV1(receipt) {
-  let session = null;
-  try {
-    session = requireSession(receipt);
-  } catch (error) {
-    await cleanupIdentities(identitiesFromReceipt(receipt));
-    if (error instanceof RunContractV1Error && error.code === 'orchestration_session_unknown') {
-      return freezeData({ status: 'cancelled', cleaned: true, missing: true });
-    }
-    throw error;
-  }
-  await cleanupSession(session);
-  return freezeData({ status: 'cancelled', cleaned: true, missing: false });
+  const session = requireSession(receipt);
+  const cleanup = await cleanupSession(session);
+  return lifecycleResult('cancelled', cleanup);
 }
 
 export async function completeRunDispatchV1(receipt) {
   const session = requireSession(receipt);
-  await cleanupSession(session);
-  return freezeData({ status: 'terminal', cleaned: true, missing: false });
+  const cleanup = await cleanupSession(session);
+  return lifecycleResult('terminal', cleanup);
 }
 
 export async function restartRunDispatchV1(receipt, options) {
   const session = requireSession(receipt);
-  await stopDispatchers(session.stops);
-  session.stops = [];
-  await cleanupIdentities(session.identities);
+  const previous = await cleanupSession(session);
+  if (previous.cleaned !== true) {
+    return lifecycleResult('dispatched', previous, { restarted: false });
+  }
   const parsed = parseOptions(options);
   const dispatch = parsed.dispatch ?? session.parsed.dispatch;
   if (typeof dispatch !== 'function') {
@@ -590,6 +657,7 @@ export async function restartRunDispatchV1(receipt, options) {
     status: 'dispatched',
     cleaned: false,
     restarted: true,
+    unresolved: capturedFreeze([]),
     side_effects: capturedFreeze(sideEffects),
   });
 }
