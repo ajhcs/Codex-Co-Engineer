@@ -1,0 +1,42 @@
+// Cross-process journal appender used by r1-run-journal concurrency tests.
+// Usage:
+//   node r1-run-journal-worker.mjs <storeRoot> <journalRoot> <runId> <count> <prefix>
+// Appends `count` child_progress events with distinct notes and prints one
+// JSON result line: { ok, appended, created, deduped, code? }.
+
+import { openRunStore } from '../../mcp/v3/run-store.mjs';
+import { openRunJournal } from '../../mcp/v3/run-journal.mjs';
+
+const [storeRoot, journalRoot, runId, rawCount, prefix] = process.argv.slice(2);
+const count = Number.parseInt(rawCount, 10);
+
+function emit(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+try {
+  const store = await openRunStore(storeRoot);
+  const journal = await openRunJournal({ root: journalRoot, store, run_id: runId });
+  let appended = 0;
+  let created = 0;
+  let deduped = 0;
+  for (let index = 0; index < count; index += 1) {
+    const result = await journal.append({
+      kind: 'child_progress',
+      data: { assignment_id: 'a0', note: `${prefix}.${index}` },
+      dedupe_key: `${prefix}/${index}`,
+    });
+    appended += 1;
+    if (result.created) created += 1;
+    if (result.deduped) deduped += 1;
+  }
+  emit({ ok: true, appended, created, deduped });
+} catch (error) {
+  emit({
+    ok: false,
+    code: error?.code ?? 'unknown',
+    path: error?.path ?? '',
+    message: String(error?.message ?? error),
+  });
+  process.exit(1);
+}

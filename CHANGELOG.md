@@ -357,6 +357,81 @@
   `r1-provider-driver` and `r1-provider-driver-adversarial` tests plus the
   reusable `provider-driver-contract-suite` harness.
 
+- **Aggregate journal binding after R24A resolution_ready (R25B).** Additive
+  `run-journal.mjs` gains stamp v2 and distinct
+  `createAggregateRunJournal` / `openAggregateRunJournal` entrypoints that
+  bind an existing P25 journal root/run identity to an exact validated R24A
+  marker, claim, anchor, coordination, and resolved-plan identity only after
+  that aggregate run is `resolution_ready` and the durable resolved-plan
+  record/digest re-verify. Legacy `createRunJournal` / `openRunJournal`,
+  stamp v1, fingerprint, six event kinds, reducer/state/cursor schemas, and
+  lock order stay byte- and behavior-identical; standalone P24/P25 callers
+  are unchanged. There is no migration, cross-open, root adoption,
+  empty-root inference, or legacy-to-aggregate fallback. Missing,
+  malformed, mismatched, or swapped R24A records, marker/claim/stamp
+  substitutions, symlink/hardlink/non-regular files, wrong run/root/plan,
+  stale phase/revision, and post-validation TOCTOU fail closed with typed
+  content-free errors. Identical aggregate identity reopens and replays
+  exactly; a different binding is a permanent conflict. Coverage lives in
+  `r1-run-journal-aggregate` and `r1-run-journal-aggregate-adversarial`
+  tests. R24A record publication remains in `aggregate-run-anchor.mjs`.
+- **Aggregate pre-dispatch run anchor for unresolved P05 selection.** Additive
+  `aggregate-run-anchor.mjs` persists one immutable AggregateRunAnchorV1 plus
+  absorbing coordination state for runs whose P05 provider/model selection is
+  still unresolved, inside a caller-supplied existing private root distinct
+  from accepted P24/P25. The P03 registry gains closed labels `storage-root.v1`,
+  `aggregate-run-anchor.v1`, `aggregate-run-coordination.v1`,
+  `aggregate-submission-idempotency.v1`, `aggregate-run-claim.v1`,
+  `aggregate-selection-reply.v1`, and `aggregate-resolved-plan.v1`.
+  `initializeAggregateRunAnchorRoot` publishes an atomic owner-only
+  `storage-root.v1` marker of kind `aggregate_run_anchor` plus a nonce, and
+  only onto an existing private completely empty root. Open rejects unmarked
+  empty roots and nonempty P24, P25, or foreign layouts, and every operation
+  reverifies root and marker identity. `claims/<run_id>.json` is durable
+  before `runs/<run_id>`: a claim binds run, anchor, submission key, marker,
+  and claim nonce/digest. Namespace lock then per-run lock. An empty directory
+  without the exact claim is never adopted; the exact claim recovers the same
+  identity; a mismatch conflicts; losers never remove winner paths. High-level
+  `commitSelectionRequest`, `commitSelectionResolution`, and
+  `commitResolvedPlan` publish bounded canonical JSON records at fixed names,
+  fsync, and verify the full record before coordination references it. Exact
+  orphan records are adopted; differing orphans conflict; committed missing,
+  malformed, or digest-mismatched files are corruption. The lattice is
+  `submitted@0` → `awaiting_selection@1` → `resolution_ready@2`, or
+  `submitted@0` → `resolution_ready@1`; revisions are exact, the terminal
+  phase is absorbing, and identical retries are idempotent. There is no public
+  digest CAS, journal, reducer, scheduler, provider, workspace, server, or MCP
+  wiring, and no migration of P24/P25. Coverage lives in
+  `r1-aggregate-run-anchor` and `r1-aggregate-run-anchor-adversarial` tests.
+- **Append-only run journal, deterministic reducer, and run-bound cursor.**
+  Additive `run-reducer.mjs` / `run-journal.mjs` persist one bounded
+  append-only canonical JSONL event chain per run inside a private per-run
+  directory of a separate caller-supplied existing private journal root.
+  Every create/open/append/read first binds an exact validated accepted-P24
+  durable run record (the `openRunStore(...)` handle and its `getByRunId`
+  result) by run identity and canonical digest, never writes into the P24
+  root (sharing it fails closed), and re-verifies a creation stamp bound to
+  that record on every operation, so inode-reuse directory swaps fail hard.
+  Entries carry dense sequences over closed event and content-addressed
+  artifact-ref shapes chained by a domain-separated SHA-256 hash; appends
+  serialize in-process and cross-process through an exclusive lock with
+  bounded dead-owner and age-capped stale recovery, support compare-and-swap
+  `expected_seq`, exact head dedupe, typed replay/dedupe conflicts, and full
+  lattice validation before any byte is written. Publication uses
+  same-directory temporaries with file fsync, atomic rename, and directory
+  fsync for the journal first and the atomically published derived state
+  second, so crashes leave only unpublished temporaries or a stale cache
+  that exact replay rebuilds. A torn unterminated final line is the only
+  healable damage; committed corruption or regression, malformed or foreign
+  entries, symlinks, hardlinks, floods, oversized files, and path attacks
+  fail closed with typed constant errors. The pure deterministic
+  terminal-absorbing reducer projects monotonic child/run state, and opaque
+  run-bound checksummed cursors page bounded event windows whose
+  diagnostics stay content-free counts. There is no artifact verification,
+  scheduler or provider invocation, attention reduction, supervisor/server
+  wiring, cleanup/GC, semantic memory, merge authority, or protected-ref
+  implementation. Coverage lives in `r1-run-journal` and
+  `r1-run-journal-adversarial` tests.
 - **Durable local run store and idempotent submission.** Additive
   `run-store.mjs` persists one bounded canonical record per run in an
   explicit caller-supplied existing private directory. The store fails

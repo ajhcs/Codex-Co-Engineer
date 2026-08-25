@@ -97,6 +97,26 @@ reducer, scheduler, provider dispatch, workspace provisioning, cleanup,
 candidate composition, `AttentionBatchV1`, or MCP wiring. Gate A remains
 the functional release authority; Gate B context-efficiency and Gate C
 credit economics stay advisory.
+Library-only P24/P25 run persistence now accepts an existing private
+directory, persists identity-bound idempotent submission records, and
+appends a hash-chained per-run event journal with a deterministic
+terminal-absorbing reducer and run-bound cursors. A separate R24A
+aggregate pre-dispatch run anchor accepts its own existing private root
+marked `storage-root.v1` kind `aggregate_run_anchor`, binds identity with
+durable claims before run directories, and publishes full selection
+request/reply/resolved-plan records before absorbing coordination
+references; it does not migrate or write into P24/P25. R25B is only the
+binding bridge that can open the existing P25 journal against that exact
+R24A identity after `resolution_ready`, using stamp v2 and distinct
+aggregate entrypoints; it does not add event kinds, a second run lock,
+scheduler, provider, workspace, server, or MCP wiring, and it never
+migrates or cross-opens legacy P24/P25 state. None of these library layers
+implement the rest of the run runtime: there is no scheduler, provider
+dispatch, workspace provisioning, cleanup, candidate composition,
+`AttentionBatchV1`, supervisor/server journal wiring, or MCP surface above
+the library layer.
+Gate A remains the functional release authority; Gate B context-efficiency
+and Gate C credit economics stay advisory.
 
 ## Durable, low-token agent completion waits
 
