@@ -86,6 +86,13 @@ State contains:
 - local repository/worktree paths, branch names, and commit references;
 - opaque local session, cloud agent, run, branch, and PR identifiers.
 
+R1 run-store records are a separate library surface. Callers pass an
+already-existing private directory (owner-only, not a symlink). The store
+writes owner-only canonical JSON plus a request-idempotency pointer, uses
+no-follow opens, and restores by recomputing accepted identity and
+telemetry digests. It is not wired to the five-tool MCP catalog, does not
+replace `tasks/` receipts, and does not delete runs.
+
 MCP `task`/`status` results may overlay a compact live `last_event` from
 `events.jsonl` while the durable `task.json` receipt is still mid-run.
 Those snapshots omit prompt text, argv, secrets, and raw event streams.

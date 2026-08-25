@@ -62,6 +62,14 @@ into the MCP server, supervisor, or scheduler. Gate A remains the
 functional release authority; Gate B context-efficiency and Gate C credit
 economics stay advisory.
 
+A library-only durable run store now accepts an existing private directory
+and persists identity-bound, idempotent submission records. It does not
+implement the rest of the run runtime: there is no atomic journal or
+reducer, scheduler, provider dispatch, workspace provisioning, cleanup,
+candidate composition, `AttentionBatchV1`, or MCP wiring. Gate A remains
+the functional release authority; Gate B context-efficiency and Gate C
+credit economics stay advisory.
+
 ## Durable, low-token agent completion waits
 
 Status: implemented in 3.1.0 with remaining real-host MCP pending-call
