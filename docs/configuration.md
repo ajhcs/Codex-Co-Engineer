@@ -255,6 +255,19 @@ does not stream raw events or emit unsolicited stdio callbacks across
 assistant turns. See [MCP pending-call budget](mcp-pending-call.md) and the
 [efficient dogfood workflow](efficient-dogfood.md).
 
+### Bounded runs (additive)
+
+The five-tool catalog does not gain a sixth tool. One run is submitted
+through `delegate.run` with 1–8 lanes. `status`, `task`, `tasks`, and
+`cancel` accept `run_id` to inspect, wait (`wait_until:
+"decision_or_attention"`), latch attention, reply exactly once
+(`run_reply`), cancel named lanes, or request proof-bound `cleanup`.
+Omitted run fields keep the 3.2.1 shapes above, including `view:
+"compact"`, `detail: "compact"`, `task_ids` wait-any, and
+`response_mode: "structured"`. Provider/model is explicit; P22 is not a
+provider; parsing failures dispatch nothing. See
+[the run tool API](run-tool-api.md).
+
 ### Local providers
 
 `workspace_mode: "managed"` is the default. It creates one locked
