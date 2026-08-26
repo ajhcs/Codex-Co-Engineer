@@ -1865,7 +1865,82 @@ function boundCatalogSnapshotPayload(snapshot) {
   };
 }
 
+function assignmentDispatchFacts(assignments, dispatchedById = null) {
+  if (!ARRAY_IS_ARRAY(assignments)) {
+    failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+  }
+  const facts = [];
+  const seen = new Set();
+  for (const assignment of assignments) {
+    const assignmentId = assignment?.assignment_id;
+    if (typeof assignmentId !== 'string' || seen.has(assignmentId)) {
+      failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+    }
+    seen.add(assignmentId);
+    facts.push({
+      assignment_id: assignmentId,
+      dispatched: dispatchedById instanceof Map
+        ? dispatchedById.get(assignmentId) === true
+        : false,
+    });
+  }
+  return facts;
+}
+
+function dispatchFactsFromReceipt(assignments, receipt) {
+  const byId = new Map();
+  if (ARRAY_IS_ARRAY(receipt?.lanes)) {
+    for (const lane of receipt.lanes) {
+      if (lane === null || typeof lane !== 'object' || ARRAY_IS_ARRAY(lane) || IS_PROXY(lane)) {
+        continue;
+      }
+      if (typeof lane.assignment_id === 'string') {
+        byId.set(lane.assignment_id, lane.dispatched === true);
+      }
+    }
+  }
+  return assignmentDispatchFacts(assignments, byId);
+}
+
+function boundAssignmentDispatch(plan) {
+  const facts = plan.assignment_dispatch;
+  if (!ARRAY_IS_ARRAY(facts) || facts.length !== plan.assignments.length) {
+    failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+  }
+  const bound = [];
+  const seen = new Set();
+  for (let index = 0; index < plan.assignments.length; index += 1) {
+    const assignmentId = plan.assignments[index]?.assignment_id;
+    const fact = facts[index];
+    if (fact === null || typeof fact !== 'object' || ARRAY_IS_ARRAY(fact) || IS_PROXY(fact)
+      || typeof assignmentId !== 'string'
+      || fact.assignment_id !== assignmentId
+      || typeof fact.dispatched !== 'boolean'
+      || seen.has(assignmentId)) {
+      failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+    }
+    seen.add(assignmentId);
+    bound.push({
+      assignment_id: assignmentId,
+      dispatched: fact.dispatched === true,
+    });
+  }
+  const allDispatched = bound.every((fact) => fact.dispatched === true);
+  if ((plan.dispatched === true) !== allDispatched) {
+    failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+  }
+  return bound;
+}
+
 async function persistSchedulerPlan(schedulerRoot, payload) {
+  const assignmentDispatch = ARRAY_IS_ARRAY(payload.assignment_dispatch)
+    ? payload.assignment_dispatch.map((fact) => ({
+      assignment_id: fact.assignment_id,
+      dispatched: fact.dispatched === true,
+    }))
+    : assignmentDispatchFacts(payload.assignments);
+  const dispatched = assignmentDispatch.length > 0
+    && assignmentDispatch.every((fact) => fact.dispatched === true);
   await persistAtomicJson(planPath(schedulerRoot, payload.run_id), {
     schema: SCHEDULER_PLAN_SCHEMA,
     run_id: payload.run_id,
@@ -1873,7 +1948,8 @@ async function persistSchedulerPlan(schedulerRoot, payload) {
     assignments: payload.assignments,
     plan_identity: payload.plan_identity,
     catalog_digest: payload.catalog_digest ?? null,
-    dispatched: payload.dispatched === true,
+    dispatched,
+    assignment_dispatch: assignmentDispatch,
   });
   if (payload.catalog_snapshot !== null && payload.catalog_snapshot !== undefined) {
     await persistAtomicJson(catalogSnapshotPath(schedulerRoot, payload.run_id), payload.catalog_snapshot);
@@ -1905,11 +1981,23 @@ async function loadSchedulerPlan(schedulerRoot, runId) {
       failAdapter('durable_state_mismatch', 'catalog', CONTENT_FREE.durable_state_mismatch);
     }
   }
+  parsed.assignment_dispatch = boundAssignmentDispatch(parsed);
   return parsed;
 }
 
 function planWasDispatched(plan) {
   return plan?.dispatched === true;
+}
+
+function assignmentWasDispatched(plan, assignment) {
+  const assignmentId = assignment?.assignment_id;
+  if (!ARRAY_IS_ARRAY(plan?.assignment_dispatch) || typeof assignmentId !== 'string') {
+    return false;
+  }
+  for (const fact of plan.assignment_dispatch) {
+    if (fact?.assignment_id === assignmentId) return fact.dispatched === true;
+  }
+  return false;
 }
 
 function reconstructLane(assignment, inspected, {
@@ -2010,9 +2098,9 @@ async function inspectPlanLane(inspectTask, plan, assignment) {
 }
 
 async function reconstructPlanReceipt(plan, inspectTask, clock, status = 'inspected') {
-  const dispatched = planWasDispatched(plan);
   const lanes = [];
   for (const assignment of plan.assignments) {
+    const dispatched = assignmentWasDispatched(plan, assignment);
     const inspected = dispatched === true
       ? await inspectPlanLane(inspectTask, plan, assignment)
       : null;
@@ -2025,7 +2113,7 @@ async function reconstructPlanReceipt(plan, inspectTask, clock, status = 'inspec
     base_sha: plan.base_sha,
     created: false,
     lanes,
-    complete_candidate_blocked: dispatched !== true || lanes.some((lane) => lane.required
+    complete_candidate_blocked: planWasDispatched(plan) !== true || lanes.some((lane) => lane.required
       && (lane.status === 'unresolved' || lane.status === 'failed')),
     wake: false,
     remote_mutated: false,
@@ -2056,12 +2144,14 @@ function wrapDurableScheduler({
         catalog_digest: catalogPayload?.catalog_digest ?? null,
         catalog_snapshot: catalogPayload,
         dispatched: false,
+        assignment_dispatch: assignmentDispatchFacts(request.assignments),
       });
       pendingRunCatalogSnapshots.delete(request.run_id);
       if (typeof beforeProviderDispatch === 'function') {
         await beforeProviderDispatch(request);
       }
       const receipt = await inner.submitAssignments(request);
+      const assignmentDispatch = dispatchFactsFromReceipt(request.assignments, receipt);
       await persistSchedulerPlan(schedulerRoot, {
         run_id: request.run_id,
         base_sha: request.base_sha,
@@ -2069,7 +2159,8 @@ function wrapDurableScheduler({
         plan_identity: identity,
         catalog_digest: catalogPayload?.catalog_digest ?? null,
         catalog_snapshot: catalogPayload,
-        dispatched: true,
+        dispatched: assignmentDispatch.every((fact) => fact.dispatched === true),
+        assignment_dispatch: assignmentDispatch,
       });
       return receipt;
     },
@@ -2094,12 +2185,12 @@ function wrapDurableScheduler({
         }
         const plan = await loadSchedulerPlan(schedulerRoot, request.run_id);
         if (plan === null) throw error;
-        const dispatched = planWasDispatched(plan);
         const selected = new Set(request.assignment_ids ?? []);
         const lanes = [];
         let unconfirmed = false;
         for (const assignment of plan.assignments) {
           const selectedLane = selected.has(assignment.assignment_id);
+          const dispatched = assignmentWasDispatched(plan, assignment);
           if (dispatched !== true) {
             const lane = reconstructLane(assignment, null, {
               cancelAttempted: selectedLane,
@@ -2133,7 +2224,7 @@ function wrapDurableScheduler({
           if (lane.cancel_confirmed !== true) unconfirmed = true;
           lanes.push(lane);
         }
-        const blocked = unconfirmed || dispatched !== true;
+        const blocked = unconfirmed || planWasDispatched(plan) !== true;
         return freezeData({
           schema: 'codex-co-engineer.run-scheduler-receipt.v1',
           status: blocked ? 'inspected' : 'cancelled',

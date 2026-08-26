@@ -1,7 +1,7 @@
 // R-CUTOVER adversarial coverage: catalog stability, omission compatibility,
 // validation-before-side-effects, learned routing, P22 isolation, proxies,
-// mixed operations, evidence leaks, cleanup without proof, and remote
-// mutation denial.
+// mixed operations, evidence leaks, cleanup without proof, remote
+// mutation denial, and per-assignment dispatch durability.
 
 import assert from 'node:assert/strict';
 import { inspect, types as utilTypes } from 'node:util';
@@ -462,6 +462,245 @@ test('legitimate dispatched restart still inspects and never redispatches', asyn
     assert.equal(cancelCalls.length, 0);
   } finally {
     await rm(first.root, { recursive: true, force: true });
+  }
+});
+
+function laneByAssignment(receipt, assignmentId) {
+  return receipt.lanes.find((lane) => lane.assignment_id === assignmentId);
+}
+
+function assertZeroReplay(receipt) {
+  assert.equal(receipt.side_effects.replay, false);
+  assert.equal(receipt.side_effects.fallback, false);
+  assert.equal(receipt.candidate.composed, false);
+  assert.equal(receipt.candidate.ready_for_codex_review, false);
+}
+
+function assertNeverDispatchedLane(lane, inspectCalls, cancelCalls) {
+  assert.equal(lane.dispatched === true, false);
+  assert.equal(lane.status, 'unresolved');
+  assert.equal(FORBIDDEN_RESTART_AUTHORITY.has(lane.status), false);
+  assert.notEqual(lane.status, 'completed');
+  assert.notEqual(lane.status, 'cancelled');
+  assert.notEqual(lane.cancel_confirmed, true);
+  assert.equal(lane.unresolved == null, false);
+  assert.equal(typeof lane.unresolved.code, 'string');
+  assert.equal(inspectCalls.includes(lane.assignment_id), false);
+  assert.equal(cancelCalls.includes(lane.assignment_id), false);
+}
+
+test('two-lane partial dispatch restart never inspects or terminalizes the never-dispatched lane', async () => {
+  const laneA = makeAssignment({ assignmentId: 'lane-a', taskId: 'task-a', writeScope: ['a/**'] });
+  const laneB = makeAssignment({ assignmentId: 'lane-b', taskId: 'task-b', writeScope: ['b/**'] });
+  const runArgs = makeRunArgs({ assignments: [laneA, laneB] });
+  const mixedDispatch = [];
+  const mixedInspect = [];
+  const mixedCancel = [];
+  const mixedHooks = {
+    delegateTask: async (plan) => {
+      mixedDispatch.push(plan.assignment_id);
+      if (plan.assignment_id === laneB.assignment_id) throw new Error(HOSTILE_SECRET);
+      return { task_id: plan.task_id, status: 'dispatched', cursor: '0' };
+    },
+    inspectTask: async (plan) => {
+      mixedInspect.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'completed', cursor: plan.cursor ?? '0' };
+    },
+    cancelTask: async (plan) => {
+      mixedCancel.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'cancelled', cancelled: true };
+    },
+  };
+  const mixed = await createDurableAdapter(mixedHooks);
+  try {
+    const submitted = await mixed.adapter.dispatch('delegate', runArgs);
+    assert.equal(submitted.operation, 'submit');
+    assert.equal(submitted.lanes.length, 2);
+    assert.equal(laneByAssignment(submitted, laneA.assignment_id).status, 'dispatched');
+    assert.equal(laneByAssignment(submitted, laneB.assignment_id).status, 'unresolved');
+    assert.equal(submitted.complete_candidate_blocked, true);
+    assertZeroReplay(submitted);
+    assert.equal(mixedDispatch.includes(laneA.assignment_id), true);
+    assert.equal(mixedDispatch.includes(laneB.assignment_id), true);
+    assert.equal(mixedInspect.length, 0);
+    const persisted = await readDurablePlan(mixed.root);
+    assert.equal(persisted.dispatched, false);
+    assert.equal(persisted.assignment_dispatch.length, 2);
+    assert.equal(persisted.assignment_dispatch[0].assignment_id, laneA.assignment_id);
+    assert.equal(persisted.assignment_dispatch[0].dispatched, true);
+    assert.equal(persisted.assignment_dispatch[1].assignment_id, laneB.assignment_id);
+    assert.equal(persisted.assignment_dispatch[1].dispatched, false);
+    assert.equal(inspect(submitted).includes(HOSTILE_SECRET), false);
+
+    const reopen = () => createDurableAdapter({ root: mixed.root, ...mixedHooks });
+    const dispatchCount = mixedDispatch.length;
+
+    const statusAdapter = await reopen();
+    const reconstructed = await statusAdapter.seams.scheduler.resumeAssignments({ run_id: RUN_ID });
+    const reconstructedA = laneByAssignment(reconstructed, laneA.assignment_id);
+    const reconstructedB = laneByAssignment(reconstructed, laneB.assignment_id);
+    assert.equal(reconstructedA.dispatched, true);
+    assert.equal(reconstructedA.status, 'completed');
+    assertNeverDispatchedLane(reconstructedB, mixedInspect, mixedCancel);
+    assert.equal(reconstructedB.unresolved.code, 'dispatch_failed');
+    assert.equal(reconstructed.complete_candidate_blocked, true);
+    const inspected = await statusAdapter.adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.operation, 'status');
+    assert.equal(inspected.tool, 'status');
+    assert.equal(laneByAssignment(inspected, laneA.assignment_id).status, 'completed');
+    assert.equal(laneByAssignment(inspected, laneB.assignment_id).status, 'unresolved');
+    assert.equal(laneByAssignment(inspected, laneB.assignment_id).unresolved.code, 'dispatch_failed');
+    assert.equal(inspected.complete_candidate_blocked, true);
+    assert.equal(inspected.decision_or_attention.unresolved_required_blocks, true);
+    assertZeroReplay(inspected);
+    assert.equal(mixedInspect.includes(laneA.assignment_id), true);
+    assert.equal(mixedInspect.includes(laneB.assignment_id), false);
+    assert.equal(mixedDispatch.length, dispatchCount);
+    assert.equal(mixedCancel.length, 0);
+    assert.equal(inspect(inspected).includes(HOSTILE_SECRET), false);
+
+    const resumeAdapter = await reopen();
+    const resumed = await resumeAdapter.adapter.dispatch('task', {
+      run_id: RUN_ID,
+      wait_until: 'decision_or_attention',
+      wait_ms: 0,
+    });
+    assert.equal(resumed.operation, 'wait');
+    assert.equal(resumed.tool, 'task');
+    assert.equal(laneByAssignment(resumed, laneA.assignment_id).status, 'completed');
+    assert.equal(laneByAssignment(resumed, laneB.assignment_id).status, 'unresolved');
+    assert.equal(resumed.complete_candidate_blocked, true);
+    assertZeroReplay(resumed);
+    assert.equal(mixedInspect.includes(laneB.assignment_id), false);
+    assert.equal(mixedDispatch.length, dispatchCount);
+    assert.equal(mixedCancel.length, 0);
+
+    const resubmitAdapter = await reopen();
+    const resubmit = await resubmitAdapter.adapter.dispatch('delegate', runArgs);
+    assert.equal(resubmit.operation, 'submit');
+    assert.equal(resubmit.tool, 'delegate');
+    assert.equal(laneByAssignment(resubmit, laneA.assignment_id).status, 'completed');
+    assert.equal(laneByAssignment(resubmit, laneB.assignment_id).status, 'unresolved');
+    assert.equal(resubmit.complete_candidate_blocked, true);
+    assertZeroReplay(resubmit);
+    assert.equal(mixedDispatch.length, dispatchCount);
+    assert.equal(mixedInspect.includes(laneB.assignment_id), false);
+
+    const cancelAdapter = await reopen();
+    const cancelled = await cancelAdapter.adapter.dispatch('cancel', {
+      run_id: RUN_ID,
+      assignment_ids: [laneA.assignment_id, laneB.assignment_id],
+    });
+    assert.equal(cancelled.operation, 'cancel');
+    assert.equal(cancelled.tool, 'cancel');
+    assert.equal(cancelled.complete_candidate_blocked, true);
+    assertZeroReplay(cancelled);
+    assert.equal(laneByAssignment(cancelled, laneA.assignment_id).status, 'cancelled');
+    const cancelledB = laneByAssignment(cancelled, laneB.assignment_id);
+    assert.equal(cancelledB.status, 'unresolved');
+    assert.equal(cancelledB.unresolved.code, 'safe_cancel_unconfirmed');
+    assert.notEqual(cancelledB.cancel_confirmed, true);
+    assert.equal(mixedCancel.includes(laneA.assignment_id), true);
+    assert.equal(mixedCancel.includes(laneB.assignment_id), false);
+    assert.equal(mixedInspect.includes(laneB.assignment_id), false);
+    assert.equal(mixedDispatch.length, dispatchCount);
+    const afterCancel = await readDurablePlan(mixed.root);
+    assert.equal(afterCancel.assignment_dispatch[0].dispatched, true);
+    assert.equal(afterCancel.assignment_dispatch[1].dispatched, false);
+    assert.equal(inspect(cancelled).includes(HOSTILE_SECRET), false);
+  } finally {
+    await rm(mixed.root, { recursive: true, force: true });
+  }
+
+  const zeroDispatch = [];
+  const zeroInspect = [];
+  const zeroCancel = [];
+  const zeroHooks = {
+    delegateTask: async (plan) => {
+      zeroDispatch.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'dispatched', cursor: '0' };
+    },
+    inspectTask: async (plan) => {
+      zeroInspect.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'completed', cursor: plan.cursor ?? '0' };
+    },
+    cancelTask: async (plan) => {
+      zeroCancel.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'cancelled', cancelled: true };
+    },
+    beforeProviderDispatch: async () => {
+      throw new RunContractV1Error(
+        'durable_state_mismatch',
+        'plan',
+        'Durable run state is stale, partial, or mismatched.',
+      );
+    },
+  };
+  const zero = await createDurableAdapter(zeroHooks);
+  try {
+    const crashed = await errorOf(() => zero.adapter.dispatch('delegate', runArgs));
+    assert.equal(crashed.code, 'durable_state_mismatch');
+    assertContentFree(crashed);
+    assert.equal(zeroDispatch.length, 0);
+    const zeroPlan = await readDurablePlan(zero.root);
+    assert.equal(zeroPlan.dispatched, false);
+    assert.equal(zeroPlan.assignment_dispatch.every((fact) => fact.dispatched === false), true);
+    const zeroRestart = await createDurableAdapter({ root: zero.root, ...zeroHooks });
+    const zeroStatus = await zeroRestart.adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(zeroStatus.lanes.length, 2);
+    assert.equal(zeroStatus.complete_candidate_blocked, true);
+    assertZeroReplay(zeroStatus);
+    for (const lane of zeroStatus.lanes) {
+      assert.equal(lane.status, 'unresolved');
+      assert.equal(lane.unresolved.code, 'dispatch_failed');
+    }
+    assert.equal(zeroInspect.length, 0);
+    assert.equal(zeroCancel.length, 0);
+    assert.equal(zeroDispatch.length, 0);
+  } finally {
+    await rm(zero.root, { recursive: true, force: true });
+  }
+
+  const allDispatch = [];
+  const allInspect = [];
+  const allCancel = [];
+  const allHooks = {
+    delegateTask: async (plan) => {
+      allDispatch.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'dispatched', cursor: '0' };
+    },
+    inspectTask: async (plan) => {
+      allInspect.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'completed', cursor: plan.cursor ?? '0' };
+    },
+    cancelTask: async (plan) => {
+      allCancel.push(plan.assignment_id);
+      return { task_id: plan.task_id, status: 'cancelled', cancelled: true };
+    },
+  };
+  const all = await createDurableAdapter(allHooks);
+  try {
+    const submitted = await all.adapter.dispatch('delegate', runArgs);
+    assert.equal(submitted.lanes.every((lane) => lane.status === 'dispatched'), true);
+    assert.equal(submitted.complete_candidate_blocked, false);
+    const allPlan = await readDurablePlan(all.root);
+    assert.equal(allPlan.dispatched, true);
+    assert.equal(allPlan.assignment_dispatch.every((fact) => fact.dispatched === true), true);
+    const allRestart = await createDurableAdapter({ root: all.root, ...allHooks });
+    const reconstructed = await allRestart.seams.scheduler.resumeAssignments({ run_id: RUN_ID });
+    assert.equal(reconstructed.lanes.every((lane) => lane.dispatched === true), true);
+    assert.equal(reconstructed.lanes.every((lane) => lane.status === 'completed'), true);
+    assert.equal(reconstructed.complete_candidate_blocked, false);
+    const inspected = await allRestart.adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.lanes.every((lane) => lane.status === 'completed'), true);
+    assert.equal(inspected.complete_candidate_blocked, false);
+    assertZeroReplay(inspected);
+    assert.equal(allInspect.includes(laneA.assignment_id), true);
+    assert.equal(allInspect.includes(laneB.assignment_id), true);
+    assert.equal(allDispatch.length, 2);
+    assert.equal(allCancel.length, 0);
+  } finally {
+    await rm(all.root, { recursive: true, force: true });
   }
 });
 
