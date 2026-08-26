@@ -264,9 +264,12 @@ through `delegate.run` with 1–8 lanes. `status`, `task`, `tasks`, and
 (`run_reply`), cancel named lanes, or request proof-bound `cleanup`.
 Omitted run fields keep the 3.2.1 shapes above, including `view:
 "compact"`, `detail: "compact"`, `task_ids` wait-any, and
-`response_mode: "structured"`. Provider/model is explicit; P22 is not a
-provider; parsing failures dispatch nothing. See
-[the run tool API](run-tool-api.md).
+`response_mode: "structured"`. Provider/model is explicit or filled from
+one named profile; mixed explicit/profile values fail closed when they
+conflict. P22 is not a provider; parsing failures dispatch nothing.
+`decision_or_attention` waits until an attention or terminal decision
+(or `wait_ms`), and default production seams are durable P33/P34
+authorities. See [the run tool API](run-tool-api.md).
 
 ### Local providers
 

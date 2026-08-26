@@ -63,6 +63,7 @@ import {
 } from './process-boundary.mjs';
 import {
   classifyRunToolCall,
+  createDurableRunSeams,
   createInProcessRunSeams,
   createRunToolAdapter,
 } from './run-tool-adapter.mjs';
@@ -2067,24 +2068,33 @@ function liveTaskFns(root, contextByRun) {
     cancelTask: async (plan) => {
       const task = await cancelTask(root, plan.task_id);
       const projected = projectSupervisorTerminalReceipt(task);
-      return { task_id: projected.id, status: projected.status };
+      return {
+        task_id: projected.id,
+        status: projected.status,
+        cancelled: projected.status === 'cancelled',
+      };
     },
   };
 }
 
-export function createSupervisorRunToolAdapter(options = {}) {
+export async function createSupervisorRunToolAdapter(options = {}) {
   if (options.adapter) return options.adapter;
   const contextByRun = options.contextByRun ?? new Map();
   const root = options.root;
   const fns = liveTaskFns(root, contextByRun);
-  const seams = options.seams ?? createInProcessRunSeams({
+  const taskFns = {
     delegateTask: options.delegateTask ?? fns.delegateTask,
     inspectTask: options.inspectTask ?? fns.inspectTask,
     cancelTask: options.cancelTaskFn ?? fns.cancelTask,
     settleLocalTaskLifecycle: options.settleLocalTaskLifecycle ?? settleLocalTaskLifecycle,
     cleanupLocalTaskLifecycle: options.cleanupLocalTaskLifecycle ?? cleanupLocalTaskLifecycle,
     clock: options.clock ?? (() => new Date().toISOString()),
-  });
+  };
+  const seams = options.seams ?? (
+    options.inProcess === true
+      ? createInProcessRunSeams(taskFns)
+      : await createDurableRunSeams({ root, ...taskFns })
+  );
   return createRunToolAdapter({
     runtime: seams.runtime,
     attention: seams.attention,
@@ -2096,12 +2106,12 @@ export function createSupervisorRunToolAdapter(options = {}) {
   });
 }
 
-export function supervisorRunToolAdapter(root, options = {}) {
+export async function supervisorRunToolAdapter(root, options = {}) {
   if (options.adapter) return options.adapter;
   const key = typeof root === 'string' ? root : '';
   let adapter = runToolAdapters.get(key);
   if (!adapter) {
-    adapter = createSupervisorRunToolAdapter({ root, ...options });
+    adapter = await createSupervisorRunToolAdapter({ root, ...options });
     runToolAdapters.set(key, adapter);
   }
   return adapter;
@@ -2110,8 +2120,8 @@ export function supervisorRunToolAdapter(root, options = {}) {
 export async function invokeRunTool(root, name, args, options = {}) {
   const classified = classifyRunToolCall(name, args);
   if (classified.mode === 'legacy') return classified;
-  const adapter = supervisorRunToolAdapter(root, options);
-  return adapter.dispatch(name, args);
+  const adapter = await supervisorRunToolAdapter(root, options);
+  return adapter.dispatch(name, args, { signal: options.signal });
 }
 
 export { classifyRunToolCall };

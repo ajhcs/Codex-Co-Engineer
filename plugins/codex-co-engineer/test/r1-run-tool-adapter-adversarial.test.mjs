@@ -23,6 +23,7 @@ import {
   countingProxy,
   createAdapter,
   makeAssignment,
+  makeAttentionItem,
   makeRunArgs,
 } from './fixtures/r1-run-tool-adapter-fixtures.mjs';
 
@@ -108,7 +109,7 @@ test('mixed run operations and mixed 3.2.1 fields fail closed', async () => {
   await adapter.dispatch('delegate', makeRunArgs());
   const mixed = await errorOf(() => adapter.dispatch('task', {
     run_id: RUN_ID,
-    attention: { items: [{ assignment_id: ASSIGNMENT_ID }] },
+    attention: { items: [makeAttentionItem()] },
     run_reply: { batch_id: 'att-x', reply: {} },
   }));
   assert.equal(mixed.code, 'mixed_run_operation');
@@ -180,6 +181,7 @@ test('replay keys on resume/cancel never reach the runtime', async () => {
   const replay = await errorOf(() => adapter.dispatch('task', {
     run_id: RUN_ID,
     wait_until: 'decision_or_attention',
+    wait_ms: 0,
     replay: true,
   }));
   assert.equal(replay.code, 'replay_or_fallback_denied');
@@ -189,4 +191,35 @@ test('replay keys on resume/cancel never reach the runtime', async () => {
   }));
   assert.equal(fallback.code, 'replay_or_fallback_denied');
   assert.equal(calls.cancel.length, 0);
+});
+
+test('invalid attention items fail before scheduler resume', async () => {
+  const { adapter, calls } = createAdapter();
+  await adapter.dispatch('delegate', makeRunArgs());
+  const error = await errorOf(() => adapter.dispatch('task', {
+    run_id: RUN_ID,
+    attention: {
+      items: [{
+        assignment_id: ASSIGNMENT_ID,
+        task_id: 'task-writer-0',
+        provider: 'grok',
+        required: true,
+      }],
+    },
+  }));
+  assert.ok(error.code === 'missing_key' || error.code === 'invalid_format' || error.code === 'invalid_type');
+  assert.equal(calls.resume.length, 0);
+  assertContentFree(error);
+});
+
+test('explicit provider/model does not ignore a hostile profile name', async () => {
+  const { adapter, calls } = createAdapter();
+  const assignment = makeAssignment();
+  assignment.profile = 'NOT A PROFILE';
+  const error = await errorOf(() => adapter.dispatch('delegate', makeRunArgs({
+    assignments: [assignment],
+  })));
+  assert.equal(error.code, 'invalid_format');
+  assert.equal(calls.submit.length, 0);
+  assertContentFree(error);
 });

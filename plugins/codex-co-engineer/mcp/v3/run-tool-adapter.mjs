@@ -14,8 +14,15 @@
 // runtime, attention, and candidate refs. MCP output is model-facing and
 // therefore sanitized.
 
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { types as utilTypes } from 'node:util';
 
+import {
+  openAttentionRoot,
+  validateAttentionItemsV1,
+} from './attention-batch.mjs';
+import { MCP_PENDING_CALL_BUDGET_MS } from './contract.mjs';
 import {
   denyRunRemoteMutationV1,
 } from './run-orchestration.mjs';
@@ -43,6 +50,11 @@ import {
   FUTURE_HARNESS_CONFORMANCE_SCHEMA_ID,
   FUTURE_HARNESS_TEMPLATE_SCHEMA_ID,
 } from './future-harness.mjs';
+import { canonicalJsonStringify } from './identity.mjs';
+import {
+  findProfile,
+  loadProfiles,
+} from './profile.mjs';
 import {
   PROVIDER_REGISTRY_SLOTS,
   describeProviderRegistryV1,
@@ -50,6 +62,13 @@ import {
   requireRegistrySlotV1,
   resolveRegistrySelectionV1,
 } from './provider-registry.mjs';
+import { createRunArtifactBridge } from './run-artifact-bridge.mjs';
+import {
+  createAggregateRunJournal,
+  createRunJournal,
+  openAggregateRunJournal,
+  openRunJournal,
+} from './run-journal.mjs';
 import {
   MAX_ASSIGNMENTS,
   MIN_ASSIGNMENTS,
@@ -63,6 +82,7 @@ import {
   createRunRuntime,
 } from './run-runtime.mjs';
 import { createRunScheduler } from './run-scheduler.mjs';
+import { openRunStore } from './run-store.mjs';
 import {
   assertDirectJsonClosure,
   assertNotProxy,
@@ -165,6 +185,15 @@ export const RUN_TOOL_ADAPTER_ALWAYS_FALSE_SIDE_EFFECTS = capturedFreeze([
 
 export const MAX_ADAPTER_DIAGNOSTIC_BYTES = 160;
 export const RUN_ID_SCHEMA_PATTERN = RUN_ID_PATTERN.source;
+export const MAX_RUN_TOOL_WAIT_MS = MCP_PENDING_CALL_BUDGET_MS;
+export const RUN_TOOL_WAIT_POLL_MS = 25;
+export const OWNER_ONLY_EVIDENCE_KEYS = capturedFreeze([
+  'raw', 'bytes', 'secret', 'secrets', 'credential', 'credentials',
+]);
+export const ACTIONABLE_LANE_STATUSES = capturedFreeze([
+  'needs_attention', 'completed', 'failed', 'cancelled', 'unresolved',
+  'timeout', 'transport_lost', 'environment_blocked',
+]);
 
 const IS_PROXY = utilTypes.isProxy;
 const STRING = String;
@@ -444,6 +473,149 @@ function optionalValue(object, key, field) {
   return ownDataValue(object, key, field);
 }
 
+function delayMs(milliseconds, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve('abort');
+      return;
+    }
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+      resolve('timeout');
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve('timeout');
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve('abort');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function parseWaitMs(args) {
+  const value = optionalValue(args, 'wait_ms', 'wait_ms');
+  if (value === undefined) return MAX_RUN_TOOL_WAIT_MS;
+  if (!Number.isInteger(value) || value < 0 || value > MAX_RUN_TOOL_WAIT_MS) {
+    failAdapter('invalid_format', 'wait_ms', CONTENT_FREE.invalid_format);
+  }
+  return value;
+}
+
+function ownerOnlyKey(key) {
+  return typeof key === 'string' && capturedIncludes(OWNER_ONLY_EVIDENCE_KEYS, key);
+}
+
+function sanitizeModelFacing(value, depth = 0) {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'object') return value;
+  if (depth > 16) return null;
+  if (IS_PROXY(value)) return freezeData({});
+  if (ARRAY_IS_ARRAY(value) || capturedIsArray(value)) {
+    return freezeData(value.map((entry) => sanitizeModelFacing(entry, depth + 1)));
+  }
+  const copy = {};
+  let keys;
+  try {
+    keys = REFLECT_OWN_KEYS(value);
+  } catch {
+    return freezeData({});
+  }
+  for (const key of keys) {
+    if (typeof key !== 'string' || ownerOnlyKey(key)) continue;
+    copy[key] = sanitizeModelFacing(value[key], depth + 1);
+  }
+  return freezeData(copy);
+}
+
+function actionableDecision(receipt) {
+  const attention = receipt?.attention;
+  if (attention && (attention.status === 'open' || attention.status === 'reply_committed')) {
+    return true;
+  }
+  const lanes = ARRAY_IS_ARRAY(receipt?.lanes) ? receipt.lanes : [];
+  for (const lane of lanes) {
+    if (typeof lane?.status === 'string' && capturedIncludes(ACTIONABLE_LANE_STATUSES, lane.status)) {
+      return true;
+    }
+  }
+  return receipt?.journal?.terminal === true;
+}
+
+function cursorsFromReceipt(receipt) {
+  const lanes = ARRAY_IS_ARRAY(receipt?.lanes) ? receipt.lanes : [];
+  const cursors = [];
+  for (const lane of lanes) {
+    if (typeof lane?.assignment_id !== 'string' || typeof lane?.task_id !== 'string') continue;
+    const raw = lane.cursor;
+    const eventCursor = typeof raw === 'string'
+      ? raw
+      : (raw && typeof raw === 'object' && typeof raw.event_cursor === 'string' ? raw.event_cursor : null);
+    if (typeof eventCursor !== 'string' || !capturedTest(/^[0-9]{1,16}$/u, eventCursor)) continue;
+    cursors.push({
+      assignment_id: lane.assignment_id,
+      task_id: lane.task_id,
+      event_cursor: eventCursor,
+    });
+  }
+  return cursors;
+}
+
+async function lookupProfileDefinition(name, repositoryPath) {
+  if (typeof repositoryPath !== 'string' || repositoryPath.length === 0 || !path.isAbsolute(repositoryPath)) {
+    return null;
+  }
+  try {
+    const loaded = await loadProfiles({ repositoryPath });
+    const found = findProfile(loaded, name);
+    return found?.definition ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAssignmentSelection(assignment, path, runProfile, repositoryPath) {
+  const provider = optionalValue(assignment, 'provider', `${path}.provider`);
+  const model = optionalValue(assignment, 'model', `${path}.model`);
+  const assignmentProfile = optionalValue(assignment, 'profile', `${path}.profile`);
+  if (assignmentProfile !== undefined && (typeof assignmentProfile !== 'string' || !isProfileName(assignmentProfile))) {
+    failAdapter('invalid_format', `${path}.profile`, CONTENT_FREE.invalid_format);
+  }
+  const named = typeof assignmentProfile === 'string' ? assignmentProfile : runProfile;
+  let definition = null;
+  if (typeof named === 'string') {
+    definition = await lookupProfileDefinition(named, repositoryPath);
+    if (definition === null) {
+      failAdapter('selection_unresolved', path, CONTENT_FREE.selection_unresolved);
+    }
+  }
+  let resolvedProvider = provider;
+  let resolvedModel = model;
+  if (definition !== null) {
+    if (resolvedProvider !== undefined && definition.provider
+      && resolvedProvider !== definition.provider) {
+      failAdapter('selection_unresolved', `${path}.provider`, CONTENT_FREE.selection_unresolved);
+    }
+    if (resolvedModel !== undefined && definition.model
+      && resolvedModel !== definition.model) {
+      failAdapter('selection_unresolved', `${path}.model`, CONTENT_FREE.selection_unresolved);
+    }
+    if (resolvedProvider === undefined && typeof definition.provider === 'string') {
+      resolvedProvider = definition.provider;
+    }
+    if (resolvedModel === undefined && typeof definition.model === 'string') {
+      resolvedModel = definition.model;
+    }
+  }
+  if (typeof resolvedProvider !== 'string') {
+    failAdapter('selection_unresolved', `${path}.provider`, CONTENT_FREE.selection_unresolved);
+  }
+  assertRegistryProvider(resolvedProvider, resolvedModel, `${path}.provider`);
+  return { provider: resolvedProvider, model: resolvedModel };
+}
+
 function assertClosedTool(tool) {
   if (!capturedIncludes(PUBLIC_MCP_CATALOG, tool)) {
     failAdapter(
@@ -536,7 +708,7 @@ function stripAssignment(assignment) {
   return stripped;
 }
 
-function parseAssignments(value) {
+async function parseAssignments(value, runProfile, repositoryPath) {
   if (!ARRAY_IS_ARRAY(value) && !capturedIsArray(value)) {
     failAdapter('invalid_type', 'run.assignments', CONTENT_FREE.invalid_type);
   }
@@ -549,47 +721,40 @@ function parseAssignments(value) {
   const prompts = {};
   const durations = {};
   for (let index = 0; index < value.length; index += 1) {
-    const path = `run.assignments[${index}]`;
-    const assignment = quarantineObject(value[index], path, RUN_ASSIGNMENT_KEYS);
-    const assignmentId = requireString(assignment, 'assignment_id', `${path}.assignment_id`, isAssignmentId);
+    const assignmentPath = `run.assignments[${index}]`;
+    const assignment = quarantineObject(value[index], assignmentPath, RUN_ASSIGNMENT_KEYS);
+    const assignmentId = requireString(assignment, 'assignment_id', `${assignmentPath}.assignment_id`, isAssignmentId);
     if (seenIds.has(assignmentId)) {
-      failAdapter('duplicate_assignment_id', `${path}.assignment_id`, CONTENT_FREE.duplicate_assignment_id);
+      failAdapter('duplicate_assignment_id', `${assignmentPath}.assignment_id`, CONTENT_FREE.duplicate_assignment_id);
     }
     seenIds.add(assignmentId);
-    const taskId = requireString(assignment, 'task_id', `${path}.task_id`,
+    const taskId = requireString(assignment, 'task_id', `${assignmentPath}.task_id`,
       (candidate) => capturedTest(TASK_ID_PATTERN, candidate));
     if (seenTasks.has(taskId)) {
-      failAdapter('duplicate_task_id', `${path}.task_id`, CONTENT_FREE.duplicate_task_id);
+      failAdapter('duplicate_task_id', `${assignmentPath}.task_id`, CONTENT_FREE.duplicate_task_id);
     }
     seenTasks.add(taskId);
-    const provider = optionalValue(assignment, 'provider', `${path}.provider`);
-    const model = optionalValue(assignment, 'model', `${path}.model`);
-    const profile = optionalValue(assignment, 'profile', `${path}.profile`);
-    if (provider === undefined && model === undefined) {
-      if (typeof profile !== 'string' || !isProfileName(profile)) {
-        failAdapter('selection_unresolved', path, CONTENT_FREE.selection_unresolved);
-      }
-    } else {
-      if (typeof provider !== 'string') {
-        failAdapter('selection_unresolved', `${path}.provider`, CONTENT_FREE.selection_unresolved);
-      }
-      assertRegistryProvider(provider, model, `${path}.provider`);
-    }
-    const prompt = optionalValue(assignment, 'prompt', `${path}.prompt`);
+    const resolved = await resolveAssignmentSelection(
+      assignment, assignmentPath, runProfile, repositoryPath,
+    );
+    const prompt = optionalValue(assignment, 'prompt', `${assignmentPath}.prompt`);
     if (prompt !== undefined) {
       if (typeof prompt !== 'string' || prompt.length < 1 || prompt.length > 16384) {
-        failAdapter('invalid_format', `${path}.prompt`, CONTENT_FREE.invalid_format);
+        failAdapter('invalid_format', `${assignmentPath}.prompt`, CONTENT_FREE.invalid_format);
       }
       prompts[assignmentId] = prompt;
     }
-    const duration = optionalValue(assignment, 'expected_duration_ms', `${path}.expected_duration_ms`);
+    const duration = optionalValue(assignment, 'expected_duration_ms', `${assignmentPath}.expected_duration_ms`);
     if (duration !== undefined) durations[assignmentId] = duration;
-    parsed.push(stripAssignment(assignment));
+    const stripped = stripAssignment(assignment);
+    stripped.provider = resolved.provider;
+    stripped.model = resolved.model;
+    parsed.push(stripped);
   }
   return { assignments: parsed, prompts, durations };
 }
 
-function parseSubmit(args) {
+async function parseSubmit(args) {
   if (mixLegacySingleTask('delegate', args)) {
     failAdapter('mixed_tool_mode', 'delegate', CONTENT_FREE.mixed_tool_mode);
   }
@@ -607,12 +772,15 @@ function parseSubmit(args) {
   if (profile !== undefined && (typeof profile !== 'string' || !isProfileName(profile))) {
     failAdapter('invalid_format', 'run.profile', CONTENT_FREE.invalid_format);
   }
-  const { assignments, prompts, durations } = parseAssignments(ownDataValue(run, 'assignments', 'run.assignments'));
-  const unresolved = assignments.some((assignment) => assignment.provider === undefined
-    || assignment.model === undefined);
-  if (unresolved && (typeof profile !== 'string' || !isProfileName(profile))) {
-    failAdapter('selection_unresolved', 'run.assignments', CONTENT_FREE.selection_unresolved);
-  }
+  const git = ownDataValue(run, 'git', 'run.git');
+  const repositoryPath = git && typeof git === 'object' ? git.repository_path ?? null : null;
+  const { assignments, prompts, durations } = await parseAssignments(
+    ownDataValue(run, 'assignments', 'run.assignments'),
+    typeof profile === 'string' ? profile : undefined,
+    repositoryPath,
+  );
+  const unresolved = assignments.some((assignment) => typeof assignment.provider !== 'string'
+    || typeof assignment.model !== 'string');
   if (unresolved) {
     failAdapter('selection_unresolved', 'run.assignments', CONTENT_FREE.selection_unresolved);
   }
@@ -623,7 +791,7 @@ function parseSubmit(args) {
       run_id: runId,
       request_idempotency_key: idempotency,
       identity: ownDataValue(run, 'identity', 'run.identity'),
-      git: ownDataValue(run, 'git', 'run.git'),
+      git,
       provenance: ownDataValue(run, 'provenance', 'run.provenance'),
       telemetry: ownDataValue(run, 'telemetry', 'run.telemetry'),
       assignments,
@@ -634,7 +802,7 @@ function parseSubmit(args) {
       profile: typeof profile === 'string' ? profile : null,
       prompts,
       durations,
-      repository_path: run.git && typeof run.git === 'object' ? run.git.repository_path ?? null : null,
+      repository_path: repositoryPath,
     }),
   };
 }
@@ -687,15 +855,12 @@ function projectLane(lane, projectLaneTask, classifyLaneTask) {
       : copy.task;
   }
   if (copy.artifacts && typeof copy.artifacts === 'object') {
-    const artifacts = { ...copy.artifacts };
-    if (capturedHasOwn(artifacts, 'raw')) delete artifacts.raw;
-    if (capturedHasOwn(artifacts, 'bytes')) delete artifacts.bytes;
-    copy.artifacts = artifacts;
+    copy.artifacts = sanitizeModelFacing(copy.artifacts);
   }
-  return freezeData(copy);
+  return sanitizeModelFacing(copy);
 }
 
-function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask) {
+function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask, wakeRequested = false) {
   const runId = runtimeReceipt?.run_id;
   const lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
     ? runtimeReceipt.lanes.map((lane) => projectLane(lane, projectLaneTask, classifyLaneTask))
@@ -713,10 +878,12 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     || (runtimeReceipt?.cleanup && runtimeReceipt.cleanup.cleaned === true)) {
     sideEffects.cleanup_executed = runtimeReceipt?.cleanup?.cleaned === true;
   }
-  const attention = runtimeReceipt?.attention ?? freezeData({
+  const attention = sanitizeModelFacing(runtimeReceipt?.attention ?? freezeData({
     batch_id: null, status: null, revision: null, wake: false,
     complete_candidate_blocked: blocked,
-  });
+  }));
+  const actionable = actionableDecision({ ...runtimeReceipt, lanes, attention });
+  const wake = wakeRequested === true && actionable === true;
   return freezeData({
     schema: RUN_TOOL_ADAPTER_RECEIPT_SCHEMA_ID,
     version: RUN_TOOL_ADAPTER_VERSION,
@@ -728,11 +895,11 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     assignment_count: runtimeReceipt?.assignment_count ?? lanes.length,
     lanes,
     attention,
-    cleanup: runtimeReceipt?.cleanup ?? freezeData({
+    cleanup: sanitizeModelFacing(runtimeReceipt?.cleanup ?? freezeData({
       cleaned: false, proof_bound: true, removed: 0, remaining: null, unresolved: [],
-    }),
+    })),
     decision_or_attention: freezeData({
-      wake: false,
+      wake,
       attention: attention?.status === 'open' || lanes.some((lane) => lane?.status === 'needs_attention'),
       unresolved_required_blocks: blocked,
       exactly_once_reply: attention?.status === 'reply_committed' || attention?.status === 'resolved',
@@ -742,7 +909,7 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     checks: emptyChecks(),
     side_effects: sideEffects,
     audience: 'model',
-    wake: false,
+    wake,
     remote_mutated: false,
   });
 }
@@ -851,7 +1018,35 @@ export function createRunToolAdapter(dependencies) {
     submit: 0, inspect: 0, resume: 0, cancel: 0, reply: 0,
   };
 
-  async function dispatch(tool, args) {
+  async function inspectLive(runId, previous) {
+    const cursors = cursorsFromReceipt(previous);
+    if (cursors.length > 0) {
+      counters.resume += 1;
+      return runtime.resumeRun({ run_id: runId, cursors });
+    }
+    counters.inspect += 1;
+    return runtime.inspectRun({ run_id: runId });
+  }
+
+  async function waitForDecision(runId, args, signal) {
+    const waitMs = parseWaitMs(args);
+    const started = Date.now();
+    let receipt = await inspectLive(runId, null);
+    if (actionableDecision(receipt) || waitMs === 0) return receipt;
+    const deadline = started + waitMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) return receipt;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await delayMs(Math.min(RUN_TOOL_WAIT_POLL_MS, remaining), signal);
+      if (signal?.aborted) return receipt;
+      receipt = await inspectLive(runId, receipt);
+      if (actionableDecision(receipt)) return receipt;
+    }
+    return receipt;
+  }
+
+  async function dispatch(tool, args, options = {}) {
     const classified = classifyRunToolCall(tool, args);
     if (classified.mode === 'legacy') return classified;
     assertClosedTool(tool);
@@ -870,9 +1065,10 @@ export function createRunToolAdapter(dependencies) {
       failAdapter('mixed_tool_mode', 'tasks', CONTENT_FREE.mixed_tool_mode);
     }
 
+    const signal = options && typeof options === 'object' ? options.signal : undefined;
     let runtimeReceipt;
     if (operation === 'submit') {
-      const parsed = parseSubmit(args);
+      const parsed = await parseSubmit(args);
       if (rememberSubmitContext) rememberSubmitContext(parsed.context);
       counters.submit += 1;
       runtimeReceipt = await runtime.submitRun(parsed.runtimeRequest);
@@ -893,8 +1089,7 @@ export function createRunToolAdapter(dependencies) {
       if (waitUntil !== undefined && !capturedIncludes(WAIT_UNTIL_VALUES, waitUntil)) {
         failAdapter('invalid_format', 'wait_until', CONTENT_FREE.invalid_format);
       }
-      counters.inspect += 1;
-      runtimeReceipt = await runtime.inspectRun({ run_id: runId });
+      runtimeReceipt = await waitForDecision(runId, args, signal);
     } else if (operation === 'attention') {
       const runId = requireRunId(args);
       const attentionRequest = quarantineObject(
@@ -906,6 +1101,7 @@ export function createRunToolAdapter(dependencies) {
       if (!ARRAY_IS_ARRAY(items) || items.length < MIN_ASSIGNMENTS || items.length > MAX_ASSIGNMENTS) {
         failAdapter('out_of_range', 'attention.items', CONTENT_FREE.out_of_range);
       }
+      validateAttentionItemsV1(items, 'attention.items');
       counters.resume += 1;
       runtimeReceipt = await runtime.resumeRun({
         run_id: runId,
@@ -962,6 +1158,7 @@ export function createRunToolAdapter(dependencies) {
 
     const projected = projectReceipt(
       tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
+      operation === 'wait',
     );
     return projected;
   }
@@ -1113,6 +1310,19 @@ export function createInProcessRunSeams(options = {}) {
     async reply(request) {
       const existing = batches.get(request.run_id);
       if (!existing) fail('attention_batch_not_found', 'run_id', CONTENT_FREE.invalid_format);
+      if (request.batch_id !== undefined && request.batch_id !== existing.batch_id) {
+        fail('attention_batch_identity_mismatch', 'batch_id', CONTENT_FREE.invalid_format);
+      }
+      const expectedRevision = request.expected_revision;
+      if (expectedRevision !== undefined && expectedRevision !== existing.revision) {
+        fail('attention_batch_revision_conflict', 'expected_revision', CONTENT_FREE.invalid_format);
+      }
+      if (existing.reply !== null || existing.status === 'resolved' || existing.status === 'reply_committed') {
+        if (canonicalJsonStringify(existing.reply) === canonicalJsonStringify(request.reply)) {
+          return existing;
+        }
+        fail('attention_batch_reply_conflict', 'reply', CONTENT_FREE.invalid_format);
+      }
       const record = freezeData({
         ...existing,
         status: 'resolved',
@@ -1176,6 +1386,326 @@ export function createInProcessRunSeams(options = {}) {
   });
 }
 
+async function ensurePrivateRoot(rootPath) {
+  if (typeof rootPath !== 'string' || rootPath.length === 0 || !path.isAbsolute(rootPath)) {
+    failAdapter('injected_dependency_invalid', 'root', CONTENT_FREE.injected_dependency_invalid);
+  }
+  const resolved = path.resolve(rootPath);
+  await mkdir(resolved, { recursive: true, mode: 0o700 });
+  await chmod(resolved, 0o700);
+  return resolved;
+}
+
+function missingAggregateAnchor() {
+  return {
+    async getCoordination() {
+      fail('aggregate_run_not_found', 'run_id', CONTENT_FREE.invalid_format);
+    },
+  };
+}
+
+function wrapDurableJournal({ journalRoot, store, anchor }) {
+  return {
+    async create(options) {
+      return createRunJournal({ root: journalRoot, store, run_id: options.run_id });
+    },
+    async open(options) {
+      return openRunJournal({ root: journalRoot, store, run_id: options.run_id });
+    },
+    async createAggregate(options) {
+      return createAggregateRunJournal({
+        root: journalRoot, anchor, run_id: options.run_id,
+      });
+    },
+    async openAggregate(options) {
+      return openAggregateRunJournal({
+        root: journalRoot, anchor, run_id: options.run_id,
+      });
+    },
+  };
+}
+
+function durableArtifactBridge(clock) {
+  const records = new Map();
+  const evidence = [];
+  const keyOf = (runId, assignmentId, relativePath) =>
+    `${runId}\u0000${assignmentId}\u0000${relativePath}`;
+  const rawStore = {
+    async publish({ artifact_ref, bytes, source_truncated }) {
+      const key = keyOf(artifact_ref.run_id, artifact_ref.assignment_id, artifact_ref.relative_path);
+      records.set(key, {
+        artifact_ref: { ...artifact_ref },
+        bytes: Buffer.from(bytes),
+        source_truncated: source_truncated === true,
+      });
+      return { artifact_ref: { ...artifact_ref } };
+    },
+    async get({ run_id, assignment_id, relative_path }) {
+      const record = records.get(keyOf(run_id, assignment_id, relative_path));
+      if (!record) return null;
+      return {
+        artifact_ref: { ...record.artifact_ref },
+        bytes: Buffer.from(record.bytes),
+        source_truncated: record.source_truncated === true,
+      };
+    },
+    async list({ run_id }) {
+      const listed = [];
+      for (const record of records.values()) {
+        if (record.artifact_ref.run_id !== run_id) continue;
+        listed.push({
+          artifact_ref: { ...record.artifact_ref },
+          bytes: Buffer.from(record.bytes),
+          source_truncated: record.source_truncated === true,
+        });
+      }
+      return listed;
+    },
+    async remove({ run_id, assignment_id, relative_path }) {
+      records.delete(keyOf(run_id, assignment_id, relative_path));
+    },
+  };
+  const sanitizer = {
+    async sanitize({ artifact_ref, source }) {
+      const bytes = Buffer.from(source);
+      return {
+        sanitized_ref: {
+          ...artifact_ref,
+          artifact_class: 'sanitized',
+        },
+        bytes,
+        redaction_count: 0,
+        sanitizer_version: 1,
+        source_truncated: false,
+        complete: true,
+      };
+    },
+  };
+  const evidenceBundle = {
+    async append(event) {
+      evidence.push(event);
+      return { appended: true };
+    },
+    async list() {
+      return [...evidence];
+    },
+  };
+  return createRunArtifactBridge({
+    rawStore,
+    sanitizer,
+    evidenceBundle,
+    clock: { now: () => (typeof clock === 'function' ? clock() : new Date().toISOString()) },
+  });
+}
+
+function planPath(schedulerRoot, runId) {
+  return path.join(schedulerRoot, `${runId}.json`);
+}
+
+async function persistSchedulerPlan(schedulerRoot, request) {
+  const payload = {
+    run_id: request.run_id,
+    base_sha: request.base_sha,
+    assignments: request.assignments,
+  };
+  await writeFile(planPath(schedulerRoot, request.run_id), `${canonicalJsonStringify(payload)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+}
+
+async function loadSchedulerPlan(schedulerRoot, runId) {
+  try {
+    const text = await readFile(planPath(schedulerRoot, runId), 'utf8');
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || parsed.run_id !== runId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function reconstructLane(assignment, inspected) {
+  return {
+    access: assignment.access,
+    assignment_id: assignment.assignment_id,
+    attention: inspected?.attention ?? null,
+    cancel_confirmed: inspected?.cancelled === true || inspected?.status === 'cancelled' ? true : null,
+    cursor: inspected?.cursor ?? null,
+    dispatched: true,
+    fallback: false,
+    model: assignment.model,
+    provider: assignment.provider,
+    replayed: false,
+    required: assignment.required !== false,
+    role: assignment.role,
+    starting_ref: assignment.starting_ref ?? null,
+    status: typeof inspected?.status === 'string' ? inspected.status : 'dispatched',
+    task_id: assignment.task_id,
+    unresolved: null,
+    write_scope: assignment.write_scope,
+  };
+}
+
+function wrapDurableScheduler({ inner, schedulerRoot, inspectTask, cancelTask, clock }) {
+  return {
+    async submitAssignments(request) {
+      const receipt = await inner.submitAssignments(request);
+      await persistSchedulerPlan(schedulerRoot, request);
+      return receipt;
+    },
+    async resumeAssignments(request) {
+      try {
+        return await inner.resumeAssignments(request);
+      } catch (error) {
+        if (!(error instanceof RunContractV1Error) || error.code !== 'scheduler_run_unknown') {
+          throw error;
+        }
+        const plan = await loadSchedulerPlan(schedulerRoot, request.run_id);
+        if (plan === null) throw error;
+        const lanes = [];
+        for (const assignment of plan.assignments) {
+          let inspected = null;
+          try {
+            inspected = await inspectTask({
+              run_id: plan.run_id,
+              assignment_id: assignment.assignment_id,
+              task_id: assignment.task_id,
+              role: assignment.role,
+              provider: assignment.provider,
+            });
+          } catch {
+            inspected = { task_id: assignment.task_id, status: 'unresolved' };
+          }
+          lanes.push(reconstructLane(assignment, inspected));
+        }
+        return freezeData({
+          schema: 'codex-co-engineer.run-scheduler-receipt.v1',
+          status: 'inspected',
+          run_id: plan.run_id,
+          base_sha: plan.base_sha,
+          created: false,
+          lanes,
+          complete_candidate_blocked: lanes.some((lane) => lane.required
+            && (lane.status === 'unresolved' || lane.status === 'failed')),
+          wake: false,
+          remote_mutated: false,
+          observed_at: clock(),
+        });
+      }
+    },
+    async cancelAssignments(request) {
+      try {
+        return await inner.cancelAssignments(request);
+      } catch (error) {
+        if (!(error instanceof RunContractV1Error) || error.code !== 'scheduler_run_unknown') {
+          throw error;
+        }
+        const plan = await loadSchedulerPlan(schedulerRoot, request.run_id);
+        if (plan === null) throw error;
+        const selected = new Set(request.assignment_ids ?? []);
+        const lanes = [];
+        for (const assignment of plan.assignments) {
+          let inspected = { task_id: assignment.task_id, status: assignment.status ?? 'dispatched' };
+          if (selected.has(assignment.assignment_id)) {
+            try {
+              inspected = await cancelTask({
+                run_id: plan.run_id,
+                assignment_id: assignment.assignment_id,
+                task_id: assignment.task_id,
+                role: assignment.role,
+                provider: assignment.provider,
+              });
+            } catch {
+              inspected = { task_id: assignment.task_id, status: 'unresolved', cancelled: false };
+            }
+          }
+          lanes.push(reconstructLane(assignment, inspected));
+        }
+        return freezeData({
+          schema: 'codex-co-engineer.run-scheduler-receipt.v1',
+          status: 'cancelled',
+          run_id: plan.run_id,
+          base_sha: plan.base_sha,
+          created: false,
+          lanes,
+          complete_candidate_blocked: false,
+          wake: false,
+          remote_mutated: false,
+          observed_at: clock(),
+        });
+      }
+    },
+  };
+}
+
+export async function createDurableRunSeams(options = {}) {
+  assertPlainObject(options, 'injected_dependency_invalid', 'options',
+    'Durable run seams');
+  const delegateTask = options.delegateTask;
+  const inspectTask = options.inspectTask;
+  const cancelTask = options.cancelTask;
+  const settleLocalTaskLifecycle = options.settleLocalTaskLifecycle;
+  const cleanupLocalTaskLifecycle = options.cleanupLocalTaskLifecycle;
+  const clock = options.clock ?? (() => new Date().toISOString());
+  if (typeof delegateTask !== 'function' || typeof inspectTask !== 'function'
+    || typeof cancelTask !== 'function' || typeof settleLocalTaskLifecycle !== 'function'
+    || typeof cleanupLocalTaskLifecycle !== 'function') {
+    failAdapter('injected_dependency_invalid', 'options', CONTENT_FREE.injected_dependency_invalid);
+  }
+  const root = typeof options.root === 'string' ? options.root : null;
+  const storeRoot = await ensurePrivateRoot(
+    options.storeRoot ?? (root ? path.join(root, 'runs', 'store') : null),
+  );
+  const journalRoot = await ensurePrivateRoot(
+    options.journalRoot ?? (root ? path.join(root, 'runs', 'journal') : null),
+  );
+  const attentionRoot = await ensurePrivateRoot(
+    options.attentionRoot ?? (root ? path.join(root, 'runs', 'attention') : null),
+  );
+  const schedulerRoot = await ensurePrivateRoot(
+    options.schedulerRoot ?? (root ? path.join(root, 'runs', 'scheduler') : null),
+  );
+  const runStore = await openRunStore(storeRoot);
+  const aggregateAnchor = options.aggregateAnchor ?? missingAggregateAnchor();
+  const runJournal = wrapDurableJournal({
+    journalRoot, store: runStore, anchor: aggregateAnchor,
+  });
+  const attentionBatch = await openAttentionRoot(attentionRoot);
+  const artifactBridge = durableArtifactBridge(clock);
+  const innerScheduler = createRunScheduler({
+    delegateTask,
+    inspectTask,
+    cancelTask,
+    clock,
+  });
+  const scheduler = wrapDurableScheduler({
+    inner: innerScheduler,
+    schedulerRoot,
+    inspectTask,
+    cancelTask,
+    clock,
+  });
+  const runtime = createRunRuntime({
+    runStore,
+    runJournal,
+    aggregateAnchor,
+    attentionBatch,
+    scheduler,
+    artifactBridge,
+    settleLocalTaskLifecycle,
+    cleanupLocalTaskLifecycle,
+    clock,
+  });
+  return capturedFreeze({
+    runtime,
+    attention: attentionBatch,
+    scheduler,
+    runStore,
+    artifactBridge,
+  });
+}
+
 export function classifyDeniedGitOperationV1(runId, operation) {
   return classifyGitOperationV1({
     schema: GIT_AUTHORITY_SCHEMA_ID,
@@ -1196,4 +1726,5 @@ capturedFreeze(classifyRunToolCall);
 capturedFreeze(describeRunToolAdapterV1);
 capturedFreeze(createRunToolAdapter);
 capturedFreeze(createInProcessRunSeams);
+capturedFreeze(createDurableRunSeams);
 capturedFreeze(classifyDeniedGitOperationV1);

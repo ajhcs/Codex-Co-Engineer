@@ -18,6 +18,9 @@ import {
   PROVIDER_REGISTRY_SLOTS,
   describeProviderRegistryV1,
 } from '../mcp/v3/provider-registry.mjs';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import {
   PUBLIC_MCP_CATALOG,
   RUN_TOOL_ADAPTER_ALWAYS_FALSE_SIDE_EFFECTS,
@@ -25,6 +28,7 @@ import {
   RUN_TOOL_OPERATIONS,
   classifyDeniedGitOperationV1,
   classifyRunToolCall,
+  createDurableRunSeams,
   createRunToolAdapter,
   denyRunToolRemoteMutationV1,
   describeRunToolAdapterV1,
@@ -34,11 +38,15 @@ import {
   RUN_ID,
   TASK_ID,
   createAdapter,
+  createSeamAdapter,
   makeAssignment,
+  makeAttentionItem,
   makeRunArgs,
   makeVerifier,
   zeroWorkPingTimeoutReceipt,
 } from './fixtures/r1-run-tool-adapter-fixtures.mjs';
+import { PROFILE_SCHEMA } from '../mcp/v3/profile.mjs';
+import { createClock, createLifecycleFns, makePrivateRoot } from './fixtures/r1-run-runtime-fixtures.mjs';
 
 const MODULE_SOURCE = await readFile(
   fileURLToPath(new URL('../mcp/v3/run-tool-adapter.mjs', import.meta.url)),
@@ -198,28 +206,21 @@ test('status/wait/attention/reply/cancel/cleanup map through frozen additive par
   const wait = await adapter.dispatch('task', {
     run_id: RUN_ID,
     wait_until: 'decision_or_attention',
+    wait_ms: 0,
   });
   assert.equal(wait.operation, 'wait');
   assert.equal(wait.decision_or_attention.wake, false);
   const aggregate = await adapter.dispatch('tasks', {
     run_id: RUN_ID,
     wait_until: 'decision_or_attention',
+    wait_ms: 0,
   });
   assert.equal(aggregate.operation, 'wait');
   assert.equal(aggregate.assignment_count, 1);
   const attention = await adapter.dispatch('task', {
     run_id: RUN_ID,
     attention: {
-      items: [{
-        assignment_id: ASSIGNMENT_ID,
-        task_id: TASK_ID,
-        provider: 'grok',
-        required: true,
-        session_id: 'sess-1',
-        question_id: 'q-1',
-        event_cursor: '0',
-        reply_capability: 'same_session',
-      }],
+      items: [makeAttentionItem()],
     },
   });
   assert.equal(attention.operation, 'attention');
@@ -251,13 +252,21 @@ test('status/wait/attention/reply/cancel/cleanup map through frozen additive par
   assert.equal(cleanup.cleanup.proof_bound, true);
 });
 
-test('model-facing receipts redact raw artifacts and R-TRUTH-correct false success', async () => {
+test('model-facing receipts redact nested raw artifacts and R-TRUTH-correct false success', async () => {
   const { adapter } = createAdapter({
     decorateInspect: (receipt) => ({
       ...receipt,
       lanes: receipt.lanes.map((lane) => ({
         ...lane,
-        artifacts: { raw: 'sk-live-ATTACKER-SECRET', bytes: [1, 2, 3], projection: 'ok' },
+        artifacts: {
+          raw: 'sk-live-ATTACKER-SECRET',
+          bytes: [1, 2, 3],
+          projection: 'ok',
+          nested: {
+            owner: { raw: 'sk-live-NESTED-SECRET', secret: 'github_pat_hostile' },
+            bytes: Buffer.from('hidden'),
+          },
+        },
         task: zeroWorkPingTimeoutReceipt({ id: lane.task_id ?? TASK_ID }),
       })),
     }),
@@ -267,11 +276,16 @@ test('model-facing receipts redact raw artifacts and R-TRUTH-correct false succe
   const lane = inspected.lanes[0];
   assert.equal(Object.hasOwn(lane.artifacts, 'raw'), false);
   assert.equal(Object.hasOwn(lane.artifacts, 'bytes'), false);
+  assert.equal(Object.hasOwn(lane.artifacts.nested, 'bytes'), false);
+  assert.equal(Object.hasOwn(lane.artifacts.nested.owner, 'raw'), false);
+  assert.equal(Object.hasOwn(lane.artifacts.nested.owner, 'secret'), false);
   assert.equal(lane.task.status, 'failed');
   assert.equal(lane.truth.corrected, true);
   const serialized = JSON.stringify(inspected);
   assert.doesNotMatch(serialized, /sk-live/u);
   assert.doesNotMatch(serialized, /ATTACKER-SECRET/u);
+  assert.doesNotMatch(serialized, /NESTED-SECRET/u);
+  assert.doesNotMatch(serialized, /github_pat/u);
 });
 
 test('unsupported same-session providers cancel only the affected lane', async () => {
@@ -289,16 +303,14 @@ test('unsupported same-session providers cancel only the affected lane', async (
     run_id: RUN_ID,
     attention: {
       items: [
-        {
-          assignment_id: 'dsh-lane',
-          task_id: 'task-dsh',
+        makeAttentionItem({
+          assignmentId: 'dsh-lane',
+          taskId: 'task-dsh',
           provider: 'dsh',
-          required: true,
-          session_id: 'sess-dsh',
-          question_id: 'q-dsh',
-          event_cursor: '0',
-          reply_capability: 'unsupported',
-        },
+          sessionId: 'sess-dsh',
+          questionId: 'q-dsh',
+          prompt: 'DSH cannot host a same-session reply',
+        }),
       ],
     },
   });
@@ -333,4 +345,159 @@ test('createRunToolAdapter rejects extra injected seams before dispatch', async 
     () => createRunToolAdapter({ runtime, attention: attentionBatch, scheduler: {} }),
     (error) => error.code === 'unknown_key',
   );
+});
+
+test('decision_or_attention wait polls until an actionable attention decision', async () => {
+  let inspections = 0;
+  const { adapter } = createAdapter({
+    decorateInspect: (receipt) => {
+      inspections += 1;
+      if (inspections < 3) return receipt;
+      return {
+        ...receipt,
+        lanes: receipt.lanes.map((lane) => ({ ...lane, status: 'needs_attention' })),
+      };
+    },
+  });
+  await adapter.dispatch('delegate', makeRunArgs());
+  const wait = await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    wait_until: 'decision_or_attention',
+    wait_ms: 400,
+  });
+  assert.equal(wait.operation, 'wait');
+  assert.equal(wait.wake, true);
+  assert.equal(wait.decision_or_attention.wake, true);
+  assert.ok(inspections >= 3);
+});
+
+test('explicit provider/model plus a conflicting named profile fails closed', async () => {
+  const workspace = await makePrivateRoot('r1-rcutover-profile-');
+  try {
+    const catalogDir = path.join(workspace, '.codex');
+    await mkdir(catalogDir, { recursive: true, mode: 0o700 });
+    const definition = {
+      schema: PROFILE_SCHEMA,
+      provider: 'dsh',
+      model: 'muse-spark-1.2-contributor',
+    };
+    const name = 'writer-profile';
+    const catalog = {
+      [name]: definition,
+    };
+    await writeFile(path.join(catalogDir, 'co-engineer-profiles.json'), JSON.stringify(catalog));
+    const assignment = makeAssignment();
+    assignment.profile = name;
+    const args = makeRunArgs({ assignments: [assignment] });
+    args.run.git = { ...args.run.git, repository_path: workspace };
+    args.run.profile = name;
+    const { adapter, calls } = createAdapter();
+    const error = await errorOf(() => adapter.dispatch('delegate', args));
+    assert.equal(error.code, 'selection_unresolved');
+    assert.equal(calls.submit.length, 0);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('named profile fills omitted provider/model from the catalog', async () => {
+  const workspace = await makePrivateRoot('r1-rcutover-profile-fill-');
+  try {
+    const catalogDir = path.join(workspace, '.codex');
+    await mkdir(catalogDir, { recursive: true, mode: 0o700 });
+    const name = 'writer-profile';
+    const definition = {
+      schema: PROFILE_SCHEMA,
+      provider: 'grok',
+      model: 'grok-4',
+    };
+    await writeFile(path.join(catalogDir, 'co-engineer-profiles.json'), JSON.stringify({
+      [name]: definition,
+    }));
+    const assignment = makeAssignment();
+    delete assignment.provider;
+    delete assignment.model;
+    assignment.profile = name;
+    const args = makeRunArgs({ assignments: [assignment] });
+    args.run.git = { ...args.run.git, repository_path: workspace };
+    const { adapter, calls } = createAdapter();
+    const receipt = await adapter.dispatch('delegate', args);
+    assert.equal(receipt.operation, 'submit');
+    assert.equal(calls.submit.length, 1);
+    assert.equal(calls.submit[0].assignments[0].provider, 'grok');
+    assert.equal(calls.submit[0].assignments[0].model, 'grok-4');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('default in-process attention reply rejects a conflicting second round', async () => {
+  const { adapter, seams } = createSeamAdapter();
+  await adapter.dispatch('delegate', makeRunArgs());
+  await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    attention: { items: [makeAttentionItem()] },
+  });
+  const replyBody = {
+    round: 1,
+    batch_id: `att-${RUN_ID}`,
+    answers: [{
+      assignment_id: ASSIGNMENT_ID, question_id: 'q-1', session_id: 'sess-1',
+      task_id: TASK_ID, response: 'ship-it',
+    }],
+  };
+  const first = await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    run_reply: {
+      batch_id: `att-${RUN_ID}`,
+      expected_revision: 1,
+      reply: replyBody,
+    },
+  });
+  assert.equal(first.operation, 'reply');
+  const conflict = await errorOf(() => adapter.dispatch('task', {
+    run_id: RUN_ID,
+    run_reply: {
+      batch_id: `att-${RUN_ID}`,
+      expected_revision: 2,
+      reply: { ...replyBody, answers: [{ ...replyBody.answers[0], response: 'overwrite' }] },
+    },
+  }));
+  assert.equal(conflict.code, 'attention_batch_reply_conflict');
+  const forged = await errorOf(() => seams.attention.reply({
+    run_id: RUN_ID,
+    batch_id: 'forged-batch',
+    expected_revision: 2,
+    reply: replyBody,
+  }));
+  assert.equal(forged.code, 'attention_batch_identity_mismatch');
+});
+
+test('durable P33/P34 seams recover identity after a fresh reopen', async () => {
+  const root = await makePrivateRoot('r1-rcutover-durable-');
+  const lifecycle = createLifecycleFns({ final: true });
+  const taskFns = {
+    delegateTask: async (plan) => ({ task_id: plan.task_id, status: 'dispatched', cursor: '0' }),
+    inspectTask: async (plan) => ({ task_id: plan.task_id, status: 'running', cursor: plan.cursor ?? '0' }),
+    cancelTask: async (plan) => ({ task_id: plan.task_id, status: 'cancelled', cancelled: true }),
+    settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
+    cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
+    clock: createClock(),
+  };
+  try {
+    const first = await createDurableRunSeams({ root, ...taskFns });
+    const adapter = createRunToolAdapter({ runtime: first.runtime, attention: first.attention });
+    const submitted = await adapter.dispatch('delegate', makeRunArgs());
+    assert.equal(submitted.operation, 'submit');
+    const second = await createDurableRunSeams({ root, ...taskFns });
+    const restarted = createRunToolAdapter({
+      runtime: second.runtime, attention: second.attention,
+    });
+    const inspected = await restarted.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.run_id, RUN_ID);
+    assert.equal(inspected.assignment_count, 1);
+    assert.equal(inspected.lanes[0].assignment_id, ASSIGNMENT_ID);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -821,6 +821,13 @@ test('exports identity-bound local lifecycle settlement without rewriting stored
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('default run seams are durable P33/P34 authorities and cancel confirms', async () => {
+  const source = await readFile(new URL('../mcp/v3/supervisor.mjs', import.meta.url), 'utf8');
+  assert.match(source, /createDurableRunSeams/u);
+  assert.match(source, /cancelled: projected.status === 'cancelled'/u);
+  assert.match(source, /options.seams \?\? \(/u);
 });
 
 test('invokeRunTool preserves omitted 3.2.1 mode and R-TRUTH lifecycle authority', async () => {

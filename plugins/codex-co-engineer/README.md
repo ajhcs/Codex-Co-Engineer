@@ -29,7 +29,9 @@ The MCP server exposes five tools:
 The catalog is still those five tools. Bounded runs use additive
 parameters (`run`, `run_id`, `attention`, `run_reply`, `cleanup`, and
 `wait_until: "decision_or_attention"`) on the same tools. Omit them to
-keep exact 3.2.1 single-task behavior. See
+keep exact 3.2.1 single-task behavior. Run wait is a bounded
+`decision_or_attention` wait; default production seams are durable
+P33/P34 run/journal/attention authorities. See
 [the run tool API](../../docs/run-tool-api.md).
 
 `delegate` requires a stable `task_id`, a provider, an absolute Git worktree

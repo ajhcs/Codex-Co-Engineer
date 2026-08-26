@@ -45,10 +45,13 @@ Mixing a run body with 3.2.1 `task_id` / `workspace_mode` / `create_pr` /
 ## Bounds and selection
 
 One run submission carries 1–8 lanes. Provider/model is explicit on each
-assignment or left unresolved; the adapter never learns, ranks, or
-globally routes. The accepted four-slot registry is `grok`,
-`cursor-local`, `cursor-cloud`, and `dsh`. P22 future-harness
-conformance remains evidence, never a provider slot.
+assignment or filled from one named profile. Explicit fields must agree
+with that profile when both are present; omitted fields may be filled
+from the profile. A missing, invalid, or conflicting profile fails
+closed before dispatch. The adapter never learns, ranks, or globally
+routes. The accepted four-slot registry is `grok`, `cursor-local`,
+`cursor-cloud`, and `dsh`. P22 future-harness conformance remains
+evidence, never a provider slot.
 
 Direct mode, replay, fallback, merge, push, create-PR, GitHub, and
 remote keys fail before any provider dispatch, ref creation, or cleanup.
@@ -68,10 +71,24 @@ Unaffected lanes continue. A required unresolved lane blocks a complete
 candidate. Decision results are the verified P33/P34 receipts, not caller
 prose. MCP output is model-facing: owner-only raw artifacts are stripped.
 
+Production default seams are durable P24/P25/P34/P32 authorities under
+the supervisor state root (`runs/store`, `runs/journal`,
+`runs/attention`). Tests may inject `createInProcessRunSeams` or an
+explicit `seams` object. Restart recovery, journal cursors, attention
+CAS, and proof-bound cleanup are not process-local Maps.
+
+`wait_until: "decision_or_attention"` performs a bounded wait
+(`wait_ms` 0 is a snapshot; omit follows the MCP pending-call budget).
+It wakes only on attention or terminal lane decisions, keeps the last
+lane cursor, and never replays. Model-facing receipts recursively strip
+owner-only `raw` / `bytes` / `secret` evidence. Attention items are
+validated before any scheduler resume.
+
 ## API
 
 - `classifyRunToolCall(tool, args)` — pure; `legacy` or `run`
 - `createRunToolAdapter({ runtime, attention?, projectLaneTask?, classifyLaneTask?, rememberSubmitContext? })`
+- `createDurableRunSeams({ root, delegateTask, inspectTask, cancelTask, settleLocalTaskLifecycle, cleanupLocalTaskLifecycle, clock? })`
 - `createInProcessRunSeams({ delegateTask, inspectTask, cancelTask, settleLocalTaskLifecycle, cleanupLocalTaskLifecycle, clock? })`
 - `describeRunToolAdapterV1()`
 - `denyRunToolRemoteMutationV1(operation)`
