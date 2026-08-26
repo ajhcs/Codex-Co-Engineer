@@ -8,7 +8,9 @@
 // dispatch happens only when P24 reports created=true. inspect/remember
 // recover stored submission identity and never invent a placeholder
 // digest. Child terminal journal facts are accepted only after
-// settleLocalTaskLifecycle returns final=true.
+// settleLocalTaskLifecycle returns final=true and only for
+// authoritatively dispatched lanes. Unresolved evidence and unconfirmed
+// cancellation never map to a journal terminal outcome.
 // cleanupLocalTaskLifecycle is invoked idempotently on
 // terminal, cancel, and restart. Artifact cleanup is proof-bound and
 // never runs without that finality. P27 is composed as R24A
@@ -234,7 +236,7 @@ const SCHEDULER_MISSING_CODES = capturedFreeze([
   'runtime_run_unknown',
 ]);
 const TERMINAL_LANE_STATUSES = capturedFreeze([
-  'completed', 'failed', 'cancelled', 'unresolved', 'timeout',
+  'completed', 'failed', 'cancelled', 'timeout',
   'transport_lost', 'environment_blocked',
 ]);
 const JOURNAL_TERMINAL_STATUSES = capturedFreeze([
@@ -752,14 +754,37 @@ function schedulerLaneStatus(lane) {
   return capturedIncludes(RUN_RUNTIME_LANE_STATUSES, status) ? status : 'unresolved';
 }
 
+function isAuthoritativeDispatch(lane) {
+  return lane?.dispatched !== false;
+}
+
+function isConfirmedCancelled(lane) {
+  return isAuthoritativeDispatch(lane)
+    && schedulerLaneStatus(lane) === 'cancelled'
+    && lane?.cancel_confirmed === true;
+}
+
 function isSchedulerTerminal(status) {
   return capturedIncludes(TERMINAL_LANE_STATUSES, status);
+}
+
+function isAcceptableChildTerminal(lane) {
+  if (!isAuthoritativeDispatch(lane)) return false;
+  const status = schedulerLaneStatus(lane);
+  if (status === 'cancelled') return lane?.cancel_confirmed === true;
+  return isSchedulerTerminal(status) && status !== 'transport_lost';
+}
+
+function authoritativeLaneStatus(lane) {
+  if (!isAuthoritativeDispatch(lane)) return 'unresolved';
+  const status = schedulerLaneStatus(lane ?? { status: 'dispatched' });
+  if (status === 'cancelled' && lane?.cancel_confirmed !== true) return 'unresolved';
+  return status;
 }
 
 function journalOutcomeFor(status) {
   if (status === 'completed') return 'completed';
   if (status === 'cancelled') return 'cancelled';
-  if (status === 'unresolved') return 'cancelled';
   if (capturedIncludes(JOURNAL_TERMINAL_STATUSES, status) || status === 'failed'
     || status === 'timeout' || status === 'environment_blocked') {
     return 'failed';
@@ -783,8 +808,9 @@ function pickLane(schedulerReceipt, assignmentId) {
 }
 
 function projectLane(assignment, schedulerLane, lifecycle) {
-  const status = schedulerLaneStatus(schedulerLane ?? { status: 'dispatched' });
-  const overlay = lifecycle && isSchedulerTerminal(status) && lifecycle.final !== true
+  const rawLane = schedulerLane ?? { status: 'dispatched' };
+  const status = authoritativeLaneStatus(rawLane);
+  const overlay = lifecycle && isAcceptableChildTerminal(rawLane) && lifecycle.final !== true
     ? 'lifecycle_pending'
     : status;
   return freezeData({
@@ -1469,14 +1495,13 @@ export function createRunRuntime(dependencies) {
       let pending = false;
       for (const assignment of record.assignments) {
         const schedulerLane = pickLane(schedulerReceipt, assignment.assignment_id);
-        const status = schedulerLaneStatus(schedulerLane);
         let lifecycle = null;
-        if (selected.includes(assignment.assignment_id) && isSchedulerTerminal(status)
-          && status !== 'transport_lost') {
+        if (selected.includes(assignment.assignment_id)
+          && isAcceptableChildTerminal(schedulerLane)) {
           lifecycle = await settleAndCleanup(injected, record, assignment, schedulerLane,
             'resume');
           if (lifecycle.final === true) {
-            const outcome = journalOutcomeFor(status);
+            const outcome = journalOutcomeFor(authoritativeLaneStatus(schedulerLane));
             if (outcome !== null) {
               state = await ensureChildStarted(handle, state, assignment.assignment_id);
               state = await acceptChildTerminal(handle, state, assignment.assignment_id,
@@ -1531,7 +1556,7 @@ export function createRunRuntime(dependencies) {
       for (const assignment of record.assignments) {
         const schedulerLane = pickLane(schedulerReceipt, assignment.assignment_id);
         let lifecycle = null;
-        if (selected.includes(assignment.assignment_id)) {
+        if (selected.includes(assignment.assignment_id) && isConfirmedCancelled(schedulerLane)) {
           lifecycle = await settleAndCleanup(injected, record, assignment, schedulerLane,
             'cancel');
           if (lifecycle.final === true) {
@@ -1599,9 +1624,8 @@ export function createRunRuntime(dependencies) {
           continue;
         }
         const schedulerLane = pickLane(schedulerReceipt, assignment.assignment_id);
-        const status = schedulerLaneStatus(schedulerLane);
         let lifecycle = null;
-        if (isSchedulerTerminal(status) && status !== 'transport_lost') {
+        if (isAcceptableChildTerminal(schedulerLane)) {
           lifecycle = await invokeLifecycle(injected.settleLocalTaskLifecycle, record, assignment,
             schedulerLane?.task_id ?? assignment.task_id, 'inspect',
             'settleLocalTaskLifecycle');

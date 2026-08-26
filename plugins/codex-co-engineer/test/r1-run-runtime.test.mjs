@@ -342,6 +342,62 @@ test('cancelRun cancels only named lanes, settles lifecycle, and proof-binds cle
   assertDeniedSideEffects(cancelled);
 });
 
+test('confirmed dispatched cancellation settles journal cancelled', async () => {
+  const harness = createRuntime({
+    lifecycle: createLifecycleFns({ final: true, cleanupStatus: 'normal' }),
+  });
+  const request = makeSubmitRequest();
+  await harness.runtime.submitRun(request);
+  const cancelled = await harness.runtime.cancelRun({
+    run_id: request.run_id,
+    assignment_ids: [ASSIGNMENT_ID],
+  });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.lanes[0].status, 'cancelled');
+  assert.equal(cancelled.journal.terminal, true);
+  assert.equal(cancelled.journal.run_outcome, 'cancelled');
+  const handle = harness.runJournal._handles.get(request.run_id);
+  const kinds = handle.events.map((event) => event.kind);
+  assert.ok(kinds.includes('child_started'));
+  assert.ok(kinds.includes('child_terminal'));
+  assert.ok(kinds.includes('run_terminal'));
+  assertDeniedSideEffects(cancelled);
+});
+
+test('dispatched terminal success, failure, timeout, and transport-loss keep their journal mapping', async () => {
+  const cases = [
+    { status: 'completed', terminal: true, outcome: 'completed', blocked: false },
+    { status: 'failed', terminal: true, outcome: 'failed', blocked: true },
+    { status: 'timeout', terminal: true, outcome: 'failed', blocked: false },
+    { status: 'transport_lost', terminal: false, outcome: null, blocked: true },
+  ];
+  for (const expected of cases) {
+    const harness = createRuntime({
+      scheduler: createMemoryScheduler({
+        inspectStatusByAssignment: new Map([[ASSIGNMENT_ID, expected.status]]),
+      }),
+      lifecycle: createLifecycleFns({ final: true, cleanupStatus: 'normal' }),
+    });
+    const request = makeSubmitRequest();
+    await harness.runtime.submitRun(request);
+    const resumed = await harness.runtime.resumeRun({ run_id: request.run_id });
+    assert.equal(resumed.lanes[0].status, expected.status, expected.status);
+    assert.equal(resumed.journal.terminal, expected.terminal, expected.status);
+    assert.equal(resumed.journal.run_outcome, expected.outcome, expected.status);
+    assert.equal(resumed.complete_candidate_blocked, expected.blocked, expected.status);
+    const handle = harness.runJournal._handles.get(request.run_id);
+    assert.equal(handle.events.some((event) => event.kind === 'run_terminal'),
+      expected.terminal, expected.status);
+    if (expected.terminal) {
+      const terminal = handle.events.find((event) => event.kind === 'child_terminal');
+      assert.equal(terminal.data.outcome, expected.outcome, expected.status);
+    } else {
+      assert.equal(handle.events.some((event) => event.kind === 'child_terminal'), false,
+        expected.status);
+    }
+  }
+});
+
 test('cleanup without lifecycle finality is refused and does not remove artifacts', async () => {
   const harness = createRuntime({
     lifecycle: createLifecycleFns({ final: false, cleanupStatus: 'pending' }),
