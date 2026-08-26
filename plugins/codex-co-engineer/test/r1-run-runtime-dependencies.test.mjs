@@ -204,6 +204,39 @@ test('resume against a real P25 journal accepts terminal only after injected lif
   });
 });
 
+test('restart resume of a never-dispatched P25 lane stays unresolved and nonterminal', async () => {
+  await withLegacyRuntime(async (harness) => {
+    const scheduler = createMemoryScheduler({
+      delegateErrorFor: new Set([ASSIGNMENT_ID]),
+    });
+    const lifecycle = createLifecycleFns({ final: true });
+    const runtime = bindLegacyRuntime({ ...harness, scheduler, lifecycle });
+    const request = makeSubmitRequest();
+    const submitted = await runtime.submitRun(request);
+    assert.equal(submitted.lanes[0].status, 'unresolved');
+    assert.equal(submitted.journal.terminal, false);
+
+    const restarted = bindLegacyRuntime({ ...harness, scheduler, lifecycle });
+    const resumed = await restarted.resumeRun({ run_id: request.run_id });
+    assert.equal(resumed.lanes[0].status, 'unresolved');
+    assert.equal(resumed.complete_candidate_blocked, true);
+    assert.equal(resumed.journal.terminal, false);
+    assert.equal(resumed.journal.run_outcome, null);
+    assert.equal(lifecycle.cleanupCalls.length, 0);
+
+    const cancelled = await restarted.cancelRun({
+      run_id: request.run_id,
+      assignment_ids: [ASSIGNMENT_ID],
+    });
+    assert.equal(cancelled.lanes[0].status, 'unresolved');
+    assert.equal(cancelled.complete_candidate_blocked, true);
+    assert.equal(cancelled.journal.terminal, false);
+    assert.equal(cancelled.journal.run_outcome, null);
+    assert.equal(lifecycle.cleanupCalls.length, 0);
+    assert.equal(scheduler.calls.submit, 1);
+  });
+});
+
 test('R24A resolution_ready plus R25B aggregate journal is the dispatch path', async () => {
   const prepared = await makeResolvedAnchor({ runId: 'p33-aggregate-run' });
   const storeRoot = await makeStoreRoot('r1-p33-agg-store-');

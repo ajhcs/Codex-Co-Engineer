@@ -320,3 +320,87 @@ test('resume of a cancelled lane does not redispatch', async () => {
   assert.equal(resumed.side_effects.replay, false);
   assert.equal(resumed.side_effects.duplicate_dispatch, false);
 });
+
+function journalKinds(harness, runId) {
+  return (harness.runJournal._handles.get(runId)?.events ?? []).map((event) => event.kind);
+}
+
+test('restart resume of dispatched=false/unresolved stays nonterminal and blocked', async () => {
+  const harness = createRuntime({
+    scheduler: createMemoryScheduler({
+      delegateErrorFor: new Set([ASSIGNMENT_ID]),
+    }),
+    lifecycle: createLifecycleFns({ final: true, cleanupStatus: 'normal' }),
+  });
+  const request = makeSubmitRequest();
+  const submitted = await harness.runtime.submitRun(request);
+  assert.equal(submitted.lanes[0].status, 'unresolved');
+  assert.equal(submitted.complete_candidate_blocked, true);
+  assert.equal(submitted.journal.terminal, false);
+
+  harness.scheduler.inspectStatusByAssignment.set(ASSIGNMENT_ID, 'completed');
+  const fresh = createFreshRuntime(harness);
+  const resumed = await fresh.runtime.resumeRun({ run_id: request.run_id });
+  assert.equal(resumed.lanes[0].status, 'unresolved');
+  assert.equal(resumed.complete_candidate_blocked, true);
+  assert.equal(resumed.journal.terminal, false);
+  assert.equal(resumed.journal.run_outcome, null);
+  assert.equal(resumed.side_effects.replay, false);
+  assert.equal(resumed.side_effects.duplicate_dispatch, false);
+  const kinds = journalKinds(harness, request.run_id);
+  assert.equal(kinds.includes('child_started'), false);
+  assert.equal(kinds.includes('child_terminal'), false);
+  assert.equal(kinds.includes('run_terminal'), false);
+  assert.equal(fresh.lifecycle.cleanupCalls.length, 0);
+  assert.equal(harness.scheduler.calls.submit, 1);
+});
+
+test('restart cancel of dispatched=false/unresolved stays unresolved and does not journal-cancel', async () => {
+  const harness = createRuntime({
+    scheduler: createMemoryScheduler({
+      delegateErrorFor: new Set([ASSIGNMENT_ID]),
+    }),
+    lifecycle: createLifecycleFns({ final: true, cleanupStatus: 'normal' }),
+  });
+  const request = makeSubmitRequest();
+  await harness.runtime.submitRun(request);
+  const fresh = createFreshRuntime(harness);
+  const cancelled = await fresh.runtime.cancelRun({
+    run_id: request.run_id,
+    assignment_ids: [ASSIGNMENT_ID],
+  });
+  assert.equal(cancelled.lanes[0].status, 'unresolved');
+  assert.equal(cancelled.complete_candidate_blocked, true);
+  assert.equal(cancelled.journal.terminal, false);
+  assert.equal(cancelled.journal.run_outcome, null);
+  assert.notEqual(cancelled.journal.run_outcome, 'cancelled');
+  const kinds = journalKinds(harness, request.run_id);
+  assert.equal(kinds.includes('child_started'), false);
+  assert.equal(kinds.includes('child_terminal'), false);
+  assert.equal(kinds.includes('run_terminal'), false);
+  assert.equal(fresh.lifecycle.cleanupCalls.length, 0);
+  assert.equal(harness.scheduler.calls.submit, 1);
+  assert.equal(cancelled.side_effects.replay, false);
+});
+
+test('unconfirmed cancel remains unresolved and does not set journal cancelled', async () => {
+  const harness = createRuntime({
+    scheduler: createMemoryScheduler({ cancelConfirmed: false }),
+    lifecycle: createLifecycleFns({ final: true, cleanupStatus: 'normal' }),
+  });
+  const request = makeSubmitRequest();
+  await harness.runtime.submitRun(request);
+  const cancelled = await harness.runtime.cancelRun({
+    run_id: request.run_id,
+    assignment_ids: [ASSIGNMENT_ID],
+  });
+  assert.equal(cancelled.lanes[0].status, 'unresolved');
+  assert.equal(cancelled.lanes[0].unresolved?.code, 'safe_cancel_unconfirmed');
+  assert.equal(cancelled.complete_candidate_blocked, true);
+  assert.equal(cancelled.journal.terminal, false);
+  assert.equal(cancelled.journal.run_outcome, null);
+  const kinds = journalKinds(harness, request.run_id);
+  assert.equal(kinds.includes('child_terminal'), false);
+  assert.equal(kinds.includes('run_terminal'), false);
+  assert.equal(harness.lifecycle.cleanupCalls.length, 0);
+});
