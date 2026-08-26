@@ -73,9 +73,21 @@ prose. MCP output is model-facing: owner-only raw artifacts are stripped.
 
 Production default seams are durable P24/P25/P34/P32 authorities under
 the supervisor state root (`runs/store`, `runs/journal`,
-`runs/attention`). Tests may inject `createInProcessRunSeams` or an
-explicit `seams` object. Restart recovery, journal cursors, attention
-CAS, and proof-bound cleanup are not process-local Maps.
+`runs/attention`, `runs/scheduler`, `runs/artifacts`). Tests may inject
+`createInProcessRunSeams` or an explicit `seams` object. Restart
+recovery, journal cursors, attention CAS, scheduler-plan identity, and
+proof-bound cleanup are not process-local Maps.
+
+Production `attention.reply` binds P34 to the supervisor proof-bound
+same-session mailbox (`submitReply`): the one reply round must match the
+latched task/session/question identity and is delivered exactly once.
+Failed or unconfirmed cancellation stays unresolved/unsafe, including
+after durable restart, and never projects cancelled/safe. Authoritative
+artifact bytes and scheduler-plan identity persist before or atomically
+with provider dispatch; stale, partial, or mismatched state fails closed
+and never duplicates dispatch. One immutable run-level profile/catalog
+snapshot is loaded, bound, and persisted at submit; later catalog
+mutation cannot change assignment resolution.
 
 `wait_until: "decision_or_attention"` performs a bounded wait
 (`wait_ms` 0 is a snapshot; omit follows the MCP pending-call budget).

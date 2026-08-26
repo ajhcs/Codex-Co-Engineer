@@ -14,7 +14,8 @@
 // runtime, attention, and candidate refs. MCP output is model-facing and
 // therefore sanitized.
 
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { types as utilTypes } from 'node:util';
 
@@ -23,6 +24,7 @@ import {
   validateAttentionItemsV1,
 } from './attention-batch.mjs';
 import { MCP_PENDING_CALL_BUDGET_MS } from './contract.mjs';
+import { submitReply } from './mailbox.mjs';
 import {
   denyRunRemoteMutationV1,
 } from './run-orchestration.mjs';
@@ -53,7 +55,7 @@ import {
 import { canonicalJsonStringify } from './identity.mjs';
 import {
   findProfile,
-  loadProfiles,
+  loadProfileCatalogSnapshot,
 } from './profile.mjs';
 import {
   PROVIDER_REGISTRY_SLOTS,
@@ -263,6 +265,7 @@ const CONTENT_FREE = capturedFreeze({
   catalog_sixth_tool_denied: 'The public catalog remains five tools.',
   cleanup_unproven: 'Cleanup requires P33 proof-bound finality.',
   direct_mode_rejected: 'Run submissions reject direct mode.',
+  durable_state_mismatch: 'Durable run state is stale, partial, or mismatched.',
   duplicate_assignment_id: 'Assignment ids in a run must be unique.',
   duplicate_task_id: 'Task ids in a run must be unique.',
   exotic_prototype_denied: 'Exotic prototypes are denied.',
@@ -295,6 +298,7 @@ export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
   'catalog_sixth_tool_denied',
   'cleanup_unproven',
   'direct_mode_rejected',
+  'durable_state_mismatch',
   'duplicate_assignment_id',
   'duplicate_task_id',
   'exotic_prototype_denied',
@@ -326,6 +330,12 @@ const ADAPTER_DEPENDENCY_KEYS = capturedFreeze([
 ]);
 const RUNTIME_METHODS = RUN_RUNTIME_METHODS;
 const ATTENTION_METHODS = capturedFreeze(['get', 'reply']);
+const SCHEDULER_PLAN_SCHEMA = 'codex-co-engineer.run-scheduler-plan.v1';
+const CATALOG_SNAPSHOT_SCHEMA = 'codex-co-engineer.run-catalog-snapshot.v1';
+const RECONSTRUCT_LANE_STATUSES = capturedFreeze([
+  'dispatched', 'running', ...ACTIONABLE_LANE_STATUSES,
+]);
+const pendingRunCatalogSnapshots = new Map();
 
 function diagnostic(value) {
   const text = STRING(value ?? '');
@@ -563,20 +573,54 @@ function cursorsFromReceipt(receipt) {
   return cursors;
 }
 
-async function lookupProfileDefinition(name, repositoryPath) {
-  if (typeof repositoryPath !== 'string' || repositoryPath.length === 0 || !path.isAbsolute(repositoryPath)) {
-    return null;
-  }
-  try {
-    const loaded = await loadProfiles({ repositoryPath });
-    const found = findProfile(loaded, name);
-    return found?.definition ?? null;
-  } catch {
-    return null;
-  }
+function assignmentNeedsNamedProfile(assignment) {
+  if (assignment === undefined || assignment === null || typeof assignment !== 'object') return false;
+  return capturedHasOwn(assignment, 'profile');
 }
 
-async function resolveAssignmentSelection(assignment, path, runProfile, repositoryPath) {
+function submitNeedsCatalogSnapshot(run, assignments) {
+  const profile = optionalValue(run, 'profile', 'run.profile');
+  if (typeof profile === 'string') return true;
+  if (!ARRAY_IS_ARRAY(assignments) && !capturedIsArray(assignments)) return false;
+  for (const assignment of assignments) {
+    if (assignmentNeedsNamedProfile(assignment)) return true;
+  }
+  return false;
+}
+
+async function loadBoundCatalogSnapshot(repositoryPath) {
+  if (typeof repositoryPath !== 'string' || repositoryPath.length === 0 || !path.isAbsolute(repositoryPath)) {
+    failAdapter('selection_unresolved', 'run.profile', CONTENT_FREE.selection_unresolved);
+  }
+  try {
+    return await loadProfileCatalogSnapshot({ repositoryPath });
+  } catch (error) {
+    if (error instanceof RunContractV1Error && error.code === 'selection_unresolved') throw error;
+    failAdapter('selection_unresolved', 'run.profile', CONTENT_FREE.selection_unresolved);
+  }
+  return null;
+}
+
+function lookupSnapshotDefinition(snapshot, name, field) {
+  if (snapshot === null || snapshot === undefined) {
+    failAdapter('selection_unresolved', field, CONTENT_FREE.selection_unresolved);
+  }
+  let found;
+  try {
+    found = findProfile(snapshot, name);
+  } catch (error) {
+    if (error instanceof RunContractV1Error && error.code === 'invalid_profile_name') {
+      failAdapter('invalid_format', field, CONTENT_FREE.invalid_format);
+    }
+    failAdapter('selection_unresolved', field, CONTENT_FREE.selection_unresolved);
+  }
+  if (found === undefined || found === null || found.definition === undefined) {
+    failAdapter('selection_unresolved', field, CONTENT_FREE.selection_unresolved);
+  }
+  return found.definition;
+}
+
+function resolveAssignmentSelection(assignment, path, runProfile, snapshot) {
   const provider = optionalValue(assignment, 'provider', `${path}.provider`);
   const model = optionalValue(assignment, 'model', `${path}.model`);
   const assignmentProfile = optionalValue(assignment, 'profile', `${path}.profile`);
@@ -586,10 +630,7 @@ async function resolveAssignmentSelection(assignment, path, runProfile, reposito
   const named = typeof assignmentProfile === 'string' ? assignmentProfile : runProfile;
   let definition = null;
   if (typeof named === 'string') {
-    definition = await lookupProfileDefinition(named, repositoryPath);
-    if (definition === null) {
-      failAdapter('selection_unresolved', path, CONTENT_FREE.selection_unresolved);
-    }
+    definition = lookupSnapshotDefinition(snapshot, named, path);
   }
   let resolvedProvider = provider;
   let resolvedModel = model;
@@ -708,7 +749,7 @@ function stripAssignment(assignment) {
   return stripped;
 }
 
-async function parseAssignments(value, runProfile, repositoryPath) {
+function parseAssignments(value, runProfile, snapshot) {
   if (!ARRAY_IS_ARRAY(value) && !capturedIsArray(value)) {
     failAdapter('invalid_type', 'run.assignments', CONTENT_FREE.invalid_type);
   }
@@ -734,8 +775,8 @@ async function parseAssignments(value, runProfile, repositoryPath) {
       failAdapter('duplicate_task_id', `${assignmentPath}.task_id`, CONTENT_FREE.duplicate_task_id);
     }
     seenTasks.add(taskId);
-    const resolved = await resolveAssignmentSelection(
-      assignment, assignmentPath, runProfile, repositoryPath,
+    const resolved = resolveAssignmentSelection(
+      assignment, assignmentPath, runProfile, snapshot,
     );
     const prompt = optionalValue(assignment, 'prompt', `${assignmentPath}.prompt`);
     if (prompt !== undefined) {
@@ -774,10 +815,14 @@ async function parseSubmit(args) {
   }
   const git = ownDataValue(run, 'git', 'run.git');
   const repositoryPath = git && typeof git === 'object' ? git.repository_path ?? null : null;
-  const { assignments, prompts, durations } = await parseAssignments(
-    ownDataValue(run, 'assignments', 'run.assignments'),
+  const rawAssignments = ownDataValue(run, 'assignments', 'run.assignments');
+  const snapshot = submitNeedsCatalogSnapshot(run, rawAssignments)
+    ? await loadBoundCatalogSnapshot(repositoryPath)
+    : null;
+  const { assignments, prompts, durations } = parseAssignments(
+    rawAssignments,
     typeof profile === 'string' ? profile : undefined,
-    repositoryPath,
+    snapshot,
   );
   const unresolved = assignments.some((assignment) => typeof assignment.provider !== 'string'
     || typeof assignment.model !== 'string');
@@ -800,10 +845,12 @@ async function parseSubmit(args) {
       run_id: runId,
       objective: typeof objective === 'string' ? objective : null,
       profile: typeof profile === 'string' ? profile : null,
+      catalog_digest: typeof snapshot?.catalog_digest === 'string' ? snapshot.catalog_digest : null,
       prompts,
       durations,
       repository_path: repositoryPath,
     }),
+    catalogSnapshot: snapshot,
   };
 }
 
@@ -860,12 +907,43 @@ function projectLane(lane, projectLaneTask, classifyLaneTask) {
   return sanitizeModelFacing(copy);
 }
 
+function cancellationUnconfirmed(operation, lanes) {
+  if (operation !== 'cancel' && operation !== 'cleanup') return false;
+  for (const lane of lanes) {
+    if (lane?.unresolved?.code === 'safe_cancel_unconfirmed') return true;
+    if (lane?.cancel_confirmed === false) return true;
+  }
+  return false;
+}
+
+function attentionRecord(receipt) {
+  if (receipt === undefined || receipt === null || typeof receipt !== 'object') return receipt;
+  if (receipt.record !== undefined && receipt.record !== null && typeof receipt.record === 'object') {
+    return {
+      ...receipt.record,
+      complete_candidate_blocked: receipt.complete_candidate_blocked === true
+        || receipt.record.complete_candidate_blocked === true,
+    };
+  }
+  return receipt;
+}
+
 function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask, wakeRequested = false) {
   const runId = runtimeReceipt?.run_id;
-  const lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
+  let lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
     ? runtimeReceipt.lanes.map((lane) => projectLane(lane, projectLaneTask, classifyLaneTask))
     : [];
-  const blocked = runtimeReceipt?.complete_candidate_blocked === true
+  const unconfirmed = cancellationUnconfirmed(operation, lanes);
+  if (unconfirmed === true) {
+    lanes = lanes.map((lane) => {
+      if (lane?.unresolved?.code === 'safe_cancel_unconfirmed' || lane?.cancel_confirmed === false) {
+        return { ...lane, status: 'unresolved' };
+      }
+      return lane;
+    });
+  }
+  const blocked = unconfirmed === true
+    || runtimeReceipt?.complete_candidate_blocked === true
     || lanes.some((lane) => lane?.required !== false && (
       lane.status === 'unresolved'
       || lane.status === 'failed'
@@ -874,30 +952,41 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     ));
   const sideEffects = emptySideEffects();
   if (runtimeReceipt?.side_effects?.task_dispatched === true) sideEffects.provider_dispatched = true;
+  const cleanupSource = runtimeReceipt?.cleanup ?? freezeData({
+    cleaned: false, proof_bound: true, removed: 0, remaining: null, unresolved: [],
+  });
+  const cleanup = unconfirmed === true
+    ? freezeData({
+      ...cleanupSource,
+      cleaned: false,
+      proof_bound: true,
+    })
+    : cleanupSource;
   if (runtimeReceipt?.side_effects?.task_cancelled === true
-    || (runtimeReceipt?.cleanup && runtimeReceipt.cleanup.cleaned === true)) {
-    sideEffects.cleanup_executed = runtimeReceipt?.cleanup?.cleaned === true;
+    || cleanup.cleaned === true) {
+    sideEffects.cleanup_executed = cleanup.cleaned === true;
   }
-  const attention = sanitizeModelFacing(runtimeReceipt?.attention ?? freezeData({
+  const attention = sanitizeModelFacing(attentionRecord(runtimeReceipt?.attention) ?? freezeData({
     batch_id: null, status: null, revision: null, wake: false,
     complete_candidate_blocked: blocked,
   }));
   const actionable = actionableDecision({ ...runtimeReceipt, lanes, attention });
   const wake = wakeRequested === true && actionable === true;
+  const status = unconfirmed === true
+    ? 'unresolved'
+    : (runtimeReceipt?.status ?? 'inspected');
   return freezeData({
     schema: RUN_TOOL_ADAPTER_RECEIPT_SCHEMA_ID,
     version: RUN_TOOL_ADAPTER_VERSION,
     mode: 'run',
     tool,
     operation,
-    status: runtimeReceipt?.status ?? 'inspected',
+    status,
     run_id: runId,
     assignment_count: runtimeReceipt?.assignment_count ?? lanes.length,
     lanes,
     attention,
-    cleanup: sanitizeModelFacing(runtimeReceipt?.cleanup ?? freezeData({
-      cleaned: false, proof_bound: true, removed: 0, remaining: null, unresolved: [],
-    })),
+    cleanup: sanitizeModelFacing(cleanup),
     decision_or_attention: freezeData({
       wake,
       attention: attention?.status === 'open' || lanes.some((lane) => lane?.status === 'needs_attention'),
@@ -1069,6 +1158,9 @@ export function createRunToolAdapter(dependencies) {
     let runtimeReceipt;
     if (operation === 'submit') {
       const parsed = await parseSubmit(args);
+      if (parsed.catalogSnapshot !== null && parsed.catalogSnapshot !== undefined) {
+        pendingRunCatalogSnapshots.set(parsed.runId, parsed.catalogSnapshot);
+      }
       if (rememberSubmitContext) rememberSubmitContext(parsed.context);
       counters.submit += 1;
       runtimeReceipt = await runtime.submitRun(parsed.runtimeRequest);
@@ -1128,7 +1220,7 @@ export function createRunToolAdapter(dependencies) {
       runtimeReceipt = await runtime.inspectRun({ run_id: runId });
       runtimeReceipt = freezeData({
         ...runtimeReceipt,
-        attention: attentionReceipt,
+        attention: attentionRecord(attentionReceipt),
       });
     } else if (operation === 'cancel' || operation === 'cleanup') {
       const runId = requireRunId(args);
@@ -1169,6 +1261,134 @@ export function createRunToolAdapter(dependencies) {
     describe: describeRunToolAdapterV1,
     counters,
   });
+}
+
+function echoReplyIdentity(identity, outcome) {
+  return freezeData({
+    outcome,
+    run_id: identity.run_id,
+    assignment_id: identity.assignment_id,
+    task_id: identity.task_id,
+    session_id: identity.session_id,
+    question_id: identity.question_id,
+  });
+}
+
+export async function deliverSupervisorSameSessionReplyV1(root, identity) {
+  try {
+    await submitReply(root, identity.task_id, {
+      session_id: identity.session_id,
+      question_id: identity.question_id,
+      response: identity.response,
+    });
+    return echoReplyIdentity(identity, 'delivered');
+  } catch (error) {
+    if (error?.code === 'reply_already_recorded') {
+      return echoReplyIdentity(identity, 'already_delivered');
+    }
+    throw error;
+  }
+}
+
+export async function cancelSupervisorSameSessionReplyV1(cancelTask, identity) {
+  try {
+    const inspected = await cancelTask({
+      run_id: identity.run_id,
+      assignment_id: identity.assignment_id,
+      task_id: identity.task_id,
+      role: identity.role,
+      provider: identity.provider,
+    });
+    const confirmed = inspected?.cancelled === true
+      && inspected?.status === 'cancelled'
+      && inspected?.task_id === identity.task_id;
+    return echoReplyIdentity(identity, confirmed ? 'confirmed' : 'unconfirmed');
+  } catch {
+    return echoReplyIdentity(identity, 'unconfirmed');
+  }
+}
+
+function bindAttentionReplyDelivery(attention, options = {}) {
+  if (attention === undefined || attention === null || typeof attention.reply !== 'function') {
+    return attention;
+  }
+  const deliver = typeof options.deliver === 'function' ? options.deliver : null;
+  const cancel = typeof options.cancel === 'function' ? options.cancel : null;
+  const bound = {
+    async get(runId) {
+      return attention.get(runId);
+    },
+    async reply(request) {
+      const payload = {
+        run_id: request.run_id,
+        batch_id: request.batch_id,
+        expected_revision: request.expected_revision,
+        reply: request.reply,
+      };
+      if (request.now !== undefined) payload.now = request.now;
+      const deliverFn = request.deliver ?? deliver;
+      const cancelFn = request.cancel ?? cancel;
+      if (typeof deliverFn === 'function') payload.deliver = deliverFn;
+      if (typeof cancelFn === 'function') payload.cancel = cancelFn;
+      return attention.reply(payload);
+    },
+  };
+  if (typeof attention.latch === 'function') {
+    bound.latch = async (request) => attention.latch(request);
+  }
+  return capturedFreeze(bound);
+}
+
+function assertLatchedReplyIdentities(items, reply, runId) {
+  const answers = reply?.answers;
+  if (!ARRAY_IS_ARRAY(items) || !ARRAY_IS_ARRAY(answers)) {
+    fail('attention_batch_identity_mismatch', 'reply.answers', CONTENT_FREE.invalid_format);
+  }
+  const pending = items.filter((item) => item.disposition === 'pending'
+    && item.reply_capability === 'same_session');
+  if (answers.length !== pending.length) {
+    fail('attention_batch_identity_mismatch', 'reply.answers', CONTENT_FREE.invalid_format);
+  }
+  const byAssignment = Object.create(null);
+  for (const item of pending) byAssignment[item.assignment_id] = item;
+  for (const answer of answers) {
+    const item = byAssignment[answer.assignment_id];
+    if (item === undefined
+      || item.task_id !== answer.task_id
+      || item.session_id !== answer.session_id
+      || item.question_id !== answer.question_id
+      || (item.run_id !== undefined && item.run_id !== runId)) {
+      fail('attention_batch_identity_mismatch', 'reply.answers', CONTENT_FREE.invalid_format);
+    }
+  }
+}
+
+async function deliverInProcessAnswers(deliver, items, reply, runId) {
+  if (typeof deliver !== 'function') return;
+  const byAssignment = Object.create(null);
+  for (const item of items ?? []) byAssignment[item.assignment_id] = item;
+  for (const answer of reply?.answers ?? []) {
+    const item = byAssignment[answer.assignment_id];
+    const identity = {
+      run_id: runId,
+      assignment_id: answer.assignment_id,
+      task_id: answer.task_id,
+      session_id: answer.session_id,
+      question_id: answer.question_id,
+      response: answer.response,
+      provider: item?.provider,
+      role: item?.role,
+    };
+    const result = await deliver(identity);
+    if (result === undefined || result === null || typeof result !== 'object') {
+      fail('attention_batch_identity_mismatch', 'deliver', CONTENT_FREE.invalid_format);
+    }
+    for (const key of ['run_id', 'assignment_id', 'task_id', 'session_id', 'question_id']) {
+      if (capturedHasOwn(result, key) && result[key] !== identity[key]) {
+        fail('attention_batch_identity_mismatch', `deliver.${key}`, CONTENT_FREE.invalid_format);
+      }
+    }
+  }
 }
 
 export function createInProcessRunSeams(options = {}) {
@@ -1317,12 +1537,14 @@ export function createInProcessRunSeams(options = {}) {
       if (expectedRevision !== undefined && expectedRevision !== existing.revision) {
         fail('attention_batch_revision_conflict', 'expected_revision', CONTENT_FREE.invalid_format);
       }
+      assertLatchedReplyIdentities(existing.items, request.reply, request.run_id);
       if (existing.reply !== null || existing.status === 'resolved' || existing.status === 'reply_committed') {
         if (canonicalJsonStringify(existing.reply) === canonicalJsonStringify(request.reply)) {
           return existing;
         }
         fail('attention_batch_reply_conflict', 'reply', CONTENT_FREE.invalid_format);
       }
+      await deliverInProcessAnswers(request.deliver, existing.items, request.reply, request.run_id);
       const record = freezeData({
         ...existing,
         status: 'resolved',
@@ -1366,11 +1588,19 @@ export function createInProcessRunSeams(options = {}) {
     cancelTask,
     clock,
   });
+  const attention = bindAttentionReplyDelivery(attentionBatch, {
+    deliver: typeof options.deliverSameSessionReply === 'function'
+      ? options.deliverSameSessionReply
+      : null,
+    cancel: typeof options.cancelSameSessionReply === 'function'
+      ? options.cancelSameSessionReply
+      : null,
+  });
   const runtime = createRunRuntime({
     runStore,
     runJournal,
     aggregateAnchor,
-    attentionBatch,
+    attentionBatch: attention,
     scheduler,
     artifactBridge,
     settleLocalTaskLifecycle,
@@ -1379,7 +1609,7 @@ export function createInProcessRunSeams(options = {}) {
   });
   return capturedFreeze({
     runtime,
-    attention: attentionBatch,
+    attention,
     scheduler,
     runStore,
     artifactBridge,
@@ -1425,44 +1655,145 @@ function wrapDurableJournal({ journalRoot, store, anchor }) {
   };
 }
 
-function durableArtifactBridge(clock) {
-  const records = new Map();
-  const evidence = [];
-  const keyOf = (runId, assignmentId, relativePath) =>
-    `${runId}\u0000${assignmentId}\u0000${relativePath}`;
+function secondPrecisionNow(clock) {
+  const raw = typeof clock === 'function' ? clock() : new Date().toISOString();
+  if (typeof raw === 'string') return raw.replace(/\.\d{3}Z$/u, 'Z');
+  return new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z');
+}
+
+async function persistAtomicJson(filePath, value) {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await chmod(path.dirname(filePath), 0o700).catch(() => {});
+  const tmp = `${filePath}.${process.pid}.${STRING(Date.now())}.tmp`;
+  try {
+    await writeFile(tmp, `${canonicalJsonStringify(value)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    });
+    await chmod(tmp, 0o600);
+    await rename(tmp, filePath);
+  } catch (error) {
+    await unlink(tmp).catch(() => {});
+    if (error instanceof RunContractV1Error) throw error;
+    failAdapter('durable_state_mismatch', 'state', CONTENT_FREE.durable_state_mismatch);
+  }
+}
+
+async function loadAtomicJson(filePath) {
+  let text;
+  try {
+    text = await readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { missing: true, value: null };
+    failAdapter('durable_state_mismatch', 'state', CONTENT_FREE.durable_state_mismatch);
+  }
+  if (typeof text !== 'string' || text.trim().length === 0 || text.includes('\0')) {
+    failAdapter('durable_state_mismatch', 'state', CONTENT_FREE.durable_state_mismatch);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    failAdapter('durable_state_mismatch', 'state', CONTENT_FREE.durable_state_mismatch);
+  }
+  if (parsed === null || typeof parsed !== 'object' || ARRAY_IS_ARRAY(parsed)) {
+    failAdapter('durable_state_mismatch', 'state', CONTENT_FREE.durable_state_mismatch);
+  }
+  return { missing: false, value: parsed };
+}
+
+function encodeArtifactName(relativePath) {
+  return Buffer.from(STRING(relativePath)).toString('base64url');
+}
+
+function durableArtifactBridge(clock, artifactRoot) {
   const rawStore = {
     async publish({ artifact_ref, bytes, source_truncated }) {
-      const key = keyOf(artifact_ref.run_id, artifact_ref.assignment_id, artifact_ref.relative_path);
-      records.set(key, {
+      const payload = {
         artifact_ref: { ...artifact_ref },
-        bytes: Buffer.from(bytes),
+        bytes: Buffer.from(bytes).toString('base64'),
         source_truncated: source_truncated === true,
+      };
+      const filePath = path.join(
+        artifactRoot,
+        artifact_ref.run_id,
+        artifact_ref.assignment_id,
+        `${encodeArtifactName(artifact_ref.relative_path)}.json`,
+      );
+      await persistAtomicJson(filePath, payload);
+      const readback = await this.get({
+        run_id: artifact_ref.run_id,
+        assignment_id: artifact_ref.assignment_id,
+        relative_path: artifact_ref.relative_path,
       });
-      return { artifact_ref: { ...artifact_ref } };
+      if (readback === null
+        || readback.artifact_ref.run_id !== artifact_ref.run_id
+        || readback.artifact_ref.assignment_id !== artifact_ref.assignment_id
+        || readback.artifact_ref.relative_path !== artifact_ref.relative_path) {
+        failAdapter('durable_state_mismatch', 'artifact', CONTENT_FREE.durable_state_mismatch);
+      }
+      return { artifact_ref: { ...readback.artifact_ref } };
     },
     async get({ run_id, assignment_id, relative_path }) {
-      const record = records.get(keyOf(run_id, assignment_id, relative_path));
-      if (!record) return null;
+      const filePath = path.join(
+        artifactRoot, run_id, assignment_id, `${encodeArtifactName(relative_path)}.json`,
+      );
+      const loaded = await loadAtomicJson(filePath);
+      if (loaded.missing) return null;
+      const record = loaded.value;
+      if (record.artifact_ref?.run_id !== run_id
+        || record.artifact_ref?.assignment_id !== assignment_id
+        || record.artifact_ref?.relative_path !== relative_path
+        || typeof record.bytes !== 'string') {
+        failAdapter('durable_state_mismatch', 'artifact', CONTENT_FREE.durable_state_mismatch);
+      }
       return {
         artifact_ref: { ...record.artifact_ref },
-        bytes: Buffer.from(record.bytes),
+        bytes: Buffer.from(record.bytes, 'base64'),
         source_truncated: record.source_truncated === true,
       };
     },
     async list({ run_id }) {
       const listed = [];
-      for (const record of records.values()) {
-        if (record.artifact_ref.run_id !== run_id) continue;
-        listed.push({
-          artifact_ref: { ...record.artifact_ref },
-          bytes: Buffer.from(record.bytes),
-          source_truncated: record.source_truncated === true,
-        });
+      const runDir = path.join(artifactRoot, run_id);
+      let assignments;
+      try {
+        assignments = await readdir(runDir, { withFileTypes: true });
+      } catch (error) {
+        if (error?.code === 'ENOENT') return listed;
+        failAdapter('durable_state_mismatch', 'artifact', CONTENT_FREE.durable_state_mismatch);
+      }
+      for (const assignmentDir of assignments) {
+        if (!assignmentDir.isDirectory()) continue;
+        const files = await readdir(path.join(runDir, assignmentDir.name), { withFileTypes: true });
+        for (const file of files) {
+          if (!file.isFile() || !file.name.endsWith('.json')) continue;
+          const loaded = await loadAtomicJson(path.join(runDir, assignmentDir.name, file.name));
+          if (loaded.missing) continue;
+          if (loaded.value.artifact_ref?.run_id !== run_id) {
+            failAdapter('durable_state_mismatch', 'artifact', CONTENT_FREE.durable_state_mismatch);
+          }
+          listed.push({
+            artifact_ref: { ...loaded.value.artifact_ref },
+            bytes: Buffer.from(loaded.value.bytes, 'base64'),
+            source_truncated: loaded.value.source_truncated === true,
+          });
+        }
       }
       return listed;
     },
     async remove({ run_id, assignment_id, relative_path }) {
-      records.delete(keyOf(run_id, assignment_id, relative_path));
+      const filePath = path.join(
+        artifactRoot, run_id, assignment_id, `${encodeArtifactName(relative_path)}.json`,
+      );
+      try {
+        await unlink(filePath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          failAdapter('durable_state_mismatch', 'artifact', CONTENT_FREE.durable_state_mismatch);
+        }
+      }
     },
   };
   const sanitizer = {
@@ -1481,6 +1812,7 @@ function durableArtifactBridge(clock) {
       };
     },
   };
+  const evidence = [];
   const evidenceBundle = {
     async append(event) {
       evidence.push(event);
@@ -1494,7 +1826,7 @@ function durableArtifactBridge(clock) {
     rawStore,
     sanitizer,
     evidenceBundle,
-    clock: { now: () => (typeof clock === 'function' ? clock() : new Date().toISOString()) },
+    clock: { now: () => secondPrecisionNow(clock) },
   });
 }
 
@@ -1502,56 +1834,209 @@ function planPath(schedulerRoot, runId) {
   return path.join(schedulerRoot, `${runId}.json`);
 }
 
-async function persistSchedulerPlan(schedulerRoot, request) {
-  const payload = {
-    run_id: request.run_id,
-    base_sha: request.base_sha,
-    assignments: request.assignments,
-  };
-  await writeFile(planPath(schedulerRoot, request.run_id), `${canonicalJsonStringify(payload)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
+function catalogSnapshotPath(schedulerRoot, runId) {
+  return path.join(schedulerRoot, `${runId}.catalog.json`);
 }
 
-async function loadSchedulerPlan(schedulerRoot, runId) {
-  try {
-    const text = await readFile(planPath(schedulerRoot, runId), 'utf8');
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== 'object' || parsed.run_id !== runId) return null;
-    return parsed;
-  } catch {
-    return null;
+function schedulerPlanIdentity(request) {
+  const digest = createHash('sha256')
+    .update(canonicalJsonStringify({
+      assignments: request.assignments,
+      base_sha: request.base_sha,
+      run_id: request.run_id,
+    }))
+    .digest('hex');
+  return `sha256:${digest}`;
+}
+
+function boundCatalogSnapshotPayload(snapshot) {
+  if (snapshot === null || snapshot === undefined) return null;
+  return {
+    schema: CATALOG_SNAPSHOT_SCHEMA,
+    catalog_digest: snapshot.catalog_digest,
+    profiles: ARRAY_IS_ARRAY(snapshot.profiles)
+      ? snapshot.profiles.map((record) => ({
+        name: record.name,
+        scope: record.scope,
+        digest: record.digest,
+        definition: record.definition,
+      }))
+      : [],
+  };
+}
+
+async function persistSchedulerPlan(schedulerRoot, payload) {
+  await persistAtomicJson(planPath(schedulerRoot, payload.run_id), {
+    schema: SCHEDULER_PLAN_SCHEMA,
+    run_id: payload.run_id,
+    base_sha: payload.base_sha,
+    assignments: payload.assignments,
+    plan_identity: payload.plan_identity,
+    catalog_digest: payload.catalog_digest ?? null,
+    dispatched: payload.dispatched === true,
+  });
+  if (payload.catalog_snapshot !== null && payload.catalog_snapshot !== undefined) {
+    await persistAtomicJson(catalogSnapshotPath(schedulerRoot, payload.run_id), payload.catalog_snapshot);
   }
 }
 
-function reconstructLane(assignment, inspected) {
+async function loadSchedulerPlan(schedulerRoot, runId) {
+  const loaded = await loadAtomicJson(planPath(schedulerRoot, runId));
+  if (loaded.missing) return null;
+  const parsed = loaded.value;
+  if (parsed.schema !== SCHEDULER_PLAN_SCHEMA
+    || parsed.run_id !== runId
+    || typeof parsed.plan_identity !== 'string'
+    || typeof parsed.base_sha !== 'string'
+    || !ARRAY_IS_ARRAY(parsed.assignments)) {
+    failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+  }
+  const expected = schedulerPlanIdentity({
+    run_id: parsed.run_id,
+    base_sha: parsed.base_sha,
+    assignments: parsed.assignments,
+  });
+  if (parsed.plan_identity !== expected) {
+    failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+  }
+  if (parsed.catalog_digest !== null && parsed.catalog_digest !== undefined) {
+    const snapshot = await loadAtomicJson(catalogSnapshotPath(schedulerRoot, runId));
+    if (snapshot.missing || snapshot.value.catalog_digest !== parsed.catalog_digest) {
+      failAdapter('durable_state_mismatch', 'catalog', CONTENT_FREE.durable_state_mismatch);
+    }
+  }
+  return parsed;
+}
+
+function reconstructLane(assignment, inspected, { cancelAttempted = false } = {}) {
+  const required = assignment.required !== false;
+  if (cancelAttempted === true) {
+    const confirmed = inspected?.cancelled === true
+      && inspected?.status === 'cancelled'
+      && inspected?.task_id === assignment.task_id;
+    return {
+      access: assignment.access,
+      assignment_id: assignment.assignment_id,
+      attention: null,
+      cancel_confirmed: confirmed,
+      cursor: inspected?.cursor ?? null,
+      dispatched: true,
+      fallback: false,
+      model: assignment.model,
+      provider: assignment.provider,
+      replayed: false,
+      required,
+      role: assignment.role,
+      starting_ref: assignment.starting_ref ?? null,
+      status: confirmed ? 'cancelled' : 'unresolved',
+      task_id: assignment.task_id,
+      unresolved: confirmed ? null : {
+        assignment_id: assignment.assignment_id,
+        code: 'safe_cancel_unconfirmed',
+        required,
+      },
+      write_scope: assignment.write_scope,
+    };
+  }
+  const status = typeof inspected?.status === 'string' && capturedIncludes(RECONSTRUCT_LANE_STATUSES, inspected.status)
+    ? inspected.status
+    : 'unresolved';
   return {
     access: assignment.access,
     assignment_id: assignment.assignment_id,
     attention: inspected?.attention ?? null,
-    cancel_confirmed: inspected?.cancelled === true || inspected?.status === 'cancelled' ? true : null,
+    cancel_confirmed: null,
     cursor: inspected?.cursor ?? null,
     dispatched: true,
     fallback: false,
     model: assignment.model,
     provider: assignment.provider,
     replayed: false,
-    required: assignment.required !== false,
+    required,
     role: assignment.role,
     starting_ref: assignment.starting_ref ?? null,
-    status: typeof inspected?.status === 'string' ? inspected.status : 'dispatched',
+    status,
     task_id: assignment.task_id,
-    unresolved: null,
+    unresolved: status === 'unresolved'
+      ? { assignment_id: assignment.assignment_id, code: 'inspect_failed', required }
+      : null,
     write_scope: assignment.write_scope,
   };
 }
 
-function wrapDurableScheduler({ inner, schedulerRoot, inspectTask, cancelTask, clock }) {
+async function inspectPlanLane(inspectTask, plan, assignment) {
+  try {
+    return await inspectTask({
+      run_id: plan.run_id,
+      assignment_id: assignment.assignment_id,
+      task_id: assignment.task_id,
+      role: assignment.role,
+      provider: assignment.provider,
+    });
+  } catch {
+    return { task_id: assignment.task_id, status: 'unresolved' };
+  }
+}
+
+async function reconstructPlanReceipt(plan, inspectTask, clock, status = 'inspected') {
+  const lanes = [];
+  for (const assignment of plan.assignments) {
+    const inspected = await inspectPlanLane(inspectTask, plan, assignment);
+    lanes.push(reconstructLane(assignment, inspected));
+  }
+  return freezeData({
+    schema: 'codex-co-engineer.run-scheduler-receipt.v1',
+    status,
+    run_id: plan.run_id,
+    base_sha: plan.base_sha,
+    created: false,
+    lanes,
+    complete_candidate_blocked: lanes.some((lane) => lane.required
+      && (lane.status === 'unresolved' || lane.status === 'failed')),
+    wake: false,
+    remote_mutated: false,
+    observed_at: clock(),
+  });
+}
+
+function wrapDurableScheduler({
+  inner, schedulerRoot, inspectTask, cancelTask, clock, beforeProviderDispatch,
+}) {
   return {
     async submitAssignments(request) {
+      const identity = schedulerPlanIdentity(request);
+      const existing = await loadSchedulerPlan(schedulerRoot, request.run_id);
+      if (existing !== null) {
+        if (existing.plan_identity !== identity || existing.base_sha !== request.base_sha) {
+          failAdapter('durable_state_mismatch', 'plan', CONTENT_FREE.durable_state_mismatch);
+        }
+        return reconstructPlanReceipt(existing, inspectTask, clock, 'idempotent');
+      }
+      const snapshot = pendingRunCatalogSnapshots.get(request.run_id) ?? null;
+      const catalogPayload = boundCatalogSnapshotPayload(snapshot);
+      await persistSchedulerPlan(schedulerRoot, {
+        run_id: request.run_id,
+        base_sha: request.base_sha,
+        assignments: request.assignments,
+        plan_identity: identity,
+        catalog_digest: catalogPayload?.catalog_digest ?? null,
+        catalog_snapshot: catalogPayload,
+        dispatched: false,
+      });
+      pendingRunCatalogSnapshots.delete(request.run_id);
+      if (typeof beforeProviderDispatch === 'function') {
+        await beforeProviderDispatch(request);
+      }
       const receipt = await inner.submitAssignments(request);
-      await persistSchedulerPlan(schedulerRoot, request);
+      await persistSchedulerPlan(schedulerRoot, {
+        run_id: request.run_id,
+        base_sha: request.base_sha,
+        assignments: request.assignments,
+        plan_identity: identity,
+        catalog_digest: catalogPayload?.catalog_digest ?? null,
+        catalog_snapshot: catalogPayload,
+        dispatched: true,
+      });
       return receipt;
     },
     async resumeAssignments(request) {
@@ -1563,35 +2048,7 @@ function wrapDurableScheduler({ inner, schedulerRoot, inspectTask, cancelTask, c
         }
         const plan = await loadSchedulerPlan(schedulerRoot, request.run_id);
         if (plan === null) throw error;
-        const lanes = [];
-        for (const assignment of plan.assignments) {
-          let inspected = null;
-          try {
-            inspected = await inspectTask({
-              run_id: plan.run_id,
-              assignment_id: assignment.assignment_id,
-              task_id: assignment.task_id,
-              role: assignment.role,
-              provider: assignment.provider,
-            });
-          } catch {
-            inspected = { task_id: assignment.task_id, status: 'unresolved' };
-          }
-          lanes.push(reconstructLane(assignment, inspected));
-        }
-        return freezeData({
-          schema: 'codex-co-engineer.run-scheduler-receipt.v1',
-          status: 'inspected',
-          run_id: plan.run_id,
-          base_sha: plan.base_sha,
-          created: false,
-          lanes,
-          complete_candidate_blocked: lanes.some((lane) => lane.required
-            && (lane.status === 'unresolved' || lane.status === 'failed')),
-          wake: false,
-          remote_mutated: false,
-          observed_at: clock(),
-        });
+        return reconstructPlanReceipt(plan, inspectTask, clock, 'inspected');
       }
     },
     async cancelAssignments(request) {
@@ -1605,31 +2062,37 @@ function wrapDurableScheduler({ inner, schedulerRoot, inspectTask, cancelTask, c
         if (plan === null) throw error;
         const selected = new Set(request.assignment_ids ?? []);
         const lanes = [];
+        let unconfirmed = false;
         for (const assignment of plan.assignments) {
-          let inspected = { task_id: assignment.task_id, status: assignment.status ?? 'dispatched' };
-          if (selected.has(assignment.assignment_id)) {
-            try {
-              inspected = await cancelTask({
-                run_id: plan.run_id,
-                assignment_id: assignment.assignment_id,
-                task_id: assignment.task_id,
-                role: assignment.role,
-                provider: assignment.provider,
-              });
-            } catch {
-              inspected = { task_id: assignment.task_id, status: 'unresolved', cancelled: false };
-            }
+          if (!selected.has(assignment.assignment_id)) {
+            const inspected = await inspectPlanLane(inspectTask, plan, assignment);
+            lanes.push(reconstructLane(assignment, inspected));
+            continue;
           }
-          lanes.push(reconstructLane(assignment, inspected));
+          let inspected;
+          try {
+            inspected = await cancelTask({
+              run_id: plan.run_id,
+              assignment_id: assignment.assignment_id,
+              task_id: assignment.task_id,
+              role: assignment.role,
+              provider: assignment.provider,
+            });
+          } catch {
+            inspected = { task_id: assignment.task_id, status: 'unresolved', cancelled: false };
+          }
+          const lane = reconstructLane(assignment, inspected, { cancelAttempted: true });
+          if (lane.cancel_confirmed !== true) unconfirmed = true;
+          lanes.push(lane);
         }
         return freezeData({
           schema: 'codex-co-engineer.run-scheduler-receipt.v1',
-          status: 'cancelled',
+          status: unconfirmed ? 'inspected' : 'cancelled',
           run_id: plan.run_id,
           base_sha: plan.base_sha,
           created: false,
           lanes,
-          complete_candidate_blocked: false,
+          complete_candidate_blocked: unconfirmed,
           wake: false,
           remote_mutated: false,
           observed_at: clock(),
@@ -1666,13 +2129,28 @@ export async function createDurableRunSeams(options = {}) {
   const schedulerRoot = await ensurePrivateRoot(
     options.schedulerRoot ?? (root ? path.join(root, 'runs', 'scheduler') : null),
   );
+  const artifactRoot = await ensurePrivateRoot(
+    options.artifactRoot ?? (root ? path.join(root, 'runs', 'artifacts') : null),
+  );
   const runStore = await openRunStore(storeRoot);
   const aggregateAnchor = options.aggregateAnchor ?? missingAggregateAnchor();
   const runJournal = wrapDurableJournal({
     journalRoot, store: runStore, anchor: aggregateAnchor,
   });
   const attentionBatch = await openAttentionRoot(attentionRoot);
-  const artifactBridge = durableArtifactBridge(clock);
+  const deliverSameSessionReply = typeof options.deliverSameSessionReply === 'function'
+    ? options.deliverSameSessionReply
+    : (typeof root === 'string'
+      ? (identity) => deliverSupervisorSameSessionReplyV1(root, identity)
+      : null);
+  const cancelSameSessionReply = typeof options.cancelSameSessionReply === 'function'
+    ? options.cancelSameSessionReply
+    : (identity) => cancelSupervisorSameSessionReplyV1(cancelTask, identity);
+  const attention = bindAttentionReplyDelivery(attentionBatch, {
+    deliver: deliverSameSessionReply,
+    cancel: cancelSameSessionReply,
+  });
+  const artifactBridge = durableArtifactBridge(clock, artifactRoot);
   const innerScheduler = createRunScheduler({
     delegateTask,
     inspectTask,
@@ -1685,12 +2163,13 @@ export async function createDurableRunSeams(options = {}) {
     inspectTask,
     cancelTask,
     clock,
+    beforeProviderDispatch: options.beforeProviderDispatch,
   });
   const runtime = createRunRuntime({
     runStore,
     runJournal,
     aggregateAnchor,
-    attentionBatch,
+    attentionBatch: attention,
     scheduler,
     artifactBridge,
     settleLocalTaskLifecycle,
@@ -1699,7 +2178,7 @@ export async function createDurableRunSeams(options = {}) {
   });
   return capturedFreeze({
     runtime,
-    attention: attentionBatch,
+    attention,
     scheduler,
     runStore,
     artifactBridge,
@@ -1728,3 +2207,5 @@ capturedFreeze(createRunToolAdapter);
 capturedFreeze(createInProcessRunSeams);
 capturedFreeze(createDurableRunSeams);
 capturedFreeze(classifyDeniedGitOperationV1);
+capturedFreeze(deliverSupervisorSameSessionReplyV1);
+capturedFreeze(cancelSupervisorSameSessionReplyV1);

@@ -66,6 +66,8 @@ import {
   createDurableRunSeams,
   createInProcessRunSeams,
   createRunToolAdapter,
+  deliverSupervisorSameSessionReplyV1,
+  cancelSupervisorSameSessionReplyV1,
 } from './run-tool-adapter.mjs';
 
 const execFile = promisify(nodeExecFile);
@@ -2090,14 +2092,40 @@ export async function createSupervisorRunToolAdapter(options = {}) {
     cleanupLocalTaskLifecycle: options.cleanupLocalTaskLifecycle ?? cleanupLocalTaskLifecycle,
     clock: options.clock ?? (() => new Date().toISOString()),
   };
+  const deliverSameSessionReply = options.deliverSameSessionReply
+    ?? ((identity) => deliverSupervisorSameSessionReplyV1(root, identity));
+  const cancelSameSessionReply = options.cancelSameSessionReply
+    ?? ((identity) => cancelSupervisorSameSessionReplyV1(taskFns.cancelTask, identity));
+  const seamOptions = {
+    ...taskFns,
+    deliverSameSessionReply,
+    cancelSameSessionReply,
+  };
   const seams = options.seams ?? (
     options.inProcess === true
-      ? createInProcessRunSeams(taskFns)
-      : await createDurableRunSeams({ root, ...taskFns })
+      ? createInProcessRunSeams(seamOptions)
+      : await createDurableRunSeams({ root, ...seamOptions })
   );
+  const attention = seams.attention && typeof seams.attention.reply === 'function'
+    ? {
+      get: (...args) => seams.attention.get(...args),
+      ...(typeof seams.attention.latch === 'function'
+        ? { latch: (...args) => seams.attention.latch(...args) }
+        : {}),
+      reply: async (request) => seams.attention.reply({
+        run_id: request.run_id,
+        batch_id: request.batch_id,
+        expected_revision: request.expected_revision,
+        reply: request.reply,
+        ...(request.now !== undefined ? { now: request.now } : {}),
+        deliver: request.deliver ?? deliverSameSessionReply,
+        cancel: request.cancel ?? cancelSameSessionReply,
+      }),
+    }
+    : seams.attention;
   return createRunToolAdapter({
     runtime: seams.runtime,
-    attention: seams.attention,
+    attention,
     projectLaneTask: projectSupervisorTerminalReceipt,
     classifyLaneTask: classifySupervisorTerminalReceipt,
     rememberSubmitContext: (context) => {

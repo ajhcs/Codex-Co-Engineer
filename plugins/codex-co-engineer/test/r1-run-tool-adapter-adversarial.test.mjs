@@ -8,11 +8,15 @@ import { inspect, types as utilTypes } from 'node:util';
 import test from 'node:test';
 
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import {
   classifyRunToolCall,
   createRunToolAdapter,
   denyRunToolRemoteMutationV1,
 } from '../mcp/v3/run-tool-adapter.mjs';
+import { PROFILE_SCHEMA } from '../mcp/v3/profile.mjs';
 import {
   ASSIGNMENT_ID,
   HOSTILE_ENV,
@@ -22,10 +26,15 @@ import {
   RUN_ID,
   countingProxy,
   createAdapter,
+  createDurableAdapter,
+  createSeamAdapter,
   makeAssignment,
   makeAttentionItem,
   makeRunArgs,
+  makeRunReply,
+  trackingSameSessionDeliver,
 } from './fixtures/r1-run-tool-adapter-fixtures.mjs';
+import { makePrivateRoot } from './fixtures/r1-run-runtime-fixtures.mjs';
 
 function errorOf(action) {
   return Promise.resolve()
@@ -222,4 +231,200 @@ test('explicit provider/model does not ignore a hostile profile name', async () 
   assert.equal(error.code, 'invalid_format');
   assert.equal(calls.submit.length, 0);
   assertContentFree(error);
+});
+
+test('forged same-session identity never delivers and fails closed', async () => {
+  const tracker = trackingSameSessionDeliver();
+  const { adapter } = createSeamAdapter({
+    deliverSameSessionReply: tracker.deliver,
+  });
+  await adapter.dispatch('delegate', makeRunArgs());
+  await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    attention: { items: [makeAttentionItem()] },
+  });
+  const forged = makeRunReply({ sessionId: 'sess-forged', questionId: 'q-forged' });
+  const error = await errorOf(() => adapter.dispatch('task', {
+    run_id: RUN_ID,
+    run_reply: {
+      batch_id: `att-${RUN_ID}`,
+      expected_revision: 1,
+      reply: forged,
+    },
+  }));
+  assert.equal(error.code, 'attention_batch_identity_mismatch');
+  assert.equal(tracker.calls.length, 0);
+  assertContentFree(error);
+});
+
+test('thrown cancel stays unresolved/unsafe across durable restart', async () => {
+  const first = await createDurableAdapter();
+  try {
+    await first.adapter.dispatch('delegate', makeRunArgs());
+    const restarted = await createDurableAdapter({
+      root: first.root,
+      cancelTask: async () => {
+        throw new Error(HOSTILE_SECRET);
+      },
+    });
+    const receipt = await restarted.adapter.dispatch('cancel', {
+      run_id: RUN_ID,
+      assignment_ids: [ASSIGNMENT_ID],
+    });
+    assert.equal(receipt.status, 'unresolved');
+    assert.equal(receipt.lanes[0].status, 'unresolved');
+    assert.equal(receipt.lanes[0].unresolved.code, 'safe_cancel_unconfirmed');
+    assert.equal(receipt.cleanup.cleaned, false);
+    const serialized = inspect(receipt);
+    assert.equal(serialized.includes(HOSTILE_SECRET), false);
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
+  }
+});
+
+test('crash before dispatch cannot duplicate dispatch after restart', async () => {
+  const first = await createDurableAdapter({
+    beforeProviderDispatch: async () => {
+      throw new RunContractV1Error(
+        'durable_state_mismatch',
+        'plan',
+        'Durable run state is stale, partial, or mismatched.',
+      );
+    },
+  });
+  try {
+    const crashed = await errorOf(() => first.adapter.dispatch('delegate', makeRunArgs()));
+    assert.equal(crashed.code, 'durable_state_mismatch');
+    assert.equal(first.dispatchCalls.length, 0);
+    const restarted = await createDurableAdapter({ root: first.root });
+    const inspected = await restarted.adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.run_id, RUN_ID);
+    assert.equal(restarted.dispatchCalls.length, 0);
+    const resubmit = await restarted.adapter.dispatch('delegate', makeRunArgs());
+    assert.equal(resubmit.operation, 'submit');
+    assert.equal(restarted.dispatchCalls.length, 0);
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
+  }
+});
+
+test('stale partial and mismatched scheduler plans fail closed', async () => {
+  const first = await createDurableAdapter();
+  try {
+    await first.adapter.dispatch('delegate', makeRunArgs());
+    const planPath = path.join(first.root, 'runs', 'scheduler', `${RUN_ID}.json`);
+    await writeFile(planPath, '{"run_id":');
+    const truncated = await createDurableAdapter({ root: first.root });
+    const truncatedError = await errorOf(() => truncated.adapter.dispatch('status', { run_id: RUN_ID }));
+    assert.equal(truncatedError.code, 'durable_state_mismatch');
+    assertContentFree(truncatedError);
+
+    const mismatched = await createDurableAdapter();
+    try {
+      await mismatched.adapter.dispatch('delegate', makeRunArgs());
+      const otherPlan = path.join(mismatched.root, 'runs', 'scheduler', `${RUN_ID}.json`);
+      const parsed = JSON.parse(await readFile(otherPlan, 'utf8'));
+      parsed.base_sha = 'b'.repeat(40);
+      await writeFile(otherPlan, `${JSON.stringify(parsed)}\n`);
+      const reopened = await createDurableAdapter({ root: mismatched.root });
+      const mismatchError = await errorOf(() => reopened.adapter.dispatch('status', { run_id: RUN_ID }));
+      assert.equal(mismatchError.code, 'durable_state_mismatch');
+      assertContentFree(mismatchError);
+    } finally {
+      await rm(mismatched.root, { recursive: true, force: true });
+    }
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
+  }
+});
+
+test('durable artifacts persist before restart and reject mismatched identity', async () => {
+  const first = await createDurableAdapter();
+  try {
+    await first.adapter.dispatch('delegate', makeRunArgs());
+    const relativePath = `runs/${RUN_ID}/${ASSIGNMENT_ID}/provider-report.txt`;
+    await first.seams.artifactBridge.captureAssignmentArtifacts({
+      run_id: RUN_ID,
+      assignment_id: ASSIGNMENT_ID,
+      artifact_kind: 'provider_report',
+      media_type: 'text/plain',
+      relative_path: relativePath,
+      source: 'owner-only report',
+    });
+    const restarted = await createDurableAdapter({ root: first.root });
+    const projected = await restarted.seams.artifactBridge.projectAssignmentArtifacts({
+      run_id: RUN_ID,
+      assignment_id: ASSIGNMENT_ID,
+    });
+    assert.equal(projected.artifacts.length, 1);
+    assert.equal(projected.artifacts[0].relative_path, relativePath);
+    const artifactFile = path.join(
+      first.root,
+      'runs',
+      'artifacts',
+      RUN_ID,
+      ASSIGNMENT_ID,
+      `${Buffer.from(relativePath).toString('base64url')}.json`,
+    );
+    const stored = JSON.parse(await readFile(artifactFile, 'utf8'));
+    stored.artifact_ref.run_id = 'run-forged-identity-00000000000000000000000000000000';
+    await writeFile(artifactFile, `${JSON.stringify(stored)}\n`);
+    const hostile = await createDurableAdapter({ root: first.root });
+    const mismatch = await errorOf(() => hostile.seams.artifactBridge.projectAssignmentArtifacts({
+      run_id: RUN_ID,
+      assignment_id: ASSIGNMENT_ID,
+    }));
+    assert.ok([
+      'durable_state_mismatch',
+      'invalid_type',
+      'artifact_bridge_restart_conflict',
+      'artifact_bridge_identity_mismatch',
+    ].includes(mismatch.code), mismatch.code);
+    assertContentFree(mismatch);
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
+  }
+});
+
+test('catalog mutation after submit cannot change bound assignment resolution', async () => {
+  const workspace = await makePrivateRoot('r1-rcutover-catalog-mut-');
+  try {
+    const catalogDir = path.join(workspace, '.codex');
+    await mkdir(catalogDir, { recursive: true, mode: 0o700 });
+    const catalogPath = path.join(catalogDir, 'co-engineer-profiles.json');
+    const name = 'writer-profile';
+    await writeFile(catalogPath, JSON.stringify({
+      [name]: { schema: PROFILE_SCHEMA, provider: 'grok', model: 'grok-4' },
+    }));
+    const first = makeAssignment({ assignmentId: 'lane-a', taskId: 'task-a', writeScope: ['a/**'] });
+    const second = makeAssignment({ assignmentId: 'lane-b', taskId: 'task-b', writeScope: ['b/**'] });
+    delete first.provider;
+    delete first.model;
+    delete second.provider;
+    delete second.model;
+    first.profile = name;
+    second.profile = name;
+    const args = makeRunArgs({ assignments: [first, second] });
+    args.run.git = { ...args.run.git, repository_path: workspace };
+    const { adapter, calls } = createAdapter();
+    const submitted = await adapter.dispatch('delegate', args);
+    assert.equal(submitted.lanes[0].provider, 'grok');
+    assert.equal(submitted.lanes[1].model, 'grok-4');
+    await writeFile(catalogPath, JSON.stringify({
+      [name]: {
+        schema: PROFILE_SCHEMA,
+        provider: 'cursor-local',
+        model: 'composer-1',
+      },
+    }));
+    const inspected = await adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.lanes[0].provider, 'grok');
+    assert.equal(inspected.lanes[0].model, 'grok-4');
+    assert.equal(inspected.lanes[1].provider, 'grok');
+    assert.equal(calls.submit.length, 1);
+    assert.equal(calls.submit[0].assignments[0].provider, 'grok');
+    assert.equal(calls.submit[0].assignments[1].model, 'grok-4');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });

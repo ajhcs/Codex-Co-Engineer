@@ -11,6 +11,7 @@ import {
   cancelTask,
   cleanupLocalTaskLifecycle,
   cleanupManagedWorkspace,
+  createSupervisorRunToolAdapter,
   createWriterWorkspace,
   invokeRunTool,
   launchWorker,
@@ -19,6 +20,15 @@ import {
   supervisorStatus,
   taskStatus,
 } from '../mcp/v3/supervisor.mjs';
+import { recordNeedsAttention, submitReply } from '../mcp/v3/mailbox.mjs';
+import {
+  RUN_ID,
+  TASK_ID,
+  makeAttentionItem,
+  makeRunArgs,
+  makeRunReply,
+} from './fixtures/r1-run-tool-adapter-fixtures.mjs';
+import { createClock, createLifecycleFns } from './fixtures/r1-run-runtime-fixtures.mjs';
 import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 import { runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
 
@@ -827,7 +837,92 @@ test('default run seams are durable P33/P34 authorities and cancel confirms', as
   const source = await readFile(new URL('../mcp/v3/supervisor.mjs', import.meta.url), 'utf8');
   assert.match(source, /createDurableRunSeams/u);
   assert.match(source, /cancelled: projected.status === 'cancelled'/u);
+  assert.match(source, /deliverSupervisorSameSessionReplyV1/u);
   assert.match(source, /options.seams \?\? \(/u);
+});
+
+test('production P34 reply binds supervisor same-session delivery exactly once', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-p34-reply-'));
+  const lifecycle = createLifecycleFns({ final: true });
+  try {
+    await createTask({
+      root,
+      prompt: 'ask a question',
+      record: {
+        id: TASK_ID,
+        status: 'running',
+        provider: 'grok',
+        transport: 'acp',
+        cwd: root,
+        acp_session_id: 'sess-1',
+      },
+    });
+    await recordNeedsAttention(root, TASK_ID, {
+      session_id: 'sess-1',
+      question_id: 'q-1',
+      prompt: 'Choose the next writer step',
+    });
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      delegateTask: async (plan) => ({ task_id: plan.task_id, status: 'dispatched', cursor: '0' }),
+      inspectTask: async (plan) => ({
+        task_id: plan.task_id,
+        status: 'needs_attention',
+        cursor: plan.cursor ?? '0',
+        attention: { session_id: 'sess-1', question_id: 'q-1' },
+      }),
+      cancelTaskFn: async (plan) => ({ task_id: plan.task_id, status: 'cancelled', cancelled: true }),
+      settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
+      cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
+      clock: createClock(),
+    });
+    await adapter.dispatch('delegate', makeRunArgs());
+    const attention = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      attention: { items: [makeAttentionItem()] },
+    });
+    const batchId = attention.attention.batch_id;
+    assert.equal(typeof batchId, 'string');
+    const replyBody = makeRunReply({ batchId });
+    const first = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      run_reply: {
+        batch_id: batchId,
+        expected_revision: attention.attention.revision,
+        reply: replyBody,
+      },
+    });
+    assert.equal(first.operation, 'reply');
+    assert.ok(first.attention.status === 'resolved' || first.attention.status === 'reply_committed');
+    await assert.rejects(
+      () => submitReply(root, TASK_ID, {
+        session_id: 'sess-1',
+        question_id: 'q-1',
+        response: 'ship-it',
+      }),
+      (error) => error.code === 'reply_already_recorded',
+    );
+    const second = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      run_reply: {
+        batch_id: batchId,
+        expected_revision: first.attention.revision,
+        reply: replyBody,
+      },
+    });
+    assert.ok(second.attention.status === 'resolved' || second.attention.status === 'reply_committed');
+    const forged = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      run_reply: {
+        batch_id: batchId,
+        expected_revision: second.attention.revision,
+        reply: makeRunReply({ batchId, sessionId: 'sess-other', questionId: 'q-other' }),
+      },
+    }).then(() => null, (error) => error);
+    assert.equal(forged?.code, 'attention_batch_reply_conflict');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('invokeRunTool preserves omitted 3.2.1 mode and R-TRUTH lifecycle authority', async () => {

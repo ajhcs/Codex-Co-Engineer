@@ -7,6 +7,7 @@ import {
   projectSupervisorTerminalReceipt,
 } from '../../mcp/v3/supervisor.mjs';
 import {
+  createDurableRunSeams,
   createInProcessRunSeams,
   createRunToolAdapter,
 } from '../../mcp/v3/run-tool-adapter.mjs';
@@ -23,6 +24,7 @@ import {
   createMemoryScheduler,
   createRuntime,
   makeAssignment,
+  makePrivateRoot,
   makeSubmitRequest,
   makeVerifier,
 } from './r1-run-runtime-fixtures.mjs';
@@ -195,6 +197,8 @@ export function createSeamAdapter(options = {}) {
     settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
     cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
     clock: options.clock ?? createClock(),
+    deliverSameSessionReply: options.deliverSameSessionReply,
+    cancelSameSessionReply: options.cancelSameSessionReply,
   });
   const adapter = createRunToolAdapter({
     runtime: seams.runtime,
@@ -203,4 +207,76 @@ export function createSeamAdapter(options = {}) {
     classifyLaneTask: options.classifyLaneTask ?? classifySupervisorTerminalReceipt,
   });
   return { adapter, seams, lifecycle };
+}
+
+export function makeRunReply({
+  runId = RUN_ID,
+  batchId = `att-${runId}`,
+  assignmentId = ASSIGNMENT_ID,
+  taskId = TASK_ID,
+  sessionId = 'sess-1',
+  questionId = 'q-1',
+  response = 'ship-it',
+} = {}) {
+  return {
+    round: 1,
+    batch_id: batchId,
+    answers: [{
+      assignment_id: assignmentId,
+      question_id: questionId,
+      session_id: sessionId,
+      task_id: taskId,
+      response,
+    }],
+  };
+}
+
+export function trackingSameSessionDeliver() {
+  const calls = [];
+  return {
+    calls,
+    async deliver(identity) {
+      calls.push({ ...identity });
+      return {
+        outcome: 'delivered',
+        run_id: identity.run_id,
+        assignment_id: identity.assignment_id,
+        task_id: identity.task_id,
+        session_id: identity.session_id,
+        question_id: identity.question_id,
+      };
+    },
+  };
+}
+
+export async function createDurableAdapter(options = {}) {
+  const root = options.root ?? await makePrivateRoot('r1-rcutover-durable-');
+  const lifecycle = options.lifecycle ?? createLifecycleFns(options.lifecycleOptions ?? { final: true });
+  const dispatchCalls = [];
+  const taskFns = {
+    delegateTask: options.delegateTask ?? (async (plan) => {
+      dispatchCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'dispatched', cursor: '0' };
+    }),
+    inspectTask: options.inspectTask ?? (async (plan) => ({
+      task_id: plan.task_id, status: 'running', cursor: plan.cursor ?? '0',
+    })),
+    cancelTask: options.cancelTask ?? (async (plan) => ({
+      task_id: plan.task_id, status: 'cancelled', cancelled: true,
+    })),
+    settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
+    cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
+    clock: options.clock ?? createClock(),
+    deliverSameSessionReply: options.deliverSameSessionReply,
+    cancelSameSessionReply: options.cancelSameSessionReply,
+    beforeProviderDispatch: options.beforeProviderDispatch,
+  };
+  const seams = await createDurableRunSeams({ root, ...taskFns });
+  const adapter = createRunToolAdapter({
+    runtime: seams.runtime,
+    attention: seams.attention,
+    projectLaneTask: options.projectLaneTask ?? projectSupervisorTerminalReceipt,
+    classifyLaneTask: options.classifyLaneTask ?? classifySupervisorTerminalReceipt,
+  });
+  return { adapter, seams, root, lifecycle, dispatchCalls, taskFns };
 }

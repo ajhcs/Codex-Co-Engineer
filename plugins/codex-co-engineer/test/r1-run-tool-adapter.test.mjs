@@ -38,11 +38,14 @@ import {
   RUN_ID,
   TASK_ID,
   createAdapter,
+  createDurableAdapter,
   createSeamAdapter,
   makeAssignment,
   makeAttentionItem,
   makeRunArgs,
+  makeRunReply,
   makeVerifier,
+  trackingSameSessionDeliver,
   zeroWorkPingTimeoutReceipt,
 } from './fixtures/r1-run-tool-adapter-fixtures.mjs';
 import { PROFILE_SCHEMA } from '../mcp/v3/profile.mjs';
@@ -499,5 +502,127 @@ test('durable P33/P34 seams recover identity after a fresh reopen', async () => 
     assert.equal(inspected.lanes[0].assignment_id, ASSIGNMENT_ID);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('same-session reply proves exact task/session/question identity and delivers once', async () => {
+  const tracker = trackingSameSessionDeliver();
+  const { adapter } = createSeamAdapter({
+    deliverSameSessionReply: tracker.deliver,
+  });
+  await adapter.dispatch('delegate', makeRunArgs());
+  await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    attention: { items: [makeAttentionItem()] },
+  });
+  const replyBody = makeRunReply();
+  const first = await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    run_reply: {
+      batch_id: replyBody.batch_id,
+      expected_revision: 1,
+      reply: replyBody,
+    },
+  });
+  assert.equal(first.operation, 'reply');
+  assert.equal(first.attention.status, 'resolved');
+  assert.equal(tracker.calls.length, 1);
+  assert.equal(tracker.calls[0].task_id, TASK_ID);
+  assert.equal(tracker.calls[0].session_id, 'sess-1');
+  assert.equal(tracker.calls[0].question_id, 'q-1');
+  const second = await adapter.dispatch('task', {
+    run_id: RUN_ID,
+    run_reply: {
+      batch_id: replyBody.batch_id,
+      expected_revision: 2,
+      reply: replyBody,
+    },
+  });
+  assert.equal(second.attention.status, 'resolved');
+  assert.equal(tracker.calls.length, 1);
+});
+
+test('unconfirmed cancellation stays unresolved/unsafe and never projects cancelled', async () => {
+  const { adapter } = createSeamAdapter({
+    cancelTask: async (plan) => ({ task_id: plan.task_id, status: 'running', cancelled: false }),
+  });
+  await adapter.dispatch('delegate', makeRunArgs());
+  const receipt = await adapter.dispatch('cancel', {
+    run_id: RUN_ID,
+    assignment_ids: [ASSIGNMENT_ID],
+  });
+  assert.equal(receipt.operation, 'cancel');
+  assert.equal(receipt.status, 'unresolved');
+  assert.equal(receipt.lanes[0].status, 'unresolved');
+  assert.equal(receipt.lanes[0].unresolved.code, 'safe_cancel_unconfirmed');
+  assert.equal(receipt.complete_candidate_blocked, true);
+  assert.equal(receipt.cleanup.cleaned, false);
+  assert.equal(receipt.cleanup.proof_bound, true);
+});
+
+test('named profile snapshot is bound once and survives catalog mutation after submit', async () => {
+  const workspace = await makePrivateRoot('r1-rcutover-snapshot-');
+  try {
+    const catalogDir = path.join(workspace, '.codex');
+    await mkdir(catalogDir, { recursive: true, mode: 0o700 });
+    const catalogPath = path.join(catalogDir, 'co-engineer-profiles.json');
+    const name = 'writer-profile';
+    await writeFile(catalogPath, JSON.stringify({
+      [name]: { schema: PROFILE_SCHEMA, provider: 'grok', model: 'grok-4' },
+    }));
+    const first = makeAssignment({ assignmentId: 'lane-a', taskId: 'task-a', writeScope: ['a/**'] });
+    const second = makeAssignment({ assignmentId: 'lane-b', taskId: 'task-b', writeScope: ['b/**'] });
+    delete first.provider;
+    delete first.model;
+    delete second.provider;
+    delete second.model;
+    first.profile = name;
+    second.profile = name;
+    const args = makeRunArgs({ assignments: [first, second] });
+    args.run.git = { ...args.run.git, repository_path: workspace };
+    const { adapter, calls } = createAdapter();
+    const submitted = await adapter.dispatch('delegate', args);
+    assert.equal(submitted.operation, 'submit');
+    assert.equal(submitted.lanes[0].provider, 'grok');
+    assert.equal(submitted.lanes[0].model, 'grok-4');
+    assert.equal(submitted.lanes[1].provider, 'grok');
+    assert.equal(submitted.lanes[1].model, 'grok-4');
+    await writeFile(catalogPath, JSON.stringify({
+      [name]: {
+        schema: PROFILE_SCHEMA,
+        provider: 'dsh',
+        model: 'muse-spark-1.2-contributor',
+      },
+    }));
+    const inspected = await adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.lanes[0].provider, 'grok');
+    assert.equal(inspected.lanes[1].model, 'grok-4');
+    assert.equal(calls.submit.length, 1);
+    assert.equal(calls.submit[0].assignments[0].provider, 'grok');
+    assert.equal(calls.submit[0].assignments[1].provider, 'grok');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('durable restart fallback keeps unconfirmed cancel unresolved/unsafe', async () => {
+  const first = await createDurableAdapter();
+  try {
+    await first.adapter.dispatch('delegate', makeRunArgs());
+    const restarted = await createDurableAdapter({
+      root: first.root,
+      cancelTask: async (plan) => ({ task_id: plan.task_id, status: 'running', cancelled: false }),
+    });
+    const receipt = await restarted.adapter.dispatch('cancel', {
+      run_id: RUN_ID,
+      assignment_ids: [ASSIGNMENT_ID],
+    });
+    assert.equal(receipt.status, 'unresolved');
+    assert.equal(receipt.lanes[0].status, 'unresolved');
+    assert.equal(receipt.lanes[0].unresolved.code, 'safe_cancel_unconfirmed');
+    assert.equal(receipt.cleanup.cleaned, false);
+    assert.equal(receipt.complete_candidate_blocked, true);
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
   }
 });
