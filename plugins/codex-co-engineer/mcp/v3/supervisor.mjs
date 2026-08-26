@@ -61,6 +61,11 @@ import {
   stopExactProcessBoundary,
   stopProcessBoundary,
 } from './process-boundary.mjs';
+import {
+  classifyRunToolCall,
+  createInProcessRunSeams,
+  createRunToolAdapter,
+} from './run-tool-adapter.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
@@ -2009,3 +2014,104 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
   };
   return detail === 'compact' ? projectCompactStatus(result) : result;
 }
+
+const runToolAdapters = new Map();
+
+function liveTaskFns(root, contextByRun) {
+  return {
+    delegateTask: async (plan) => {
+      const ctx = contextByRun.get(plan.run_id) ?? {};
+      const prompt = ctx.prompts?.[plan.assignment_id] ?? ctx.objective;
+      if (typeof prompt !== 'string' || prompt.trim().length === 0) {
+        fail('invalid_prompt', 'prompt must be non-empty text.');
+      }
+      const role = plan.role === 'verify' ? 'review' : plan.role;
+      const input = {
+        task_id: plan.task_id,
+        provider: plan.provider,
+        repo: ctx.repository_path,
+        prompt,
+        role,
+        expected_duration_ms: Number.isInteger(ctx.durations?.[plan.assignment_id])
+          ? ctx.durations[plan.assignment_id]
+          : 60_000,
+        workspace_mode: 'managed',
+      };
+      if (plan.provider === 'dsh'
+        && (plan.model === 'stealth/ox-alpha' || plan.model === DEFAULT_DSH_MODEL)) {
+        input.dsh_model = plan.model;
+      }
+      if (plan.provider === 'cursor-cloud' && typeof plan.starting_ref === 'string') {
+        input.starting_ref = plan.starting_ref;
+      }
+      const result = await submitTask(input, { root });
+      return {
+        task_id: result.task.id,
+        status: result.task.status,
+        cursor: '0',
+      };
+    },
+    inspectTask: async (plan) => {
+      const result = await inspectTask(root, {
+        task_id: plan.task_id,
+        ...(typeof plan.cursor === 'string' ? { cursor: plan.cursor } : {}),
+      });
+      const projected = projectSupervisorTerminalReceipt(result.task);
+      return {
+        task_id: projected.id,
+        status: projected.status,
+        cursor: result.progress?.event_cursor ?? plan.cursor ?? '0',
+        attention: projected.status === 'needs_attention' ? (projected.attention ?? null) : null,
+      };
+    },
+    cancelTask: async (plan) => {
+      const task = await cancelTask(root, plan.task_id);
+      const projected = projectSupervisorTerminalReceipt(task);
+      return { task_id: projected.id, status: projected.status };
+    },
+  };
+}
+
+export function createSupervisorRunToolAdapter(options = {}) {
+  if (options.adapter) return options.adapter;
+  const contextByRun = options.contextByRun ?? new Map();
+  const root = options.root;
+  const fns = liveTaskFns(root, contextByRun);
+  const seams = options.seams ?? createInProcessRunSeams({
+    delegateTask: options.delegateTask ?? fns.delegateTask,
+    inspectTask: options.inspectTask ?? fns.inspectTask,
+    cancelTask: options.cancelTaskFn ?? fns.cancelTask,
+    settleLocalTaskLifecycle: options.settleLocalTaskLifecycle ?? settleLocalTaskLifecycle,
+    cleanupLocalTaskLifecycle: options.cleanupLocalTaskLifecycle ?? cleanupLocalTaskLifecycle,
+    clock: options.clock ?? (() => new Date().toISOString()),
+  });
+  return createRunToolAdapter({
+    runtime: seams.runtime,
+    attention: seams.attention,
+    projectLaneTask: projectSupervisorTerminalReceipt,
+    classifyLaneTask: classifySupervisorTerminalReceipt,
+    rememberSubmitContext: (context) => {
+      contextByRun.set(context.run_id, context);
+    },
+  });
+}
+
+export function supervisorRunToolAdapter(root, options = {}) {
+  if (options.adapter) return options.adapter;
+  const key = typeof root === 'string' ? root : '';
+  let adapter = runToolAdapters.get(key);
+  if (!adapter) {
+    adapter = createSupervisorRunToolAdapter({ root, ...options });
+    runToolAdapters.set(key, adapter);
+  }
+  return adapter;
+}
+
+export async function invokeRunTool(root, name, args, options = {}) {
+  const classified = classifyRunToolCall(name, args);
+  if (classified.mode === 'legacy') return classified;
+  const adapter = supervisorRunToolAdapter(root, options);
+  return adapter.dispatch(name, args);
+}
+
+export { classifyRunToolCall };
