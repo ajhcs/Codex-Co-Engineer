@@ -308,6 +308,163 @@ test('crash before dispatch cannot duplicate dispatch after restart', async () =
   }
 });
 
+const FORBIDDEN_RESTART_AUTHORITY = new Set(['running', 'cancelled', 'safe', 'dispatched']);
+
+function assertPreDispatchCrashProjection(receipt) {
+  assert.equal(receipt.complete_candidate_blocked, true);
+  assert.equal(receipt.decision_or_attention.unresolved_required_blocks, true);
+  assert.equal(receipt.side_effects.provider_dispatched, false);
+  assert.equal(receipt.side_effects.replay, false);
+  assert.equal(receipt.side_effects.fallback, false);
+  assert.equal(receipt.cleanup.cleaned, false);
+  assert.equal(FORBIDDEN_RESTART_AUTHORITY.has(receipt.status), false);
+  assert.equal(receipt.lanes.length > 0, true);
+  for (const lane of receipt.lanes) {
+    assert.equal(lane.status, 'unresolved');
+    assert.equal(lane.unresolved == null, false);
+    assert.equal(typeof lane.unresolved.code, 'string');
+    assert.notEqual(lane.cancel_confirmed, true);
+    assert.equal(FORBIDDEN_RESTART_AUTHORITY.has(lane.status), false);
+  }
+}
+
+async function readDurablePlan(root) {
+  const planPath = path.join(root, 'runs', 'scheduler', `${RUN_ID}.json`);
+  return JSON.parse(await readFile(planPath, 'utf8'));
+}
+
+test('pre-dispatch crash reopens unresolved and never projects running/safe/cancelled', async () => {
+  const dispatchCalls = [];
+  const inspectCalls = [];
+  const cancelCalls = [];
+  const hooks = {
+    delegateTask: async (plan) => {
+      dispatchCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'dispatched', cursor: '0' };
+    },
+    inspectTask: async (plan) => {
+      inspectCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'running', cursor: plan.cursor ?? '0' };
+    },
+    cancelTask: async (plan) => {
+      cancelCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'cancelled', cancelled: true };
+    },
+    beforeProviderDispatch: async () => {
+      throw new RunContractV1Error(
+        'durable_state_mismatch',
+        'plan',
+        'Durable run state is stale, partial, or mismatched.',
+      );
+    },
+  };
+  const first = await createDurableAdapter(hooks);
+  try {
+    const crashed = await errorOf(() => first.adapter.dispatch('delegate', makeRunArgs()));
+    assert.equal(crashed.code, 'durable_state_mismatch');
+    assert.equal(dispatchCalls.length, 0);
+    const persisted = await readDurablePlan(first.root);
+    assert.equal(persisted.dispatched, false);
+
+    const reopen = () => createDurableAdapter({ root: first.root, ...hooks });
+
+    const statusAdapter = await reopen();
+    const reconstructed = await statusAdapter.seams.scheduler.resumeAssignments({ run_id: RUN_ID });
+    assert.equal(reconstructed.lanes[0].dispatched, false);
+    assert.equal(reconstructed.lanes[0].status, 'unresolved');
+    assert.equal(reconstructed.lanes[0].unresolved.code, 'dispatch_failed');
+    assert.equal(reconstructed.complete_candidate_blocked, true);
+    const inspected = await statusAdapter.adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.operation, 'status');
+    assert.equal(inspected.tool, 'status');
+    assertPreDispatchCrashProjection(inspected);
+    assert.equal(inspected.lanes[0].unresolved.code, 'dispatch_failed');
+    assert.equal(inspectCalls.length, 0);
+    assert.equal(dispatchCalls.length, 0);
+
+    const resumeAdapter = await reopen();
+    const resumed = await resumeAdapter.adapter.dispatch('task', {
+      run_id: RUN_ID,
+      wait_until: 'decision_or_attention',
+      wait_ms: 0,
+    });
+    assert.equal(resumed.operation, 'wait');
+    assert.equal(resumed.tool, 'task');
+    assertPreDispatchCrashProjection(resumed);
+    assert.equal(inspectCalls.length, 0);
+    assert.equal(dispatchCalls.length, 0);
+
+    const resubmitAdapter = await reopen();
+    const resubmit = await resubmitAdapter.adapter.dispatch('delegate', makeRunArgs());
+    assert.equal(resubmit.operation, 'submit');
+    assert.equal(resubmit.tool, 'delegate');
+    assertPreDispatchCrashProjection(resubmit);
+    assert.equal(dispatchCalls.length, 0);
+    assert.equal(inspectCalls.length, 0);
+
+    const cancelAdapter = await reopen();
+    const cancelled = await cancelAdapter.adapter.dispatch('cancel', {
+      run_id: RUN_ID,
+      assignment_ids: [ASSIGNMENT_ID],
+    });
+    assert.equal(cancelled.operation, 'cancel');
+    assert.equal(cancelled.tool, 'cancel');
+    assert.equal(cancelled.status, 'unresolved');
+    assertPreDispatchCrashProjection(cancelled);
+    assert.equal(cancelled.lanes[0].unresolved.code, 'safe_cancel_unconfirmed');
+    assert.equal(cancelCalls.length, 0);
+    assert.equal(inspectCalls.length, 0);
+    assert.equal(dispatchCalls.length, 0);
+    assert.equal((await readDurablePlan(first.root)).dispatched, false);
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
+  }
+});
+
+test('legitimate dispatched restart still inspects and never redispatches', async () => {
+  const dispatchCalls = [];
+  const inspectCalls = [];
+  const cancelCalls = [];
+  const hooks = {
+    delegateTask: async (plan) => {
+      dispatchCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'dispatched', cursor: '0' };
+    },
+    inspectTask: async (plan) => {
+      inspectCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'running', cursor: plan.cursor ?? '0' };
+    },
+    cancelTask: async (plan) => {
+      cancelCalls.push(plan.task_id);
+      return { task_id: plan.task_id, status: 'cancelled', cancelled: true };
+    },
+  };
+  const first = await createDurableAdapter(hooks);
+  try {
+    const submitted = await first.adapter.dispatch('delegate', makeRunArgs());
+    assert.equal(submitted.operation, 'submit');
+    assert.equal(dispatchCalls.length, 1);
+    assert.equal((await readDurablePlan(first.root)).dispatched, true);
+
+    const restarted = await createDurableAdapter({ root: first.root, ...hooks });
+    const reconstructed = await restarted.seams.scheduler.resumeAssignments({ run_id: RUN_ID });
+    assert.equal(reconstructed.lanes[0].dispatched, true);
+    assert.equal(reconstructed.lanes[0].status, 'running');
+    assert.equal(reconstructed.complete_candidate_blocked, false);
+    const inspected = await restarted.adapter.dispatch('status', { run_id: RUN_ID });
+    assert.equal(inspected.operation, 'status');
+    assert.equal(inspected.lanes[0].status, 'running');
+    assert.equal(inspected.lanes[0].unresolved, null);
+    assert.equal(inspected.complete_candidate_blocked, false);
+    assert.equal(inspected.side_effects.provider_dispatched, false);
+    assert.equal(dispatchCalls.length, 1);
+    assert.equal(inspectCalls.length >= 1, true);
+    assert.equal(cancelCalls.length, 0);
+  } finally {
+    await rm(first.root, { recursive: true, force: true });
+  }
+});
+
 test('stale partial and mismatched scheduler plans fail closed', async () => {
   const first = await createDurableAdapter();
   try {

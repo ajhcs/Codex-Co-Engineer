@@ -1908,8 +1908,39 @@ async function loadSchedulerPlan(schedulerRoot, runId) {
   return parsed;
 }
 
-function reconstructLane(assignment, inspected, { cancelAttempted = false } = {}) {
+function planWasDispatched(plan) {
+  return plan?.dispatched === true;
+}
+
+function reconstructLane(assignment, inspected, {
+  cancelAttempted = false, dispatched = false,
+} = {}) {
   const required = assignment.required !== false;
+  if (dispatched !== true) {
+    return {
+      access: assignment.access,
+      assignment_id: assignment.assignment_id,
+      attention: null,
+      cancel_confirmed: cancelAttempted === true ? false : null,
+      cursor: null,
+      dispatched: false,
+      fallback: false,
+      model: assignment.model,
+      provider: assignment.provider,
+      replayed: false,
+      required,
+      role: assignment.role,
+      starting_ref: assignment.starting_ref ?? null,
+      status: 'unresolved',
+      task_id: assignment.task_id,
+      unresolved: {
+        assignment_id: assignment.assignment_id,
+        code: cancelAttempted === true ? 'safe_cancel_unconfirmed' : 'dispatch_failed',
+        required,
+      },
+      write_scope: assignment.write_scope,
+    };
+  }
   if (cancelAttempted === true) {
     const confirmed = inspected?.cancelled === true
       && inspected?.status === 'cancelled'
@@ -1979,10 +2010,13 @@ async function inspectPlanLane(inspectTask, plan, assignment) {
 }
 
 async function reconstructPlanReceipt(plan, inspectTask, clock, status = 'inspected') {
+  const dispatched = planWasDispatched(plan);
   const lanes = [];
   for (const assignment of plan.assignments) {
-    const inspected = await inspectPlanLane(inspectTask, plan, assignment);
-    lanes.push(reconstructLane(assignment, inspected));
+    const inspected = dispatched === true
+      ? await inspectPlanLane(inspectTask, plan, assignment)
+      : null;
+    lanes.push(reconstructLane(assignment, inspected, { dispatched }));
   }
   return freezeData({
     schema: 'codex-co-engineer.run-scheduler-receipt.v1',
@@ -1991,7 +2025,7 @@ async function reconstructPlanReceipt(plan, inspectTask, clock, status = 'inspec
     base_sha: plan.base_sha,
     created: false,
     lanes,
-    complete_candidate_blocked: lanes.some((lane) => lane.required
+    complete_candidate_blocked: dispatched !== true || lanes.some((lane) => lane.required
       && (lane.status === 'unresolved' || lane.status === 'failed')),
     wake: false,
     remote_mutated: false,
@@ -2060,13 +2094,24 @@ function wrapDurableScheduler({
         }
         const plan = await loadSchedulerPlan(schedulerRoot, request.run_id);
         if (plan === null) throw error;
+        const dispatched = planWasDispatched(plan);
         const selected = new Set(request.assignment_ids ?? []);
         const lanes = [];
         let unconfirmed = false;
         for (const assignment of plan.assignments) {
-          if (!selected.has(assignment.assignment_id)) {
+          const selectedLane = selected.has(assignment.assignment_id);
+          if (dispatched !== true) {
+            const lane = reconstructLane(assignment, null, {
+              cancelAttempted: selectedLane,
+              dispatched: false,
+            });
+            if (selectedLane && lane.cancel_confirmed !== true) unconfirmed = true;
+            lanes.push(lane);
+            continue;
+          }
+          if (!selectedLane) {
             const inspected = await inspectPlanLane(inspectTask, plan, assignment);
-            lanes.push(reconstructLane(assignment, inspected));
+            lanes.push(reconstructLane(assignment, inspected, { dispatched: true }));
             continue;
           }
           let inspected;
@@ -2081,18 +2126,22 @@ function wrapDurableScheduler({
           } catch {
             inspected = { task_id: assignment.task_id, status: 'unresolved', cancelled: false };
           }
-          const lane = reconstructLane(assignment, inspected, { cancelAttempted: true });
+          const lane = reconstructLane(assignment, inspected, {
+            cancelAttempted: true,
+            dispatched: true,
+          });
           if (lane.cancel_confirmed !== true) unconfirmed = true;
           lanes.push(lane);
         }
+        const blocked = unconfirmed || dispatched !== true;
         return freezeData({
           schema: 'codex-co-engineer.run-scheduler-receipt.v1',
-          status: unconfirmed ? 'inspected' : 'cancelled',
+          status: blocked ? 'inspected' : 'cancelled',
           run_id: plan.run_id,
           base_sha: plan.base_sha,
           created: false,
           lanes,
-          complete_candidate_blocked: unconfirmed,
+          complete_candidate_blocked: blocked,
           wake: false,
           remote_mutated: false,
           observed_at: clock(),
