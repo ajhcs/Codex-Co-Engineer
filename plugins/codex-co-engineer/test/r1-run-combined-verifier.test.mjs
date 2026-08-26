@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { expectedCandidateRefV1 } from '../mcp/v3/git-authority.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import { composeRunOwnedCandidateV1 } from '../mcp/v3/run-candidate-composer.mjs';
 import {
@@ -18,7 +19,10 @@ import {
 import {
   ASSIGNMENT_A,
   ASSIGNMENT_B,
+  DENY_VERIFIER_GIT_OPTIONS,
+  RUN_ID,
   addWriterCommit,
+  candidateRef,
   composeRequest,
   createBaseRepo,
   executeVerificationStub,
@@ -26,6 +30,7 @@ import {
   verificationStub,
   verifyLane,
   verifyRequest,
+  withCandidateRef,
   writerLane,
 } from './fixtures/r1-run-candidate-composer-fixtures.mjs';
 
@@ -64,6 +69,11 @@ test('combined verifier schema never claims integration or Gate A', () => {
   assert.equal(inventory.gate_a_claimed, false);
   assert.equal(inventory.imports_server, false);
   assert.equal(inventory.imports_composer_functions, false);
+  assert.equal(
+    inventory.composed_surfaces.git_authority,
+    'codex-co-engineer.git-authority.v1',
+  );
+  assert.equal(inventory.checks.includes('p28_candidate_ref_authority'), true);
 });
 
 test('P35 verifier source does not import server, supervisor, runtime, or scheduler', async () => {
@@ -99,6 +109,33 @@ test('a complete composed candidate verifies through accepted evidence', async (
   assert.equal(receipt.parent_count, 1);
   assert.equal(receipt.verification_executed, true);
   assert.equal(receipt.api_boundary_status, 'ready');
+  assert.equal(receipt.candidate_ref, expectedCandidateRefV1({ run_id: RUN_ID }));
+  assert.equal(receipt.candidate_ref, candidateRef());
+  assert.equal(inspectRepo(repo).main, repo.baseSha);
+  assert.equal(inspectRepo(repo).remotes, '');
+});
+
+test('exact tamper of candidate_ref to refs/heads/main never verifies or is ready', async (t) => {
+  const repo = await createBaseRepo();
+  t.after(() => repo.cleanup());
+  const headA = await addWriterCommit(repo, {
+    assignmentId: ASSIGNMENT_A, relativePath: 'src/a.js', contents: 'from-a\n',
+  });
+  const composition = await composed(repo, [
+    writerLane(ASSIGNMENT_A, ['src/**'], 'verified', headA),
+    verifyLane(),
+  ]);
+  const tampered = withCandidateRef(composition, 'refs/heads/main');
+  const receipt = await verifyCombinedCandidateV1(
+    verifyRequest(repo, tampered), DENY_VERIFIER_GIT_OPTIONS,
+  );
+  assertFrozenTree(receipt);
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.ready_for_codex_review, false);
+  assert.equal(receipt.verification_executed, false);
+  assert.equal(receipt.integrated, false);
+  assert.equal(receipt.candidate_ref, candidateRef());
+  assert.equal(receipt.discrepancies.length > 0, true);
   assert.equal(inspectRepo(repo).main, repo.baseSha);
   assert.equal(inspectRepo(repo).remotes, '');
 });

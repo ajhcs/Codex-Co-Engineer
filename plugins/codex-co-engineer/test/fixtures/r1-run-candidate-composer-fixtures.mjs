@@ -233,6 +233,28 @@ export function candidateRef() {
   return expectedCandidateRefV1({ run_id: RUN_ID });
 }
 
+export function withCandidateRef(composition, candidateRefValue) {
+  return { ...composition, candidate_ref: candidateRefValue };
+}
+
+export const DENY_VERIFIER_GIT_OPTIONS = Object.freeze({
+  executeVerification: async () => {
+    throw new Error('p16 must not run for unauthorized candidate_ref');
+  },
+  verifyGitIdentity: async () => {
+    throw new Error('p14 must not run for unauthorized candidate_ref');
+  },
+  verifyScope: async () => {
+    throw new Error('p15 must not run for unauthorized candidate_ref');
+  },
+  auditProtectedRefs: async () => {
+    throw new Error('p30 must not run for unauthorized candidate_ref');
+  },
+  projectRunApiBoundary: () => {
+    throw new Error('p32 must not run for unauthorized candidate_ref');
+  },
+});
+
 export function inspectRepo(repo) {
   const head = git(repo.path, ['rev-parse', 'HEAD']);
   const main = git(repo.path, ['rev-parse', MAIN_REF]);

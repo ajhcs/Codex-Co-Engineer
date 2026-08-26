@@ -89,14 +89,29 @@ candidate through accepted evidence:
 | Constrained trusted-policy execution | P16 `constrained-verification-runner.mjs` | injected `executeVerification` |
 | Live protected-ref audit | P30 `protected-ref-audit.mjs` | `auditProtectedRefsV1` |
 | Run API boundary | P32 `run-api-boundary.mjs` | `projectRunApiBoundaryV1` of already-produced P30/P31 receipts |
-| Git authority | P28 `git-authority.mjs` | candidate-ref namespace and compose operation |
+| Git authority | P28 `git-authority.mjs` | exact same-run candidate-ref authority |
+
+The verifier revalidates `composition.candidate_ref` through accepted P28
+run-owned candidate-ref authority bound to the same run and composition
+receipt identity. Regex or presence is not authority. The only accepted
+name is `refs/codex-co-engineer/runs/<same-run-id>/candidate` from
+`expectedCandidateRefV1` / `isRunOwnedCandidateRefV1` plus a
+`compose_candidate_non_authoritative` verdict whose projected evidence
+repeats that same run/assignment/base. Unauthorized names include
+`refs/heads/main`, other heads, tags, remotes, notes, protected and
+default refs, another run's candidate, malformed, nested, escaped,
+traversal-like, and symbolic or aliased refs. Missing or contradictory
+P28 evidence fails closed. An unauthorized ref never returns
+`verified` or `ready_for_codex_review`; the receipt is deterministic
+frozen `failed` evidence with no Git or remote mutation.
 
 `ready_for_codex_review` is true only when composition is complete
-(`composed`, one parent), P14/P15/P30 verify, P32 projects `ready`, and
-P16 reports an unchanged passing execution. Incomplete diagnostic
-candidates, blocked required lanes, missing P16 evidence, and any failed
-audit remain not ready. Codex still owns acceptance: a verified receipt
-is evidence for review, not integration.
+(`composed`, one parent), the candidate ref is the exact P28 same-run
+binding, P14/P15/P30 verify, P32 projects `ready`, and P16 reports an
+unchanged passing execution. Incomplete diagnostic candidates, blocked
+required lanes, missing P16 evidence, and any failed audit remain not
+ready. Codex still owns acceptance: a verified receipt is evidence for
+review, not integration.
 
 ## Receipts
 

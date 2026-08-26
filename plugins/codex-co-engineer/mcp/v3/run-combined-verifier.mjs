@@ -3,11 +3,13 @@
 // `diagnostic_partial_candidate_never_ready`, `codex_only_final_acceptance`).
 //
 // Additive v3 module. It verifies a run-owned candidate through accepted
-// P13/P14/P15/P16/P30/P32 evidence. It never repairs conflicts, never
+// P13/P14/P15/P16/P28/P30/P32 evidence. It never repairs conflicts, never
 // integrates, never mutates remotes or protected refs, and never claims
 // Codex acceptance. Incomplete diagnostic output stays
 // incomplete_candidate. Required missing, rejected, or unresolved writer
-// lanes block ready_for_codex_review.
+// lanes block ready_for_codex_review. composition.candidate_ref is
+// revalidated through accepted P28 run-owned candidate-ref authority and
+// same-run receipt identity, not a permissive string or regex check.
 //
 // This module does not import or own the server, supervisor, worker,
 // provider, registry, runtime, scheduler, artifact-bridge, or composer
@@ -27,6 +29,21 @@ import {
   parseEvidenceDiscrepancyV1,
   parseVerifiedFactV1,
 } from './evidence-bundle.mjs';
+import {
+  ACTOR_VALUES,
+  CANDIDATE_REF_LEAF,
+  CANDIDATE_REF_NAMESPACE,
+  GIT_AUTHORITY_POLICY_V1,
+  GIT_AUTHORITY_SCHEMA_ID,
+  GIT_AUTHORITY_VERSION,
+  bindAuthorityIdentityV1,
+  classifyGitOperationV1,
+  classifyRefV1,
+  expectedCandidateRefV1,
+  isRunOwnedCandidateRefV1,
+  parseGitAuthorityPolicyV1,
+  projectAuthorityEvidenceV1,
+} from './git-authority.mjs';
 import { verifyGitIdentityV1 } from './git-identity.mjs';
 import {
   capturedFreeze,
@@ -82,6 +99,7 @@ export const COMBINED_STATUSES = capturedFreeze([
 export const COMBINED_CHECKS = capturedFreeze([
   'request_quarantine',
   'composition_receipt',
+  'p28_candidate_ref_authority',
   'p14_git_identity',
   'p15_scope',
   'p16_constrained_verification',
@@ -344,6 +362,8 @@ function parseComposition(input, identity, pathLabel) {
     run_id: runId,
     assignment_id: assignmentId,
     base_sha: baseSha,
+    // Structural string only. Same-run P28 authority is revalidated in
+    // verifyCombinedCandidateV1 before any Git inspection or ready claim.
     candidate_ref: ownString(object, 'candidate_ref', pathLabel),
     candidate_sha: candidateSha,
     parent_sha: parentSha,
@@ -533,6 +553,114 @@ function emitDiscrepancy(id, request, factIds, sequence) {
   });
 }
 
+function authorityIdentityInput(request) {
+  return {
+    repository_path: request.identity.repository_path,
+    base_sha: request.identity.base_sha,
+    run_id: request.identity.run_id,
+    assignment_id: request.identity.assignment_id,
+  };
+}
+
+function revalidateCandidateRefAuthority(request) {
+  const identityInput = authorityIdentityInput(request);
+  let expected;
+  let boundIdentity;
+  try {
+    parseGitAuthorityPolicyV1(GIT_AUTHORITY_POLICY_V1);
+    boundIdentity = bindAuthorityIdentityV1(identityInput);
+    expected = expectedCandidateRefV1({ run_id: boundIdentity.run_id });
+  } catch {
+    return { authorized: false, expected: null, evidence: null };
+  }
+
+  const candidateRef = request.composition.candidate_ref;
+  const sameRunOwned = isRunOwnedCandidateRefV1(candidateRef, boundIdentity.run_id)
+    && candidateRef === expected
+    && candidateRef === `${CANDIDATE_REF_NAMESPACE}${boundIdentity.run_id}/${CANDIDATE_REF_LEAF}`
+    && boundIdentity.run_id === request.identity.run_id
+    && boundIdentity.run_id === request.composition.run_id
+    && boundIdentity.assignment_id === request.identity.assignment_id
+    && boundIdentity.assignment_id === request.composition.assignment_id
+    && boundIdentity.base_sha === request.identity.base_sha
+    && boundIdentity.base_sha === request.composition.base_sha;
+
+  let classified;
+  let verdict;
+  let evidence;
+  try {
+    classified = classifyRefV1({ ref: candidateRef, identity: identityInput });
+    verdict = classifyGitOperationV1({
+      schema: GIT_AUTHORITY_SCHEMA_ID,
+      version: GIT_AUTHORITY_VERSION,
+      actor: ACTOR_VALUES[1],
+      operation: 'compose_candidate_non_authoritative',
+      identity: identityInput,
+      ref: candidateRef,
+      history: { parent_counts: [1] },
+    });
+    evidence = projectAuthorityEvidenceV1(verdict, {
+      fact_id: 'git-identity',
+      discrepancy_id: 'candidate-ref-authority',
+      sequence: 0,
+    });
+  } catch {
+    return { authorized: false, expected, evidence: null };
+  }
+
+  const classBound = classified.ref_class === 'platform_run_owned'
+    && classified.code === 'protected_ref_write_denied'
+    && classified.protected === true;
+  const operationBound = verdict.verdict === 'allowed'
+    && verdict.ref_class === 'platform_run_owned'
+    && verdict.code === 'authority_ok'
+    && verdict.run_id === boundIdentity.run_id
+    && verdict.assignment_id === boundIdentity.assignment_id
+    && verdict.base_sha === boundIdentity.base_sha;
+  const fact = evidence.facts[0];
+  const evidenceBound = fact !== undefined
+    && evidence.facts.length === 1
+    && fact.status === 'verified'
+    && fact.run_id === boundIdentity.run_id
+    && fact.assignment_id === boundIdentity.assignment_id
+    && fact.payload.base_sha === boundIdentity.base_sha
+    && evidence.discrepancies.length === 0;
+
+  return {
+    authorized: sameRunOwned === true
+      && classBound === true
+      && operationBound === true
+      && evidenceBound === true,
+    expected,
+    evidence,
+  };
+}
+
+function authorityFailureReceipt(request, payload, binding) {
+  const evidence = binding.evidence;
+  const denied = evidence !== null
+    && evidence.facts.length > 0
+    && evidence.facts[0].status === 'failed';
+  let facts;
+  let discrepancies;
+  if (denied) {
+    facts = [...evidence.facts];
+    discrepancies = evidence.discrepancies.length > 0
+      ? [...evidence.discrepancies]
+      : [emitDiscrepancy('candidate-ref-authority', request, ['git-identity'], 1)];
+  } else {
+    facts = [emitFact(request, 'failed', payload, 0)];
+    discrepancies = [emitDiscrepancy('candidate-ref-authority', request, ['git-identity'], 1)];
+  }
+  return finish(request, {
+    status: 'failed',
+    api_boundary_status: null,
+    verification_executed: false,
+    facts,
+    discrepancies,
+  });
+}
+
 function finish(request, values) {
   const incomplete = values.status === 'incomplete_candidate'
     || request.composition.incomplete === true
@@ -545,7 +673,7 @@ function finish(request, values) {
     run_id: request.identity.run_id,
     assignment_id: request.identity.assignment_id,
     base_sha: request.identity.base_sha,
-    candidate_ref: request.composition.candidate_ref,
+    candidate_ref: expectedCandidateRefV1({ run_id: request.identity.run_id }),
     candidate_sha: request.composition.candidate_sha,
     parent_count: request.composition.parent_count,
     composition_status: request.composition.status,
@@ -569,6 +697,10 @@ export async function verifyCombinedCandidateV1(input, options) {
     base_sha: request.identity.base_sha,
     head_sha: request.composition.candidate_sha ?? request.identity.base_sha,
   };
+  const candidateRefAuthority = revalidateCandidateRefAuthority(request);
+  if (candidateRefAuthority.authorized !== true) {
+    return authorityFailureReceipt(request, payload, candidateRefAuthority);
+  }
 
   if (request.composition.status === 'blocked'
     || request.composition.candidate_sha === null
@@ -735,6 +867,7 @@ export function describeRunCombinedVerifierV1() {
     composed_surfaces: capturedFreeze({
       evidence_bundle: 'codex-co-engineer.evidence-bundle.v1',
       git_identity: 'codex-co-engineer.git-identity.v1',
+      git_authority: GIT_AUTHORITY_SCHEMA_ID,
       scope_verifier: 'codex-co-engineer.scope-verifier.v1',
       constrained_verification: CONSTRAINED_VERIFICATION_SCHEMA_ID,
       protected_ref_audit: 'codex-co-engineer.protected-ref-audit.v1',
@@ -743,6 +876,7 @@ export function describeRunCombinedVerifierV1() {
   }));
 }
 
+capturedFreeze(revalidateCandidateRefAuthority);
 capturedFreeze(parseCombinedCandidateRequestV1);
 capturedFreeze(verifyCombinedCandidateV1);
 capturedFreeze(describeRunCombinedVerifierV1);
