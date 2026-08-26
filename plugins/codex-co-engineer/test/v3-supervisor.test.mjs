@@ -12,6 +12,7 @@ import {
   cleanupLocalTaskLifecycle,
   cleanupManagedWorkspace,
   createWriterWorkspace,
+  invokeRunTool,
   launchWorker,
   settleLocalTaskLifecycle,
   submitTask,
@@ -817,6 +818,32 @@ test('exports identity-bound local lifecycle settlement without rewriting stored
     assert.equal((await readTask(root, 'legacy-lifecycle')).task.status, 'completed');
     assert.equal((await readTask(root, 'legacy-lifecycle')).task.cleanup, undefined);
     assert.equal(await cleanupLocalTaskLifecycle(root, task, null, { drainGraceMs: 0 }).then((value) => value.final), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('invokeRunTool preserves omitted 3.2.1 mode and R-TRUTH lifecycle authority', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-run-tool-'));
+  try {
+    const omitted = await invokeRunTool(root, 'status', { detail: 'compact', include_tasks: false });
+    assert.equal(omitted.mode, 'legacy');
+    const single = await invokeRunTool(root, 'cancel', { task_id: 'legacy-task' });
+    assert.equal(single.mode, 'legacy');
+    const rejected = await invokeRunTool(root, 'delegate', {
+      run: {
+        run_id: 'NOT_A_RUN',
+        request_idempotency_key: 'sha256:' + 'a'.repeat(64),
+        identity: {},
+        git: {},
+        provenance: {},
+        telemetry: {},
+        assignments: [],
+      },
+    }).then(() => null, (error) => error);
+    assert.equal(rejected?.code, 'invalid_format');
+    assert.equal(typeof settleLocalTaskLifecycle, 'function');
+    assert.equal(typeof cleanupLocalTaskLifecycle, 'function');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

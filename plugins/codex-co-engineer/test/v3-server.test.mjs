@@ -99,22 +99,27 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
   assert.equal(values[0].result.serverInfo.version, '3.2.1');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
+  assert.equal(values[1].result.tools.length, 5);
   const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
   assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
-    'detail', 'task_limit', 'include_tasks', 'response_mode',
+    'detail', 'task_limit', 'include_tasks', 'response_mode', 'run_id',
   ]);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
     'task_id', 'wait_ms', 'wait_until', 'wake_on_needs_attention', 'view', 'cursor', 'max_bytes',
     'extend_expected_duration_ms', 'extend_reason', 'reply', 'response_mode',
+    'run_id', 'assignment_id', 'attention', 'run_reply',
   ]);
   assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 14400000);
+  assert.equal(taskTool.inputSchema.properties.wait_until.enum[0], 'progress');
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
+  assert.equal(taskTool.inputSchema.properties.wait_until.enum[2], 'decision_or_attention');
   assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured']);
   const tasksTool = values[1].result.tools.find((tool) => tool.name === 'tasks');
   assert.deepEqual(Object.keys(tasksTool.inputSchema.properties), [
     'detail', 'limit', 'cursor', 'provider', 'state', 'status', 'response_mode',
     'task_ids', 'cursors', 'wait_ms', 'wait_until', 'wake_on_needs_attention',
+    'run_id',
   ]);
   for (const tool of values[1].result.tools) {
     assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured']);
@@ -122,7 +127,7 @@ test('advertises only the thin public tool surface', async () => {
   }
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.match(delegateTool.description, /property named repo/u);
-  assert.deepEqual(delegateTool.inputSchema.required, ['task_id', 'provider', 'repo', 'prompt']);
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].else.required, ['task_id', 'provider', 'repo', 'prompt']);
   assert.match(delegateTool.inputSchema.properties.repo.description, /Required property named repo/u);
   assert.match(delegateTool.inputSchema.properties.repo.description, /\/absolute\/path\/to\/git-worktree/u);
   assert.match(delegateTool.inputSchema.properties.repo.description, /Do not rename this property to git_root/u);
@@ -137,10 +142,13 @@ test('advertises only the thin public tool surface', async () => {
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'expected_duration_ms'));
   assert.equal(delegateTool.inputSchema.properties.expected_duration_ms.maximum, 86400000);
   assert.equal(delegateTool.inputSchema.properties.timeout_ms.maximum, 103680000);
-  assert.deepEqual(delegateTool.inputSchema.anyOf, [
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].else.anyOf, [
     { required: ['expected_duration_ms'] },
     { required: ['timeout_ms'] },
   ]);
+  assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'run'));
+  assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.minItems, 1);
+  assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.maxItems, 8);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
   assert.match(taskTool.description, /view=compact/u);
@@ -148,8 +156,14 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(tasksTool.inputSchema.properties.task_ids.minItems, 1);
   assert.equal(tasksTool.inputSchema.properties.task_ids.maxItems, 8);
   assert.equal(tasksTool.inputSchema.properties.wait_ms.maximum, 14400000);
-  assert.deepEqual(tasksTool.inputSchema.properties.wait_until.enum, ['progress', 'terminal']);
+  assert.deepEqual(tasksTool.inputSchema.properties.wait_until.enum, [
+    'progress', 'terminal', 'decision_or_attention',
+  ]);
   assert.equal(tasksTool.inputSchema.allOf[0].then.required[0], 'task_ids');
+  const cancelTool = values[1].result.tools.find((tool) => tool.name === 'cancel');
+  assert.ok(Object.hasOwn(cancelTool.inputSchema.properties, 'run_id'));
+  assert.ok(Object.hasOwn(cancelTool.inputSchema.properties, 'cleanup'));
+  assert.equal(cancelTool.inputSchema.allOf[0].else.required[0], 'task_id');
 });
 
 test('task returns a compact live snapshot and can wait for the next event', async () => {
@@ -743,4 +757,59 @@ test('status fails local providers closed when the MCP environment lacks the use
   assert.equal(status.healthy, false);
   assert.equal(status.local_boundary.ready, false);
   for (const provider of ['grok', 'cursor-local', 'dsh']) assert.equal(status.readiness[provider].ready, false);
+});
+
+test('invalid run submit stays on the five-tool catalog and creates no task artifacts', async () => {
+  await withServer(async ({ state, request }) => {
+    const listed = await request({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    });
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), [
+      'status', 'delegate', 'task', 'tasks', 'cancel',
+    ]);
+    const rejected = await request({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'delegate',
+        arguments: {
+          run: {
+            run_id: 'NOT_A_RUN',
+            request_idempotency_key: 'sha256:' + 'a'.repeat(64),
+            identity: {},
+            git: {},
+            provenance: {},
+            telemetry: {},
+            assignments: [{ assignment_id: 'w1', task_id: 't1', provider: 'p22', model: 'x' }],
+          },
+        },
+      },
+    });
+    assert.equal(rejected.result.isError, true);
+    assert.ok(rejected.result.structuredContent.error.code === 'invalid_format'
+      || rejected.result.structuredContent.error.code === 'p22_not_a_provider'
+      || rejected.result.structuredContent.error.code === 'unknown_provider'
+      || rejected.result.structuredContent.error.code === 'unknown_key');
+    const tasks = await request({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: {} },
+    });
+    assert.equal(tasks.result.structuredContent.tasks.length, 0);
+    const status = await request({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'status', arguments: {} },
+    });
+    assert.deepEqual(Object.keys(status.result.structuredContent).sort(), [
+      'active', 'capabilities', 'healthy', 'local_boundary', 'mcp_pending_call',
+      'providers', 'readiness', 'tasks', 'version',
+    ].sort());
+  });
 });
