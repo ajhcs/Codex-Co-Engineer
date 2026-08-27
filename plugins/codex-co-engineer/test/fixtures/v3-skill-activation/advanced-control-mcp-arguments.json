@@ -1,0 +1,15 @@
+{
+  "id": "advanced-control-mcp-arguments",
+  "skill": "control-codex-co-engineer-agents",
+  "activation": "direct",
+  "user_prompt": "Debug the control-plane MCP arguments, wait_ms budget, and worktree-bootstrap lock for this run.",
+  "ask_once": false,
+  "expected_skills": ["control-codex-co-engineer-agents"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer"
+  ]
+}

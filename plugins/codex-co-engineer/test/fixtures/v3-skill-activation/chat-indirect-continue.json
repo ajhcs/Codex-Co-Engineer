@@ -1,0 +1,15 @@
+{
+  "id": "chat-indirect-continue",
+  "skill": "chat-with-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Continue the running Co-Engineer work.",
+  "ask_once": false,
+  "expected_skills": ["chat-with-co-engineer"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

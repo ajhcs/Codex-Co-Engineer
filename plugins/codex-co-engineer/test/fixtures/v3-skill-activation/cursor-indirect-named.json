@@ -1,0 +1,15 @@
+{
+  "id": "cursor-indirect-named",
+  "skill": "use-cursor-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Run the isolated assignment with Cursor as a co-engineer.",
+  "ask_once": false,
+  "expected_skills": ["use-cursor-co-engineer"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

@@ -1,9 +1,11 @@
 ---
 name: control-codex-co-engineer-agents
-description: Delegate review and implementation work to Grok, Cursor Local, Cursor Cloud, or DeepSeek Harness through the Codex-Co-Engineer ACP-first MCP supervisor. Use for parallel coding, review, task monitoring, worktree-isolated or direct local changes, and cancellation.
+description: Operate Codex-Co-Engineer through the five MCP tools for raw status, payload, cursor, deadline, worktree, and control-plane debugging. Use when the user asks to inspect MCP arguments, event cursors, diagnostics, or lifecycle internals. Do not use for ordinary Delegating to Co-Engineer, Chatting with Co-Engineer, or Using Grok, Cursor, or Muse Co-Engineer.
 ---
 
-# Codex-Co-Engineer
+# Advanced Co-Engineer Control
+
+This is the raw MCP lifecycle skill, not the natural-language Co-Engineer experience. For ordinary outcomes use `$delegate-to-co-engineer`, `$chat-with-co-engineer`, `$use-grok-co-engineer`, `$use-cursor-co-engineer`, or `$use-muse-co-engineer`. Load this skill when the user asks to debug status, payloads, cursors, deadlines, worktrees, or other control-plane internals.
 
 Use the five MCP tools for delegation and lifecycle control.
 

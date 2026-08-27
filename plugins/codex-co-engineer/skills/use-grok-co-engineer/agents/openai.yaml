@@ -1,0 +1,11 @@
+interface:
+  display_name: "Using Grok Co-Engineer"
+  short_description: "Assign isolated work to Grok Co-Engineer"
+  default_prompt: "Use $use-grok-co-engineer to give Grok Co-Engineer one isolated assignment."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "codex-co-engineer"
+      description: "ACP-first supervisor for a Grok Co-Engineer assignment"
+policy:
+  allow_implicit_invocation: true

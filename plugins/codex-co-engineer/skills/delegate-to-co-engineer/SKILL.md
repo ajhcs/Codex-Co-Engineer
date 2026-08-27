@@ -1,0 +1,28 @@
+---
+name: delegate-to-co-engineer
+description: Start one new bounded Co-Engineer run of one to eight isolated independent assignments. Use when the user says Delegating to Co-Engineer, asks for a team of external co-engineers, or wants parallel independent assignments without naming a single co-engineer. Do not use to inspect, continue, answer grouped attention, or cancel an existing run, and do not use for raw MCP or control-plane debugging.
+---
+
+# Delegating to Co-Engineer
+
+Start exactly one new bounded run. That is the only submission.
+
+Give Codex a team of external co-engineers without giving up control. Codex remains chief engineer, reviewer, and merge authority. The substantiated shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.
+
+## Route first
+
+- Inspecting, continuing, answering grouped attention, or cancelling existing work uses `$chat-with-co-engineer`. Do not submit again.
+- Exactly one named Grok, Cursor, or Muse Co-Engineer uses `$use-grok-co-engineer`, `$use-cursor-co-engineer`, or `$use-muse-co-engineer`.
+- Several named co-engineers stay in this one run. Do not rank, predict cost, or substitute a different co-engineer.
+- No named co-engineer and no named profile means ask once among Grok, Cursor, or Muse. Do not submit before that choice exists.
+- Raw MCP, payload, cursor, or control-plane debugging uses `$control-codex-co-engineer-agents`.
+
+Independent assignments do not share a writer path. The bound is eight. Wait once for `decision_or_attention`. Routine progress does not wake that wait. Keep the same run cursor.
+
+Speak `I am delegating this to Co-Engineer`, then `Co-Engineer is running 1 independent assignment` or `Co-Engineer is running N independent assignments` for N from 2 through 8. When a chosen co-engineer is actually used, also say `Using Grok Co-Engineer`, `Using Cursor Co-Engineer`, or `Using Muse Co-Engineer`. Cursor on this computer and Cursor Cloud both display as Using Cursor Co-Engineer. Never say Using DSH Co-Engineer, Using Ox Co-Engineer, Using Cursor Local Co-Engineer, or Using Cursor Cloud Co-Engineer.
+
+After a complete candidate exists, inspect it, then say `Co-Engineer finished, and I verified the candidate.` That sentence is not a merge, push, or pull-request claim. Failure, cancel, and unresolved work must not use it.
+
+Never ask the user to construct tool payloads.
+
+For one-lane, multi-lane, ask-once, and provider-choice procedures, read [references/runs.md](references/runs.md) only when that case applies.

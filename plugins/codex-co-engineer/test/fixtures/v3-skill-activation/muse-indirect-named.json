@@ -1,0 +1,15 @@
+{
+  "id": "muse-indirect-named",
+  "skill": "use-muse-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Give Muse the isolated docs assignment as a co-engineer.",
+  "ask_once": false,
+  "expected_skills": ["use-muse-co-engineer"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

@@ -1,0 +1,11 @@
+interface:
+  display_name: "Delegating to Co-Engineer"
+  short_description: "Start one bounded Co-Engineer run"
+  default_prompt: "Use $delegate-to-co-engineer to start one bounded run of isolated independent assignments."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "codex-co-engineer"
+      description: "ACP-first supervisor for one bounded Co-Engineer run"
+policy:
+  allow_implicit_invocation: true

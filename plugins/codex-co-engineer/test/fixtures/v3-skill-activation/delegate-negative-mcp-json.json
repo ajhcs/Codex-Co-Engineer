@@ -1,0 +1,16 @@
+{
+  "id": "delegate-negative-mcp-json",
+  "skill": "delegate-to-co-engineer",
+  "activation": "negative",
+  "user_prompt": "Delegating to Co-Engineer through this MCP JSON: {\"run_id\": \"auth-split\", \"wait_until\": \"decision_or_attention\"}. Show me the payload I should paste.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

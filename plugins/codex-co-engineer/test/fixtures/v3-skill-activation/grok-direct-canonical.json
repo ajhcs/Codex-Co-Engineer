@@ -1,0 +1,15 @@
+{
+  "id": "grok-direct-canonical",
+  "skill": "use-grok-co-engineer",
+  "activation": "direct",
+  "user_prompt": "Using Grok Co-Engineer, implement only the validator tests.",
+  "ask_once": false,
+  "expected_skills": ["use-grok-co-engineer"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

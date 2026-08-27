@@ -1,0 +1,15 @@
+{
+  "id": "delegate-direct-provider-choice",
+  "skill": "delegate-to-co-engineer",
+  "activation": "direct",
+  "user_prompt": "Use Grok Co-Engineer for the API change and Muse Co-Engineer for the docs. Keep the review on Cursor Co-Engineer.",
+  "ask_once": false,
+  "expected_skills": ["delegate-to-co-engineer"],
+  "forbidden_skills": [
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

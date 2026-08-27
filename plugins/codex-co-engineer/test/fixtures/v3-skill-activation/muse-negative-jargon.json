@@ -1,0 +1,16 @@
+{
+  "id": "muse-negative-jargon",
+  "skill": "use-muse-co-engineer",
+  "activation": "negative",
+  "user_prompt": "Using Muse Co-Engineer, show the P34 latch and R-TRUTH receipt.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

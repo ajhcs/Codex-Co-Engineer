@@ -1,0 +1,11 @@
+interface:
+  display_name: "Chatting with Co-Engineer"
+  short_description: "Inspect or continue a Co-Engineer run"
+  default_prompt: "Use $chat-with-co-engineer to inspect, continue, answer, or cancel the existing Co-Engineer run."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "codex-co-engineer"
+      description: "ACP-first supervisor for an existing Co-Engineer run"
+policy:
+  allow_implicit_invocation: true
