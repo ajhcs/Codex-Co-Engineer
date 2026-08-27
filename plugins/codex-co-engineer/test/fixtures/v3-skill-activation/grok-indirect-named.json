@@ -1,0 +1,15 @@
+{
+  "id": "grok-indirect-named",
+  "skill": "use-grok-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Have Grok take this isolated assignment as an external co-engineer.",
+  "ask_once": false,
+  "expected_skills": ["use-grok-co-engineer"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "grok-negative-claims",
+  "skill": "use-grok-co-engineer",
+  "activation": "negative",
+  "user_prompt": "Using Grok Co-Engineer, claim 8x speed and SOTA routing.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

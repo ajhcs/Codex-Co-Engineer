@@ -1,0 +1,30 @@
+{
+  "schema": "codex-co-engineer.skill-activation-examples.v1",
+  "version": 1,
+  "examples": [
+    "delegate-direct-canonical.json",
+    "delegate-indirect-product-lead.json",
+    "delegate-indirect-isolated-team.json",
+    "delegate-indirect-multi-lane.json",
+    "delegate-direct-provider-choice.json",
+    "delegate-negative-mcp-json.json",
+    "chat-direct-canonical.json",
+    "chat-direct-grouped-attention.json",
+    "chat-direct-verified-final.json",
+    "chat-indirect-continue.json",
+    "chat-negative-jargon.json",
+    "grok-direct-canonical.json",
+    "grok-indirect-named.json",
+    "grok-negative-claims.json",
+    "cursor-direct-canonical.json",
+    "cursor-indirect-named.json",
+    "cursor-negative-sixth-tool.json",
+    "muse-direct-canonical.json",
+    "muse-indirect-named.json",
+    "muse-negative-jargon.json",
+    "advanced-control-event-cursor.json",
+    "advanced-control-mcp-arguments.json",
+    "none-ordinary-coding.json",
+    "none-dsh-public-name.json"
+  ]
+}
