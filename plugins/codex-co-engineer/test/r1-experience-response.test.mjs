@@ -136,7 +136,10 @@ test('grouped attention card collects questions once, marks lanes, and keeps one
   assert.equal(projection.attention.unsupported.unresolved, true);
   assert.deepEqual(projection.attention.unsupported.lanes, ['cloud-review']);
   assert.equal(projection.attention.unsupported.code, 'same_session_reply_unsupported');
+  const validator = projection.attention.questions.find((item) => item.assignment_id === 'validator');
   const cloud = projection.attention.questions.find((item) => item.assignment_id === 'cloud-review');
+  assert.equal(validator.question, 'Use the stricter validator?');
+  assert.equal(cloud.question, 'Cloud cannot host a same-session reply');
   assert.equal(cloud.reply_capability, 'unsupported');
   assert.equal(cloud.disposition, 'unresolved');
   assert.equal(cloud.options, null);
@@ -169,13 +172,29 @@ test('final card buckets lanes, git identity, and evidence without merge control
 
 test('verified-final sentence is used only for an accepted complete candidate', async () => {
   const receipt = await loadJson('final-receipt.json');
-  const complete = structuredClone(receipt);
-  complete.complete_candidate_blocked = false;
-  complete.lanes = complete.lanes.map((lane) => ({ ...lane, status: 'completed' }));
+  const lanesOnly = structuredClone(receipt);
+  lanesOnly.complete_candidate_blocked = false;
+  lanesOnly.lanes = lanesOnly.lanes.map((lane) => ({ ...lane, status: 'completed' }));
+  const lanesOnlyProjection = projectExperience(lanesOnly);
+  assert.equal(lanesOnlyProjection.card, 'final');
+  assert.equal(lanesOnlyProjection.summary.verified_final, null);
+  assert.equal(lanesOnlyProjection.summary.phrases.includes(EXPERIENCE_PHRASES.verified_final), false);
+
+  const complete = structuredClone(lanesOnly);
+  complete.candidate = {
+    ...complete.candidate,
+    composed: true,
+    ready_for_codex_review: true,
+    accepted: true,
+    authority: 'p35',
+  };
   const projection = projectExperience(complete);
   assert.equal(projection.card, 'final');
   assert.equal(projection.summary.verified_final, EXPERIENCE_PHRASES.verified_final);
   assert.equal(projection.summary.phrases.at(-1), EXPERIENCE_PHRASES.verified_final);
+  assert.equal(projection.final.candidate.composed, true);
+  assert.equal(projection.final.candidate.ready_for_codex_review, true);
+  assert.equal(projection.final.candidate.accepted, true);
 });
 
 test('adapter submit/wait/reply stay one submission, one wait, one grouped reply', async () => {
@@ -210,6 +229,7 @@ test('adapter submit/wait/reply stay one submission, one wait, one grouped reply
   });
   assert.equal(latched.experience.card, 'attention');
   assert.equal(latched.experience.attention.questions.length, 1);
+  assert.equal(latched.experience.attention.questions[0].question, 'Choose the next writer step');
   assert.equal(latched.experience.attention.reply.rounds, 1);
   const replied = await adapter.dispatch('task', {
     run_id: submitted.run_id,

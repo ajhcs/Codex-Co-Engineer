@@ -32,6 +32,7 @@ import {
   classifyRunToolCall,
 } from '../mcp/v3/run-tool-adapter.mjs';
 import {
+  HOSTILE_PATH,
   HOSTILE_SECRET,
   createAdapter,
   makeAssignment,
@@ -139,6 +140,7 @@ test('unsupported same-session reply marks the lane unresolved and does not inve
   const dshQuestion = latched.experience.attention.questions.find((item) => item.assignment_id === 'dsh-lane');
   assert.equal(dshQuestion.reply_capability, 'unsupported');
   assert.equal(dshQuestion.disposition, 'unresolved');
+  assert.equal(dshQuestion.question, 'DSH cannot host a same-session reply');
 });
 
 test('missing Apps capability never advertises ui:// metadata or resources', () => {
@@ -251,4 +253,143 @@ test('human summaries stay free of internal jargon while authority fields remain
   }
   const verified = projectExperience(await loadJson('final-receipt.json'));
   assert.equal(verified.summary.phrases.includes(EXPERIENCE_PHRASES.verified_final), false);
+});
+
+function completedLanes(receipt) {
+  const complete = structuredClone(receipt);
+  complete.complete_candidate_blocked = false;
+  complete.lanes = complete.lanes.map((lane) => ({ ...lane, status: 'completed' }));
+  return complete;
+}
+
+function assertNeverVerified(projection, label) {
+  assert.equal(projection.card, 'final', label);
+  assert.equal(projection.summary.verified_final, null, label);
+  assert.equal(projection.summary.phrases.includes(EXPERIENCE_PHRASES.verified_final), false, label);
+}
+
+test('completed lanes without composed/ready/accepted candidate never emit verified-final', async () => {
+  const receipt = await loadJson('final-receipt.json');
+  const uncomposed = completedLanes(receipt);
+  uncomposed.candidate = {
+    ...uncomposed.candidate,
+    composed: false,
+    ready_for_codex_review: false,
+    accepted: false,
+    authority: 'p35',
+  };
+  assertNeverVerified(projectExperience(uncomposed), 'uncomposed');
+
+  const notReady = completedLanes(receipt);
+  notReady.candidate = {
+    ...notReady.candidate,
+    composed: true,
+    ready_for_codex_review: false,
+    accepted: false,
+    authority: 'p35',
+  };
+  assertNeverVerified(projectExperience(notReady), 'not-ready');
+
+  const absent = completedLanes(receipt);
+  delete absent.candidate;
+  assertNeverVerified(projectExperience(absent), 'absent');
+
+  const contradictory = completedLanes(receipt);
+  contradictory.candidate = {
+    ...contradictory.candidate,
+    composed: false,
+    ready_for_codex_review: true,
+    accepted: true,
+    authority: 'p35',
+  };
+  assertNeverVerified(projectExperience(contradictory), 'contradictory');
+
+  const unresolved = completedLanes(receipt);
+  unresolved.lanes = unresolved.lanes.map((lane, index) => (
+    index === 0 ? { ...lane, status: 'unresolved' } : lane
+  ));
+  unresolved.candidate = {
+    ...unresolved.candidate,
+    composed: true,
+    ready_for_codex_review: true,
+    accepted: true,
+    authority: 'p35',
+  };
+  assertNeverVerified(projectExperience(unresolved), 'unresolved');
+
+  const control = completedLanes(receipt);
+  control.candidate = {
+    ...control.candidate,
+    composed: true,
+    ready_for_codex_review: true,
+    accepted: true,
+    authority: 'p35',
+  };
+  const verified = projectExperience(control);
+  assert.equal(verified.card, 'final');
+  assert.equal(verified.summary.verified_final, EXPERIENCE_PHRASES.verified_final);
+  assert.equal(verified.summary.phrases.at(-1), EXPERIENCE_PHRASES.verified_final);
+  assert.equal(verified.final.candidate.composed, true);
+  assert.equal(verified.final.candidate.ready_for_codex_review, true);
+  assert.equal(verified.final.candidate.accepted, true);
+});
+
+test('attention prompt becomes a sanitized question and nested owner-only prompt stays stripped', async () => {
+  const receipt = await loadJson('attention-receipt.json');
+  const projected = projectExperience(receipt);
+  const validator = projected.attention.questions.find((item) => item.assignment_id === 'validator');
+  assert.equal(typeof validator.question, 'string');
+  assert.ok(validator.question.trim().length > 0);
+  assert.equal(validator.question, 'Use the stricter validator?');
+
+  const questionPreserved = structuredClone(receipt);
+  questionPreserved.attention.items[0].question = 'Keep the public question';
+  questionPreserved.attention.items[0].prompt = 'hidden owner prompt';
+  const preserved = projectExperience(questionPreserved);
+  const preservedQuestion = preserved.attention.questions.find((item) => item.assignment_id === 'validator');
+  assert.equal(preservedQuestion.question, 'Keep the public question');
+  assert.equal(JSON.stringify(preserved).includes('hidden owner prompt'), false);
+  assert.equal(JSON.stringify(preserved).includes('"prompt"'), false);
+
+  const hostile = structuredClone(receipt);
+  hostile.prompt = 'OWNER_ROOT_PROMPT';
+  hostile.attention.prompt = 'OWNER_RECORD_PROMPT';
+  hostile.attention.items[0].prompt = [
+    'Approve the writer?',
+    HOSTILE_SECRET,
+    HOSTILE_PATH,
+    'argv=["--inject", "/tmp/hostile-repo"]',
+    'env=MODEL_API_KEY=sk-live-ATTACKER-SECRET',
+    'repository_path=/tmp/hostile-repo',
+  ].join(' ');
+  hostile.attention.items[0].argv = ['--secret', HOSTILE_PATH];
+  hostile.attention.items[0].env = { MODEL_API_KEY: HOSTILE_SECRET };
+  hostile.attention.items[0].repository_path = HOSTILE_PATH;
+  hostile.attention.items[0].nested = {
+    prompt: 'RAW_NESTED_PROMPT_SECRET',
+    argv: ['--nested', HOSTILE_PATH],
+  };
+  hostile.lanes[0].prompt = 'LANE_OWNER_PROMPT';
+  hostile.candidate = { prompt: 'CANDIDATE_NESTED_PROMPT' };
+  const sanitized = projectExperience(hostile);
+  const serialized = JSON.stringify(sanitized);
+  const question = sanitized.attention.questions.find((item) => item.assignment_id === 'validator');
+  assert.equal(typeof question.question, 'string');
+  assert.ok(question.question.trim().length > 0);
+  assert.match(question.question, /Approve the writer\?/u);
+  assert.equal(question.question.includes(HOSTILE_SECRET), false);
+  assert.equal(question.question.includes(HOSTILE_PATH), false);
+  assert.equal(question.question.includes('sk-live-ATTACKER-SECRET'), false);
+  assert.equal(question.question.includes('/tmp/hostile-repo'), false);
+  assert.equal(question.question.includes('--inject'), false);
+  assert.equal(serialized.includes(HOSTILE_SECRET), false);
+  assert.equal(serialized.includes(HOSTILE_PATH), false);
+  assert.equal(serialized.includes('OWNER_ROOT_PROMPT'), false);
+  assert.equal(serialized.includes('OWNER_RECORD_PROMPT'), false);
+  assert.equal(serialized.includes('RAW_NESTED_PROMPT_SECRET'), false);
+  assert.equal(serialized.includes('LANE_OWNER_PROMPT'), false);
+  assert.equal(serialized.includes('CANDIDATE_NESTED_PROMPT'), false);
+  assert.equal(serialized.includes('"prompt"'), false);
+  assert.equal(serialized.includes('"argv"'), false);
+  assert.equal(Object.hasOwn(sanitized.attention.questions[0], 'prompt'), false);
 });

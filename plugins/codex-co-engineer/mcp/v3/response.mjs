@@ -404,6 +404,62 @@ function utf8Head(value, maxBytes) {
   return `${buffer.subarray(0, end).toString('utf8')}…`;
 }
 
+function ownString(object, key) {
+  if (object == null || typeof object !== 'object' || Array.isArray(object)) return null;
+  if (!Object.hasOwn(object, key)) return null;
+  return typeof object[key] === 'string' ? object[key] : null;
+}
+
+function ownExactTrue(object, key) {
+  return object != null
+    && typeof object === 'object'
+    && !Array.isArray(object)
+    && Object.hasOwn(object, key)
+    && object[key] === true;
+}
+
+function ownExactFalse(object, key) {
+  return object != null
+    && typeof object === 'object'
+    && !Array.isArray(object)
+    && Object.hasOwn(object, key)
+    && object[key] === false;
+}
+
+const ATTENTION_QUESTION_OWNER_LEAK = /(?:^|[\s,;])(?:argv|env|repository_path|worktree_path|agent_argv|cli_argv)\s*[:=]\s*(?:\[[^\]]*\]|"[^"]*"|'[^']*'|\S+)/giu;
+const ATTENTION_QUESTION_PATH_LEAK = /\/(?:tmp|home|Users|var|opt|root|etc|usr)\/[^\s"'`]+/gu;
+
+function sanitizeAttentionQuestion(item) {
+  const source = ownString(item, 'question') ?? ownString(item, 'prompt');
+  if (source == null) return null;
+  const scrubbed = source
+    .replace(ATTENTION_QUESTION_OWNER_LEAK, ' [REDACTED]')
+    .replace(ATTENTION_QUESTION_PATH_LEAK, '[REDACTED]');
+  const clipped = utf8Head(scrubbed, EXPERIENCE_QUESTION_BYTES);
+  if (clipped == null || clipped.trim() === '') return null;
+  return clipped;
+}
+
+function proofBoundAttentionQuestions(receipt) {
+  return attentionItems(receipt).map((item) => ({
+    assignment_id: typeof item.assignment_id === 'string' ? item.assignment_id : null,
+    question_id: typeof item.question_id === 'string' ? item.question_id : null,
+    question: sanitizeAttentionQuestion(item),
+  }));
+}
+
+function bindProofBoundQuestions(items, bound) {
+  return items.map((item) => {
+    const assignmentId = typeof item.assignment_id === 'string' ? item.assignment_id : null;
+    const questionId = typeof item.question_id === 'string' ? item.question_id : null;
+    const match = bound.find((entry) => (
+      entry.assignment_id === assignmentId && entry.question_id === questionId
+    ));
+    if (!match) return item;
+    return { ...item, question: match.question };
+  });
+}
+
 function sha40(value) {
   return typeof value === 'string' && SHA40.test(value) ? value.toLowerCase() : null;
 }
@@ -618,12 +674,39 @@ function gitFacts(receipt, lanes) {
   };
 }
 
+function candidateRecord(receipt) {
+  const candidate = receipt?.candidate;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  return candidate;
+}
+
+function contradictoryCandidate(candidate) {
+  const composed = ownExactTrue(candidate, 'composed');
+  const ready = ownExactTrue(candidate, 'ready_for_codex_review');
+  const acceptedOrReviewed = ownExactTrue(candidate, 'accepted')
+    || ownExactTrue(candidate, 'reviewed');
+  if (ownExactTrue(candidate, 'rejected')) return true;
+  if (ownExactFalse(candidate, 'composed') && (ready || acceptedOrReviewed)) return true;
+  if (ownExactFalse(candidate, 'ready_for_codex_review') && acceptedOrReviewed) return true;
+  if (ready && !composed) return true;
+  if (acceptedOrReviewed && (!composed || !ready)) return true;
+  return false;
+}
+
 function verifiedFinalAllowed(receipt, lanes) {
   if (receipt?.complete_candidate_blocked === true) return false;
-  if (lanes.length === 0) return false;
+  if (!Array.isArray(lanes) || lanes.length === 0) return false;
   const required = lanes.filter((lane) => lane.required !== false);
-  const requiredAccepted = required.every((lane) => ACCEPTED_LANE_STATUSES.includes(laneStatus(lane)));
-  return requiredAccepted && required.length > 0;
+  if (required.length === 0) return false;
+  if (!required.every((lane) => ACCEPTED_LANE_STATUSES.includes(laneStatus(lane)))) return false;
+  if (lanes.some((lane) => UNRESOLVED_LANE_STATUSES.includes(laneStatus(lane)))) return false;
+  const candidate = candidateRecord(receipt);
+  if (candidate == null) return false;
+  if (contradictoryCandidate(candidate)) return false;
+  if (candidate.authority !== 'p35') return false;
+  if (!ownExactTrue(candidate, 'composed')) return false;
+  if (!ownExactTrue(candidate, 'ready_for_codex_review')) return false;
+  return ownExactTrue(candidate, 'accepted') || ownExactTrue(candidate, 'reviewed');
 }
 
 function experienceSummaryPhrases(card, receipt, lanes) {
@@ -813,9 +896,10 @@ function boundProjection(projection) {
 }
 
 export function projectExperience(receipt) {
+  const boundAttention = proofBoundAttentionQuestions(receipt);
   const safe = stripOwnerOnly(receipt) ?? {};
   const lanes = asLanes(safe);
-  const items = attentionItems(safe);
+  const items = bindProofBoundQuestions(attentionItems(safe), boundAttention);
   const card = classifyExperienceCard(safe);
   const phrases = experienceSummaryPhrases(card, safe, lanes);
   const projection = {
