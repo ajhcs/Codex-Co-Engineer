@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { readFileSync } from 'node:fs';
 import {
   WAIT_ANY_PROGRESS_DETAIL_HINT,
   WAIT_ANY_PROGRESS_EVENT_BYTES_MAX,
@@ -15,7 +15,12 @@ import {
   WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX,
   WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
 } from '../mcp/v3/compact-task.mjs';
-import { appendTaskEvent, createTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
+import { appendTaskEvent, createTask, taskPaths, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
+import {
+  legitimateCompletedReceipt,
+  legitimateFailedReceipt,
+  zeroWorkPingTimeoutReceipt,
+} from './fixtures/r1-supervisor-result-truthfulness-fixtures.mjs';
 
 function currentRuntime() {
   const proc = readFileSync(`/proc/${process.pid}/stat`, 'utf8');
@@ -94,22 +99,27 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
   assert.equal(values[0].result.serverInfo.version, '3.2.1');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
+  assert.equal(values[1].result.tools.length, 5);
   const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
   assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
-    'detail', 'task_limit', 'include_tasks', 'response_mode',
+    'detail', 'task_limit', 'include_tasks', 'response_mode', 'run_id',
   ]);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
     'task_id', 'wait_ms', 'wait_until', 'wake_on_needs_attention', 'view', 'cursor', 'max_bytes',
     'extend_expected_duration_ms', 'extend_reason', 'reply', 'response_mode',
+    'run_id', 'assignment_id', 'attention', 'run_reply',
   ]);
   assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 14400000);
+  assert.equal(taskTool.inputSchema.properties.wait_until.enum[0], 'progress');
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
+  assert.equal(taskTool.inputSchema.properties.wait_until.enum[2], 'decision_or_attention');
   assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured']);
   const tasksTool = values[1].result.tools.find((tool) => tool.name === 'tasks');
   assert.deepEqual(Object.keys(tasksTool.inputSchema.properties), [
     'detail', 'limit', 'cursor', 'provider', 'state', 'status', 'response_mode',
     'task_ids', 'cursors', 'wait_ms', 'wait_until', 'wake_on_needs_attention',
+    'run_id',
   ]);
   for (const tool of values[1].result.tools) {
     assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured']);
@@ -117,7 +127,7 @@ test('advertises only the thin public tool surface', async () => {
   }
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.match(delegateTool.description, /property named repo/u);
-  assert.deepEqual(delegateTool.inputSchema.required, ['task_id', 'provider', 'repo', 'prompt']);
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].else.required, ['task_id', 'provider', 'repo', 'prompt']);
   assert.match(delegateTool.inputSchema.properties.repo.description, /Required property named repo/u);
   assert.match(delegateTool.inputSchema.properties.repo.description, /\/absolute\/path\/to\/git-worktree/u);
   assert.match(delegateTool.inputSchema.properties.repo.description, /Do not rename this property to git_root/u);
@@ -132,10 +142,13 @@ test('advertises only the thin public tool surface', async () => {
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'expected_duration_ms'));
   assert.equal(delegateTool.inputSchema.properties.expected_duration_ms.maximum, 86400000);
   assert.equal(delegateTool.inputSchema.properties.timeout_ms.maximum, 103680000);
-  assert.deepEqual(delegateTool.inputSchema.anyOf, [
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].else.anyOf, [
     { required: ['expected_duration_ms'] },
     { required: ['timeout_ms'] },
   ]);
+  assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'run'));
+  assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.minItems, 1);
+  assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.maxItems, 8);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
   assert.match(taskTool.description, /view=compact/u);
@@ -143,8 +156,14 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(tasksTool.inputSchema.properties.task_ids.minItems, 1);
   assert.equal(tasksTool.inputSchema.properties.task_ids.maxItems, 8);
   assert.equal(tasksTool.inputSchema.properties.wait_ms.maximum, 14400000);
-  assert.deepEqual(tasksTool.inputSchema.properties.wait_until.enum, ['progress', 'terminal']);
+  assert.deepEqual(tasksTool.inputSchema.properties.wait_until.enum, [
+    'progress', 'terminal', 'decision_or_attention',
+  ]);
   assert.equal(tasksTool.inputSchema.allOf[0].then.required[0], 'task_ids');
+  const cancelTool = values[1].result.tools.find((tool) => tool.name === 'cancel');
+  assert.ok(Object.hasOwn(cancelTool.inputSchema.properties, 'run_id'));
+  assert.ok(Object.hasOwn(cancelTool.inputSchema.properties, 'cleanup'));
+  assert.equal(cancelTool.inputSchema.allOf[0].else.required[0], 'task_id');
 });
 
 test('task returns a compact live snapshot and can wait for the next event', async () => {
@@ -531,6 +550,202 @@ test('live MCP tool results use structured-first text fallback when response_mod
   });
 });
 
+test('tasks list, paged full/compact, and wait-any cannot project a completed PING-timeout as succeeded', async () => {
+  await withServer(async ({ state, request }) => {
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: zeroWorkPingTimeoutReceipt({ cwd: state }),
+    });
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: legitimateCompletedReceipt({ cwd: state }),
+    });
+
+    const listed = (await request({
+      jsonrpc: '2.0',
+      id: 60,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: {} },
+    })).result.structuredContent;
+    const pingListed = listed.tasks.find((task) => task.id === 'rtruth-ping-timeout');
+    const legitListed = listed.tasks.find((task) => task.id === 'rtruth-legitimate-completed');
+    assert.equal(pingListed.state, 'failed');
+    assert.equal(pingListed.status, 'failed');
+    assert.notEqual(pingListed.state, 'succeeded');
+    assert.equal(legitListed.state, 'succeeded');
+    assert.equal(legitListed.status, 'completed');
+
+    const fullPage = (await request({
+      jsonrpc: '2.0',
+      id: 61,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'full', limit: 20 } },
+    })).result.structuredContent;
+    assert.equal(fullPage.detail, 'full');
+    assert.equal(fullPage.tasks.find((task) => task.id === 'rtruth-ping-timeout').state, 'failed');
+    assert.equal(fullPage.tasks.find((task) => task.id === 'rtruth-legitimate-completed').state, 'succeeded');
+
+    const compactPage = (await request({
+      jsonrpc: '2.0',
+      id: 62,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'compact', limit: 20 } },
+    })).result.structuredContent;
+    assert.equal(compactPage.detail, 'compact');
+    assert.equal(compactPage.tasks.find((task) => task.id === 'rtruth-ping-timeout').state, 'failed');
+    assert.equal(compactPage.tasks.find((task) => task.id === 'rtruth-legitimate-completed').state, 'succeeded');
+
+    const waitAny = (await request({
+      jsonrpc: '2.0',
+      id: 63,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: {
+          task_ids: ['rtruth-ping-timeout', 'rtruth-legitimate-completed'],
+          wait_ms: 0,
+          wait_until: 'terminal',
+        },
+      },
+    })).result.structuredContent;
+    const pingWait = waitAny.tasks.find((entry) => entry.task_id === 'rtruth-ping-timeout');
+    const legitWait = waitAny.tasks.find((entry) => entry.task_id === 'rtruth-legitimate-completed');
+    assert.equal(pingWait.state, 'failed');
+    assert.equal(pingWait.task.state, 'failed');
+    assert.equal(pingWait.task.status, 'failed');
+    assert.notEqual(pingWait.state, 'succeeded');
+    assert.equal(legitWait.state, 'succeeded');
+    assert.equal(legitWait.task.status, 'completed');
+
+    const stored = await readFile(taskPaths(state, 'rtruth-ping-timeout').record, 'utf8');
+    assert.match(stored, /"schema": "codex-co-engineer.task.v1"/u);
+    assert.match(stored, /"status": "completed"/u);
+  });
+});
+
+test('tasks state filter classifies before membership, total, and page boundaries', async () => {
+  await withServer(async ({ state, request }) => {
+    const stamp = (second, receipt) => ({
+      ...receipt,
+      cwd: state,
+      created_at: `2026-08-20T00:00:0${second}.000Z`,
+      updated_at: `2026-08-20T00:00:0${second}.000Z`,
+    });
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: legitimateCompletedReceipt(stamp(3, { id: 'rtruth-legit-b' })),
+    });
+    const ping = await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: zeroWorkPingTimeoutReceipt(stamp(2, {})),
+    });
+    const pingStored = await readFile(ping.paths.record, 'utf8');
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: legitimateCompletedReceipt(stamp(1, { id: 'rtruth-legit-a' })),
+    });
+    await createTask({
+      root: state,
+      prompt: 'keep this prompt private',
+      record: legitimateFailedReceipt(stamp(0, {})),
+    });
+
+    const omitted = (await request({
+      jsonrpc: '2.0',
+      id: 70,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: {} },
+    })).result.structuredContent;
+    assert.deepEqual(omitted.tasks.map((task) => task.id), [
+      'rtruth-legit-b',
+      'rtruth-ping-timeout',
+      'rtruth-legit-a',
+      'rtruth-legitimate-failed',
+    ]);
+    assert.equal(omitted.tasks.find((task) => task.id === 'rtruth-ping-timeout').state, 'failed');
+    assert.equal(omitted.tasks.find((task) => task.id === 'rtruth-legit-a').state, 'succeeded');
+
+    const succeeded = (await request({
+      jsonrpc: '2.0',
+      id: 71,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'full', state: 'succeeded', limit: 1 } },
+    })).result.structuredContent;
+    assert.deepEqual(Object.keys(succeeded).sort(), ['detail', 'has_more', 'limit', 'next_cursor', 'tasks', 'total'].sort());
+    assert.deepEqual(succeeded.tasks.map((task) => task.id), ['rtruth-legit-b']);
+    assert.equal(succeeded.tasks[0].state, 'succeeded');
+    assert.equal(succeeded.tasks[0].status, 'completed');
+    assert.equal(succeeded.total, 2);
+    assert.equal(succeeded.has_more, true);
+    assert.ok(succeeded.next_cursor);
+    assert.equal(succeeded.tasks.some((task) => task.id === 'rtruth-ping-timeout'), false);
+
+    const succeededPage2 = (await request({
+      jsonrpc: '2.0',
+      id: 72,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: { detail: 'full', state: 'succeeded', limit: 1, cursor: succeeded.next_cursor },
+      },
+    })).result.structuredContent;
+    assert.deepEqual(succeededPage2.tasks.map((task) => task.id), ['rtruth-legit-a']);
+    assert.equal(succeededPage2.total, 2);
+    assert.equal(succeededPage2.has_more, false);
+    assert.equal(succeededPage2.next_cursor, null);
+    assert.equal(succeededPage2.tasks[0].state, 'succeeded');
+
+    const compactFailed = (await request({
+      jsonrpc: '2.0',
+      id: 73,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: { detail: 'compact', state: 'failed', limit: 1 } },
+    })).result.structuredContent;
+    assert.deepEqual(compactFailed.tasks.map((task) => task.id), ['rtruth-ping-timeout']);
+    assert.equal(compactFailed.tasks[0].state, 'failed');
+    assert.notEqual(compactFailed.tasks[0].state, 'succeeded');
+    assert.equal(compactFailed.total, 2);
+    assert.equal(compactFailed.has_more, true);
+
+    const compactFailedPage2 = (await request({
+      jsonrpc: '2.0',
+      id: 74,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: { detail: 'compact', state: 'failed', limit: 1, cursor: compactFailed.next_cursor },
+      },
+    })).result.structuredContent;
+    assert.deepEqual(compactFailedPage2.tasks.map((task) => task.id), ['rtruth-legitimate-failed']);
+    assert.equal(compactFailedPage2.tasks[0].state, 'failed');
+    assert.equal(compactFailedPage2.total, 2);
+    assert.equal(compactFailedPage2.has_more, false);
+    assert.equal(compactFailedPage2.next_cursor, null);
+
+    const mismatched = await request({
+      jsonrpc: '2.0',
+      id: 75,
+      method: 'tools/call',
+      params: {
+        name: 'tasks',
+        arguments: { detail: 'full', state: 'failed', limit: 1, cursor: succeeded.next_cursor },
+      },
+    });
+    assert.equal(mismatched.result.isError, true);
+    assert.match(mismatched.result.structuredContent.error.code, /invalid_cursor/u);
+
+    const after = await readFile(taskPaths(state, 'rtruth-ping-timeout').record, 'utf8');
+    assert.equal(after, pingStored);
+    assert.match(after, /"schema": "codex-co-engineer.task.v1"/u);
+    assert.match(after, /"status": "completed"/u);
+  });
+});
+
 test('status fails local providers closed when the MCP environment lacks the user-bus locator', async () => {
   const environment = { ...process.env };
   delete environment.XDG_RUNTIME_DIR;
@@ -542,4 +757,59 @@ test('status fails local providers closed when the MCP environment lacks the use
   assert.equal(status.healthy, false);
   assert.equal(status.local_boundary.ready, false);
   for (const provider of ['grok', 'cursor-local', 'dsh']) assert.equal(status.readiness[provider].ready, false);
+});
+
+test('invalid run submit stays on the five-tool catalog and creates no task artifacts', async () => {
+  await withServer(async ({ state, request }) => {
+    const listed = await request({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    });
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), [
+      'status', 'delegate', 'task', 'tasks', 'cancel',
+    ]);
+    const rejected = await request({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'delegate',
+        arguments: {
+          run: {
+            run_id: 'NOT_A_RUN',
+            request_idempotency_key: 'sha256:' + 'a'.repeat(64),
+            identity: {},
+            git: {},
+            provenance: {},
+            telemetry: {},
+            assignments: [{ assignment_id: 'w1', task_id: 't1', provider: 'p22', model: 'x' }],
+          },
+        },
+      },
+    });
+    assert.equal(rejected.result.isError, true);
+    assert.ok(rejected.result.structuredContent.error.code === 'invalid_format'
+      || rejected.result.structuredContent.error.code === 'p22_not_a_provider'
+      || rejected.result.structuredContent.error.code === 'unknown_provider'
+      || rejected.result.structuredContent.error.code === 'unknown_key');
+    const tasks = await request({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'tasks', arguments: {} },
+    });
+    assert.equal(tasks.result.structuredContent.tasks.length, 0);
+    const status = await request({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'status', arguments: {} },
+    });
+    assert.deepEqual(Object.keys(status.result.structuredContent).sort(), [
+      'active', 'capabilities', 'healthy', 'local_boundary', 'mcp_pending_call',
+      'providers', 'readiness', 'tasks', 'version',
+    ].sort());
+  });
 });

@@ -1,13 +1,20 @@
 import { spawn as nodeSpawn, execFile as nodeExecFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { open, readFile, realpath, stat } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  CredentialBoundaryError,
+  materializeProviderEnvironment,
+  projectProviderEnvironment,
+} from './credential-boundary.mjs';
+
+import {
   ACTIVE_STATUSES,
+  STORED_TERMINAL,
   VERSION,
   mcpPendingCallReport,
   providerCapabilities,
@@ -46,12 +53,21 @@ import {
   reconcileCursorCloudTask,
 } from './cursor-cloud-worker.mjs';
 import {
-  inspectProcessBoundary,
+  inspectExactProcessBoundary,
   launchProcessBoundary,
   probeProcessBoundary,
-  restoreProcessBoundary,
+  PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS,
+  stopExactProcessBoundary,
   stopProcessBoundary,
 } from './process-boundary.mjs';
+import {
+  classifyRunToolCall,
+  createDurableRunSeams,
+  createInProcessRunSeams,
+  createRunToolAdapter,
+  deliverSupervisorSameSessionReplyV1,
+  cancelSupervisorSameSessionReplyV1,
+} from './run-tool-adapter.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
@@ -95,6 +111,26 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   workspace_dirty: 'The source worktree has uncommitted changes; clean it before managed delegation.',
   worktree_create_failed: 'The managed worktree could not be prepared.',
   worker_boundary_uncertain: 'The worker boundary could not be stopped; reconcile or cancel this task.',
+  worker_boundary_pending: 'The worker process boundary is not yet final.',
+  worker_boundary_missing: 'The worker process boundary receipt is missing.',
+  worker_boundary_inspect_failed: 'The worker process boundary could not be inspected.',
+  worker_boundary_identity_mismatch: 'The worker process boundary identity did not match this task.',
+  worker_boundary_pid_visibility_unknown: 'The worker process boundary process visibility is unknown.',
+  worker_boundary_membership_unknown: 'The worker process boundary membership is unknown.',
+  worker_boundary_stop_failed: 'The worker process boundary could not be stopped.',
+  worker_boundary_not_empty: 'The worker process boundary still has descendants.',
+  worktree_lock_inspect_failed: 'The worktree lock could not be inspected.',
+  worktree_lock_identity_mismatch: 'The worktree lock identity did not match this task.',
+  worktree_lock_liveness_unknown: 'The worktree lock liveness could not be proven.',
+  worktree_lock_cleanup_failed: 'The worktree lock could not be cleaned.',
+  worktree_git_changed_during_recovery: 'The worktree Git identity changed during recovery.',
+  boundary_visibility_unknown: 'The worker process boundary could not be proven idle or empty.',
+  boundary_identity_mismatch: 'The worker process boundary identity did not match this task.',
+  boundary_not_empty: 'The worker process boundary still has descendants.',
+  lock_release_unproven: 'The worktree lock release could not be proven.',
+  lock_cleanup_refused: 'The worktree lock cleanup was refused.',
+  cleanup_failed: 'Task lifecycle cleanup failed.',
+  cgroup_not_empty: 'Owned systemd process boundary still has descendants after exact unit stop.',
   cancelled: 'The task was cancelled before worker startup.',
   provider_startup_failed: 'Provider startup could not be prepared.',
   task_launch_busy: 'Another worker already owns this task launch.',
@@ -140,7 +176,10 @@ function fail(code, message) {
 }
 
 function publicStartupError(error, fallbackCode = 'worker_start_failed') {
-  const rawCode = typeof error?.code === 'string' ? error.code : fallbackCode;
+  const mapped = error instanceof CredentialBoundaryError
+    ? (PUBLIC_STARTUP_MESSAGES[error.code] ? error.code : (error.code === 'credential_too_large' || error.code === 'credential_empty' || error.code === 'credential_file_changed' || error.code === 'credential_hardlink_denied' || error.code === 'credential_owner_denied' || error.code === 'credential_symlink_denied' || error.code === 'credential_unreadable' || error.code === 'invalid_credential_path' || error.code === 'invalid_handoff' ? 'invalid_credential_file' : error.code))
+    : (typeof error?.code === 'string' ? error.code : fallbackCode);
+  const rawCode = typeof mapped === 'string' ? mapped : fallbackCode;
   const code = /^[A-Za-z0-9._-]{1,96}$/u.test(rawCode) ? rawCode : fallbackCode;
   const message = PUBLIC_STARTUP_MESSAGES[code] ?? PUBLIC_STARTUP_MESSAGES[fallbackCode] ?? 'The worker failed to start.';
   // Startup failures cross the MCP boundary. Keep the public error bounded and
@@ -181,21 +220,20 @@ function providerArgv(provider, env = process.env, dshModel) {
 }
 
 async function workerEnvironment(provider, source = process.env, dshModel) {
-  const env = { ...source };
-  if (provider !== 'dsh') return env;
-  const selection = DSH_MODELS[resolveDshModel(dshModel)];
-  if (env[selection.credentialEnv]) return env;
-  const file = env[selection.credentialFileEnv] ?? path.join(
-    env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(env.HOME ? path.resolve(env.HOME) : homedir(), '.config'),
-    'codex-co-engineer',
-    selection.credentialFile,
-  );
-  const metadata = await stat(file);
-  if ((metadata.mode & 0o077) !== 0) fail('credential_permissions', 'DSH credential file must be owner-only.');
-  const key = (await readFile(file, 'utf8')).trim();
-  if (!key || key.includes('\0') || Buffer.byteLength(key) > 16 * 1024) fail('invalid_credential_file', 'DSH credential file is invalid.');
-  env[selection.credentialEnv] = key;
-  return env;
+  try {
+    return await materializeProviderEnvironment({
+      provider,
+      source,
+      dshModel: provider === 'dsh' ? resolveDshModel(dshModel) : undefined,
+      operation: 'lane',
+    });
+  } catch (error) {
+    if (error instanceof CredentialBoundaryError) {
+      const code = PUBLIC_STARTUP_MESSAGES[error.code] ? error.code : 'invalid_credential_file';
+      fail(code === 'credential_permissions' ? 'credential_permissions' : 'invalid_credential_file', error.message);
+    }
+    throw error;
+  }
 }
 
 async function localBoundaryReadiness(probe = probeProcessBoundary) {
@@ -463,27 +501,54 @@ export async function cleanupManagedWorkspace({ workspace, taskId, execute = exe
     ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     return { state: 'cleaned', cleaned: true, lock_id: lock.lock_id };
   } catch (error) {
+    const exitCode = Number.isInteger(error?.status) ? error.status : (Number.isInteger(error?.code) ? error.code : undefined);
     return {
       state: 'cleanup_failed',
       cleaned: false,
-      error: { code: error?.code ?? 'worktree_cleanup_failed', message: error?.message ?? 'Worktree lock cleanup failed.' },
+      exit_code: exitCode,
+      error: {
+        code: typeof error?.code === 'string' ? error.code : 'worktree_cleanup_failed',
+        message: 'Worktree lock cleanup failed.',
+      },
     };
   }
 }
 
-async function recordManagedCleanup(root, task, execute) {
+function cleanupEventFields(result) {
+  const exitCode = Number.isInteger(result?.exit_code) ? result.exit_code : undefined;
+  let code;
+  if (result?.error?.code) code = result.error.code;
+  else if (result?.cleaned) code = null;
+  else if (result?.state === 'unlocked') code = null;
+  else code = 'lock_cleanup_refused';
+  return {
+    type: result?.error ? 'cleanup_warning' : 'cleanup',
+    code,
+    cleaned: result?.cleaned === true,
+    ...(exitCode !== undefined ? { exit_code_class: `exit_${exitCode}` } : {}),
+  };
+}
+
+async function recordManagedCleanup(root, task, execute, options = {}) {
   if (task?.workspace_kind !== 'managed-worktree') return null;
+  if (options.requireInactiveEmpty && options.boundaryState !== 'inactive_empty') {
+    const result = {
+      state: options.boundaryState ?? 'unknown',
+      cleaned: false,
+      error: {
+        code: 'worktree_lock_liveness_unknown',
+        message: 'Worktree lock cleanup requires exact inactive empty boundary proof.',
+      },
+    };
+    await appendTaskEvent(root, task.id, cleanupEventFields(result)).catch(() => {});
+    return result;
+  }
   const result = await cleanupManagedWorkspace({
     workspace: task,
     taskId: task.worktree_task ?? task.id,
     execute,
   });
-  if (result.error) {
-    await appendTaskEvent(root, task.id, {
-      type: 'cleanup_warning',
-      code: result.error.code,
-    }).catch(() => {});
-  }
+  await appendTaskEvent(root, task.id, cleanupEventFields(result)).catch(() => {});
   return result;
 }
 
@@ -788,23 +853,46 @@ function currentProcessIdentity(runtime) {
   return processIdentity(runtime?.pid, runtime?.process_group, runtime?.process_start_ticks);
 }
 
-function runtimeLeaderAlive(runtime) {
-  return Number.isInteger(runtime?.pid)
-    && runtime.pid >= 2
-    && typeof runtime.process_start_ticks === 'string'
-    && processStartTicks(runtime.pid) === runtime.process_start_ticks;
+function expectedLeaderFromRuntime(runtime) {
+  const pid = Number(runtime?.pid);
+  if (!Number.isSafeInteger(pid) || pid < 2) return null;
+  if (typeof runtime.process_start_ticks !== 'string' || runtime.process_start_ticks.length === 0) return null;
+  return { pid, process_start_ticks: runtime.process_start_ticks };
 }
 
-async function runtimeActive(runtime) {
+function rememberedIdentitiesFromRuntime(runtime) {
+  const remembered = [];
+  if (Array.isArray(runtime?.remembered_process_identities)) {
+    remembered.push(...runtime.remembered_process_identities);
+  }
+  const leader = expectedLeaderFromRuntime(runtime);
+  if (leader) remembered.push(leader);
+  return remembered;
+}
+
+async function inspectRuntimeBoundary(runtime, dependencies = {}) {
+  if (!runtime?.process_boundary) return null;
+  const inspect = dependencies.inspectBoundary ?? inspectExactProcessBoundary;
+  try {
+    return await inspect(runtime.process_boundary, {
+      adapter: dependencies.adapter,
+      expectedLeader: expectedLeaderFromRuntime(runtime),
+      rememberedIdentities: rememberedIdentitiesFromRuntime(runtime),
+    });
+  } catch {
+    return Object.freeze({
+      state: 'unknown',
+      stop_allowed: false,
+      identity_matched: false,
+      code: 'worker_boundary_inspect_failed',
+    });
+  }
+}
+
+async function runtimeActive(runtime, dependencies = {}) {
   if (runtime?.process_boundary) {
-    if (!runtimeLeaderAlive(runtime)) return false;
-    try {
-      const handle = restoreProcessBoundary(runtime.process_boundary);
-      const state = await inspectProcessBoundary(handle);
-      return state.found && !state.empty;
-    } catch {
-      return false;
-    }
+    const inspection = await inspectRuntimeBoundary(runtime, dependencies);
+    return inspection?.state === 'active';
   }
   return Boolean(currentProcessIdentity(runtime));
 }
@@ -813,10 +901,18 @@ function taskRuntime(runtime, task) {
   return runtime ?? task?.runtime_recovery ?? null;
 }
 
-async function stopRuntimeBoundary(runtime) {
+async function stopRuntimeBoundary(runtime, dependencies = {}) {
   if (!runtime?.process_boundary) return null;
-  const handle = restoreProcessBoundary(runtime.process_boundary);
-  return stopProcessBoundary(handle);
+  return (dependencies.stopExactBoundary ?? stopExactProcessBoundary)(runtime.process_boundary, {
+    adapter: dependencies.adapter,
+    expectedLeader: expectedLeaderFromRuntime(runtime),
+    rememberedIdentities: rememberedIdentitiesFromRuntime(runtime),
+    timeoutMs: dependencies.stopTimeoutMs,
+  });
+}
+
+function boundaryIsInactiveEmpty(inspection) {
+  return inspection?.state === 'inactive_empty' && inspection.empty !== false;
 }
 
 function currentProviderIdentity(task) {
@@ -837,8 +933,485 @@ export async function extendTaskDeadline(root, taskId, { expected_duration_ms, r
   return next;
 }
 
-async function reconcileInactiveTask(root, task, runtime) {
-  if (!ACTIVE.has(task.status) || launchReservationActive(task) || await runtimeActive(runtime)) return task;
+export const LOCAL_TASK_LIFECYCLE_VERSION = 1;
+const CLEANUP_FINAL = new Set(['normal', 'recovered']);
+const PUBLIC_LIFECYCLE_CODE = Object.freeze({
+  worker_boundary_pid_visibility_unknown: 'boundary_visibility_unknown',
+  worker_boundary_membership_unknown: 'boundary_visibility_unknown',
+  worker_boundary_inspect_failed: 'boundary_visibility_unknown',
+  worker_boundary_identity_mismatch: 'boundary_identity_mismatch',
+  worker_boundary_not_empty: 'boundary_not_empty',
+  worker_boundary_stop_failed: 'boundary_not_empty',
+  cgroup_not_empty: 'boundary_not_empty',
+  worktree_lock_liveness_unknown: 'lock_release_unproven',
+  worktree_lock_identity_mismatch: 'lock_cleanup_refused',
+  worktree_lock_cleanup_failed: 'lock_cleanup_refused',
+  worktree_lock_inspect_failed: 'lock_cleanup_refused',
+});
+
+function publicLifecycleCode(code) {
+  if (typeof code !== 'string' || code.length === 0) return 'worker_boundary_pending';
+  return PUBLIC_LIFECYCLE_CODE[code] ?? (PUBLIC_STARTUP_MESSAGES[code] ? code : 'cleanup_failed');
+}
+
+function lifecycleBlocksFinalProjection(task) {
+  let status;
+  let cleanup;
+  try {
+    status = task?.status;
+    cleanup = task?.cleanup;
+  } catch {
+    return false;
+  }
+  if (!STORED_TERMINAL.includes(status)) return false;
+  if (!cleanup || typeof cleanup !== 'object' || Array.isArray(cleanup)) return false;
+  return !CLEANUP_FINAL.has(cleanup.status);
+}
+
+function freezeLocalTaskLifecycle(values) {
+  return Object.freeze({
+    version: LOCAL_TASK_LIFECYCLE_VERSION,
+    task_id: values.task_id,
+    stored_status: values.stored_status ?? null,
+    projected_status: values.projected_status ?? null,
+    public_state: values.public_state ?? publicState(values.projected_status ?? undefined),
+    final: values.final === true,
+    cleanup: values.cleanup,
+    boundary: values.boundary,
+    lock: values.lock,
+    reason: values.reason ?? null,
+  });
+}
+
+function localTaskLifecycleFrom(task, fields) {
+  const overlay = fields.cleanupRecord ? { ...task, cleanup: fields.cleanupRecord } : task;
+  const classified = classifySupervisorTerminalReceipt(overlay);
+  return freezeLocalTaskLifecycle({
+    task_id: task.id,
+    stored_status: task.status,
+    projected_status: classified.projected_status,
+    public_state: classified.public_state,
+    final: fields.final === true,
+    cleanup: fields.cleanup,
+    boundary: fields.boundary,
+    lock: fields.lock,
+    reason: fields.reason ?? classified.reason ?? null,
+  });
+}
+
+async function persistLifecycleEvidence(root, task, cleanup, extra = {}) {
+  const next = await updateTask(root, task.id, { cleanup });
+  await appendTaskEvent(root, task.id, {
+    type: 'cleanup',
+    status: cleanup.status,
+    boundary: cleanup.boundary,
+    lock: cleanup.lock,
+    code: cleanup.code ?? null,
+    ...(extra.forced ? { forced: true } : {}),
+    ...(extra.exit_code_class ? { exit_code_class: extra.exit_code_class } : {}),
+  }).catch(() => {});
+  if (extra.runtime) {
+    await writeRuntimeRecord(root, task.id, {
+      ...extra.runtime,
+      lifecycle_proof: {
+        status: cleanup.status,
+        boundary: cleanup.boundary,
+        lock: cleanup.lock,
+        code: cleanup.code ?? null,
+        recovered: extra.recovered === true,
+        git: extra.git ?? null,
+      },
+    }).catch(() => {});
+  }
+  return next;
+}
+
+function gitIdentity(outputs) {
+  return Object.freeze({
+    head: String(outputs.head ?? '').trim(),
+    tree: String(outputs.tree ?? '').trim(),
+    branch: String(outputs.branch ?? '').trim(),
+    clean: String(outputs.porcelain ?? '').trim() === '',
+  });
+}
+
+async function snapshotTaskGit(task, dependencies = {}) {
+  const cwd = task?.cwd;
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) return null;
+  if (typeof dependencies.snapshotGit === 'function') return dependencies.snapshotGit(task);
+  const execute = dependencies.execute ?? execFile;
+  try {
+    const [head, tree, branch, status] = await Promise.all([
+      execute('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }),
+      execute('git', ['-C', cwd, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }),
+      execute('git', ['-C', cwd, 'branch', '--show-current'], { encoding: 'utf8' }),
+      execute('git', ['-C', cwd, 'status', '--porcelain=v1'], { encoding: 'utf8' }),
+    ]);
+    return gitIdentity({
+      head: head.stdout,
+      tree: tree.stdout,
+      branch: branch.stdout,
+      porcelain: status.stdout,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function sameGitIdentity(before, after) {
+  return Boolean(before && after
+    && before.head === after.head
+    && before.tree === after.tree
+    && before.branch === after.branch
+    && before.clean === after.clean);
+}
+
+async function snapshotUnrelatedUnits(receipt, dependencies = {}) {
+  if (typeof dependencies.snapshotUnits === 'function') return dependencies.snapshotUnits(receipt);
+  const exec = dependencies.adapter?.execFile ?? (dependencies.execute
+    ? (command, args, options) => dependencies.execute(command, args, options)
+    : null);
+  if (typeof exec !== 'function') return null;
+  try {
+    const listed = await exec('/usr/bin/systemctl', [
+      '--user', 'list-units', '--all', '--no-legend', '--plain', '--no-pager', 'codex-co-engineer-*.service',
+    ], { encoding: 'utf8', timeout: 3_000, maxBuffer: 64 * 1024 });
+    const units = Object.create(null);
+    for (const line of String(listed?.stdout ?? '').split(/\r?\n/u)) {
+      const unit = line.trim().split(/\s+/u)[0];
+      if (!unit || unit === receipt.unit || !/^codex-co-engineer-[a-f0-9]{32}\.service$/u.test(unit)) continue;
+      const shown = await exec('/usr/bin/systemctl', [
+        '--user', 'show', unit, '--no-pager', '--property=Id', '--property=ActiveState',
+        '--property=InvocationID', '--property=MainPID',
+      ], { encoding: 'utf8', timeout: 3_000, maxBuffer: 16 * 1024 });
+      const properties = Object.create(null);
+      for (const row of String(shown?.stdout ?? '').split(/\r?\n/u)) {
+        const separator = row.indexOf('=');
+        if (separator > 0) properties[row.slice(0, separator)] = row.slice(separator + 1);
+      }
+      units[unit] = Object.freeze({
+        ActiveState: properties.ActiveState ?? null,
+        InvocationID: properties.InvocationID ?? null,
+        MainPID: properties.MainPID ?? null,
+      });
+    }
+    return Object.freeze(units);
+  } catch {
+    return null;
+  }
+}
+
+function sameUnrelatedUnits(before, after) {
+  if (!before || !after) return false;
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    const left = before[key];
+    const right = after[key];
+    if (!left || !right) return false;
+    if (left.ActiveState !== right.ActiveState || left.InvocationID !== right.InvocationID || left.MainPID !== right.MainPID) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function lockIdentityMatches(lock, task, runtime) {
+  const taskId = task.worktree_task ?? task.id;
+  if (!lock || typeof lock !== 'object' || Array.isArray(lock)) return false;
+  if (typeof lock.lock_id !== 'string' || lock.lock_id.length === 0) return false;
+  if (lock.task != null && lock.task !== taskId) return false;
+  if (lock.schema != null && lock.schema !== 'worktree-bootstrap/v1') return false;
+  const worktree = task.cwd ?? task.worktree_path;
+  if (lock.worktree_path && worktree && path.resolve(String(lock.worktree_path)) !== path.resolve(worktree)) return false;
+  if (lock.branch && task.branch && lock.branch !== task.branch) return false;
+  if (lock.start_sha && task.start_sha && String(lock.start_sha).toLowerCase() !== String(task.start_sha).toLowerCase()) return false;
+  const wrapperPid = lock.wrapper_pid ?? lock.writer_pid;
+  if (runtime?.pid != null && wrapperPid != null && Number(wrapperPid) !== Number(runtime.pid)) return false;
+  if (runtime?.process_start_ticks && lock.process_start_ticks
+    && String(lock.process_start_ticks) !== String(runtime.process_start_ticks)) return false;
+  if (runtime?.command && Array.isArray(lock.command) && lock.command[0] && lock.command[0] !== runtime.command) return false;
+  return true;
+}
+
+async function inspectManagedLockState(task, runtime, dependencies = {}) {
+  if (task.workspace_kind !== 'managed-worktree') {
+    return { lock: 'not_applicable', cleaned: false };
+  }
+  const reference = workspaceReference(task, task.worktree_task ?? task.id);
+  if (!reference) return { lock: 'unknown', code: 'worktree_lock_inspect_failed', cleaned: false };
+  const execute = dependencies.execute ?? execFile;
+  try {
+    const { stdout } = await execute('worktree-bootstrap', [
+      'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
+    ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    const lock = parseJsonSuffix(stdout);
+    if (!lock || typeof lock !== 'object' || Array.isArray(lock)) {
+      return { lock: 'unknown', code: 'worktree_lock_inspect_failed', cleaned: false };
+    }
+    if (lock.state === 'unlocked') return { lock: 'unlocked', cleaned: false, receipt: lock };
+    if (!lockIdentityMatches(lock, task, runtime)) {
+      return { lock: 'unknown', code: 'worktree_lock_identity_mismatch', cleaned: false, receipt: lock };
+    }
+    return { lock: 'active', cleaned: false, receipt: lock };
+  } catch {
+    return { lock: 'unknown', code: 'worktree_lock_inspect_failed', cleaned: false };
+  }
+}
+
+async function cleanManagedLockAfterBoundary(task, runtime, dependencies = {}) {
+  const inspected = await inspectManagedLockState(task, runtime, dependencies);
+  if (inspected.lock === 'not_applicable' || inspected.lock === 'unlocked') return inspected;
+  if (inspected.lock !== 'active' || !inspected.receipt?.lock_id) return inspected;
+  const reference = workspaceReference(task, task.worktree_task ?? task.id);
+  const execute = dependencies.execute ?? execFile;
+  try {
+    await execute('worktree-bootstrap', [
+      'lock', 'clean', reference.task,
+      '--repo', reference.worktree_path,
+      '--policy', 'dead-local',
+      '--lock-id', inspected.receipt.lock_id,
+    ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    return { lock: 'cleaned', cleaned: true, receipt: inspected.receipt };
+  } catch (error) {
+    const exitCode = Number.isInteger(error?.status) ? error.status : (Number.isInteger(error?.code) ? error.code : undefined);
+    return {
+      lock: 'unknown',
+      cleaned: false,
+      code: 'worktree_lock_cleanup_failed',
+      exit_code: exitCode,
+      receipt: inspected.receipt,
+    };
+  }
+}
+
+function cleanupRecord({ status, boundary, lock, code, recoveryAttempted }) {
+  return {
+    status,
+    boundary,
+    lock,
+    ...(code ? { code } : {}),
+    ...(recoveryAttempted ? { recovery_attempted: true } : {}),
+  };
+}
+
+export async function settleLocalTaskLifecycle(root, task, runtime, dependencies = {}) {
+  const current = task && typeof task === 'object' && !Array.isArray(task) && typeof task.id === 'string'
+    ? task
+    : (await readTask(root, requireTaskId(task))).task;
+  const boundRuntime = taskRuntime(runtime, current);
+  if (!STORED_TERMINAL.includes(current.status)) {
+    const inspection = boundRuntime?.process_boundary
+      ? await inspectRuntimeBoundary(boundRuntime, dependencies)
+      : null;
+    return localTaskLifecycleFrom(current, {
+      final: false,
+      cleanup: 'pending',
+      boundary: inspection?.state ?? 'not_applicable',
+      lock: current.workspace_kind === 'managed-worktree' ? 'pending' : 'not_applicable',
+      reason: null,
+    });
+  }
+  if (!boundRuntime?.process_boundary) {
+    return localTaskLifecycleFrom(current, {
+      final: true,
+      cleanup: current.cleanup?.status ?? 'normal',
+      boundary: 'not_applicable',
+      lock: current.workspace_kind === 'managed-worktree' ? (current.cleanup?.lock ?? 'not_applicable') : 'not_applicable',
+    });
+  }
+  if (CLEANUP_FINAL.has(current.cleanup?.status)) {
+    return localTaskLifecycleFrom(current, {
+      final: true,
+      cleanup: current.cleanup.status,
+      boundary: current.cleanup.boundary ?? 'inactive_empty',
+      lock: current.cleanup.lock ?? 'unlocked',
+      reason: current.cleanup.code ?? null,
+    });
+  }
+
+  const sleep = dependencies.sleep ?? wait;
+  const drainMs = Number.isFinite(dependencies.drainGraceMs)
+    ? dependencies.drainGraceMs
+    : PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.natural_boundary_and_lock_drain;
+  if (drainMs > 0) await sleep(drainMs);
+
+  let inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);
+  let recovered = false;
+  let gitBefore = null;
+  let unrelatedBefore = null;
+  const recoveryAttempted = current.cleanup?.recovery_attempted === true;
+  if (inspection?.state === 'active' && inspection.stop_allowed && !recoveryAttempted) {
+    gitBefore = await snapshotTaskGit(current, dependencies);
+    unrelatedBefore = await snapshotUnrelatedUnits(boundRuntime.process_boundary, dependencies);
+    if (!gitBefore || !unrelatedBefore) {
+      inspection = {
+        ...inspection,
+        state: 'unknown',
+        stop_allowed: false,
+        code: 'worker_boundary_inspect_failed',
+      };
+    } else {
+      try {
+        await (dependencies.stopExactBoundary ?? stopExactProcessBoundary)(boundRuntime.process_boundary, {
+          adapter: dependencies.adapter,
+          expectedLeader: expectedLeaderFromRuntime(boundRuntime),
+          rememberedIdentities: rememberedIdentitiesFromRuntime(boundRuntime),
+          timeoutMs: dependencies.stopTimeoutMs,
+        });
+        recovered = true;
+        inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);
+      } catch (error) {
+        const code = error?.code === 'cgroup_not_empty' ? 'cgroup_not_empty' : (error?.code ?? 'worker_boundary_stop_failed');
+        const cleanup = cleanupRecord({
+          status: 'failed',
+          boundary: code === 'cgroup_not_empty' ? 'active' : 'unknown',
+          lock: 'active',
+          code,
+          recoveryAttempted: true,
+        });
+        const next = await persistLifecycleEvidence(root, current, cleanup, {
+          runtime: boundRuntime,
+          forced: error?.code === 'cgroup_not_empty',
+        });
+        return localTaskLifecycleFrom(next, {
+          final: false,
+          cleanup: cleanup.status,
+          boundary: cleanup.boundary,
+          lock: cleanup.lock,
+          reason: publicLifecycleCode(code),
+          cleanupRecord: cleanup,
+        });
+      }
+    }
+  }
+
+  if (inspection?.state !== 'inactive_empty') {
+    const code = inspection?.code ?? (inspection?.state === 'active' ? 'worker_boundary_pending' : 'worker_boundary_inspect_failed');
+    const cleanup = cleanupRecord({
+      status: inspection?.state === 'active' ? 'pending' : (code.includes('mismatch') ? 'unknown' : 'unknown'),
+      boundary: inspection?.state === 'active' ? 'active' : 'unknown',
+      lock: 'pending',
+      code,
+      recoveryAttempted: recovered || recoveryAttempted,
+    });
+    const next = await persistLifecycleEvidence(root, current, cleanup, { runtime: boundRuntime });
+    return localTaskLifecycleFrom(next, {
+      final: false,
+      cleanup: cleanup.status,
+      boundary: cleanup.boundary,
+      lock: cleanup.lock,
+      reason: publicLifecycleCode(code === 'worker_boundary_pending' ? 'worker_boundary_pending' : code),
+      cleanupRecord: cleanup,
+    });
+  }
+
+  if (recovered) {
+    const gitAfter = await snapshotTaskGit(current, dependencies);
+    const unrelatedAfter = await snapshotUnrelatedUnits(boundRuntime.process_boundary, dependencies);
+    if (!sameGitIdentity(gitBefore, gitAfter)) {
+      const cleanup = cleanupRecord({
+        status: 'failed',
+        boundary: 'inactive_empty',
+        lock: 'unknown',
+        code: 'worktree_git_changed_during_recovery',
+        recoveryAttempted: true,
+      });
+      const next = await persistLifecycleEvidence(root, current, cleanup, { runtime: boundRuntime, git: gitAfter });
+      return localTaskLifecycleFrom(next, {
+        final: false,
+        cleanup: cleanup.status,
+        boundary: cleanup.boundary,
+        lock: cleanup.lock,
+        reason: 'worktree_git_changed_during_recovery',
+        cleanupRecord: cleanup,
+      });
+    }
+    if (!sameUnrelatedUnits(unrelatedBefore, unrelatedAfter)) {
+      const cleanup = cleanupRecord({
+        status: 'failed',
+        boundary: 'inactive_empty',
+        lock: 'unknown',
+        code: 'worker_boundary_identity_mismatch',
+        recoveryAttempted: true,
+      });
+      const next = await persistLifecycleEvidence(root, current, cleanup, { runtime: boundRuntime, git: gitAfter });
+      return localTaskLifecycleFrom(next, {
+        final: false,
+        cleanup: cleanup.status,
+        boundary: cleanup.boundary,
+        lock: cleanup.lock,
+        reason: 'boundary_identity_mismatch',
+        cleanupRecord: cleanup,
+      });
+    }
+  }
+
+  let lockResult = await inspectManagedLockState(current, boundRuntime, dependencies);
+  if (lockResult.lock === 'active') {
+    lockResult = await cleanManagedLockAfterBoundary(current, boundRuntime, dependencies);
+  }
+  if (lockResult.lock === 'unknown' || lockResult.lock === 'active') {
+    const code = lockResult.code ?? 'worktree_lock_liveness_unknown';
+    const cleanup = cleanupRecord({
+      status: 'unknown',
+      boundary: 'inactive_empty',
+      lock: lockResult.lock,
+      code,
+      recoveryAttempted: recovered || recoveryAttempted,
+    });
+    const next = await persistLifecycleEvidence(root, current, cleanup, {
+      runtime: boundRuntime,
+      recovered,
+      git: gitBefore,
+      exit_code_class: Number.isInteger(lockResult.exit_code) ? `exit_${lockResult.exit_code}` : undefined,
+    });
+    return localTaskLifecycleFrom(next, {
+      final: false,
+      cleanup: cleanup.status,
+      boundary: cleanup.boundary,
+      lock: cleanup.lock,
+      reason: publicLifecycleCode(code),
+      cleanupRecord: cleanup,
+    });
+  }
+
+  const cleanup = cleanupRecord({
+    status: recovered ? 'recovered' : 'normal',
+    boundary: 'inactive_empty',
+    lock: lockResult.lock,
+    recoveryAttempted: recovered || recoveryAttempted,
+  });
+  const next = await persistLifecycleEvidence(root, current, cleanup, {
+    runtime: boundRuntime,
+    recovered,
+    git: gitBefore,
+  });
+  return localTaskLifecycleFrom(next, {
+    final: true,
+    cleanup: cleanup.status,
+    boundary: cleanup.boundary,
+    lock: cleanup.lock,
+    cleanupRecord: cleanup,
+  });
+}
+
+export async function cleanupLocalTaskLifecycle(root, task, runtime, dependencies = {}) {
+  return settleLocalTaskLifecycle(root, task, runtime, dependencies);
+}
+
+async function reconcileInactiveTask(root, task, runtime, dependencies = {}) {
+  const boundRuntime = taskRuntime(runtime, task);
+  if (STORED_TERMINAL.includes(task.status) && boundRuntime?.process_boundary) {
+    await settleLocalTaskLifecycle(root, task, boundRuntime, dependencies);
+    return (await readTask(root, task.id)).task;
+  }
+  if (!ACTIVE.has(task.status) || launchReservationActive(task)) return task;
+  if (boundRuntime?.process_boundary) {
+    const inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);
+    if (inspection?.state === 'active' || inspection?.state === 'unknown') return task;
+  } else if (await runtimeActive(boundRuntime, dependencies)) {
+    return task;
+  }
   if (deadlineReached(task)) {
     const timedOut = await updateTask(root, task.id, {
       status: 'timeout',
@@ -851,7 +1424,10 @@ async function reconcileInactiveTask(root, task, runtime) {
       finished_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, task.id, { type: 'terminal', status: 'timeout', reason: 'deadline_reached' }).catch(() => {});
-    await recordManagedCleanup(root, timedOut, undefined);
+    await recordManagedCleanup(root, timedOut, dependencies.execute, {
+      requireInactiveEmpty: Boolean(boundRuntime?.process_boundary),
+      boundaryState: boundRuntime?.process_boundary ? 'inactive_empty' : undefined,
+    });
     return timedOut;
   }
 
@@ -868,10 +1444,15 @@ async function reconcileInactiveTask(root, task, runtime) {
   }
 
   let boundaryStopped = false;
-  if (runtime?.process_boundary) {
+  if (boundRuntime?.process_boundary) {
     try {
-      await stopRuntimeBoundary(runtime);
-      boundaryStopped = true;
+      await (dependencies.stopBoundary ?? stopExactProcessBoundary)(boundRuntime.process_boundary, {
+        adapter: dependencies.adapter,
+        expectedLeader: expectedLeaderFromRuntime(boundRuntime),
+        rememberedIdentities: rememberedIdentitiesFromRuntime(boundRuntime),
+      });
+      const inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);
+      boundaryStopped = boundaryIsInactiveEmpty(inspection);
     } catch {
       // Keep the task reconcilable when exact cgroup cleanup cannot be proven.
     }
@@ -886,7 +1467,10 @@ async function reconcileInactiveTask(root, task, runtime) {
         : 'Recorded worker is not running; inspect or cancel this task without replaying it.',
     },
   });
-  await recordManagedCleanup(root, reconciled, undefined);
+  await recordManagedCleanup(root, reconciled, dependencies.execute, {
+    requireInactiveEmpty: Boolean(boundRuntime?.process_boundary),
+    boundaryState: boundaryStopped ? 'inactive_empty' : (boundRuntime?.process_boundary ? 'unknown' : undefined),
+  });
   return reconciled;
 }
 
@@ -903,10 +1487,238 @@ function processGroupAlive(processGroup) {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function probeCommand(command, args, authenticatedPattern) {
+export const SUPERVISOR_FALSE_SUCCESS_REASON = Object.freeze({
+  code: 'completed_with_terminal_error',
+  message: 'Completed receipt carried a terminal error.',
+});
+
+const WHOLE_RESULT_TERMINAL_TEXT = /^(?:[A-Za-z][\w.]*Error\s+)?(?:\[[A-Za-z0-9._-]{1,64}\]\s+)?PING timed out\.?$/u;
+const TERMINAL_TRANSPORT_PROVIDER_CODES = new Set([
+  'unavailable',
+  'retriable',
+  'retriable_error',
+  'ping_timeout',
+  'ping_timed_out',
+  'transport_error',
+  'provider_error',
+  'provider_unavailable',
+  'connection_lost',
+  'etimedout',
+  'econnreset',
+  'econnrefused',
+]);
+
+function freezeTerminalClassification({
+  stored_status,
+  projected_status,
+  public_state,
+  corrected,
+  reason = null,
+}) {
+  return Object.freeze({
+    stored_status,
+    projected_status,
+    public_state,
+    corrected,
+    reason,
+    error: reason ? Object.freeze({ ...SUPERVISOR_FALSE_SUCCESS_REASON }) : null,
+  });
+}
+
+function isWholeResultTerminalText(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (text.length === 0 || text.length > 256) return false;
+  return WHOLE_RESULT_TERMINAL_TEXT.test(text);
+}
+
+function explicitTerminalErrorEnvelope(error) {
+  if (error == null) return false;
+  if (typeof error === 'string') {
+    const text = error.trim();
+    return text.length > 0 && text !== 'ok';
+  }
+  if (typeof error !== 'object' || Array.isArray(error)) return false;
+  let code;
+  let name;
+  let message;
+  try {
+    code = error.code;
+    name = error.name;
+    message = error.message;
+  } catch {
+    return true;
+  }
+  if (typeof code === 'string' && code.length > 0 && code !== 'ok') return true;
+  if (typeof name === 'string' && /error$/iu.test(name.trim())) return true;
+  if (typeof message === 'string' && isWholeResultTerminalText(message)) return true;
+  return false;
+}
+
+function wholeResultTerminalError(result) {
+  if (result == null) return false;
+  if (typeof result === 'string') return isWholeResultTerminalText(result);
+  if (typeof result !== 'object' || Array.isArray(result)) return false;
+  let code;
+  let name;
+  let message;
+  let nested;
+  let text;
+  try {
+    code = result.code;
+    name = result.name;
+    message = result.message;
+    nested = result.error;
+    text = result.text ?? result.result ?? result.output ?? result.value;
+  } catch {
+    return true;
+  }
+  if (typeof name === 'string' && /error$/iu.test(name.trim())) return true;
+  if (typeof code === 'string' && TERMINAL_TRANSPORT_PROVIDER_CODES.has(code.trim().toLowerCase())) return true;
+  if (typeof message === 'string' && isWholeResultTerminalText(message)) return true;
+  if (explicitTerminalErrorEnvelope(nested)) {
+    if (text == null || text === '') return true;
+    if (typeof text === 'string' && isWholeResultTerminalText(text)) return true;
+    return false;
+  }
+  return typeof text === 'string' && isWholeResultTerminalText(text);
+}
+
+/**
+ * Deterministic terminal-receipt classifier at the supervisor projection
+ * seam. Callers map `projected_status` through `publicState` and must not
+ * write the overlay back onto `codex-co-engineer.task.v1` stored bytes.
+ */
+export function classifySupervisorTerminalReceipt(task) {
+  if (!task || typeof task !== 'object' || Array.isArray(task)) {
+    return freezeTerminalClassification({
+      stored_status: null,
+      projected_status: null,
+      public_state: publicState(undefined),
+      corrected: false,
+    });
+  }
+  let storedStatus = null;
+  try {
+    storedStatus = typeof task.status === 'string' ? task.status : null;
+  } catch {
+    return freezeTerminalClassification({
+      stored_status: null,
+      projected_status: null,
+      public_state: publicState(undefined),
+      corrected: false,
+    });
+  }
+  if (storedStatus === 'transport_lost') {
+    return freezeTerminalClassification({
+      stored_status: 'transport_lost',
+      projected_status: 'transport_lost',
+      public_state: publicState('transport_lost'),
+      corrected: false,
+    });
+  }
+  if (lifecycleBlocksFinalProjection(task)) {
+    const code = publicLifecycleCode(task.cleanup?.code ?? 'worker_boundary_pending');
+    return Object.freeze({
+      stored_status: storedStatus,
+      projected_status: 'transport_lost',
+      public_state: publicState('transport_lost'),
+      corrected: false,
+      reason: code,
+      error: Object.freeze({
+        code,
+        message: PUBLIC_STARTUP_MESSAGES[code] ?? PUBLIC_STARTUP_MESSAGES.worker_boundary_pending,
+      }),
+    });
+  }
+  const wouldSucceed = storedStatus === 'completed' || storedStatus === 'succeeded';
+  if (wouldSucceed) {
+    let envelope = false;
+    let whole = false;
+    try {
+      envelope = explicitTerminalErrorEnvelope(task.error);
+    } catch {
+      envelope = true;
+    }
+    try {
+      whole = wholeResultTerminalError(task.result);
+    } catch {
+      whole = true;
+    }
+    if (envelope || whole) {
+      return freezeTerminalClassification({
+        stored_status: storedStatus,
+        projected_status: 'failed',
+        public_state: publicState('failed'),
+        corrected: true,
+        reason: SUPERVISOR_FALSE_SUCCESS_REASON.code,
+      });
+    }
+  }
+  return freezeTerminalClassification({
+    stored_status: storedStatus,
+    projected_status: storedStatus,
+    public_state: publicState(storedStatus ?? undefined),
+    corrected: false,
+  });
+}
+
+export function projectSupervisorPublicState(task) {
+  return classifySupervisorTerminalReceipt(task).public_state;
+}
+
+function suppressUnfinalTerminalProjection(task, classified) {
+  const code = publicLifecycleCode(classified.reason ?? task?.cleanup?.code ?? 'worker_boundary_pending');
+  const message = PUBLIC_STARTUP_MESSAGES[code] ?? PUBLIC_STARTUP_MESSAGES.worker_boundary_pending;
+  try {
+    const overlay = {
+      ...task,
+      status: 'transport_lost',
+      error: Object.freeze({ code, message }),
+    };
+    delete overlay.result;
+    delete overlay.handoff;
+    delete overlay.stop_reason;
+    delete overlay.finished_at;
+    return overlay;
+  } catch {
+    return {
+      status: 'transport_lost',
+      error: Object.freeze({ code, message }),
+    };
+  }
+}
+
+export function projectSupervisorTerminalReceipt(task) {
+  const classified = classifySupervisorTerminalReceipt(task);
+  if (lifecycleBlocksFinalProjection(task)) {
+    return suppressUnfinalTerminalProjection(task, classified);
+  }
+  if (!classified.corrected) return task;
+  try {
+    return {
+      ...task,
+      status: classified.projected_status,
+      error: classified.error,
+    };
+  } catch {
+    return {
+      status: classified.projected_status,
+      error: classified.error,
+    };
+  }
+}
+
+export function projectSupervisorTaskRecords(tasks) {
+  if (!Array.isArray(tasks)) return [];
+  return tasks.map((task) => projectSupervisorTerminalReceipt(task));
+}
+
+async function probeCommand(command, args, authenticatedPattern, env) {
   try {
     const { stdout, stderr } = await execFile(command, args, {
       cwd: '/tmp', encoding: 'utf8', timeout: 5_000, maxBuffer: 256 * 1024,
+      env,
     });
     const output = `${stdout}${stderr}`;
     if (/not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu.test(output)) {
@@ -919,17 +1731,20 @@ async function probeCommand(command, args, authenticatedPattern) {
 }
 
 async function providerReadiness(env = process.env) {
-  const grokCommand = env.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
-  const cursorCommand = env.CODEX_CO_ENGINEER_CURSOR_COMMAND ?? 'cursor-agent';
-  const dshCommand = env.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
-  const acpxCommand = env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
-  const dshAcpCommand = env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
+  const grokEnv = projectProviderEnvironment({ provider: 'grok', source: env, operation: 'readiness' });
+  const cursorLocalEnv = projectProviderEnvironment({ provider: 'cursor-local', source: env, operation: 'readiness' });
+  const dshProbeEnv = projectProviderEnvironment({ provider: 'dsh', source: env, dshModel: DEFAULT_DSH_MODEL, operation: 'readiness_probe' });
+  const grokCommand = grokEnv.CODEX_CO_ENGINEER_GROK_COMMAND ?? 'grok';
+  const cursorCommand = cursorLocalEnv.CODEX_CO_ENGINEER_CURSOR_COMMAND ?? 'cursor-agent';
+  const dshCommand = dshProbeEnv.CODEX_CO_ENGINEER_DSH_COMMAND ?? 'dsh';
+  const acpxCommand = dshProbeEnv.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
+  const dshAcpCommand = dshProbeEnv.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
   const [grok, cursorLocal, dshCli, acpx, dshAcp, dshMuseCredential, dshOxCredential, cursorCloud] = await Promise.all([
-    probeCommand(grokCommand, ['models']),
-    probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu),
-    probeCommand(dshCommand, ['--version']),
-    probeCommand(acpxCommand, ['--version']),
-    probeCommand('which', [dshAcpCommand]),
+    probeCommand(grokCommand, ['models'], undefined, grokEnv),
+    probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu, cursorLocalEnv),
+    probeCommand(dshCommand, ['--version'], undefined, dshProbeEnv),
+    probeCommand(acpxCommand, ['--version'], undefined, dshProbeEnv),
+    probeCommand('which', [dshAcpCommand], undefined, dshProbeEnv),
     workerEnvironment('dsh', env, DEFAULT_DSH_MODEL).then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
     workerEnvironment('dsh', env, 'stealth/ox-alpha').then(() => ({ ready: true })).catch((error) => ({ ready: false, reason: error?.code ?? 'credentials_missing' })),
     Promise.all([loadCursorApiKey(env), loadCursorSdk()])
@@ -956,7 +1771,14 @@ async function providerReadiness(env = process.env) {
 
 export async function cancelTask(root, taskId, dependencies = {}) {
   const { task } = await readTask(root, taskId);
-  if (!ACTIVE.has(task.status)) return task;
+  if (!ACTIVE.has(task.status)) {
+    const runtime = taskRuntime(await readRuntimeRecord(root, taskId), task);
+    if (runtime?.process_boundary) {
+      await settleLocalTaskLifecycle(root, task, runtime, dependencies);
+      return projectSupervisorTerminalReceipt((await readTask(root, taskId)).task);
+    }
+    return projectSupervisorTerminalReceipt(task);
+  }
   if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
     const runtime = await readRuntimeRecord(root, taskId);
     await updateTask(root, taskId, { status: 'cancelling' });
@@ -971,7 +1793,7 @@ export async function cancelTask(root, taskId, dependencies = {}) {
     if (identity) {
       try { process.kill(-identity.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
     }
-    return terminal;
+    return projectSupervisorTerminalReceipt(terminal);
   }
   const runtime = taskRuntime(await readRuntimeRecord(root, taskId), task);
   const identity = currentProcessIdentity(runtime);
@@ -980,26 +1802,46 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   await clearTaskLaunchReservation(root, taskId, task.launch_reservation?.token).catch(() => {});
   if (runtime?.process_boundary) {
     try {
-      await (dependencies.stopBoundary ?? stopRuntimeBoundary)(runtime);
+      await (dependencies.stopBoundary ?? ((bound) => stopRuntimeBoundary(bound, dependencies)))(runtime);
     } catch (error) {
-      await recordManagedCleanup(root, task, dependencies.execute);
-      return updateTask(root, taskId, {
+      await recordManagedCleanup(root, task, dependencies.execute, {
+        requireInactiveEmpty: true,
+        boundaryState: 'unknown',
+      });
+      return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
         status: 'transport_lost',
         error: { code: error?.code ?? 'cancel_incomplete', message: 'The owned local task cgroup could not be proven empty.' },
-      });
+      }));
     }
-    await recordManagedCleanup(root, task, dependencies.execute);
+    const inspection = await inspectRuntimeBoundary(runtime, dependencies);
+    if (!boundaryIsInactiveEmpty(inspection)) {
+      await recordManagedCleanup(root, task, dependencies.execute, {
+        requireInactiveEmpty: true,
+        boundaryState: inspection?.state === 'active' ? 'active' : 'unknown',
+      });
+      return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
+        status: 'transport_lost',
+        error: {
+          code: inspection?.code ?? 'cancel_incomplete',
+          message: 'The owned local task cgroup could not be proven empty.',
+        },
+      }));
+    }
+    await recordManagedCleanup(root, task, dependencies.execute, {
+      requireInactiveEmpty: true,
+      boundaryState: 'inactive_empty',
+    });
     await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', boundary: runtime.process_boundary.boundary });
-    return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
+    return projectSupervisorTerminalReceipt(await updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() }));
   }
   if (!identity && !providerIdentity) {
     await recordManagedCleanup(root, task, dependencies.execute);
     await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled', reason: 'worker_not_running' });
-    return updateTask(root, taskId, {
+    return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
       status: 'cancelled',
       error: { code: 'worker_not_running', message: 'Recorded worker was not running; no owned process remained to signal.' },
       finished_at: new Date().toISOString(),
-    });
+    }));
   }
   for (const owned of [providerIdentity, identity].filter(Boolean)) {
     try { process.kill(-owned.process_group, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
@@ -1016,20 +1858,21 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   }
   if ((identity && processGroupAlive(identity.process_group)) || (providerIdentity && processGroupAlive(providerIdentity.process_group))) {
     await recordManagedCleanup(root, task, dependencies.execute);
-    return updateTask(root, taskId, {
+    return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
       status: 'transport_lost',
       error: { code: 'cancel_incomplete', message: 'Owned process group remained after SIGKILL.' },
-    });
+    }));
   }
   await recordManagedCleanup(root, task, dependencies.execute);
   await appendTaskEvent(root, taskId, { type: 'terminal', status: 'cancelled' });
-  return updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() });
+  return projectSupervisorTerminalReceipt(await updateTask(root, taskId, { status: 'cancelled', finished_at: new Date().toISOString() }));
 }
 
 export async function taskStatus(root, taskId, options = {}) {
+  const dependencies = options.dependencies ?? options;
   const { task: initialTask } = await readTask(root, taskId);
   const runtime = taskRuntime(await readRuntimeRecord(root, taskId), initialTask);
-  await reconcileInactiveTask(root, initialTask, runtime);
+  await reconcileInactiveTask(root, initialTask, runtime, dependencies);
   const view = resolveTaskView(options.view);
   const waited = await waitForTaskProgress(root, taskId, {
     cursor: options.cursor,
@@ -1039,10 +1882,10 @@ export async function taskStatus(root, taskId, options = {}) {
     signal: options.signal,
   });
   const latestRuntime = taskRuntime(await readRuntimeRecord(root, taskId), waited.task);
-  const task = await projectLiveLastEvent(
+  const task = projectSupervisorTerminalReceipt(await projectLiveLastEvent(
     root,
-    await reconcileInactiveTask(root, waited.task, latestRuntime),
-  );
+    await reconcileInactiveTask(root, waited.task, latestRuntime, dependencies),
+  ));
   const progress = {
     ...waited.progress,
     last_event: task.last_event ?? waited.progress.last_event,
@@ -1108,9 +1951,9 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
     const tasksAll = await listTasks(root);
     for (let index = 0; index < tasksAll.length; index += 1) {
       const task = tasksAll[index];
-      if (!ACTIVE.has(task.status)) continue;
       const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
-      tasksAll[index] = await reconcileInactiveTask(root, task, runtime);
+      if (!ACTIVE.has(task.status) && !(STORED_TERMINAL.includes(task.status) && runtime?.process_boundary)) continue;
+      tasksAll[index] = await reconcileInactiveTask(root, task, runtime, dependencies);
     }
     const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
     const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
@@ -1135,7 +1978,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
       mcp_pending_call: mcpPendingCallReport(),
       local_boundary: boundary,
       readiness,
-      tasks: await Promise.all(tasksAll.slice(0, 20).map((task) => projectLiveLastEvent(root, task))),
+      tasks: projectSupervisorTaskRecords(await Promise.all(tasksAll.slice(0, 20).map((task) => projectLiveLastEvent(root, task)))),
     };
   }
   const detail = options.detail ?? 'full';
@@ -1160,9 +2003,9 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
   const totalTasks = allTasks.length;
   for (let index = 0; index < allTasks.length; index += 1) {
     const task = allTasks[index];
-    if (!ACTIVE.has(task.status)) continue;
     const runtime = taskRuntime(await readRuntimeRecord(root, task.id), task);
-    allTasks[index] = await reconcileInactiveTask(root, task, runtime);
+    if (!ACTIVE.has(task.status) && !(STORED_TERMINAL.includes(task.status) && runtime?.process_boundary)) continue;
+    allTasks[index] = await reconcileInactiveTask(root, task, runtime, dependencies);
   }
   const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
   const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
@@ -1182,6 +2025,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
     if (detail === 'full') {
       windowTasks = await Promise.all(windowTasks.map((task) => projectLiveLastEvent(root, task)));
     }
+    windowTasks = projectSupervisorTaskRecords(windowTasks);
   }
   const result = {
     version: VERSION,
@@ -1208,3 +2052,139 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
   };
   return detail === 'compact' ? projectCompactStatus(result) : result;
 }
+
+const runToolAdapters = new Map();
+
+function liveTaskFns(root, contextByRun) {
+  return {
+    delegateTask: async (plan) => {
+      const ctx = contextByRun.get(plan.run_id) ?? {};
+      const prompt = ctx.prompts?.[plan.assignment_id] ?? ctx.objective;
+      if (typeof prompt !== 'string' || prompt.trim().length === 0) {
+        fail('invalid_prompt', 'prompt must be non-empty text.');
+      }
+      const role = plan.role === 'verify' ? 'review' : plan.role;
+      const input = {
+        task_id: plan.task_id,
+        provider: plan.provider,
+        repo: ctx.repository_path,
+        prompt,
+        role,
+        expected_duration_ms: Number.isInteger(ctx.durations?.[plan.assignment_id])
+          ? ctx.durations[plan.assignment_id]
+          : 60_000,
+        workspace_mode: 'managed',
+      };
+      if (plan.provider === 'dsh'
+        && (plan.model === 'stealth/ox-alpha' || plan.model === DEFAULT_DSH_MODEL)) {
+        input.dsh_model = plan.model;
+      }
+      if (plan.provider === 'cursor-cloud' && typeof plan.starting_ref === 'string') {
+        input.starting_ref = plan.starting_ref;
+      }
+      const result = await submitTask(input, { root });
+      return {
+        task_id: result.task.id,
+        status: result.task.status,
+        cursor: '0',
+      };
+    },
+    inspectTask: async (plan) => {
+      const result = await inspectTask(root, {
+        task_id: plan.task_id,
+        ...(typeof plan.cursor === 'string' ? { cursor: plan.cursor } : {}),
+      });
+      const projected = projectSupervisorTerminalReceipt(result.task);
+      return {
+        task_id: projected.id,
+        status: projected.status,
+        cursor: result.progress?.event_cursor ?? plan.cursor ?? '0',
+        attention: projected.status === 'needs_attention' ? (projected.attention ?? null) : null,
+      };
+    },
+    cancelTask: async (plan) => {
+      const task = await cancelTask(root, plan.task_id);
+      const projected = projectSupervisorTerminalReceipt(task);
+      return {
+        task_id: projected.id,
+        status: projected.status,
+        cancelled: projected.status === 'cancelled',
+      };
+    },
+  };
+}
+
+export async function createSupervisorRunToolAdapter(options = {}) {
+  if (options.adapter) return options.adapter;
+  const contextByRun = options.contextByRun ?? new Map();
+  const root = options.root;
+  const fns = liveTaskFns(root, contextByRun);
+  const taskFns = {
+    delegateTask: options.delegateTask ?? fns.delegateTask,
+    inspectTask: options.inspectTask ?? fns.inspectTask,
+    cancelTask: options.cancelTaskFn ?? fns.cancelTask,
+    settleLocalTaskLifecycle: options.settleLocalTaskLifecycle ?? settleLocalTaskLifecycle,
+    cleanupLocalTaskLifecycle: options.cleanupLocalTaskLifecycle ?? cleanupLocalTaskLifecycle,
+    clock: options.clock ?? (() => new Date().toISOString()),
+  };
+  const deliverSameSessionReply = options.deliverSameSessionReply
+    ?? ((identity) => deliverSupervisorSameSessionReplyV1(root, identity));
+  const cancelSameSessionReply = options.cancelSameSessionReply
+    ?? ((identity) => cancelSupervisorSameSessionReplyV1(taskFns.cancelTask, identity));
+  const seamOptions = {
+    ...taskFns,
+    deliverSameSessionReply,
+    cancelSameSessionReply,
+  };
+  const seams = options.seams ?? (
+    options.inProcess === true
+      ? createInProcessRunSeams(seamOptions)
+      : await createDurableRunSeams({ root, ...seamOptions })
+  );
+  const attention = seams.attention && typeof seams.attention.reply === 'function'
+    ? {
+      get: (...args) => seams.attention.get(...args),
+      ...(typeof seams.attention.latch === 'function'
+        ? { latch: (...args) => seams.attention.latch(...args) }
+        : {}),
+      reply: async (request) => seams.attention.reply({
+        run_id: request.run_id,
+        batch_id: request.batch_id,
+        expected_revision: request.expected_revision,
+        reply: request.reply,
+        ...(request.now !== undefined ? { now: request.now } : {}),
+        deliver: request.deliver ?? deliverSameSessionReply,
+        cancel: request.cancel ?? cancelSameSessionReply,
+      }),
+    }
+    : seams.attention;
+  return createRunToolAdapter({
+    runtime: seams.runtime,
+    attention,
+    projectLaneTask: projectSupervisorTerminalReceipt,
+    classifyLaneTask: classifySupervisorTerminalReceipt,
+    rememberSubmitContext: (context) => {
+      contextByRun.set(context.run_id, context);
+    },
+  });
+}
+
+export async function supervisorRunToolAdapter(root, options = {}) {
+  if (options.adapter) return options.adapter;
+  const key = typeof root === 'string' ? root : '';
+  let adapter = runToolAdapters.get(key);
+  if (!adapter) {
+    adapter = await createSupervisorRunToolAdapter({ root, ...options });
+    runToolAdapters.set(key, adapter);
+  }
+  return adapter;
+}
+
+export async function invokeRunTool(root, name, args, options = {}) {
+  const classified = classifyRunToolCall(name, args);
+  if (classified.mode === 'legacy') return classified;
+  const adapter = await supervisorRunToolAdapter(root, options);
+  return adapter.dispatch(name, args, { signal: options.signal });
+}
+
+export { classifyRunToolCall };

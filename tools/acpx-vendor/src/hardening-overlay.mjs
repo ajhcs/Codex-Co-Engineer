@@ -247,6 +247,35 @@ async function coEngineerWaitForAgentTree(child, waitMs) {
   }
 }
 
+function coEngineerClosedAgentEnvironment(sessionEnv) {
+  const env = Object.create(null);
+  if (sessionEnv == null || typeof sessionEnv !== 'object' || Array.isArray(sessionEnv)) return env;
+  for (const key of Object.keys(sessionEnv)) {
+    const value = sessionEnv[key];
+    if (typeof key !== 'string' || typeof value !== 'string' || key.includes('\0') || value.includes('\0')) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
+/*
+ * ACPX's upstream builder starts from process.env. Co-Engineer never lets
+ * ambient Git/SSH/hosting/parent secrets reach Grok or Cursor Local ACP
+ * children: the child environment is exactly the closed projection passed
+ * as sessionOptions.env, or empty when that projection is omitted.
+ */
+buildAgentEnvironment = function coEngineerBuildAgentEnvironment(_authCredentials, sessionEnv) {
+  return coEngineerClosedAgentEnvironment(sessionEnv);
+};
+
+AcpRuntimeManager.prototype.createClient = function coEngineerCreateClient(options) {
+  const next = {
+    ...options,
+    closedProviderEnv: options.closedProviderEnv ?? this.options?.closedProviderEnv,
+  };
+  return this.deps.clientFactory?.(next) ?? new AcpClient(next);
+};
+
 /*
  * ACP agents are detached into their own POSIX process group. Terminal
  * children spawned by an agent may use their own group, so we snapshot and
@@ -256,6 +285,7 @@ AcpClient.prototype.spawnAgentProcess = async function coEngineerSpawnAgentProce
   const spawnCommand = buildAgentSpawnCommand(plan.spawnCommand, plan.args, process.platform);
   const spawnedChild = spawn(spawnCommand.command, spawnCommand.args, {
     ...plan.spawnOptions,
+    env: coEngineerClosedAgentEnvironment(this.options?.closedProviderEnv ?? this.options?.sessionOptions?.env),
     detached: process.platform !== 'win32',
     windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
   });

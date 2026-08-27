@@ -1206,3 +1206,126 @@ test('run-completion wait re-arms when an audited deadline extension is recorded
   assert.ok(Date.now() - started > originalMs);
   assert.equal((await readTask(root, 'cloud-deadline-extend')).task.deadline_source, 'extended');
 });
+
+test('P12 result source binds exact R1 identity without mixing Git facts from provider text', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-p12-bind-'));
+  const repo = await createCloudRepo(root);
+  await createCloudTask({ root, prompt: 'materialize distinct sources', record: {
+    id: 'cloud-p12-bind',
+    status: 'accepted',
+    provider: 'cursor-cloud',
+    role: 'review',
+    cwd: repo,
+    run_id: 'run-p12-cloud',
+    assignment_id: 'cloud-lane',
+    model: 'claude-sonnet-4-5',
+    provider_branch: 'cursor/work',
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async (_prompt, options) => ({
+        id: 'run-p12-bind',
+        requestId: options.idempotencyKey,
+        wait: async () => ({
+          id: 'run-p12-bind',
+          requestId: options.idempotencyKey,
+          status: 'finished',
+          result: 'provider claimed head cccccccccccccccccccccccccccccccccccccccc on cursor/hostile-takeover',
+          git: { branches: [{ repoUrl: 'https://github.com/example/repo.git', branch: 'cursor/work', prUrl: 'https://github.com/example/repo/pull/12' }] },
+        }),
+      }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+  const terminal = await runCursorCloudTask({ root, taskId: 'cloud-p12-bind', sdk, apiKey: 'test-key' });
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.cursor_cloud_result_source.published, true);
+  assert.equal(terminal.cursor_cloud_result_source.provider_report.source_kind, 'provider_report');
+  assert.equal(terminal.cursor_cloud_result_source.git_evidence.source_kind, 'git_evidence');
+  assert.equal(terminal.cursor_cloud_result_source.git_evidence.branch, 'cursor/work');
+  assert.equal(terminal.cursor_cloud_result_source.git_evidence.head_sha, null);
+  assert.equal(JSON.stringify(terminal.cursor_cloud_result_source.git_evidence).includes('hostile-takeover'), false);
+  assert.match(terminal.cursor_cloud_result_source.provider_report.inline_tail.text, /hostile-takeover/u);
+});
+
+test('rejects a completion request identity mismatch without replaying the run', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-p12-request-'));
+  const repo = await createCloudRepo(root);
+  await createCloudTask({ root, prompt: 'reject drifted request', record: {
+    id: 'cloud-p12-request',
+    status: 'accepted',
+    provider: 'cursor-cloud',
+    role: 'review',
+    cwd: repo,
+    run_id: 'run-p12-cloud',
+    assignment_id: 'cloud-lane',
+    model: 'claude-sonnet-4-5',
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async (_prompt, options) => ({
+        id: 'run-p12-request',
+        requestId: options.idempotencyKey,
+        wait: async () => ({
+          id: 'run-p12-request',
+          requestId: 'cloud-p12-request:run:9',
+          status: 'finished',
+          result: 'done',
+          git: { branches: [] },
+        }),
+      }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+  await assert.rejects(
+    runCursorCloudTask({ root, taskId: 'cloud-p12-request', sdk, apiKey: 'test-key' }),
+    (error) => error.code === 'cursor_run_identity_mismatch',
+  );
+  const task = (await readTask(root, 'cloud-p12-request')).task;
+  assert.notEqual(task.status, 'completed');
+  assert.equal(task.cursor_cloud_result_source, undefined);
+  assert.doesNotMatch(JSON.stringify(task), /cloud-p12-request:run:9/u);
+});
+
+test('rejects a completion branch identity mismatch without synthesizing Git from provider text', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-p12-branch-'));
+  const repo = await createCloudRepo(root);
+  await createCloudTask({ root, prompt: 'reject drifted branch', record: {
+    id: 'cloud-p12-branch',
+    status: 'accepted',
+    provider: 'cursor-cloud',
+    role: 'review',
+    cwd: repo,
+    run_id: 'run-p12-cloud',
+    assignment_id: 'cloud-lane',
+    model: 'claude-sonnet-4-5',
+    provider_branch: 'cursor/work',
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async (_prompt, options) => ({
+        id: 'run-p12-branch',
+        requestId: options.idempotencyKey,
+        wait: async () => ({
+          id: 'run-p12-branch',
+          requestId: options.idempotencyKey,
+          status: 'finished',
+          result: 'landed on cursor/work at a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+          git: { branches: [{ repoUrl: 'https://github.com/example/repo.git', branch: 'cursor/hostile-takeover' }] },
+        }),
+      }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+  await assert.rejects(
+    runCursorCloudTask({ root, taskId: 'cloud-p12-branch', sdk, apiKey: 'test-key' }),
+    (error) => error.code === 'cursor_run_identity_mismatch',
+  );
+  const task = (await readTask(root, 'cloud-p12-branch')).task;
+  assert.notEqual(task.status, 'completed');
+  assert.equal(task.cursor_cloud_result_source, undefined);
+  assert.doesNotMatch(JSON.stringify(task.error ?? {}), /hostile-takeover/u);
+});

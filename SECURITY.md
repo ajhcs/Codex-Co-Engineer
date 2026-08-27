@@ -40,6 +40,9 @@ and local; sanitized bounded evidence is the model-facing projection.
 Profiles are data-only. `VerificationPolicyV1` is the only executable
 command catalog for verification lanes; provider-reported or requested
 commands are evidence/attention and are never automatically executed.
+The constrained verification runner executes only a genuine owner-approved
+ExecutionIntent in a disposable workspace and does not treat
+provider-reported PASS as a fact.
 Manual run cleanup is proof-bound; there is no automatic garbage
 collection.
 

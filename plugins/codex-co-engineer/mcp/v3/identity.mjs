@@ -130,6 +130,13 @@ export const IDENTITY_LABELS = capturedFreeze(OBJECT_ASSIGN(capturedCreate(null)
   VERIFICATION_EXECUTABLE_CLOSURE: 'verification-executable-closure.v1',
   VERIFICATION_COMMAND_PLAN: 'verification-command-plan.v1',
   VERIFICATION_EXECUTION_RECEIPT: 'verification-execution-receipt.v1',
+  STORAGE_ROOT: 'storage-root.v1',
+  AGGREGATE_RUN_ANCHOR: 'aggregate-run-anchor.v1',
+  AGGREGATE_RUN_COORDINATION: 'aggregate-run-coordination.v1',
+  AGGREGATE_SUBMISSION_IDEMPOTENCY: 'aggregate-submission-idempotency.v1',
+  AGGREGATE_RUN_CLAIM: 'aggregate-run-claim.v1',
+  AGGREGATE_SELECTION_REPLY: 'aggregate-selection-reply.v1',
+  AGGREGATE_RESOLVED_PLAN: 'aggregate-resolved-plan.v1',
 }));
 
 export const MAX_IDENTITY_DIGEST_PARTS = 16;

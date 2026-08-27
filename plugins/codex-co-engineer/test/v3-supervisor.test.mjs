@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,14 +9,27 @@ import { promisify } from 'node:util';
 
 import {
   cancelTask,
+  cleanupLocalTaskLifecycle,
   cleanupManagedWorkspace,
+  createSupervisorRunToolAdapter,
   createWriterWorkspace,
+  invokeRunTool,
   launchWorker,
+  settleLocalTaskLifecycle,
   submitTask,
   supervisorStatus,
   taskStatus,
 } from '../mcp/v3/supervisor.mjs';
-import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
+import { recordNeedsAttention, submitReply } from '../mcp/v3/mailbox.mjs';
+import {
+  RUN_ID,
+  TASK_ID,
+  makeAttentionItem,
+  makeRunArgs,
+  makeRunReply,
+} from './fixtures/r1-run-tool-adapter-fixtures.mjs';
+import { createClock, createLifecycleFns } from './fixtures/r1-run-runtime-fixtures.mjs';
+import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
 import { runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -182,6 +195,7 @@ test('Cursor Cloud origin preflight fails before task creation or provider launc
     await assert.rejects(
       submitTask({ task_id: 'cloud-preflight', provider: 'cursor-cloud', repo, prompt: 'must not launch', expected_duration_ms: 10_000 }, {
         root,
+        env: { CURSOR_API_KEY: 'test-key' },
         execute,
         preflightCloudOrigin: async () => { throw Object.assign(new Error('origin missing'), { code: 'cursor_cloud_origin_missing' }); },
         launch: async (request) => launches.push(request),
@@ -208,6 +222,7 @@ test('Cloud submit pins the discovered SHA and rejects checkout advancement befo
     await assert.rejects(
       submitTask({ task_id: 'cloud-head-pin', provider: 'cursor-cloud', repo, prompt: 'must not dispatch', expected_duration_ms: 10_000 }, {
         root,
+        env: { CURSOR_API_KEY: 'test-key' },
         launch: async ({ root: taskRoot, taskId }) => {
           assert.equal((await readTask(taskRoot, taskId)).task.starting_ref, firstHead.trim());
           await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'sha-two']);
@@ -754,7 +769,245 @@ test('boundary rollback failure preserves a recoverable runtime and transport-lo
       stopBoundary: async (runtime) => { recovered = runtime; },
     });
     assert.deepEqual(recovered.process_boundary, receipt);
+    assert.equal(cancelled.status, 'transport_lost');
+    assert.equal((await readTask(root, 'boundary-recovery')).task.status, 'transport_lost');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancel projects cancelled only after exact inactive_empty proof', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-cancel-proof-'));
+  const repo = path.join(root, 'repo');
+  const receipt = {
+    version: 1,
+    boundary: 'systemd-user-service-cgroup',
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+    description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    invocation_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    control_group: '/user.slice/user-1000.slice/user@1000.service/app.slice/codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+  };
+  try {
+    await mkdir(repo);
+    await createTask({
+      root,
+      prompt: 'cancel requires empty proof',
+      record: {
+        id: 'cancel-proof',
+        status: 'running',
+        provider: 'grok',
+        cwd: repo,
+        workspace_kind: 'managed-worktree',
+        worktree_task: 'cancel-proof',
+      },
+    });
+    await writeRuntimeRecord(root, 'cancel-proof', {
+      pid: 4242,
+      process_start_ticks: '100',
+      command: process.execPath,
+      process_boundary: receipt,
+    });
+    const lockCalls = [];
+    const failed = await cancelTask(root, 'cancel-proof', {
+      stopBoundary: async () => ({ stopped: true, cgroup_empty: true }),
+      inspectBoundary: async () => ({ state: 'unknown', empty: false, stop_allowed: false, code: 'cgroup_not_empty' }),
+      execute: async (command, args) => {
+        lockCalls.push([command, args]);
+        throw new Error('lock must not be cleaned');
+      },
+    });
+    assert.equal(failed.status, 'transport_lost');
+    assert.equal(lockCalls.some((entry) => entry[1]?.[1] === 'clean'), false);
+    await updateTask(root, 'cancel-proof', { status: 'running' });
+    const cancelled = await cancelTask(root, 'cancel-proof', {
+      stopBoundary: async () => ({ stopped: true, cgroup_empty: true }),
+      inspectBoundary: async () => ({ state: 'inactive_empty', empty: true, stop_allowed: false }),
+      execute: async (command, args) => {
+        lockCalls.push([command, args]);
+        if (args?.[1] === 'inspect') return { stdout: JSON.stringify({ state: 'unlocked' }) };
+        if (args?.[1] === 'clean') throw new Error('already unlocked');
+        return { stdout: '' };
+      },
+    });
     assert.equal(cancelled.status, 'cancelled');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('completed receipts with a terminal transport error do not project succeeded', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-rtruth-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'zero-work ping timeout',
+      record: {
+        id: 'ping-timeout',
+        status: 'completed',
+        provider: 'cursor-local',
+        cwd: root,
+        result: 'RetriableError [unavailable] PING timed out',
+        finished_at: new Date().toISOString(),
+      },
+    });
+    const value = await taskStatus(root, 'ping-timeout');
+    assert.equal(value.state, 'failed');
+    assert.equal(value.task.status, 'failed');
+    assert.equal(value.task.error.code, 'completed_with_terminal_error');
+    assert.doesNotMatch(value.task.error.message, /PING|RetriableError|unavailable/u);
+    assert.equal((await readTask(root, 'ping-timeout')).task.status, 'completed');
+    const cancelled = await cancelTask(root, 'ping-timeout');
+    assert.equal(cancelled.status, 'failed');
+    assert.equal((await readTask(root, 'ping-timeout')).task.status, 'completed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('exports identity-bound local lifecycle settlement without rewriting stored terminal status', async () => {
+  assert.equal(typeof settleLocalTaskLifecycle, 'function');
+  assert.equal(typeof cleanupLocalTaskLifecycle, 'function');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-lifecycle-export-'));
+  try {
+    await createTask({
+      root,
+      prompt: 'legacy terminal',
+      record: {
+        id: 'legacy-lifecycle',
+        status: 'completed',
+        provider: 'grok',
+        cwd: root,
+        result: 'ok',
+        finished_at: new Date().toISOString(),
+      },
+    });
+    const task = (await readTask(root, 'legacy-lifecycle')).task;
+    const settled = await settleLocalTaskLifecycle(root, task, null, { drainGraceMs: 0 });
+    assert.equal(settled.version, 1);
+    assert.equal(settled.final, true);
+    assert.equal(settled.boundary, 'not_applicable');
+    assert.equal(settled.cleanup, 'normal');
+    assert.equal((await readTask(root, 'legacy-lifecycle')).task.status, 'completed');
+    assert.equal((await readTask(root, 'legacy-lifecycle')).task.cleanup, undefined);
+    assert.equal(await cleanupLocalTaskLifecycle(root, task, null, { drainGraceMs: 0 }).then((value) => value.final), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('default run seams are durable P33/P34 authorities and cancel confirms', async () => {
+  const source = await readFile(new URL('../mcp/v3/supervisor.mjs', import.meta.url), 'utf8');
+  assert.match(source, /createDurableRunSeams/u);
+  assert.match(source, /cancelled: projected.status === 'cancelled'/u);
+  assert.match(source, /deliverSupervisorSameSessionReplyV1/u);
+  assert.match(source, /options.seams \?\? \(/u);
+});
+
+test('production P34 reply binds supervisor same-session delivery exactly once', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-p34-reply-'));
+  const lifecycle = createLifecycleFns({ final: true });
+  try {
+    await createTask({
+      root,
+      prompt: 'ask a question',
+      record: {
+        id: TASK_ID,
+        status: 'running',
+        provider: 'grok',
+        transport: 'acp',
+        cwd: root,
+        acp_session_id: 'sess-1',
+      },
+    });
+    await recordNeedsAttention(root, TASK_ID, {
+      session_id: 'sess-1',
+      question_id: 'q-1',
+      prompt: 'Choose the next writer step',
+    });
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      delegateTask: async (plan) => ({ task_id: plan.task_id, status: 'dispatched', cursor: '0' }),
+      inspectTask: async (plan) => ({
+        task_id: plan.task_id,
+        status: 'needs_attention',
+        cursor: plan.cursor ?? '0',
+        attention: { session_id: 'sess-1', question_id: 'q-1' },
+      }),
+      cancelTaskFn: async (plan) => ({ task_id: plan.task_id, status: 'cancelled', cancelled: true }),
+      settleLocalTaskLifecycle: lifecycle.settleLocalTaskLifecycle,
+      cleanupLocalTaskLifecycle: lifecycle.cleanupLocalTaskLifecycle,
+      clock: createClock(),
+    });
+    await adapter.dispatch('delegate', makeRunArgs());
+    const attention = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      attention: { items: [makeAttentionItem()] },
+    });
+    const batchId = attention.attention.batch_id;
+    assert.equal(typeof batchId, 'string');
+    const replyBody = makeRunReply({ batchId });
+    const first = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      run_reply: {
+        batch_id: batchId,
+        expected_revision: attention.attention.revision,
+        reply: replyBody,
+      },
+    });
+    assert.equal(first.operation, 'reply');
+    assert.ok(first.attention.status === 'resolved' || first.attention.status === 'reply_committed');
+    await assert.rejects(
+      () => submitReply(root, TASK_ID, {
+        session_id: 'sess-1',
+        question_id: 'q-1',
+        response: 'ship-it',
+      }),
+      (error) => error.code === 'reply_already_recorded',
+    );
+    const second = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      run_reply: {
+        batch_id: batchId,
+        expected_revision: first.attention.revision,
+        reply: replyBody,
+      },
+    });
+    assert.ok(second.attention.status === 'resolved' || second.attention.status === 'reply_committed');
+    const forged = await adapter.dispatch('task', {
+      run_id: RUN_ID,
+      run_reply: {
+        batch_id: batchId,
+        expected_revision: second.attention.revision,
+        reply: makeRunReply({ batchId, sessionId: 'sess-other', questionId: 'q-other' }),
+      },
+    }).then(() => null, (error) => error);
+    assert.equal(forged?.code, 'attention_batch_reply_conflict');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('invokeRunTool preserves omitted 3.2.1 mode and R-TRUTH lifecycle authority', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-run-tool-'));
+  try {
+    const omitted = await invokeRunTool(root, 'status', { detail: 'compact', include_tasks: false });
+    assert.equal(omitted.mode, 'legacy');
+    const single = await invokeRunTool(root, 'cancel', { task_id: 'legacy-task' });
+    assert.equal(single.mode, 'legacy');
+    const rejected = await invokeRunTool(root, 'delegate', {
+      run: {
+        run_id: 'NOT_A_RUN',
+        request_idempotency_key: 'sha256:' + 'a'.repeat(64),
+        identity: {},
+        git: {},
+        provenance: {},
+        telemetry: {},
+        assignments: [],
+      },
+    }).then(() => null, (error) => error);
+    assert.equal(rejected?.code, 'invalid_format');
+    assert.equal(typeof settleLocalTaskLifecycle, 'function');
+    assert.equal(typeof cleanupLocalTaskLifecycle, 'function');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

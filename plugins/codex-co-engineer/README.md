@@ -26,6 +26,14 @@ The MCP server exposes five tools:
 | `tasks` | List or keyset-page recent receipts, or wait on 1–8 exact tasks |
 | `cancel` | Stop one owned local process group or Cursor Cloud run |
 
+The catalog is still those five tools. Bounded runs use additive
+parameters (`run`, `run_id`, `attention`, `run_reply`, `cleanup`, and
+`wait_until: "decision_or_attention"`) on the same tools. Omit them to
+keep exact 3.2.1 single-task behavior. Run wait is a bounded
+`decision_or_attention` wait; default production seams are durable
+P33/P34 run/journal/attention authorities. See
+[the run tool API](../../docs/run-tool-api.md).
+
 `delegate` requires a stable `task_id`, a provider, an absolute Git worktree
 path in the property named `repo`, a prompt, and `expected_duration_ms` or a
 backwards-compatible `timeout_ms`. Providers are `grok`, `cursor-local`,

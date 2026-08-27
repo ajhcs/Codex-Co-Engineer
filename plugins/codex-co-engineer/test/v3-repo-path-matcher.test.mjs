@@ -519,11 +519,33 @@ test('the aggregate batch budget rejects the legal-cap stress before the first m
   assert.equal(Buffer.byteLength(stressPath, 'utf8'), 4079);
   const batch = Array.from({ length: REPO_PATH_BATCH_MAX }, () => stressPath);
   const pattern = Array.from({ length: GLOB_PATTERN_MAX_SEGMENTS }, () => '*[a-d]*?').join('/');
-  const startedAt = process.hrtime.bigint();
-  matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
-  matchError(() => repoGlobMatchesAnyPath(pattern, batch), 'match_work_exceeded');
-  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-  assert.ok(elapsedMs < 500, `aggregate rejection was not fast: ${elapsedMs}ms`);
+  // Charged work is reconstructed from the public grammar, not a test hook:
+  // each '*[a-d]*?' segment costs 1 (segment) + 1 (*) + 2 ([a-d] range) +
+  // 1 (*) + 1 (?) = 6, so 16 segments charge 96. Each path costs
+  // 16 * 254 code points + 16 segment slots = 4,080. The legal-cap batch
+  // product is 96 × 4,177,920 = 401,080,320, above GLOB_MATCH_STEP_BUDGET;
+  // the same single pattern/path product is 96 × 4,080 = 391,680 and stays
+  // valid. Rejection is therefore the aggregate pre-match check.
+  const chargedPatternWork = GLOB_PATTERN_MAX_SEGMENTS * (1 + 1 + 2 + 1 + 1);
+  const singlePathWork = 16 * 254 + 16;
+  const totalPathWork = REPO_PATH_BATCH_MAX * singlePathWork;
+  const aggregateProduct = chargedPatternWork * totalPathWork;
+  assert.equal(chargedPatternWork, 96);
+  assert.equal(singlePathWork, 4_080);
+  assert.equal(totalPathWork, 4_177_920);
+  assert.equal(aggregateProduct, 401_080_320);
+  assert.equal(GLOB_MATCH_STEP_BUDGET, 67_108_864);
+  assert.ok(aggregateProduct > GLOB_MATCH_STEP_BUDGET);
+  assert.equal(chargedPatternWork * singlePathWork, 391_680);
+  assert.ok(chargedPatternWork * singlePathWork < GLOB_MATCH_STEP_BUDGET);
+  const first = matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
+  const any = matchError(() => repoGlobMatchesAnyPath(pattern, batch), 'match_work_exceeded');
+  assert.equal(first.location, 'paths');
+  assert.equal(first.message,
+    `paths exceeds the ${GLOB_MATCH_STEP_BUDGET}-step aggregate batch match budget; chunk the batch.`);
+  assert.equal(any.code, first.code);
+  assert.equal(any.location, first.location);
+  assert.equal(any.message, first.message);
   // The same batch stays answerable when the product fits the budget.
   assert.equal(filterRepoPathsByGlob('**', batch).length, REPO_PATH_BATCH_MAX);
   assert.deepEqual(filterRepoPathsByGlob(pattern, ['src/x.ts']), []); // single-path semantics intact
@@ -531,7 +553,6 @@ test('the aggregate batch budget rejects the legal-cap stress before the first m
   // aggregate batch product crosses the budget.
   assert.equal(repoGlobMatchesPath(pattern, stressPath), true);
   // Deterministic typed failure on repeat calls.
-  const first = matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
   const again = matchError(() => filterRepoPathsByGlob(pattern, batch), 'match_work_exceeded');
   assert.equal(again.code, first.code);
   assert.equal(again.location, first.location);
@@ -727,8 +748,29 @@ test('the matcher module source stays free of mutable dynamic surfaces', () => {
   for (const required of [
     'callBound(', 'IR_BY_HANDLE', 'chargedPatternSteps', 'reflectApply(functionProtoBind',
     'snapshotPathBatch', 'assertValidatedOffsets', 'next[0] = current[0]',
+    'assertAggregateBatchBudget',
   ]) {
     assert.ok(source.includes(required), `matcher source must contain ${required}`);
+  }
+  // Bounded validation and pre-match DP rejection are distinct source steps:
+  // snapshotPathBatch still walks a legal batch; assertAggregateBatchBudget
+  // then rejects before irMatchesPathSegments allocates any match matrix.
+  const filterStart = source.indexOf('export function filterRepoPathsByGlob(');
+  const anyStart = source.indexOf('export function repoGlobMatchesAnyPath(');
+  assert.ok(filterStart >= 0 && anyStart > filterStart);
+  const filterSrc = source.slice(filterStart, anyStart);
+  const anySrc = source.slice(anyStart);
+  for (const [name, body] of [
+    ['filterRepoPathsByGlob', filterSrc],
+    ['repoGlobMatchesAnyPath', anySrc],
+  ]) {
+    const validateAt = body.indexOf('snapshotPathBatch(');
+    const budgetAt = body.indexOf('assertAggregateBatchBudget(');
+    const matchAt = body.indexOf('irMatchesPathSegments(');
+    assert.ok(validateAt >= 0 && budgetAt >= 0 && matchAt >= 0,
+      `${name} must validate, budget-check, and match in source`);
+    assert.ok(validateAt < budgetAt && budgetAt < matchAt,
+      `${name} must reject aggregate budget after bounded validation and before match-matrix DP`);
   }
 });
 
@@ -1007,11 +1049,8 @@ test('hostile range-count amplification is rejected deterministically before mat
   assert.ok(chargedSteps * totalPathWork > GLOB_MATCH_STEP_BUDGET,
     'test lost its point: charged accounting no longer rejects');
 
-  const startedAt = process.hrtime.bigint();
   const first = matchError(() => filterRepoPathsByGlob(densePattern, batch), 'match_work_exceeded');
   const second = matchError(() => repoGlobMatchesAnyPath(densePattern, batch), 'match_work_exceeded');
-  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-  assert.ok(elapsedMs < 500, `amplification rejection was not fast: ${elapsedMs}ms`);
   assert.equal(second.code, first.code);
   assert.equal(second.location, first.location);
   assert.equal(second.message, first.message);

@@ -1,0 +1,27 @@
+{
+  "stampSchemaV1": "codex-co-engineer.run-journal-created.v1",
+  "stampSchemaV2": "codex-co-engineer.run-journal-created.v2",
+  "stampV1Keys": ["nonce", "record_canonical_digest", "run_id", "schema"],
+  "stampV2Keys": ["binding_digest", "nonce", "run_id", "schema"],
+  "eventKinds": [
+    "run_opened",
+    "child_started",
+    "child_progress",
+    "child_artifact",
+    "child_terminal",
+    "run_terminal"
+  ],
+  "entrySchema": "codex-co-engineer.run-journal-entry.v1",
+  "stateSchema": "codex-co-engineer.run-journal-state.v1",
+  "hashDomain": "codex-co-engineer.run-journal-hash.v1",
+  "cursorDomain": "codex-co-engineer.run-journal-cursor.v1",
+  "genesisPrev": "codex-co-engineer.run-journal.genesis.v1",
+  "lockSchema": "codex-co-engineer.run-journal-lock.v1",
+  "runOpenedHash": "sha256:461c5d6174792bddff12c3daa826e34e4c59f6855c98a352045abe831feeedd8",
+  "runOpenedLine": "{\"data\":{},\"hash\":\"sha256:461c5d6174792bddff12c3daa826e34e4c59f6855c98a352045abe831feeedd8\",\"kind\":\"run_opened\",\"prev\":\"codex-co-engineer.run-journal.genesis.v1\",\"schema\":\"codex-co-engineer.run-journal-entry.v1\",\"seq\":1}",
+  "fingerprintSample": {
+    "runId": "run-journal-bind",
+    "recordDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fingerprint": "74afdc6e3bbfba9f083b121e356a7bf76cfc3f21c420f82c39e949fe49732a7d"
+  }
+}

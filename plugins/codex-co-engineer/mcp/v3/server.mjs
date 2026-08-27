@@ -21,7 +21,19 @@ import { deadlineProjection } from './deadline.mjs';
 import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
 import { buildToolResult, normalizeResponseMode } from './response.mjs';
 import { listTasks, listTasksPage, stateRoot, waitForAnyTaskProgress } from './task-store.mjs';
-import { cancelTask, inspectTask, submitTask, supervisorStatus } from './supervisor.mjs';
+import {
+  cancelTask,
+  inspectTask,
+  invokeRunTool,
+  projectSupervisorPublicState,
+  projectSupervisorTaskRecords,
+  projectSupervisorTerminalReceipt,
+  submitTask,
+  supervisorStatus,
+} from './supervisor.mjs';
+import {
+  classifyRunToolCall,
+} from './run-tool-adapter.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
@@ -46,6 +58,11 @@ const TOOLS = [
         task_limit: { type: 'integer', minimum: 0, maximum: 20, description: 'Maximum tasks to return (0-20). Default 20. Ignored when include_tasks is false.' },
         include_tasks: { type: 'boolean', description: 'When false, omit recent tasks for readiness-only checks.' },
         response_mode: RESPONSE_MODE_PROPERTY,
+        run_id: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9-]{2,63}$',
+          description: 'Optional exact run id. When present, status inspects the bounded run instead of the 3.2.1 task window. Omit to preserve the 3.2.1 supervisor snapshot.',
+        },
       },
       additionalProperties: false,
     },
@@ -90,11 +107,41 @@ const TOOLS = [
         provider_repo_url: { type: 'string', minLength: 1, maxLength: 4096, description: 'Optional credential-free provider-visible repository URL override for Cursor Cloud. SSH origins are canonicalized to HTTPS without credentials.' },
         provider_repo: { type: 'string', minLength: 1, maxLength: 4096, description: 'Backward-compatible alias for provider_repo_url; Cursor Cloud only.' },
         response_mode: RESPONSE_MODE_PROPERTY,
+        run: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['run_id', 'request_idempotency_key', 'identity', 'git', 'provenance', 'telemetry', 'assignments'],
+          description: 'Optional bounded-run submission. When present, delegate submits one 1-8 lane run instead of a 3.2.1 single task. Direct mode, replay, fallback, and merge/push/create-PR are rejected. Omit to preserve exact 3.2.1 delegate behavior.',
+          properties: {
+            run_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{2,63}$' },
+            request_idempotency_key: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' },
+            identity: { type: 'object' },
+            git: { type: 'object' },
+            provenance: { type: 'object' },
+            telemetry: { type: 'object' },
+            objective: { type: 'string', minLength: 1, maxLength: 4096 },
+            profile: { type: 'string', pattern: '^[a-z0-9][a-z0-9._-]{0,63}$' },
+            assignments: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 8,
+              items: { type: 'object' },
+            },
+          },
+        },
       },
-      required: ['task_id', 'provider', 'repo', 'prompt'],
-      anyOf: [
-        { required: ['expected_duration_ms'] },
-        { required: ['timeout_ms'] },
+      allOf: [
+        {
+          if: { required: ['run'] },
+          then: { required: ['run'] },
+          else: {
+            required: ['task_id', 'provider', 'repo', 'prompt'],
+            anyOf: [
+              { required: ['expected_duration_ms'] },
+              { required: ['timeout_ms'] },
+            ],
+          },
+        },
       ],
       additionalProperties: false,
     },
@@ -114,8 +161,8 @@ const TOOLS = [
         },
         wait_until: {
           type: 'string',
-          enum: ['progress', 'terminal'],
-          description: 'progress wakes on meaningful live events (default). terminal waits for success, failure, timeout, cancellation, transport loss, environment block, needs_attention, silence, or the recorded deadline, and does not wake on routine text deltas.',
+          enum: ['progress', 'terminal', 'decision_or_attention'],
+          description: 'progress wakes on meaningful live events (default). terminal waits for success, failure, timeout, cancellation, transport loss, environment block, needs_attention, silence, or the recorded deadline, and does not wake on routine text deltas. decision_or_attention is the additive run wait and never wakes on routine progress.',
         },
         wake_on_needs_attention: {
           type: 'boolean',
@@ -162,8 +209,45 @@ const TOOLS = [
           },
         },
         response_mode: RESPONSE_MODE_PROPERTY,
+        run_id: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9-]{2,63}$',
+          description: 'Optional exact run id. When present, task inspects, waits, latches attention, or replies on the bounded run. Omit with task_id to preserve exact 3.2.1 task behavior.',
+        },
+        assignment_id: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9-]{0,63}$',
+          description: 'Optional exact assignment id for a run-scoped task inspect.',
+        },
+        attention: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['items'],
+          description: 'Latch one run-level AttentionBatchV1. Exactly one reply round. Routine progress never wakes.',
+          properties: {
+            expected_revision: { type: 'integer', minimum: 0 },
+            items: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'object' } },
+          },
+        },
+        run_reply: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['batch_id', 'reply'],
+          description: 'Exactly-once run attention reply. Do not mix with 3.2.1 task.reply.',
+          properties: {
+            batch_id: { type: 'string', minLength: 1, maxLength: 128 },
+            expected_revision: { type: 'integer', minimum: 0 },
+            reply: { type: 'object' },
+          },
+        },
       },
-      required: ['task_id'],
+      allOf: [
+        {
+          if: { required: ['run_id'] },
+          then: { required: ['run_id'] },
+          else: { required: ['task_id'] },
+        },
+      ],
       additionalProperties: false,
     },
   },
@@ -203,23 +287,33 @@ const TOOLS = [
         },
         wait_until: {
           type: 'string',
-          enum: ['progress', 'terminal'],
-          description: 'progress wakes on meaningful progress; terminal wakes on terminal, needs_attention, silence, or deadline.',
+          enum: ['progress', 'terminal', 'decision_or_attention'],
+          description: 'progress wakes on meaningful progress; terminal wakes on terminal, needs_attention, silence, or deadline. decision_or_attention waits for the run-level attention batch without waking on routine text.',
         },
         wake_on_needs_attention: {
           type: 'boolean',
           default: true,
           description: 'Wake when any target needs a same-session reply or loses transport. Default true.',
         },
+        run_id: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9-]{2,63}$',
+          description: 'Optional exact run id. When present, tasks waits on the run\'s 1-8 lanes through decision_or_attention. Omit to preserve 3.2.1 list or wait-any behavior.',
+        },
       },
       allOf: [
         {
           if: {
-            anyOf: [
-              { required: ['cursors'] },
-              { required: ['wait_ms'] },
-              { required: ['wait_until'] },
-              { required: ['wake_on_needs_attention'] },
+            allOf: [
+              {
+                anyOf: [
+                  { required: ['cursors'] },
+                  { required: ['wait_ms'] },
+                  { required: ['wait_until'] },
+                  { required: ['wake_on_needs_attention'] },
+                ],
+              },
+              { not: { required: ['run_id'] } },
             ],
           },
           then: { required: ['task_ids'] },
@@ -261,8 +355,31 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
         response_mode: RESPONSE_MODE_PROPERTY,
+        run_id: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9-]{2,63}$',
+          description: 'Optional exact run id. When present, cancel stops named run lanes. Omit with task_id to preserve exact 3.2.1 cancel behavior.',
+        },
+        assignment_ids: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 8,
+          uniqueItems: true,
+          items: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
+          description: 'Exact assignment ids to cancel in the named run. Required for run cancel when run_id is present.',
+        },
+        cleanup: {
+          type: 'boolean',
+          description: 'Proof-bound run artifact cleanup. Requires P33 lifecycle finality. Worktrees, branches, locks, and candidate refs are never deleted here.',
+        },
       },
-      required: ['task_id'],
+      allOf: [
+        {
+          if: { required: ['run_id'] },
+          then: { required: ['run_id'] },
+          else: { required: ['task_id'] },
+        },
+      ],
       additionalProperties: false,
     },
   },
@@ -282,6 +399,24 @@ function publicTask(task) {
     state: publicState(task.status),
     deadline: deadlineProjection(task),
   });
+}
+
+function projectWaitAnyEntry(entry) {
+  const projectedTask = entry.task ? projectSupervisorTerminalReceipt(entry.task) : null;
+  return {
+    task_id: entry.task_id,
+    // Wait-any can return up to eight receipts at once. Keep the fresh
+    // event stream in the separate progress envelope, while each task
+    // is a bounded coordination projection instead of a full receipt.
+    task: projectedTask ? projectCompactTask({
+      task: projectedTask,
+      progress: entry.progress,
+      maxBytes: WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
+    }) : null,
+    progress: projectWaitAnyProgress(entry.progress),
+    state: entry.task ? projectSupervisorPublicState(entry.task) : null,
+    error: entry.error,
+  };
 }
 
 function takePresentationArgs(args = {}) {
@@ -304,6 +439,15 @@ function errorResult(error, { responseMode } = {}) {
 
 async function callTool(name, args = {}, { signal, responseMode } = {}) {
   const root = stateRoot();
+  const classified = classifyRunToolCall(name, args);
+  if (classified.mode === 'run') {
+    const value = await invokeRunTool(root, name, args, { signal });
+    if (value?.mode === 'legacy') {
+      // Fall through only when classification and dispatch disagree; omission stays 3.2.1.
+    } else {
+      return result(value, { responseMode });
+    }
+  }
   if (name === 'status') {
     const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined);
     if (!hasCompact) {
@@ -354,20 +498,7 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
         signal,
       });
       const waitAny = {
-        tasks: value.tasks.map((entry) => ({
-          task_id: entry.task_id,
-          // Wait-any can return up to eight receipts at once. Keep the fresh
-          // event stream in the separate progress envelope, while each task
-          // is a bounded coordination projection instead of a full receipt.
-          task: entry.task ? projectCompactTask({
-            task: entry.task,
-            progress: entry.progress,
-            maxBytes: WAIT_ANY_TASK_STRUCTURED_BYTES_MAX,
-          }) : null,
-          progress: projectWaitAnyProgress(entry.progress),
-          state: entry.task ? publicState(entry.task.status) : null,
-          error: entry.error,
-        })),
+        tasks: value.tasks.map(projectWaitAnyEntry),
         wait_reason: value.wait_reason,
         wait_until: value.wait_until,
         waited_ms: value.waited_ms,
@@ -376,16 +507,17 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
       return result(enforceWaitAnyResponseBudget(waitAny), { responseMode });
     }
     if (!hasListArgs) {
-      return result({ tasks: (await listTasks(root)).map(publicTask) }, { responseMode });
+      return result({ tasks: projectSupervisorTaskRecords(await listTasks(root)).map(publicTask) }, { responseMode });
     }
     const page = await listTasksPage(root, args);
-    // Filter and page before projecting full public receipts; only project sliced results.
-    // Provide pagination metadata total/limit as required by contract; preserve detail echo.
+    // Filter and page before projecting public receipts; classify the sliced
+    // window only. Stored task.v1 bytes stay unmodified.
+    const windowTasks = projectSupervisorTaskRecords(page.tasks);
     if (page.detail === 'compact') {
-      const compactTasks = page.tasks.map((t) => compactTaskCard(t));
+      const compactTasks = windowTasks.map((t) => compactTaskCard(t));
       return result({ tasks: compactTasks, next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
     }
-    return result({ tasks: page.tasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
+    return result({ tasks: windowTasks.map(publicTask), next_cursor: page.next_cursor, has_more: page.has_more, detail: page.detail, total: page.total, limit: page.limit }, { responseMode });
   }
   if (name === 'cancel') return result({ task: publicTask(await cancelTask(root, args.task_id)) }, { responseMode });
   throw Object.assign(new Error(`Unknown tool: ${name}`), { code: 'unknown_tool' });

@@ -4,6 +4,13 @@ Codex-Co-Engineer has no executable project policy file. The only
 project-scoped configuration data is the data-only ProfileV1 catalog
 described in [Profiles](#profiles); verification commands never come from
 profiles and remain a separate owner-maintained `VerificationPolicyV1`.
+The approved-command resolver consumes that owner policy plus a closed
+Codex/owner `command_id` selection and returns a frozen ExecutionIntent
+receipt; it does not execute the command. The constrained verification
+runner consumes only a genuine P16B receipt plus that trusted policy,
+runs the exact owner-approved executable and argv once in a disposable
+workspace separate from the candidate, and records bounded sanitized
+host-observed evidence. It is not wired into the MCP server.
 Provider authentication is normal persistent login/session state or an
 owner-only key file. The setup command installs the pinned local composition
 and creates the default DSH configuration; it never performs login on the
@@ -247,6 +254,22 @@ otherwise omit it to preserve the default compatible text receipt. The server
 does not stream raw events or emit unsolicited stdio callbacks across
 assistant turns. See [MCP pending-call budget](mcp-pending-call.md) and the
 [efficient dogfood workflow](efficient-dogfood.md).
+
+### Bounded runs (additive)
+
+The five-tool catalog does not gain a sixth tool. One run is submitted
+through `delegate.run` with 1–8 lanes. `status`, `task`, `tasks`, and
+`cancel` accept `run_id` to inspect, wait (`wait_until:
+"decision_or_attention"`), latch attention, reply exactly once
+(`run_reply`), cancel named lanes, or request proof-bound `cleanup`.
+Omitted run fields keep the 3.2.1 shapes above, including `view:
+"compact"`, `detail: "compact"`, `task_ids` wait-any, and
+`response_mode: "structured"`. Provider/model is explicit or filled from
+one named profile; mixed explicit/profile values fail closed when they
+conflict. P22 is not a provider; parsing failures dispatch nothing.
+`decision_or_attention` waits until an attention or terminal decision
+(or `wait_ms`), and default production seams are durable P33/P34
+authorities. See [the run tool API](run-tool-api.md).
 
 ### Local providers
 
