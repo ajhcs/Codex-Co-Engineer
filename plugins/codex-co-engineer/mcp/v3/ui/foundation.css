@@ -1,0 +1,118 @@
+:root {
+  --cce-fg: #111111;
+  --cce-fg-secondary: #374151;
+  --cce-fg-tertiary: #4B5563;
+  --cce-muted: #6B7280;
+  --cce-border: #E5E7EB;
+  --cce-bg: #FFFFFF;
+  --cce-surface: #F9FAFB;
+  --cce-font: ui-sans-serif, system-ui, Helvetica, Arial, sans-serif;
+  --cce-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--cce-bg);
+  color: var(--cce-fg);
+  font-family: var(--cce-font);
+  line-height: 1.45;
+}
+
+.cce-card {
+  box-sizing: border-box;
+  max-width: 44rem;
+  margin: 0;
+  padding: 1rem 1.15rem 1.15rem;
+  border: 1px solid var(--cce-border);
+  background: var(--cce-bg);
+}
+
+.cce-card header {
+  margin-bottom: 0.75rem;
+}
+
+h1 {
+  margin: 0 0 0.4rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--cce-fg);
+}
+
+h2 {
+  margin: 0.9rem 0 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--cce-fg-secondary);
+}
+
+p,
+li,
+dt,
+dd {
+  margin: 0;
+}
+
+.cce-phrase,
+.cce-authority {
+  color: var(--cce-fg-secondary);
+}
+
+.cce-note {
+  margin-top: 1rem;
+  color: var(--cce-muted);
+  font-size: 0.85rem;
+}
+
+section + section {
+  margin-top: 0.25rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 9.5rem 1fr;
+  gap: 0.28rem 0.85rem;
+  margin: 0;
+}
+
+dt {
+  color: var(--cce-fg-tertiary);
+}
+
+dd {
+  font-family: var(--cce-mono);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+ul {
+  margin: 0;
+  padding-left: 1.15rem;
+}
+
+.cce-lanes li,
+.cce-scope li {
+  margin: 0.35rem 0 0.55rem;
+}
+
+.cce-lanes strong {
+  font-weight: 700;
+}
+
+.cce-mono {
+  font-family: var(--cce-mono);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.cce-empty {
+  color: var(--cce-muted);
+}

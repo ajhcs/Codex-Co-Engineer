@@ -1,0 +1,38 @@
+{
+  "schema": "codex-co-engineer.experience-projection.v1",
+  "version": 1,
+  "card": "run",
+  "summary": {
+    "phrases": ["I am delegating this to Co-Engineer"],
+    "delegating": "I am delegating this to Co-Engineer",
+    "running": "Co-Engineer is running 1 independent assignment",
+    "attention": null,
+    "verified_final": null
+  },
+  "run": {
+    "objective": "<script>alert(1)</script><img src=x onerror=\"alert('xss')\"> sk-live-ATTACKER-SECRET",
+    "repository": {
+      "digest": "not-a-digest",
+      "base_sha": "/tmp/hostile-repo",
+      "repository_path": "/tmp/hostile-repo"
+    },
+    "lanes": [
+      {
+        "assignment_id": "writer",
+        "provider_phrase": "Using Grok Co-Engineer",
+        "scope": ["src/**\"><script>alert(1)</script>"],
+        "state": "running",
+        "raw": "github_pat_hostileleak",
+        "prompt": "OWNER_ONLY_PROMPT",
+        "secret": "sk-live-ATTACKER-SECRET"
+      }
+    ],
+    "authority": {
+      "merge": "codex",
+      "review": "codex"
+    }
+  },
+  "raw": "RAW_OWNER_ONLY",
+  "secret": "sk-live-ATTACKER-SECRET",
+  "prompt": "hidden owner prompt"
+}

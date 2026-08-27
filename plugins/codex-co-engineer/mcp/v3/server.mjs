@@ -28,6 +28,11 @@ import {
   resolveExperienceResultMeta,
   resolveExperienceToolMeta,
 } from './response.mjs';
+import {
+  MCP_RESOURCE_NOT_FOUND,
+  clientAdvertisesCompatibleAppsUi,
+  experienceUiResourcesForClient,
+} from './experience-ui-resource.mjs';
 import { listTasks, listTasksPage, stateRoot, waitForAnyTaskProgress } from './task-store.mjs';
 import {
   cancelTask,
@@ -48,9 +53,16 @@ let negotiated = '2025-11-25';
 let clientCapabilities = null;
 const inflight = new Map();
 
+function uiResources() {
+  return experienceUiResourcesForClient(clientCapabilities);
+}
+
 function serverCapabilities() {
   const capabilities = { tools: { listChanged: false } };
-  const apps = advertiseMcpAppsCapability({ clientCapabilities });
+  const apps = advertiseMcpAppsCapability({
+    clientCapabilities,
+    resources: uiResources(),
+  });
   if (apps) {
     capabilities.extensions = apps;
     capabilities.resources = { listChanged: false };
@@ -60,7 +72,10 @@ function serverCapabilities() {
 
 function advertisedTools() {
   return TOOLS.map((tool) => {
-    const meta = resolveExperienceToolMeta(tool.name, { clientCapabilities });
+    const meta = resolveExperienceToolMeta(tool.name, {
+      clientCapabilities,
+      resources: uiResources(),
+    });
     if (!meta) return tool;
     return { ...tool, _meta: meta };
   });
@@ -459,6 +474,7 @@ function result(value, { responseMode } = {}) {
     ? resolveExperienceResultMeta({
       card: value?.experience?.card ?? null,
       clientCapabilities,
+      resources: uiResources(),
     })
     : null;
   return buildToolResult(value, { responseMode, uiMeta });
@@ -587,7 +603,10 @@ async function handle(message) {
     return;
   }
   if (message.method === 'resources/list') {
-    const listed = listExperienceUiResourcesForClient({ clientCapabilities });
+    const listed = listExperienceUiResourcesForClient({
+      clientCapabilities,
+      resources: uiResources(),
+    });
     if (listed == null) {
       send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Method not found: ${message.method}` } });
       return;
@@ -596,9 +615,20 @@ async function handle(message) {
     return;
   }
   if (message.method === 'resources/read') {
-    const resource = readExperienceUiResourceForClient(message.params?.uri, { clientCapabilities });
-    if (resource == null) {
+    if (!clientAdvertisesCompatibleAppsUi(clientCapabilities)) {
       send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Method not found: ${message.method}` } });
+      return;
+    }
+    const resource = readExperienceUiResourceForClient(message.params?.uri, {
+      clientCapabilities,
+      resources: uiResources(),
+    });
+    if (resource == null) {
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: MCP_RESOURCE_NOT_FOUND, message: 'Resource not found' },
+      });
       return;
     }
     send({
