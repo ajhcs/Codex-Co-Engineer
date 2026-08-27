@@ -412,13 +412,15 @@ test('crash debris: torn temporaries, orphaned content, and orphaned sidecars st
 
     // Content without sidecar.
     const orphanContent = path.join(path.dirname(contentLeaf), 'orphan.bin');
-    writeFileSync(orphanContent, 'no sidecar');
+    writeFileSync(orphanContent, 'no sidecar', { mode: 0o600 });
+    chmodSync(orphanContent, 0o600);
     await expectCode(() => closeAndReopen(root), 'artifact_torn_publication');
     rmSync(orphanContent);
 
     // Sidecar without content.
     const orphanMeta = path.join(path.dirname(metaLeaf), 'ghost.bin.json');
-    writeFileSync(orphanMeta, '{}');
+    writeFileSync(orphanMeta, '{}', { mode: 0o600 });
+    chmodSync(orphanMeta, 0o600);
     await expectCode(() => closeAndReopen(root), 'artifact_torn_publication');
     rmSync(orphanMeta);
 
@@ -430,9 +432,11 @@ test('crash debris: torn temporaries, orphaned content, and orphaned sidecars st
     await expectCode(() => closeAndReopen(root), 'artifact_foreign_entry');
     rmSync(path.join(path.dirname(contentLeaf), `${'x'.repeat(129)}`));
     // A legal name without a sidecar is a torn publication.
-    writeFileSync(path.join(path.dirname(contentLeaf), 'legalname.bin'), 'x');
+    const legalOrphan = path.join(path.dirname(contentLeaf), 'legalname.bin');
+    writeFileSync(legalOrphan, 'x', { mode: 0o600 });
+    chmodSync(legalOrphan, 0o600);
     await expectCode(() => closeAndReopen(root), 'artifact_torn_publication');
-    rmSync(path.join(path.dirname(contentLeaf), 'legalname.bin'));
+    rmSync(legalOrphan);
 
     // After removing every injected fault the store verifies again.
     assert.equal(await auditArtifactStoreV1(seed).then((r) => r.artifacts), 1);

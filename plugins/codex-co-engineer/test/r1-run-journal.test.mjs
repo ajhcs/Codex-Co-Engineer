@@ -564,11 +564,13 @@ test('a dead owner lock is recovered within bounds; a live foreign owner times o
     const deadChild = spawn(process.execPath, ['-e', 'process.exit(0);']);
     await new Promise((resolve) => deadChild.on('exit', resolve));
     const { RUN_JOURNAL_LOCK_SCHEMA_ID } = await import('../mcp/v3/run-journal.mjs');
-    await writeFile(path.join(journal.directory, 'lock'), `${canonicalJsonStringify({
+    const deadLock = path.join(journal.directory, 'lock');
+    await writeFile(deadLock, `${canonicalJsonStringify({
       schema: RUN_JOURNAL_LOCK_SCHEMA_ID,
       pid: deadChild.pid,
       nonce: 'a'.repeat(32),
-    })}\n`);
+    })}\n`, { mode: 0o600 });
+    await chmod(deadLock, 0o600);
     const recovered = await journal.append({
       kind: 'child_started',
       data: { assignment_id: 'a0' },
@@ -579,11 +581,13 @@ test('a dead owner lock is recovered within bounds; a live foreign owner times o
     // Live foreign owner times out within the bounded wait.
     const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000);']);
     try {
-      await writeFile(path.join(journal.directory, 'lock'), `${canonicalJsonStringify({
+      const liveLock = path.join(journal.directory, 'lock');
+      await writeFile(liveLock, `${canonicalJsonStringify({
         schema: RUN_JOURNAL_LOCK_SCHEMA_ID,
         pid: holder.pid,
         nonce: 'b'.repeat(32),
-      })}\n`);
+      })}\n`, { mode: 0o600 });
+      await chmod(liveLock, 0o600);
       const startedAt = Date.now();
       const timeout = await errorOf(() => journal.append({
         kind: 'child_progress',

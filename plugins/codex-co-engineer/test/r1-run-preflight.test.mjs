@@ -121,7 +121,11 @@ test('the receipt binds a P03 GitIdentityV1 that P24 surfaces accept unchanged',
 test('ambient host facts are read when none are injected', async () => {
   const repo = await createLinearRepo();
   try {
-    const manifest = twoLaneManifest({ repositoryPath: repo.root, baseSha: repo.baseSha });
+    const manifest = preflightManifest([writerLane(ASSIGNMENT_ID_A, ['src/alpha/**'])], {
+      repositoryPath: repo.root,
+      baseSha: repo.baseSha,
+      policy: { max_concurrency: 1 },
+    });
     const receipt = await validateRunPreflightV1({ manifest });
     assert.equal(receipt.capacity.source, 'ambient');
     assert.ok(Number.isSafeInteger(receipt.capacity.cpu_parallelism));

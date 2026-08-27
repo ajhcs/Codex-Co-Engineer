@@ -19,15 +19,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm install --global @modelcontextprotocol/inspector@2.2.0
-      - run: node scripts/release-prerequisites.mjs
-      - run: node scripts/validate-release.mjs
-      - run: npm --prefix tools/acpx-vendor ci --ignore-scripts --no-audit --no-fund
-      - run: npm --prefix plugins/codex-co-engineer test
-      - run: npm --prefix plugins/cursor-cloud-control test
-      - run: npm --prefix tools/acpx-vendor run test:publish-provenance
-      - run: node scripts/inspector-preflight.mjs
-      - run: npm --prefix tools/acpx-vendor run test:reproducible
-      - run: npm --prefix tools/acpx-vendor run verify:publish-provenance
-      - run: npm pack ./plugins/codex-co-engineer --dry-run --ignore-scripts --offline --json
-      - run: npm pack ./plugins/cursor-cloud-control --dry-run --ignore-scripts --offline --json
+      - run: umask 077 && npm install --global @modelcontextprotocol/inspector@2.2.0
+      - run: umask 077 && node scripts/release-prerequisites.mjs
+      - run: umask 077 && node scripts/validate-release.mjs
+      - run: umask 077 && npm --prefix tools/acpx-vendor ci --ignore-scripts --no-audit --no-fund
+      - run: umask 077 && npm --prefix plugins/codex-co-engineer test
+      - run: umask 077 && npm --prefix plugins/cursor-cloud-control test
+      - run: umask 077 && npm --prefix tools/acpx-vendor run test:publish-provenance
+      - run: umask 077 && node scripts/inspector-preflight.mjs
+      - run: umask 077 && npm --prefix tools/acpx-vendor run test:reproducible
+      - run: umask 077 && npm --prefix tools/acpx-vendor run verify:publish-provenance
+      - run: umask 077 && npm pack ./plugins/codex-co-engineer --dry-run --ignore-scripts --offline --json
+      - run: umask 077 && npm pack ./plugins/cursor-cloud-control --dry-run --ignore-scripts --offline --json

@@ -242,7 +242,10 @@ test('symlinked journal surfaces fail closed without following', async () => {
         const error = await errorOf(() => journal.currentState());
         assert.equal(error.code, expected, name);
         await unlink(target);
-        if (original !== null) await writeFile(target, original);
+        if (original !== null) {
+          await writeFile(target, original, { mode: 0o600 });
+          await chmod(target, 0o600);
+        }
       }
 
       // A symlinked sibling run directory poisons the whole root audit.
@@ -533,7 +536,7 @@ test('leftover private temporaries are cleaned by the next append without losing
     assert.equal(result.state.revision, 3);
     const names = await readdir(journal.directory);
     assert.equal(names.some((name) => name.startsWith('.tmp-')), false);
-    void lstat; void chmod;
+    void lstat;
   });
 });
 

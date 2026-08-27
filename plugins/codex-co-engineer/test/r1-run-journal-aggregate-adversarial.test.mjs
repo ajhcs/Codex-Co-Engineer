@@ -216,7 +216,8 @@ test('symlink, hardlink, and non-regular aggregate identity files are not follow
       ].includes(linked.code), linked.code);
       assertNoSecret(linked);
       await unlink(planPath);
-      await writeFile(planPath, honest);
+      await writeFile(planPath, honest, { mode: 0o600 });
+      await chmod(planPath, 0o600);
 
       const claimPath = path.join(root, 'claims', `${runId}.json`);
       const claimBytes = await readFile(claimPath);
@@ -228,7 +229,8 @@ test('symlink, hardlink, and non-regular aggregate identity files are not follow
       assert.ok(typeof claimLink.code === 'string');
       assertNoSecret(claimLink);
       await unlink(claimPath);
-      await writeFile(claimPath, claimBytes);
+      await writeFile(claimPath, claimBytes, { mode: 0o600 });
+      await chmod(claimPath, 0o600);
 
       await mkdir(path.join(scratch, 'dir-plan'), { mode: 0o700 });
       await unlink(planPath);
@@ -238,7 +240,8 @@ test('symlink, hardlink, and non-regular aggregate identity files are not follow
       }));
       assert.ok(typeof nonregular.code === 'string');
       await unlink(planPath);
-      await writeFile(planPath, honest);
+      await writeFile(planPath, honest, { mode: 0o600 });
+      await chmod(planPath, 0o600);
 
       const journal = await createAggregateRunJournal({
         root: journalRoot, anchor, run_id: runId,
@@ -325,11 +328,13 @@ test('a live foreign journal lock times out; a dead owner is recovered', async (
 
     const deadChild = spawn(process.execPath, ['-e', 'process.exit(0);']);
     await new Promise((resolve) => deadChild.on('exit', resolve));
-    await writeFile(path.join(journal.directory, 'lock'), `${canonicalJsonStringify({
+    const deadLock = path.join(journal.directory, 'lock');
+    await writeFile(deadLock, `${canonicalJsonStringify({
       schema: RUN_JOURNAL_LOCK_SCHEMA_ID,
       pid: deadChild.pid,
       nonce: 'a'.repeat(32),
-    })}\n`);
+    })}\n`, { mode: 0o600 });
+    await chmod(deadLock, 0o600);
     const recovered = await journal.append({
       kind: 'child_started',
       data: { assignment_id: 'a0' },
@@ -338,11 +343,13 @@ test('a live foreign journal lock times out; a dead owner is recovered', async (
 
     const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000);']);
     try {
-      await writeFile(path.join(journal.directory, 'lock'), `${canonicalJsonStringify({
+      const liveLock = path.join(journal.directory, 'lock');
+      await writeFile(liveLock, `${canonicalJsonStringify({
         schema: RUN_JOURNAL_LOCK_SCHEMA_ID,
         pid: holder.pid,
         nonce: 'b'.repeat(32),
-      })}\n`);
+      })}\n`, { mode: 0o600 });
+      await chmod(liveLock, 0o600);
       const timeout = await errorOf(() => journal.append({
         kind: 'child_progress',
         data: { assignment_id: 'a0', note: 'progress.blocked' },

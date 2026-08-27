@@ -195,6 +195,7 @@ test('Cursor Cloud origin preflight fails before task creation or provider launc
     await assert.rejects(
       submitTask({ task_id: 'cloud-preflight', provider: 'cursor-cloud', repo, prompt: 'must not launch', expected_duration_ms: 10_000 }, {
         root,
+        env: { CURSOR_API_KEY: 'test-key' },
         execute,
         preflightCloudOrigin: async () => { throw Object.assign(new Error('origin missing'), { code: 'cursor_cloud_origin_missing' }); },
         launch: async (request) => launches.push(request),
@@ -221,6 +222,7 @@ test('Cloud submit pins the discovered SHA and rejects checkout advancement befo
     await assert.rejects(
       submitTask({ task_id: 'cloud-head-pin', provider: 'cursor-cloud', repo, prompt: 'must not dispatch', expected_duration_ms: 10_000 }, {
         root,
+        env: { CURSOR_API_KEY: 'test-key' },
         launch: async ({ root: taskRoot, taskId }) => {
           assert.equal((await readTask(taskRoot, taskId)).task.starting_ref, firstHead.trim());
           await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'sha-two']);
