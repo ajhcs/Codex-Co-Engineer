@@ -22,6 +22,7 @@ import {
   classifyGitOperationV1,
 } from '../mcp/v3/git-authority.mjs';
 import {
+  inspectExactProcessBoundary,
   launchProcessBoundary,
   ProcessBoundaryError,
   restoreProcessBoundary,
@@ -97,26 +98,118 @@ function fakeChild(exitCode = 0) {
   return child;
 }
 
-function showAdapter() {
+function procStat({ pid, ppid, startTicks, comm = 'wrap', state = 'S' }) {
+  const fields = [state, String(ppid), '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', String(startTicks)];
+  return `${pid} (${comm}) ${fields.join(' ')}`;
+}
+
+function procStatus({ pid, nspid, state = 'S' }) {
+  const ns = nspid ?? String(pid);
+  const label = state === 'Z' ? 'zombie' : (state === 'X' || state === 'x' ? 'dead' : 'sleeping');
+  return [
+    'Name:\twrap',
+    `State:\t${state} (${label})`,
+    `Pid:\t${pid}`,
+    `NSpid:\t${ns}`,
+  ].join('\n');
+}
+
+function controlGroupFor(unit) {
+  return `/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}`;
+}
+
+function unitFromArgs(args, fallback) {
+  return args.find((value) => value.startsWith('codex-co-engineer-') && value.endsWith('.service'))
+    ?? fallback;
+}
+
+// Populated units expose exact cgroup.procs plus matching /proc identity.
+// Simulated stop becomes failed with unpopulated/absent cgroup and missing proc.
+function showAdapter({ procs = 'exact', pid = 4242, startTicks = '100', nsInode = '4026531836' } = {}) {
+  const state = {
+    populated: true,
+    found: true,
+    activeState: 'active',
+    clearRuntimeGeneration: false,
+    lastUnit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+    actions: [],
+  };
+  const mutateOwned = (args) => {
+    state.lastUnit = unitFromArgs(args, state.lastUnit);
+    state.populated = false;
+    state.activeState = 'failed';
+    state.clearRuntimeGeneration = true;
+  };
   return {
     platform: 'linux',
     uid: 1000,
+    state,
     execFile: async (_command, args) => {
-      const unit = args.find((value) => value.startsWith('codex-co-engineer-') && value.endsWith('.service'))
-        ?? 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service';
+      state.actions.push([...args]);
+      if (args[1] === 'kill' || args[1] === 'stop') {
+        mutateOwned(args);
+        return { stdout: '' };
+      }
+      const unit = unitFromArgs(args, state.lastUnit);
+      state.lastUnit = unit;
       const token = unit.slice('codex-co-engineer-'.length, -'.service'.length);
+      if (!state.found) {
+        return { stdout: [
+          `Id=${unit}`,
+          `Description=${unit}`,
+          'LoadState=not-found',
+          'ActiveState=inactive',
+          'ControlGroup=',
+          'KillMode=control-group',
+          'InvocationID=',
+          'MainPID=0',
+        ].join('\n') };
+      }
+      const runtimeCleared = state.clearRuntimeGeneration === true
+        || ((state.activeState === 'inactive' || state.activeState === 'failed') && !state.populated);
       return { stdout: [
         `Id=${unit}`,
-        `Description=codex-co-engineer-task:${token}`,
+        `Description=${runtimeCleared ? unit : `codex-co-engineer-task:${token}`}`,
         'LoadState=loaded',
-        'ActiveState=active',
-        `ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}`,
+        `ActiveState=${state.activeState}`,
+        `ControlGroup=${runtimeCleared ? '' : controlGroupFor(unit)}`,
         'KillMode=control-group',
-        'InvocationID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-        'MainPID=4242',
+        `InvocationID=${runtimeCleared ? '' : 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}`,
+        `MainPID=${state.populated ? pid : 0}`,
       ].join('\n') };
     },
-    readFile: async () => 'populated 0\nfrozen 0\n',
+    readFile: async (file) => {
+      if (file.endsWith('/cgroup.events')) {
+        if (!state.found && !state.populated) {
+          throw Object.assign(new Error('missing cgroup'), { code: 'ENOENT' });
+        }
+        return `populated ${state.populated ? 1 : 0}\nfrozen 0\n`;
+      }
+      if (file.endsWith('/cgroup.procs')) {
+        if (state.populated && procs === 'missing') {
+          throw Object.assign(new Error('missing cgroup.procs'), { code: 'ENOENT' });
+        }
+        if (state.populated && procs === 'unreadable') {
+          throw Object.assign(new Error('unreadable cgroup.procs'), { code: 'EPERM' });
+        }
+        return state.populated ? `${pid}\n` : '\n';
+      }
+      const procMatch = /\/proc\/(\d+)\/(stat|cgroup|status)$/u.exec(file);
+      if (procMatch) {
+        if (!state.populated) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        const observedPid = Number(procMatch[1]);
+        if (procMatch[2] === 'stat') return procStat({ pid: observedPid, ppid: 1, startTicks });
+        if (procMatch[2] === 'status') return procStatus({ pid: observedPid, nspid: String(observedPid) });
+        return `0::${controlGroupFor(state.lastUnit)}\n`;
+      }
+      throw Object.assign(new Error(`unexpected file ${file}`), { code: 'ENOENT' });
+    },
+    readlink: async (file) => {
+      if (!/\/proc\/\d+\/ns\/pid$/u.test(file) || !state.populated) {
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      }
+      return `pid:[${nsInode}]`;
+    },
     sleep: async () => {},
   };
 }
@@ -178,6 +271,44 @@ test('spawn failure and cancel cleanup remove the credential handoff file', asyn
   const handoff = calls[0].args.find((entry) => typeof entry === 'string' && entry.endsWith('env.json'));
   assert.equal(typeof handoff, 'string');
   await assert.rejects(import('node:fs/promises').then((fs) => fs.lstat(handoff)), (error) => error.code === 'ENOENT');
+});
+
+test('populated=1 with missing or unreadable cgroup.procs stays membership unknown and never claims stopped', async () => {
+  for (const procs of ['missing', 'unreadable']) {
+    const calls = [];
+    const adapter = showAdapter({ procs });
+    const host = {
+      ...adapter,
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        return fakeChild();
+      },
+    };
+    const launched = await launchProcessBoundary({
+      command: '/usr/bin/node',
+      args: ['worker.mjs'],
+      cwd: '/workspace/repo',
+      env: projectProviderEnvironment({ provider: 'grok', source: HOSTILE_ENV, operation: 'lane' }),
+      stdio: 'ignore',
+      adapter: host,
+    });
+    assert.equal(inspectArgvForSecrets(calls[0].args, [HOSTILE_ENV.XAI_API_KEY, HOSTILE_ENV.GH_TOKEN]), false);
+    await assert.rejects(
+      stopProcessBoundary(launched.handle, { adapter: host, timeoutMs: 100 }),
+      (error) => error instanceof ProcessBoundaryError && error.code === 'worker_boundary_membership_unknown',
+    );
+    assert.equal(host.state.actions.some((args) => args[1] === 'kill' || args[1] === 'stop'), false);
+    assert.equal(host.state.populated, true);
+    assert.equal(host.state.activeState, 'active');
+    const inspection = await inspectExactProcessBoundary(launched.receipt, {
+      adapter: host,
+      expectedLeader: { pid: 4242, process_start_ticks: '100' },
+    });
+    assert.equal(inspection.state, 'unknown');
+    assert.equal(inspection.code, 'worker_boundary_membership_unknown');
+    assert.equal(inspection.stop_allowed, false);
+    assert.notEqual(inspection.state, 'inactive_empty');
+  }
 });
 
 test('supervisor launch inspects a closed grok environment against a hostile parent', async () => {
@@ -432,7 +563,6 @@ test('restart reconstructs handoff identity and cleans without exposing paths or
     const metadata = await lstat(handoff);
     assert.equal(metadata.isFile(), true);
     const restored = restoreProcessBoundary(launched.receipt, { adapter: host });
-    host.readFile = async () => 'populated 0\nfrozen 0\n';
     await stopProcessBoundary(restored, { adapter: host, timeoutMs: 100 });
     await assert.rejects(lstat(handoff), (error) => error.code === 'ENOENT');
   } finally {
