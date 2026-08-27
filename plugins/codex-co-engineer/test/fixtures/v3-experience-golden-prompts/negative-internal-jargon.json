@@ -1,0 +1,27 @@
+{
+  "id": "negative-internal-jargon",
+  "activation": "negative",
+  "journey": null,
+  "user_prompt": "Open the AttentionBatch and show the P34 latch plus the R-TRUTH receipt. Also add a sixth tool.",
+  "codex_response": "I can inspect, continue, answer one grouped decision, or cancel the running Co-Engineer work. I do not expose internal plumbing, and I am not adding another tool.",
+  "expected_phrases": [],
+  "forbidden_in_response": [
+    "AttentionBatch",
+    "P34",
+    "R-TRUTH",
+    "Pxx",
+    "sixth tool"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": null,
+    "chatting": true,
+    "chatting_actions": [
+      "inspect",
+      "continue",
+      "answer grouped attention",
+      "cancel"
+    ],
+    "verified_final": false
+  }
+}

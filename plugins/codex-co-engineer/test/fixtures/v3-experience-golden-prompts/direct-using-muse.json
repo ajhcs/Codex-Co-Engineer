@@ -1,0 +1,23 @@
+{
+  "id": "direct-using-muse",
+  "activation": "direct",
+  "journey": "one-lane",
+  "user_prompt": "Using Muse Co-Engineer, review the isolated docs change.",
+  "codex_response": "I am delegating this to Co-Engineer. Using Muse Co-Engineer. Co-Engineer is running 1 independent assignment.",
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Using Muse Co-Engineer",
+    "Co-Engineer is running 1 independent assignment"
+  ],
+  "forbidden_in_response": [
+    "Using DSH Co-Engineer",
+    "Using Ox Co-Engineer",
+    "credit reduction"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": false,
+    "verified_final": false
+  }
+}

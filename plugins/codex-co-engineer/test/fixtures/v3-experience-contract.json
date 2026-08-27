@@ -1,0 +1,108 @@
+{
+  "schema": "codex-co-engineer.experience-contract.v1",
+  "version": 1,
+  "product_lead": "Give Codex a team of external co-engineers without giving up control.",
+  "canonical_phrases": [
+    "Delegating to Co-Engineer",
+    "Chatting with Co-Engineer",
+    "Using Grok Co-Engineer",
+    "Using Cursor Co-Engineer",
+    "Using Muse Co-Engineer"
+  ],
+  "codex_phrases": {
+    "delegating": "I am delegating this to Co-Engineer",
+    "running_template": "Co-Engineer is running N independent assignments",
+    "running_one": "Co-Engineer is running 1 independent assignment",
+    "attention": "Co-Engineer needs one decision from you",
+    "verified_final": "Co-Engineer finished, and I verified the candidate."
+  },
+  "running_phrase_pattern": "Co-Engineer is running [1-8] independent assignments?",
+  "tools": [
+    "status",
+    "delegate",
+    "task",
+    "tasks",
+    "cancel"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "aggregate_wait_count": 1,
+    "verified_final_decisions": 1
+  },
+  "honest_claim": {
+    "max_isolated_external_co_engineers": 8,
+    "bounded_runs": 1,
+    "coordinated_waits": 1,
+    "verified_decisions": 1,
+    "statement": "up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision"
+  },
+  "chatting_actions": [
+    "inspect",
+    "continue",
+    "answer grouped attention",
+    "cancel"
+  ],
+  "provider_display": {
+    "grok": "Using Grok Co-Engineer",
+    "cursor-local": "Using Cursor Co-Engineer",
+    "cursor-cloud": "Using Cursor Co-Engineer",
+    "dsh": "Using Muse Co-Engineer"
+  },
+  "forbidden_provider_phrases": [
+    "Using DSH Co-Engineer",
+    "Using Ox Co-Engineer",
+    "Using Cursor Local Co-Engineer",
+    "Using Cursor Cloud Co-Engineer"
+  ],
+  "forbidden_claims": [
+    "credit reduction",
+    "8x speed",
+    "universal UI",
+    "SOTA routing"
+  ],
+  "forbidden_user_terms": [
+    "Pxx",
+    "R-TRUTH",
+    "AttentionBatch",
+    "MCP JSON"
+  ],
+  "journeys": [
+    "one-lane",
+    "multi-lane",
+    "grouped-attention",
+    "verified-final",
+    "failure-unresolved",
+    "provider-choice",
+    "no-profile-ask-once"
+  ],
+  "activation_classes": [
+    "direct",
+    "indirect",
+    "negative"
+  ],
+  "activation_order": [
+    "negative",
+    "direct",
+    "indirect",
+    "none"
+  ],
+  "negative_signals": [
+    "MCP JSON",
+    "Pxx",
+    "R-TRUTH",
+    "AttentionBatch",
+    "sixth tool",
+    "credit reduction",
+    "8x speed",
+    "universal UI",
+    "SOTA routing",
+    "poll every assignment"
+  ],
+  "indirect_signals": [
+    "Give Codex a team of external co-engineers without giving up control.",
+    "team of external co-engineers",
+    "isolated external co-engineers",
+    "independent assignments"
+  ]
+}

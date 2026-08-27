@@ -1,0 +1,23 @@
+{
+  "id": "direct-using-cursor",
+  "activation": "direct",
+  "journey": "one-lane",
+  "user_prompt": "Using Cursor Co-Engineer, review the operator guide on this computer.",
+  "codex_response": "I am delegating this to Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is running 1 independent assignment.",
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Using Cursor Co-Engineer",
+    "Co-Engineer is running 1 independent assignment"
+  ],
+  "forbidden_in_response": [
+    "Using Cursor Local Co-Engineer",
+    "Using Cursor Cloud Co-Engineer",
+    "universal UI"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": false,
+    "verified_final": false
+  }
+}

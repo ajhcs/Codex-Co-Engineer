@@ -1,0 +1,33 @@
+{
+  "id": "journey-no-profile-ask-once",
+  "activation": "indirect",
+  "journey": "no-profile-ask-once",
+  "turns": [
+    {
+      "user": "Give Codex a team of external co-engineers without giving up control. Split the validator and the docs.",
+      "codex": "Which co-engineers should take the independent assignments: Grok, Cursor, or Muse?"
+    },
+    {
+      "user": "Grok for the validator. Muse for the docs.",
+      "codex": "I am delegating this to Co-Engineer. Using Grok Co-Engineer. Using Muse Co-Engineer. Co-Engineer is running 2 independent assignments."
+    }
+  ],
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Using Grok Co-Engineer",
+    "Using Muse Co-Engineer",
+    "Co-Engineer is running 2 independent assignments"
+  ],
+  "forbidden_in_response": [
+    "SOTA routing",
+    "default router",
+    "credit reduction"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "ask_once": true,
+    "chatting": false,
+    "verified_final": false
+  }
+}
