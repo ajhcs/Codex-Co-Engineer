@@ -1,28 +1,27 @@
 {
   "name": "codex-co-engineer",
   "version": "3.3.0",
-  "description": "Codex-Co-Engineer delegates real coding work to Grok, Cursor Local, Cursor Cloud, and DeepSeek Harness through a thin ACP-first supervisor.",
+  "description": "Give Codex a team of external co-engineers without giving up control. Delegating to Co-Engineer starts one bounded run. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.",
   "author": {
     "name": "Codex-Co-Engineer"
   },
   "license": "MIT",
   "keywords": [
     "codex",
-    "agents",
-    "deepseek-harness",
-    "grok-build",
-    "control-plane",
+    "co-engineer",
+    "grok",
     "cursor",
-    "acp",
-    "worktrees",
-    "mcp"
+    "muse",
+    "delegating",
+    "chatting",
+    "isolated-assignments"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex-Co-Engineer",
-    "shortDescription": "Delegate work to Grok, Cursor Local/Cloud, and DSH",
-    "longDescription": "Use Codex-Co-Engineer to run trusted peer coding agents through ACP-first local transports or Cursor Cloud. Local tasks support managed or explicitly direct workspaces and require a Linux manager-owned transient systemd user service with a cgroup cleanup boundary; Cloud tasks start from pushed immutable commit SHAs. Codex retains review and merge authority.",
+    "shortDescription": "Give Codex a team of external co-engineers without giving up control.",
+    "longDescription": "Give Codex a team of external co-engineers without giving up control. Codex remains chief engineer, reviewer, and merge authority. Delegating to Co-Engineer starts one bounded run. Chatting with Co-Engineer inspects, continues, answers grouped attention, or cancels that existing run. Public provider names are Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.",
     "developerName": "Codex-Co-Engineer",
     "category": "Developer Tools",
     "capabilities": [
@@ -31,13 +30,16 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Show Codex-Co-Engineer status.",
-      "Delegate a review to Grok, Cursor, or DSH.",
-      "Run parallel implementation tasks in managed worktrees.",
-      "Use Cursor Cloud with a pushed commit SHA and optional PR."
+      "Give Codex a team of external co-engineers without giving up control.",
+      "Delegating to Co-Engineer: review the auth change with Grok Co-Engineer.",
+      "Chatting with Co-Engineer: inspect the current run.",
+      "Using Cursor Co-Engineer and Muse Co-Engineer on independent assignments."
     ],
     "brandColor": "#111111",
-    "composerIcon": "./assets/icon.svg",
-    "logo": "./assets/co-engineer.png"
+    "composerIcon": "./assets/experience/mark.svg",
+    "logo": "./assets/experience/mark.svg",
+    "poster": "./assets/experience/poster.jpg",
+    "heroMp4": "./assets/experience/hero-muted.mp4",
+    "heroWebm": "./assets/experience/hero-muted.webm"
   }
 }
