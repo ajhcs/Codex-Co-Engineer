@@ -31,9 +31,8 @@
     ],
     "defaultPrompt": [
       "Give Codex a team of external co-engineers without giving up control.",
-      "Delegating to Co-Engineer: review the auth change with Grok Co-Engineer.",
-      "Chatting with Co-Engineer: inspect the current run.",
-      "Using Cursor Co-Engineer and Muse Co-Engineer on independent assignments."
+      "Delegating to Co-Engineer. Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer.",
+      "Chatting with Co-Engineer: inspect the current run."
     ],
     "brandColor": "#111111",
     "composerIcon": "./assets/experience/mark.svg",

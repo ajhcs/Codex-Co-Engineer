@@ -314,6 +314,48 @@ test('plugin package inventory includes experience media and excludes originals'
   assert.equal(files.has('assets/co-engineer.png'), true);
 });
 
+test('plugin defaultPrompt stays within PluginInterface bounds and UX-01 coverage', async () => {
+  const fixture = JSON.parse(await readFile(CONTRACT_JSON, 'utf8'));
+  const plugin = JSON.parse(
+    await readFile(path.join(PLUGIN, '.codex-plugin', 'plugin.json'), 'utf8'),
+  );
+  const prompts = plugin.interface.defaultPrompt;
+
+  assert.equal(Array.isArray(prompts), true, 'defaultPrompt must be an array');
+  assert.ok(
+    prompts.length <= 3,
+    `PluginInterface allows at most three defaultPrompt starters; found ${prompts.length}`,
+  );
+  for (const [index, prompt] of prompts.entries()) {
+    assert.equal(typeof prompt, 'string', `defaultPrompt[${index}] must be a string`);
+    assert.ok(
+      prompt.length <= 128,
+      `defaultPrompt[${index}] exceeds 128 characters (${prompt.length})`,
+    );
+  }
+
+  const joined = prompts.join('\n');
+  assert.equal(joined.includes(fixture.product_lead), true, 'defaultPrompt missing product_lead');
+  for (const phrase of fixture.canonical_phrases) {
+    assert.equal(joined.includes(phrase), true, `defaultPrompt missing ${phrase}`);
+  }
+  for (const claim of FORBIDDEN_CLAIMS) {
+    const pattern = new RegExp(claim.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'iu');
+    assert.equal(hasUnnegatedMatch(joined, pattern), false, claim);
+  }
+  for (const phrase of [...FORBIDDEN_PROVIDER, ...fixture.forbidden_provider_phrases, ...fixture.forbidden_user_terms]) {
+    assert.equal(joined.includes(phrase), false, phrase);
+  }
+  assert.doesNotMatch(joined, /```json/iu);
+  assert.doesNotMatch(joined, /[{]\s*"[^"]+"\s*:/u);
+
+  assert.deepEqual(prompts, [
+    'Give Codex a team of external co-engineers without giving up control.',
+    'Delegating to Co-Engineer. Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer.',
+    'Chatting with Co-Engineer: inspect the current run.',
+  ]);
+});
+
 test('marketplace and plugin metadata stay on 3.3.0, UX-01 language, and 3.4.0 assets', async () => {
   const fixture = JSON.parse(await readFile(CONTRACT_JSON, 'utf8'));
   const plugin = JSON.parse(
