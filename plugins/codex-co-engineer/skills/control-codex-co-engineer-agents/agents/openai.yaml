@@ -1,7 +1,7 @@
 interface:
-  display_name: "Codex-Co-Engineer"
-  short_description: "Delegate work to Grok, Cursor Local/Cloud, and DSH"
-  default_prompt: "Use $control-codex-co-engineer-agents to show status and delegate the requested work to the best peer agent, selecting managed/direct local workspaces or a pushed immutable Cloud SHA as appropriate."
+  display_name: "Advanced Co-Engineer Control"
+  short_description: "Raw MCP lifecycle control for Co-Engineer"
+  default_prompt: "Use $control-codex-co-engineer-agents to inspect MCP status, payloads, cursors, and lifecycle internals for a Co-Engineer run."
 dependencies:
   tools:
     - type: "mcp"
