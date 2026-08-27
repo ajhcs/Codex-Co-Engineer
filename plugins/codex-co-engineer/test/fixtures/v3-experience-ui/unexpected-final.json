@@ -1,0 +1,53 @@
+{
+  "schema": "codex-co-engineer.experience-projection.v1",
+  "version": 1,
+  "card": "final",
+  "summary": {
+    "phrases": [],
+    "delegating": null,
+    "running": null,
+    "attention": null,
+    "verified_final": "Co-Engineer finished, and I verified the candidate."
+  },
+  "final": {
+    "accepted_lanes": [],
+    "failed_lanes": ["docs"],
+    "unresolved_lanes": ["review"],
+    "git": {
+      "branch": null,
+      "head": "not-a-sha",
+      "tree": "../etc/passwd"
+    },
+    "scope": [
+      {
+        "assignment_id": "docs",
+        "role": "implement",
+        "scope": []
+      }
+    ],
+    "tests": { "lanes": [], "present": false },
+    "reviews": { "lanes": ["review"], "present": true },
+    "candidate": {
+      "ref": null,
+      "composed": false,
+      "ready_for_codex_review": false,
+      "authority": "p35",
+      "accepted": true
+    },
+    "evidence": {
+      "present": false,
+      "digest": null,
+      "fact_count": 0,
+      "claim_count": 0,
+      "kinds": ["forged_kind"]
+    },
+    "controls": {
+      "merge": true,
+      "push": true,
+      "rebase": true,
+      "create_pr": true,
+      "tag": true,
+      "release": true
+    }
+  }
+}

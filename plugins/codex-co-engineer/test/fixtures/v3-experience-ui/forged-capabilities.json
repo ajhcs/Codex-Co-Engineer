@@ -1,0 +1,45 @@
+{
+  "wrong_mime": {
+    "resources": {},
+    "extensions": {
+      "io.modelcontextprotocol/ui": {
+        "mimeTypes": ["text/html"]
+      }
+    }
+  },
+  "string_mime": {
+    "resources": {},
+    "extensions": {
+      "io.modelcontextprotocol/ui": {
+        "mimeTypes": "text/html;profile=mcp-app"
+      }
+    }
+  },
+  "boolean_ui": {
+    "resources": {},
+    "extensions": {
+      "io.modelcontextprotocol/ui": true
+    }
+  },
+  "array_extensions": {
+    "resources": {},
+    "extensions": ["io.modelcontextprotocol/ui"]
+  },
+  "resources_boolean": {
+    "resources": true,
+    "extensions": {
+      "io.modelcontextprotocol/ui": {
+        "mimeTypes": ["text/html;profile=mcp-app"]
+      }
+    }
+  },
+  "resources_only": {
+    "resources": {}
+  },
+  "legacy_meta_key": {
+    "resources": {},
+    "extensions": {
+      "ui/resourceUri": "ui://codex-co-engineer/experience"
+    }
+  }
+}
