@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -8,6 +9,7 @@ import {
   inspectExactProcessBoundary,
   inspectProcessBoundary,
   launchProcessBoundary,
+  PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS,
   PROCESS_IDENTITY_CLASSES,
   probeProcessBoundary,
   ProcessBoundaryError,
@@ -542,4 +544,311 @@ test('kill(0) success is never treated as live proof by the classifier', () => {
   });
   assert.equal(zombie.class, 'exited');
   assert.equal(zombie.live, false);
+});
+
+test('inactive transient shell with cleared post-stop generation can prove inactive_empty', async () => {
+  const harness = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    clearRuntimeGeneration: true,
+  });
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+  assert.equal(inspection.empty, true);
+  assert.equal(inspection.identity_matched, true);
+  assert.equal(inspection.stop_allowed, false);
+  assert.equal(PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.exact_unit_stop_and_empty_proof, 5_000);
+});
+
+test('collected systemd shell with rewritten description and cleared InvocationID proves inactive_empty', async () => {
+  const harness = createBoundaryHarness({ found: false, populated: false });
+  harness.state.found = false;
+  harness.state.populated = false;
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    rememberedIdentities: [{ pid: 4242, start_ticks: '100', nspid: '4242', cgroup: harness.receipt.control_group }],
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+  assert.equal(inspection.empty, true);
+  assert.equal(inspection.found, false);
+  assert.equal(inspection.stop_allowed, false);
+});
+
+test('inactive transient shell with omitted systemd generation properties can prove inactive_empty', async () => {
+  const harness = createBoundaryHarness({ activeState: 'inactive', populated: false });
+  const original = harness.adapter.execFile;
+  harness.adapter.execFile = async (command, args) => {
+    if (args[1] === 'show' && args.some((value) => String(value) === harness.receipt.unit)) {
+      return { stdout: [
+        `Id=${harness.receipt.unit}`,
+        `Description=${harness.receipt.description}`,
+        'LoadState=loaded',
+        'ActiveState=failed',
+        'KillMode=control-group',
+      ].join('\n') };
+    }
+    return original(command, args);
+  };
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    rememberedIdentities: [{ pid: 4242, start_ticks: '100', nspid: '4242', cgroup: harness.receipt.control_group }],
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+  assert.equal(inspection.empty, true);
+});
+
+test('forged inactive unit identity cannot prove inactive_empty', async () => {
+  const harness = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    clearRuntimeGeneration: true,
+  });
+  harness.state.description = 'codex-co-engineer-task:ffffffffffffffffffffffffffffffff';
+  const forgedDescription = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(forgedDescription.state, 'unknown');
+  assert.equal(forgedDescription.identity_matched, false);
+  assert.equal(forgedDescription.code, 'worker_boundary_identity_mismatch');
+
+  const foreign = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    invocationId: 'ffffffffffffffffffffffffffffffff',
+  });
+  const foreignGeneration = await inspectExactProcessBoundary(foreign.receipt, {
+    adapter: foreign.adapter,
+    expectedLeader: foreign.leader,
+  });
+  assert.equal(foreignGeneration.state, 'unknown');
+  assert.equal(foreignGeneration.code, 'worker_boundary_identity_mismatch');
+  await assert.rejects(
+    stopExactProcessBoundary(foreign.receipt, { adapter: foreign.adapter, expectedLeader: foreign.leader, timeoutMs: 100 }),
+    (error) => error.code === 'worker_boundary_identity_mismatch',
+  );
+  assert.equal(foreign.state.stopCalls, 0);
+});
+
+test('active unit with missing generation identity fails closed', async () => {
+  const harness = createBoundaryHarness({
+    activeState: 'active',
+    populated: true,
+    clearRuntimeGeneration: true,
+  });
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'unknown');
+  assert.equal(inspection.identity_matched, false);
+  assert.equal(inspection.stop_allowed, false);
+  assert.equal(inspection.code, 'worker_boundary_identity_mismatch');
+  await assert.rejects(
+    stopExactProcessBoundary(harness.receipt, { adapter: harness.adapter, expectedLeader: harness.leader, timeoutMs: 100 }),
+    (error) => error.code === 'worker_boundary_identity_mismatch',
+  );
+  assert.equal(harness.state.stopCalls, 0);
+});
+
+test('cleared inactive generation still refuses a live escaped remembered descendant', async () => {
+  const harness = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    clearRuntimeGeneration: true,
+    procCgroups: { 4300: '/user.slice/user-1000.slice/user@1000.service/app.slice/escaped.service' },
+    procTicks: { 4300: '110' },
+  });
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    rememberedIdentities: [{ pid: 4300, start_ticks: '110', cgroup: harness.receipt.control_group }],
+  });
+  assert.equal(inspection.state, 'unknown');
+  assert.equal(inspection.empty, false);
+  assert.equal(inspection.code, 'cgroup_not_empty');
+});
+
+test('cleared inactive generation still fails closed on PID reuse and namespace mismatch', async () => {
+  const reused = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    clearRuntimeGeneration: true,
+    procTicks: { 4242: '999' },
+    procPresentWhenEmpty: { 4242: true },
+  });
+  const reuse = await inspectExactProcessBoundary(reused.receipt, {
+    adapter: reused.adapter,
+    expectedLeader: reused.leader,
+    rememberedIdentities: [{ pid: 4242, start_ticks: '100', cgroup: reused.receipt.control_group }],
+  });
+  assert.equal(reuse.state, 'unknown');
+  assert.equal(reuse.code, 'worker_boundary_identity_mismatch');
+
+  const namespaced = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    clearRuntimeGeneration: true,
+    procNspid: { 4242: '1' },
+    procPresentWhenEmpty: { 4242: true },
+  });
+  const mismatch = await inspectExactProcessBoundary(namespaced.receipt, {
+    adapter: namespaced.adapter,
+    expectedLeader: namespaced.leader,
+    rememberedIdentities: [{
+      pid: 4242,
+      start_ticks: '100',
+      nspid: '4242',
+      ns_inode: '4026531836',
+      cgroup: namespaced.receipt.control_group,
+    }],
+  });
+  assert.equal(mismatch.state, 'unknown');
+  assert.equal(mismatch.code, 'worker_boundary_identity_mismatch');
+});
+
+test('cleared inactive generation fails closed when the cgroup is nonempty or unreadable', async () => {
+  const nonempty = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: true,
+    clearRuntimeGeneration: true,
+  });
+  const populated = await inspectExactProcessBoundary(nonempty.receipt, {
+    adapter: nonempty.adapter,
+    expectedLeader: nonempty.leader,
+  });
+  assert.equal(populated.state, 'unknown');
+  assert.equal(populated.code, 'worker_boundary_not_empty');
+
+  const unread = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    clearRuntimeGeneration: true,
+    cgroupErrors: { events: 'EPERM' },
+  });
+  const unknown = await inspectExactProcessBoundary(unread.receipt, {
+    adapter: unread.adapter,
+    expectedLeader: unread.leader,
+  });
+  assert.equal(unknown.state, 'unknown');
+  assert.equal(unknown.visibility, 'unknown');
+  assert.equal(unknown.code, 'worker_boundary_inspect_failed');
+});
+
+test('unit disappearance still proves inactive_empty only when the exact cgroup is gone', async () => {
+  const gone = createBoundaryHarness({ found: false, populated: false, clearRuntimeGeneration: true });
+  gone.state.found = false;
+  gone.state.populated = false;
+  const empty = await inspectExactProcessBoundary(gone.receipt, {
+    adapter: gone.adapter,
+    expectedLeader: gone.leader,
+  });
+  assert.equal(empty.state, 'inactive_empty');
+
+  const leftover = createBoundaryHarness({ found: false, populated: true, clearRuntimeGeneration: true });
+  leftover.state.found = false;
+  leftover.state.populated = true;
+  const blocked = await inspectExactProcessBoundary(leftover.receipt, {
+    adapter: leftover.adapter,
+    expectedLeader: leftover.leader,
+  });
+  assert.equal(blocked.state, 'unknown');
+  assert.equal(blocked.stop_allowed, false);
+});
+
+test('unit disappearance with a complete unpopulated recorded cgroup may prove inactive_empty', async () => {
+  const harness = createBoundaryHarness({ found: false, populated: false });
+  harness.state.found = false;
+  harness.state.populated = false;
+  const original = harness.adapter.readFile;
+  harness.adapter.readFile = async (file) => {
+    if (file.endsWith('/cgroup.events')) return 'populated 0\nfrozen 0\n';
+    if (file.endsWith('/cgroup.procs')) return '\n';
+    return original(file);
+  };
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+  assert.equal(inspection.empty, true);
+});
+
+test('handle stop proves empty after systemd clears inactive generation properties', async () => {
+  let populated = true;
+  let active = 'active';
+  let invocation = receipt().invocation_id;
+  let controlGroup = receipt().control_group;
+  let loadState = 'loaded';
+  let description = receipt().description;
+  const host = {
+    platform: 'linux',
+    uid: 1000,
+    spawn: () => fakeChild(),
+    execFile: async (_command, args) => {
+      if (args[1] === 'show') {
+        return { stdout: [
+          `Id=${receipt().unit}`,
+          `Description=${description}`,
+          `LoadState=${loadState}`,
+          `ActiveState=${active}`,
+          `ControlGroup=${controlGroup}`,
+          'KillMode=control-group',
+          `InvocationID=${invocation}`,
+          `MainPID=${populated ? 4242 : 0}`,
+        ].join('\n') };
+      }
+      if (args[1] === 'kill') {
+        populated = false;
+        active = 'inactive';
+        invocation = '';
+        controlGroup = '';
+        loadState = 'not-found';
+        description = receipt().unit;
+      }
+      return { stdout: '' };
+    },
+    readFile: async (file) => {
+      if (file.endsWith('/cgroup.events')) {
+        if (!populated) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        return 'populated 1\nfrozen 0\n';
+      }
+      if (file.endsWith('/cgroup.procs')) return populated ? '4242\n' : '';
+      const procMatch = /\/proc\/(\d+)\/(stat|cgroup|status)$/u.exec(file);
+      if (!procMatch) return '';
+      if (!populated) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      if (procMatch[2] === 'stat') return procStat({ pid: Number(procMatch[1]), ppid: 1, startTicks: '100' });
+      if (procMatch[2] === 'status') return procStatus({ pid: Number(procMatch[1]) });
+      return `0::${receipt().control_group}\n`;
+    },
+    readlink: async () => {
+      if (!populated) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      return 'pid:[4026531836]';
+    },
+    sleep: async () => {},
+  };
+  const handle = restoreProcessBoundary(receipt(), { adapter: host });
+  const stopped = await stopProcessBoundary(handle, { adapter: host, timeoutMs: 100 });
+  assert.equal(stopped.stopped, true);
+  assert.equal(stopped.cgroup_empty, true);
+  const inspection = await inspectExactProcessBoundary(receipt(), {
+    adapter: host,
+    expectedLeader: { pid: 4242, process_start_ticks: '100' },
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+});
+
+test('process-boundary source does not mutate remotes or protected refs', async () => {
+  const source = await readFile(new URL('../mcp/v3/process-boundary.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /\bgit push\b/u);
+  assert.doesNotMatch(source, /\bgit rebase\b/u);
+  assert.doesNotMatch(source, /\bgit merge\b/u);
+  assert.doesNotMatch(source, /create_pr/u);
+  assert.equal(source.includes('kill(pid, 0)'), false);
+  assert.doesNotMatch(source, /process\.kill\(\s*[^,]+,\s*0\s*\)/u);
 });

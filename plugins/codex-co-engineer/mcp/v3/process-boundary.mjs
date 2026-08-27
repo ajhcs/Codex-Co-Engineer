@@ -411,8 +411,7 @@ async function waitForEmpty(record, timeoutMs) {
     const shown = await showUnit(record.host, record.receipt.unit);
     if (!shown.found) return true;
     const live = ACTIVE_UNIT_STATES.has(shown.properties.ActiveState);
-    if (live) validateOwnedUnit(record.receipt, shown.properties);
-    else if (!generationMatches(record.receipt, shown.properties, { requireControlGroup: false })) {
+    if (!ownedGenerationStillExact(record.receipt, shown.properties, { live })) {
       fail('ownership_mismatch', 'The systemd process boundary no longer matches its owned generation.');
     }
     if (!live && await cgroupEmpty(record.host, record.receipt.control_group)) return true;
@@ -496,7 +495,10 @@ export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS
     record.stopped = true;
     return Object.freeze({ stopped: true, cgroup_empty: true, idempotent: true });
   }
-  validateOwnedUnit(record.receipt, initial.properties);
+  const initialLive = ACTIVE_UNIT_STATES.has(initial.properties.ActiveState);
+  if (!ownedGenerationStillExact(record.receipt, initial.properties, { live: initialLive })) {
+    fail('ownership_mismatch', 'The systemd process boundary no longer matches its owned generation.');
+  }
   const cgroup = await inspectCgroupPath(record.host, record.receipt.control_group);
   if (cgroup.visibility === 'unknown') {
     fail(cgroup.code ?? 'worker_boundary_membership_unknown', 'Owned process-boundary membership could not be identified exactly.');
@@ -514,7 +516,10 @@ export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS
     if (!beforeKill.found) {
       empty = true;
     } else {
-      validateOwnedUnit(record.receipt, beforeKill.properties);
+      const live = ACTIVE_UNIT_STATES.has(beforeKill.properties.ActiveState);
+      if (!ownedGenerationStillExact(record.receipt, beforeKill.properties, { live })) {
+        fail('ownership_mismatch', 'The systemd process boundary no longer matches its owned generation.');
+      }
       await systemctlAction(record.host, ['--user', 'kill', '--kill-whom=all', '--signal=KILL', record.receipt.unit], timeoutMs);
       forced = true;
       empty = await waitForEmpty(record, timeoutMs);
@@ -1089,9 +1094,12 @@ async function rememberedBlockEmpty(host, remembered, boundary) {
   return null;
 }
 
-function omittedIdentityProperties(properties, { requireControlGroup }) {
+function omittedIdentityProperties(properties, { requireControlGroup, allowClearedRuntimeGeneration = false }) {
   if (!properties || typeof properties !== 'object') return true;
-  for (const key of ['Id', 'Description', 'LoadState', 'ActiveState', 'KillMode', 'InvocationID']) {
+  const required = allowClearedRuntimeGeneration
+    ? ['Id', 'Description', 'LoadState', 'ActiveState', 'KillMode']
+    : ['Id', 'Description', 'LoadState', 'ActiveState', 'KillMode', 'InvocationID'];
+  for (const key of required) {
     if (typeof properties[key] !== 'string' || properties[key].length === 0) return true;
   }
   if (requireControlGroup && (typeof properties.ControlGroup !== 'string' || properties.ControlGroup.length === 0)) {
@@ -1100,14 +1108,46 @@ function omittedIdentityProperties(properties, { requireControlGroup }) {
   return false;
 }
 
-function generationMatches(receipt, properties, { requireControlGroup }) {
+function generationMatches(receipt, properties, { requireControlGroup, allowClearedRuntimeGeneration = false }) {
   if (properties.Id !== receipt.unit) return false;
-  if (properties.Description !== receipt.description) return false;
-  if (properties.InvocationID !== receipt.invocation_id) return false;
   if (properties.KillMode !== 'control-group') return false;
-  if (requireControlGroup && properties.ControlGroup !== receipt.control_group) return false;
-  if (!requireControlGroup && properties.ControlGroup && properties.ControlGroup !== receipt.control_group) return false;
+  const invocation = properties.InvocationID ?? '';
+  const controlGroup = properties.ControlGroup ?? '';
+  if (allowClearedRuntimeGeneration) {
+    if (properties.Description !== receipt.description && properties.Description !== receipt.unit) return false;
+    if (invocation.length > 0 && invocation !== receipt.invocation_id) return false;
+    if (controlGroup.length > 0 && controlGroup !== receipt.control_group) return false;
+    return true;
+  }
+  if (properties.Description !== receipt.description) return false;
+  if (invocation !== receipt.invocation_id) return false;
+  if (requireControlGroup && controlGroup !== receipt.control_group) return false;
+  if (!requireControlGroup && controlGroup && controlGroup !== receipt.control_group) return false;
   return true;
+}
+
+function observedGenerationForEmptyProof(shownUnit, receipt) {
+  if (shownUnit?.found !== true || !shownUnit.properties) return {};
+  const description = shownUnit.properties.Description;
+  return {
+    observed_unit: shownUnit.properties.Id,
+    observed_invocation_id: shownUnit.properties.InvocationID,
+    observed_description: description === receipt.unit ? undefined : description,
+  };
+}
+
+function ownedGenerationStillExact(receipt, properties, { live }) {
+  const allowClearedRuntimeGeneration = live !== true;
+  if (omittedIdentityProperties(properties, {
+    requireControlGroup: live === true,
+    allowClearedRuntimeGeneration,
+  })) {
+    return false;
+  }
+  return generationMatches(receipt, properties, {
+    requireControlGroup: live === true,
+    allowClearedRuntimeGeneration,
+  });
 }
 
 async function inspectCgroupPath(host, controlGroup) {
@@ -1236,9 +1276,7 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
       expected_unit: normalized.unit,
       expected_invocation_id: normalized.invocation_id,
       expected_description: normalized.description,
-      observed_unit: shownUnit?.properties?.Id,
-      observed_invocation_id: shownUnit?.properties?.InvocationID,
-      observed_description: shownUnit?.properties?.Description,
+      ...observedGenerationForEmptyProof(shownUnit, normalized),
     });
     if (blocked) {
       return freezeBoundaryInspection({
@@ -1304,7 +1342,7 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
   }
 
   if (!shown.found) {
-    if (!cgroup.present && cgroup.populated === false) {
+    if (cgroup.visibility === 'complete' && cgroup.populated === false) {
       return proveInactiveEmpty(shown);
     }
     return freezeBoundaryInspection({
@@ -1336,19 +1374,11 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
       receipt: normalized,
     });
   }
-  if (omittedIdentityProperties(shown.properties, { requireControlGroup: live })) {
-    return freezeBoundaryInspection({
-      state: 'unknown',
-      found: true,
-      active_state: activeState,
-      identity_matched: false,
-      visibility: 'unknown',
-      stop_allowed: false,
-      code: 'worker_boundary_identity_mismatch',
-      receipt: normalized,
-    });
-  }
-  if (!generationMatches(normalized, shown.properties, { requireControlGroup: live })) {
+  // Inactive/failed transient shells may still be queryable after systemd
+  // clears runtime generation fields such as InvocationID. That may prove
+  // inactive_empty only with a receipt captured while active, an absent or
+  // complete unpopulated exact cgroup, and no live remembered identity.
+  if (!ownedGenerationStillExact(normalized, shown.properties, { live })) {
     return freezeBoundaryInspection({
       state: 'unknown',
       found: true,

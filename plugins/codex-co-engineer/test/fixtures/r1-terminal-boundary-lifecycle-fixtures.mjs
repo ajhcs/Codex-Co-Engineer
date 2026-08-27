@@ -108,6 +108,7 @@ export function createBoundaryHarness({
   found = true,
   invocationId,
   controlGroup,
+  clearRuntimeGeneration = false,
   procErrors = {},
   cgroupErrors = {},
   extraMembers = [],
@@ -119,6 +120,10 @@ export function createBoundaryHarness({
   statusErrors = {},
   procPresentWhenEmpty = {},
 } = {}) {
+  const unit = receipt.unit;
+  const description = receipt.description;
+  const invocation = invocationId ?? receipt.invocation_id;
+  const cgroup = controlGroup ?? receipt.control_group;
   const state = {
     activeState,
     populated,
@@ -126,14 +131,15 @@ export function createBoundaryHarness({
     forced: false,
     actions: [],
     stopCalls: 0,
+    unit,
+    description,
+    invocationId: invocation,
+    controlGroup: cgroup,
+    clearRuntimeGeneration: clearRuntimeGeneration === true,
     unrelated: {
       [OTHER_UNIT]: { ActiveState: 'active', InvocationID: 'dddddddddddddddddddddddddddddddd', MainPID: '99' },
     },
   };
-  const unit = receipt.unit;
-  const description = receipt.description;
-  const invocation = invocationId ?? receipt.invocation_id;
-  const cgroup = controlGroup ?? receipt.control_group;
   const membersOf = () => (state.populated ? [leaderPid, workerPid, ...extraMembers] : []);
 
   const readFile = async (file) => {
@@ -195,13 +201,15 @@ export function createBoundaryHarness({
       if (args.at(-1) !== unit) {
         throw Object.assign(new Error('refusing to stop a foreign unit'), { code: 'foreign_unit' });
       }
-      state.found = true;
+      state.found = false;
       state.activeState = 'inactive';
       state.populated = false;
+      state.clearRuntimeGeneration = true;
+      state.description = state.unit;
       return { stdout: '' };
     }
     if (args[1] === 'show') {
-      const target = args.find((value) => String(value).startsWith('codex-co-engineer-')) ?? unit;
+      const target = args.find((value) => String(value).startsWith('codex-co-engineer-')) ?? state.unit;
       if (target === OTHER_UNIT) {
         const other = state.unrelated[OTHER_UNIT];
         return { stdout: [
@@ -212,16 +220,29 @@ export function createBoundaryHarness({
         ].join('\n') };
       }
       if (!state.found) {
-        return { stdout: 'LoadState=not-found\nId=\n' };
+        return { stdout: [
+          `Id=${state.unit}`,
+          `Description=${state.unit}`,
+          'LoadState=not-found',
+          'ActiveState=inactive',
+          'ControlGroup=',
+          'KillMode=control-group',
+          'InvocationID=',
+          'MainPID=0',
+        ].join('\n') };
       }
+      const runtimeCleared = state.clearRuntimeGeneration === true;
+      const shownCgroup = runtimeCleared || (state.activeState === 'inactive' && !state.populated)
+        ? ''
+        : state.controlGroup;
       return { stdout: [
-        `Id=${unit}`,
-        `Description=${description}`,
+        `Id=${state.unit}`,
+        `Description=${state.description}`,
         'LoadState=loaded',
         `ActiveState=${state.activeState}`,
-        `ControlGroup=${state.activeState === 'inactive' && !state.populated ? '' : cgroup}`,
+        `ControlGroup=${shownCgroup}`,
         'KillMode=control-group',
-        `InvocationID=${invocation}`,
+        `InvocationID=${runtimeCleared ? '' : state.invocationId}`,
         `MainPID=${state.populated ? leaderPid : 0}`,
       ].join('\n') };
     }
