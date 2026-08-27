@@ -3,7 +3,7 @@
 Give Codex a team of external co-engineers without giving up control.
 
 These are the normal-user journeys later UX slices consume. Every step is
-public language. Users never write MCP JSON. Users never see internal
+public language. Users never write tool payloads. Users never see internal
 plumbing names.
 
 Delegating to Co-Engineer starts one bounded run. Chatting with
@@ -142,6 +142,6 @@ Across every journey:
 
 ## Non-goals
 
-These journeys do not teach MCP JSON, internal plumbing, credit
-reduction, 8x speed, universal UI, or SOTA routing. They do not add a
-sixth tool or a second wait loop.
+These journeys do not teach tool payloads, internal plumbing, extra
+speed, lower credits, a universal interface, or automatic routing. They
+do not add a sixth tool or a second wait loop.

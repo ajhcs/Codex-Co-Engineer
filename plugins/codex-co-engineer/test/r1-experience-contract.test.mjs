@@ -148,6 +148,14 @@ function assertNoUnsubstantiatedClaims(text, fixture, label) {
   }
 }
 
+function assertNoForbiddenLiterals(text, values, label) {
+  for (const value of values) {
+    if (text.includes(value)) {
+      fail(`${label} contains forbidden literal ${value}.`);
+    }
+  }
+}
+
 function assertFixtureShape(fixture) {
   assert.equal(fixture.schema, 'codex-co-engineer.experience-contract.v1');
   assert.equal(fixture.version, 1);
@@ -250,6 +258,8 @@ function assertDocsMatchFixture(contractText, journeysText, fixture) {
   for (const term of fixture.forbidden_user_terms) {
     assert.equal(contractText.includes(term), true, `contract must name exclusion ${term}`);
   }
+  assertNoForbiddenLiterals(journeysText, fixture.forbidden_user_terms, 'user journeys');
+  assertNoForbiddenLiterals(journeysText, fixture.forbidden_claims, 'user journeys');
   for (const [id, heading] of Object.entries(JOURNEY_HEADINGS)) {
     assert.equal(journeysText.includes(heading), true, `journeys missing ${id}`);
   }
@@ -530,6 +540,27 @@ test('experience contract rejects jargon, sixth tools, JSON journeys, and false 
     contractText: `${bundle.contractText}\nThe platform provides SOTA routing.\n`,
   };
   assert.throws(() => assertExperienceContract(routingClaim), /SOTA routing/u);
+
+  for (const term of bundle.fixture.forbidden_user_terms) {
+    const leaked = {
+      ...bundle,
+      journeysText: `${bundle.journeysText}\nUsers never write ${term}.\n`,
+    };
+    assert.throws(
+      () => assertExperienceContract(leaked),
+      new RegExp(term.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'),
+    );
+  }
+  for (const claim of bundle.fixture.forbidden_claims) {
+    const leaked = {
+      ...bundle,
+      journeysText: `${bundle.journeysText}\nThese journeys do not teach ${claim}.\n`,
+    };
+    assert.throws(
+      () => assertExperienceContract(leaked),
+      new RegExp(claim.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'),
+    );
+  }
 
   const failureVerified = structuredClone(bundle);
   const failureGolden = failureVerified.goldens.find((example) => example.id === 'journey-failure-unresolved');
