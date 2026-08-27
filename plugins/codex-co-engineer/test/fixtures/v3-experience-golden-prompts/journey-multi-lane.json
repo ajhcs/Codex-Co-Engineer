@@ -1,0 +1,22 @@
+{
+  "id": "journey-multi-lane",
+  "activation": "indirect",
+  "journey": "multi-lane",
+  "user_prompt": "Split this into three isolated independent assignments: API validation, the operator guide, and a review of both diffs.",
+  "codex_response": "I am delegating this to Co-Engineer. Co-Engineer is running 3 independent assignments.",
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Co-Engineer is running 3 independent assignments"
+  ],
+  "forbidden_in_response": [
+    "8x speed",
+    "poll every assignment",
+    "SOTA routing"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": false,
+    "verified_final": false
+  }
+}

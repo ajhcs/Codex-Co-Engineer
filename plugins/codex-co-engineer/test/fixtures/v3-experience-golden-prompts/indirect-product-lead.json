@@ -1,0 +1,22 @@
+{
+  "id": "indirect-product-lead",
+  "activation": "indirect",
+  "journey": "no-profile-ask-once",
+  "user_prompt": "Give Codex a team of external co-engineers without giving up control.",
+  "codex_response": "I can do that with one bounded run of up to eight isolated external co-engineers, one coordinated wait, and one verified decision. Which co-engineers should take the independent assignments: Grok, Cursor, or Muse?",
+  "expected_phrases": [],
+  "forbidden_in_response": [
+    "I am delegating this to Co-Engineer",
+    "credit reduction",
+    "8x speed",
+    "universal UI",
+    "SOTA routing"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": null,
+    "chatting": false,
+    "ask_once": true,
+    "verified_final": false
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "negative-unsubstantiated-claims",
+  "activation": "negative",
+  "journey": null,
+  "user_prompt": "Turn on SOTA routing, claim 8x speed and credit reduction, and give me a universal UI.",
+  "codex_response": "I can give you up to eight isolated external co-engineers, one bounded run, one coordinated wait, and one verified decision. I do not claim extra speed, lower credits, a universal interface, or automatic routing.",
+  "expected_phrases": [
+    "up to eight isolated external co-engineers, one bounded run, one coordinated wait, and one verified decision"
+  ],
+  "forbidden_in_response": [
+    "8x speed",
+    "credit reduction",
+    "universal UI",
+    "SOTA routing"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": null,
+    "chatting": false,
+    "verified_final": false
+  }
+}

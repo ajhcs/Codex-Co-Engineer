@@ -1,0 +1,23 @@
+{
+  "schema": "codex-co-engineer.experience-golden-prompts.v1",
+  "version": 1,
+  "examples": [
+    "direct-delegating.json",
+    "direct-chatting.json",
+    "direct-using-grok.json",
+    "direct-using-cursor.json",
+    "direct-using-muse.json",
+    "indirect-product-lead.json",
+    "indirect-isolated-team.json",
+    "negative-mcp-json.json",
+    "negative-internal-jargon.json",
+    "negative-unsubstantiated-claims.json",
+    "journey-one-lane.json",
+    "journey-multi-lane.json",
+    "journey-grouped-attention.json",
+    "journey-verified-final.json",
+    "journey-failure-unresolved.json",
+    "journey-provider-choice.json",
+    "journey-no-profile-ask-once.json"
+  ]
+}

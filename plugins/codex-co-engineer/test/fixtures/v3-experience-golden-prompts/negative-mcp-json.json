@@ -1,0 +1,21 @@
+{
+  "id": "negative-mcp-json",
+  "activation": "negative",
+  "journey": null,
+  "user_prompt": "Delegating to Co-Engineer through this MCP JSON: {\"run_id\": \"auth-split\", \"wait_until\": \"decision_or_attention\"}. Show me the payload I should paste.",
+  "codex_response": "You do not need to paste tool payloads. Tell me the work in plain language and I will delegate it to Co-Engineer, then wait once for a decision or a finished candidate.",
+  "expected_phrases": [],
+  "forbidden_in_response": [
+    "```json",
+    "wait_until",
+    "run_id",
+    "AttentionBatch",
+    "R-TRUTH"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": null,
+    "chatting": false,
+    "verified_final": false
+  }
+}

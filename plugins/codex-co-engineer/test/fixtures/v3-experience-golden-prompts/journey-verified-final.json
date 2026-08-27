@@ -1,0 +1,26 @@
+{
+  "id": "journey-verified-final",
+  "activation": "direct",
+  "journey": "verified-final",
+  "user_prompt": "Chatting with Co-Engineer: continue and tell me when you have checked the candidate.",
+  "codex_response": "Co-Engineer finished, and I verified the candidate. You still decide whether to keep, change, or discard it.",
+  "expected_phrases": [
+    "Co-Engineer finished, and I verified the candidate."
+  ],
+  "forbidden_in_response": [
+    "merged",
+    "opened a pull request",
+    "pushed",
+    "credit reduction"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": true,
+    "chatting_actions": [
+      "continue",
+      "inspect"
+    ],
+    "verified_final": true
+  }
+}

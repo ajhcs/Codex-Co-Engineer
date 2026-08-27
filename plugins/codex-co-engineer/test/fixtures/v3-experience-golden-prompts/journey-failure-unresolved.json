@@ -1,0 +1,31 @@
+{
+  "id": "journey-failure-unresolved",
+  "activation": "direct",
+  "journey": "failure-unresolved",
+  "turns": [
+    {
+      "user": "Chatting with Co-Engineer: continue the running work.",
+      "codex": "A required assignment did not finish, so there is no complete candidate. I am not treating this as verified work."
+    },
+    {
+      "user": "Cancel that run.",
+      "codex": "I cancelled the existing Co-Engineer run. I did not start another one."
+    }
+  ],
+  "expected_phrases": [],
+  "forbidden_in_response": [
+    "Co-Engineer finished, and I verified the candidate.",
+    "AttentionBatch",
+    "R-TRUTH"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": true,
+    "chatting_actions": [
+      "continue",
+      "cancel"
+    ],
+    "verified_final": false
+  }
+}
