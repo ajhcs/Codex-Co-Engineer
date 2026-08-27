@@ -12,7 +12,7 @@ coding agents:
 Codex remains the chief engineer, reviewer, and merge authority. Providers
 retain their normal shell, coding, and dependency-installation capabilities.
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-This release is 3.2.1.
+This release is 3.3.0.
 
 ## Tools
 
@@ -64,7 +64,7 @@ turns are not available.
 
 ### Efficient workflow
 
-The 3.2.1 coordination path keeps the same five tools and the no-argument
+The 3.3.0 coordination path keeps the same five tools and the no-argument
 `tasks` behavior:
 
 - Call `status` with `detail: "compact"`, `task_limit` from 0 through 20, or
