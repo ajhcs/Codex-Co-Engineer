@@ -1,0 +1,20 @@
+{
+  "schema": "codex-co-engineer.experience-projection.v1",
+  "version": 1,
+  "cards": ["run", "attention", "final"],
+  "tools": ["status", "delegate", "task", "tasks", "cancel"],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "aggregate_wait_count": 1,
+    "verified_final_decisions": 1,
+    "grouped_reply": 1
+  },
+  "mcp_apps": {
+    "extension_id": "io.modelcontextprotocol/ui",
+    "mime_type": "text/html;profile=mcp-app",
+    "uri_scheme": "ui://",
+    "tool_meta": "_meta.ui.resourceUri",
+    "legacy_meta_key": "ui/resourceUri"
+  }
+}

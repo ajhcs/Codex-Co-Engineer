@@ -1,0 +1,85 @@
+{
+  "schema": "codex-co-engineer.run-tool-receipt.v1",
+  "version": 1,
+  "mode": "run",
+  "tool": "task",
+  "operation": "attention",
+  "status": "needs_attention",
+  "run_id": "auth-split",
+  "assignment_count": 3,
+  "objective": "Split the validator and the docs.",
+  "base_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "git": {
+    "base_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+  },
+  "lanes": [
+    {
+      "assignment_id": "validator",
+      "provider": "grok",
+      "role": "implement",
+      "required": true,
+      "status": "needs_attention",
+      "write_scope": ["src/validator/**"],
+      "cursor": "12"
+    },
+    {
+      "assignment_id": "docs",
+      "provider": "cursor-local",
+      "role": "implement",
+      "required": true,
+      "status": "running",
+      "write_scope": ["docs/**"],
+      "cursor": "7"
+    },
+    {
+      "assignment_id": "cloud-review",
+      "provider": "cursor-cloud",
+      "role": "review",
+      "required": false,
+      "status": "unresolved",
+      "write_scope": [],
+      "unresolved": { "code": "same_session_reply_unsupported" }
+    }
+  ],
+  "attention": {
+    "batch_id": "att-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "open",
+    "revision": 1,
+    "wake": true,
+    "items": [
+      {
+        "assignment_id": "validator",
+        "task_id": "task-validator",
+        "provider": "grok",
+        "required": true,
+        "session_id": "sess-validator",
+        "question_id": "q-validator",
+        "event_cursor": "12",
+        "prompt": "Use the stricter validator?",
+        "options": ["stricter", "keep"],
+        "reply_capability": "same_session",
+        "disposition": "pending"
+      },
+      {
+        "assignment_id": "cloud-review",
+        "task_id": "task-cloud",
+        "provider": "cursor-cloud",
+        "required": false,
+        "session_id": "sess-cloud",
+        "question_id": "q-cloud",
+        "event_cursor": "3",
+        "prompt": "Cloud cannot host a same-session reply",
+        "options": null,
+        "reply_capability": "unsupported",
+        "disposition": "pending"
+      }
+    ]
+  },
+  "decision_or_attention": {
+    "wake": true,
+    "attention": true,
+    "unresolved_required_blocks": false,
+    "exactly_once_reply": false
+  },
+  "complete_candidate_blocked": false
+}

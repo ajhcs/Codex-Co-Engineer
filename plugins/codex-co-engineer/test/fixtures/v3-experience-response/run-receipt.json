@@ -1,0 +1,49 @@
+{
+  "schema": "codex-co-engineer.run-tool-receipt.v1",
+  "version": 1,
+  "mode": "run",
+  "tool": "delegate",
+  "operation": "submit",
+  "status": "dispatched",
+  "run_id": "auth-split",
+  "assignment_count": 2,
+  "objective": "Split the validator and the docs.",
+  "base_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "git": {
+    "base_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "lanes": [
+    {
+      "assignment_id": "validator",
+      "provider": "grok",
+      "role": "implement",
+      "required": true,
+      "status": "running",
+      "write_scope": ["src/validator/**"]
+    },
+    {
+      "assignment_id": "docs",
+      "provider": "dsh",
+      "role": "implement",
+      "required": true,
+      "status": "running",
+      "write_scope": ["docs/**"]
+    }
+  ],
+  "attention": { "batch_id": null, "status": null, "revision": 0, "wake": false },
+  "complete_candidate_blocked": false,
+  "decision_or_attention": {
+    "wake": false,
+    "attention": false,
+    "unresolved_required_blocks": false,
+    "exactly_once_reply": false
+  },
+  "candidate": {
+    "ref": "refs/codex-co-engineer/runs/auth-split/candidate",
+    "composed": false,
+    "ready_for_codex_review": false,
+    "authority": "p35",
+    "accepted": true
+  }
+}
