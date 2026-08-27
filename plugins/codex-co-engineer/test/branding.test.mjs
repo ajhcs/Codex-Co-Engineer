@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { access, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -92,12 +92,48 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
 test('visitor README leads with the product shot and copy/paste install', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  const productShot = 'docs/assets/codex-co-engineer-3.1.0.jpg';
-  const flowShot = 'docs/assets/codex-co-engineer-3.1.0.svg';
-  assert.ok(readme.includes(productShot));
-  assert.ok(readme.includes(flowShot));
-  assert.ok(readme.indexOf(productShot) < readme.indexOf(flowShot));
+  const poster = 'docs/assets/co-engineer-3.4.0/poster.jpg';
+  const heroMp4 = 'docs/assets/co-engineer-3.4.0/hero-muted.mp4';
+  const heroWebm = 'docs/assets/co-engineer-3.4.0/hero-muted.webm';
+  assert.ok(readme.includes(poster));
+  assert.ok(readme.includes(heroMp4));
+  assert.ok(readme.includes(heroWebm));
+  assert.ok(readme.indexOf(poster) < readme.indexOf(heroMp4));
+  assert.ok(readme.indexOf(heroMp4) < readme.indexOf(heroWebm));
   assert.doesNotMatch(readme.slice(0, readme.indexOf('## What Codex-Co-Engineer is for')), /co-engineer\.png/u);
+  assert.doesNotMatch(readme, /placeholder/iu);
+  assert.doesNotMatch(readme, /does not add a replacement asset/iu);
+  assert.doesNotMatch(readme, /codex-co-engineer-3\.1\.0/u);
+  assert.doesNotMatch(readme, /docs\/assets\/codex-co-engineer-3\.1\.0\.(?:jpg|svg)/u);
+
+  const referenced = new Set();
+  for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
+    const target = match[1].split('#', 1)[0];
+    if (/^(?:https?:|#|mailto:)/iu.test(target)) continue;
+    if (target.includes('docs/assets/') || /\.(?:jpg|jpeg|png|svg|mp4|webm)$/iu.test(target)) {
+      referenced.add(target);
+    }
+  }
+  for (const match of readme.matchAll(/\b(?:src|poster|href)="([^"]+)"/gu)) {
+    const target = match[1].split('#', 1)[0];
+    if (/^(?:https?:|#|mailto:)/iu.test(target)) continue;
+    if (target.includes('docs/assets/') || /\.(?:jpg|jpeg|png|svg|mp4|webm)$/iu.test(target)) {
+      referenced.add(target);
+    }
+  }
+  assert.deepEqual([...referenced].sort(), [heroMp4, heroWebm, poster].sort());
+  for (const relative of referenced) {
+    await access(path.join(REPO, relative));
+    const info = await stat(path.join(REPO, relative));
+    assert.equal(info.isFile(), true, relative);
+  }
+  for (const stale of [
+    'docs/assets/codex-co-engineer-3.1.0.jpg',
+    'docs/assets/codex-co-engineer-3.1.0.svg',
+  ]) {
+    assert.equal(referenced.has(stale), false, stale);
+    assert.equal(readme.includes(stale), false, stale);
+  }
 
   assert.match(readme, /git clone https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
   assert.match(readme, /codex plugin marketplace add "\$PWD"/u);

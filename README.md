@@ -32,12 +32,15 @@ notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 
 ## Visual demo
 
-These existing shots are the current visual-demo placeholder. This
-documentation does not add a replacement asset.
+The current visual demo uses the accepted 3.4.0 poster and muted hero.
+There is no autoplay audio.
 
-![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
+![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/poster.jpg)
 
-![Codex-Co-Engineer 3.1.0: choose one provider, delegate one task, wait until terminal, then inspect the receipt](docs/assets/codex-co-engineer-3.1.0.svg)
+<video muted playsinline controls poster="docs/assets/co-engineer-3.4.0/poster.jpg">
+  <source src="docs/assets/co-engineer-3.4.0/hero-muted.mp4" type="video/mp4">
+  <source src="docs/assets/co-engineer-3.4.0/hero-muted.webm" type="video/webm">
+</video>
 
 ## First 60 seconds
 
