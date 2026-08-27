@@ -5,14 +5,14 @@
 [![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Codex-Co-Engineer 3.2.1** lets Codex delegate real review and
+**Codex-Co-Engineer 3.3.0** lets Codex delegate real review and
 implementation work to authenticated peer coding agents — Grok Build,
 Cursor Local, Cursor Cloud, and DeepSeek Harness (DSH) — then wait for a
 durable receipt instead of polling routine text.
 
 Codex stays the chief engineer, reviewer, and merge authority. The
 stable machine identifier is `codex-co-engineer`. In-repo release notes:
-[docs/releases/v3.2.1.md](docs/releases/v3.2.1.md).
+[docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 
 ![Codex-Co-Engineer 3.1.0 product shot](docs/assets/codex-co-engineer-3.1.0.jpg)
 
@@ -107,12 +107,15 @@ Use Codex-Co-Engineer when you want Codex to:
 Do not use it as a security sandbox, a credential broker, or a replacement for
 the provider's own login and approval flow.
 
-Version 3.2.1 exposes five tools: `status`, `delegate`, `task`, `tasks`,
-and `cancel`. `delegate` records `expected_duration_ms` or `timeout_ms`
-and a 20% deadline margin. `task` can wait with `wait_until: "terminal"`
-until the recorded deadline, inspect summary/compact/diagnostics views,
-extend a deadline with an explicit reason, and deliver a same-session reply.
-It does not push unsolicited stdio callbacks across assistant turns.
+Version 3.3.0 exposes five tools: `status`, `delegate`, `task`, `tasks`,
+and `cancel`. Bounded runs use additive `run`, `run_id`, `attention`,
+`run_reply`, `cleanup`, and `wait_until: "decision_or_attention"` on those
+tools; omitting them keeps exact 3.2.1 single-task behavior. `delegate`
+records `expected_duration_ms` or `timeout_ms` and a 20% deadline margin.
+`task` can wait with `wait_until: "terminal"` until the recorded deadline,
+inspect summary/compact/diagnostics views, extend a deadline with an
+explicit reason, and deliver a same-session reply. It does not push
+unsolicited stdio callbacks across assistant turns.
 
 The bundled skill is `control-codex-co-engineer-agents`.
 
@@ -324,7 +327,7 @@ Node 24. GitHub Actions is a credential-free mirror; live Grok, Cursor,
 Cursor Cloud, and DSH acceptance is recorded separately because CI must not
 send repository content to model providers.
 
-GitHub-ready 3.2.1 notes live in [docs/releases/v3.2.1.md](docs/releases/v3.2.1.md).
+GitHub-ready 3.3.0 notes live in [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 This repository does not create the GitHub Release, tag, or remote from that
 file.
 

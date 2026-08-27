@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-27
+
+R1 bounded-run release on the same five-tool MCP catalog. One run is 1–8
+independent assignments against one immutable repository/base identity, with
+data-only profiles, trusted verification policy, additive run parameters, and
+exact 3.2.1 single-task compatibility when those parameters are omitted.
+
 ### Fixed
 
 - **P11 identity namespace, non-success, overflow, and content-free failure.**
@@ -722,6 +729,11 @@
   content into a digest, or produce unstable digests. Ordinary frozen and
   null-prototype data and file-based JSON catalog loading are unchanged, and
   digest values for valid data are byte-identical to the previous release.
+
+### Documentation
+
+- Bumped package, plugin, marketplace, and contract surfaces to 3.3.0.
+  Added GitHub Release notes in `docs/releases/v3.3.0.md`.
 
 ## [3.2.1] - 2026-08-21
 
