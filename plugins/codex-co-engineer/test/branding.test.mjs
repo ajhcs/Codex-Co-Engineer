@@ -44,9 +44,8 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   ]);
   assert.deepEqual(manifest.interface.defaultPrompt, [
     'Give Codex a team of external co-engineers without giving up control.',
-    'Delegating to Co-Engineer: review the auth change with Grok Co-Engineer.',
+    'Delegating to Co-Engineer. Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer.',
     'Chatting with Co-Engineer: inspect the current run.',
-    'Using Cursor Co-Engineer and Muse Co-Engineer on independent assignments.',
   ]);
   assert.equal(manifest.interface.composerIcon, './assets/experience/mark.svg');
   assert.equal(manifest.interface.logo, './assets/experience/mark.svg');
