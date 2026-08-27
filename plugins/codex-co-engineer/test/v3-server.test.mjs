@@ -813,3 +813,56 @@ test('invalid run submit stays on the five-tool catalog and creates no task arti
     ].sort());
   });
 });
+
+test('UX-04 keeps five tools, omitted 3.2.1 shapes, and no Apps metadata without a resource', async () => {
+  const values = await conversation([
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-11-25',
+        capabilities: {
+          extensions: {
+            'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] },
+          },
+        },
+      },
+    },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    { jsonrpc: '2.0', id: 3, method: 'resources/list', params: {} },
+    { jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri: 'ui://codex-co-engineer/experience' } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'status', arguments: {} } },
+  ]);
+  assert.deepEqual(values[0].result.capabilities, { tools: { listChanged: false } });
+  assert.equal(Object.hasOwn(values[0].result.capabilities, 'extensions'), false);
+  assert.equal(Object.hasOwn(values[0].result.capabilities, 'resources'), false);
+  assert.deepEqual(values[1].result.tools.map((tool) => tool.name), [
+    'status', 'delegate', 'task', 'tasks', 'cancel',
+  ]);
+  assert.equal(values[1].result.tools.length, 5);
+  for (const tool of values[1].result.tools) {
+    assert.equal(Object.hasOwn(tool, '_meta'), false);
+    assert.equal(tool._meta?.ui?.resourceUri, undefined);
+    assert.equal(tool._meta?.['ui/resourceUri'], undefined);
+  }
+  assert.equal(values[2].error.code, -32601);
+  assert.equal(values[3].error.code, -32601);
+  assert.equal(Object.hasOwn(values[4].result, '_meta'), false);
+  assert.equal(Object.hasOwn(values[4].result.structuredContent, 'experience'), false);
+  assert.equal(values[4].result.content[0].text, JSON.stringify(values[4].result.structuredContent));
+});
+
+test('hosts without MCP Apps capability still receive the five-tool catalog', async () => {
+  const values = await conversation([
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    { jsonrpc: '2.0', id: 3, method: 'resources/list', params: {} },
+  ]);
+  assert.deepEqual(values[0].result.capabilities, { tools: { listChanged: false } });
+  assert.equal(values[1].result.tools.length, 5);
+  for (const tool of values[1].result.tools) {
+    assert.equal(Object.hasOwn(tool, '_meta'), false);
+  }
+  assert.equal(values[2].error.code, -32601);
+});

@@ -1,0 +1,11 @@
+{
+  "version": "3.3.0",
+  "healthy": true,
+  "active": 0,
+  "providers": ["grok", "cursor-local", "cursor-cloud", "dsh"],
+  "capabilities": {},
+  "mcp_pending_call": { "budget_ms": 14400000 },
+  "local_boundary": { "ready": true },
+  "readiness": {},
+  "tasks": []
+}
