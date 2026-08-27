@@ -16,8 +16,45 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   assert.equal(manifest.version, '3.3.0');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
-  assert.equal(manifest.interface.composerIcon, './assets/icon.svg');
-  assert.equal(manifest.interface.logo, './assets/co-engineer.png');
+  assert.equal(
+    manifest.description,
+    'Give Codex a team of external co-engineers without giving up control. Delegating to Co-Engineer starts one bounded run. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.',
+  );
+  assert.equal(
+    manifest.interface.shortDescription,
+    'Give Codex a team of external co-engineers without giving up control.',
+  );
+  assert.match(
+    manifest.interface.longDescription,
+    /Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer/u,
+  );
+  assert.match(
+    manifest.interface.longDescription,
+    /up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision/u,
+  );
+  assert.deepEqual(manifest.keywords, [
+    'codex',
+    'co-engineer',
+    'grok',
+    'cursor',
+    'muse',
+    'delegating',
+    'chatting',
+    'isolated-assignments',
+  ]);
+  assert.deepEqual(manifest.interface.defaultPrompt, [
+    'Give Codex a team of external co-engineers without giving up control.',
+    'Delegating to Co-Engineer. Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer.',
+    'Chatting with Co-Engineer: inspect the current run.',
+  ]);
+  assert.equal(manifest.interface.composerIcon, './assets/experience/mark.svg');
+  assert.equal(manifest.interface.logo, './assets/experience/mark.svg');
+  assert.equal(manifest.interface.poster, './assets/experience/poster.jpg');
+  assert.equal(manifest.interface.heroMp4, './assets/experience/hero-muted.mp4');
+  assert.equal(manifest.interface.heroWebm, './assets/experience/hero-muted.webm');
+  assert.doesNotMatch(JSON.stringify(manifest), /3\.1\.0/u);
+  assert.doesNotMatch(JSON.stringify(manifest), /deepseek-harness/u);
+  assert.doesNotMatch(JSON.stringify(manifest), /Using DSH Co-Engineer/u);
 
   const mcp = JSON.parse(await readFile(path.join(ROOT, '.mcp.json'), 'utf8'));
   assert.deepEqual(Object.keys(mcp.mcpServers), ['codex-co-engineer']);
@@ -45,8 +82,12 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   const icon = await readFile(path.join(ROOT, 'assets', 'icon.svg'), 'utf8');
   assert.match(icon, /aria-label="Co-Engineer"/);
 
-  const logo = await readFile(path.join(ROOT, 'assets', 'co-engineer.png'));
-  assert.deepEqual([...logo.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  const historical = await readFile(path.join(ROOT, 'assets', 'co-engineer.png'));
+  assert.deepEqual([...historical.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+
+  const mark = await readFile(path.join(ROOT, 'assets', 'experience', 'mark.svg'), 'utf8');
+  assert.match(mark, /aria-label="Co-Engineer"/);
+  assert.match(mark, /interlocking-link mark/u);
 });
 
 test('visitor README leads with the product shot and copy/paste install', async () => {
@@ -80,6 +121,31 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.3.0', async () => {
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
   assert.equal(marketplace.plugins[0].version, '3.3.0');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
+  assert.equal(
+    marketplace.interface.shortDescription,
+    'Give Codex a team of external co-engineers without giving up control.',
+  );
+  assert.equal(
+    marketplace.plugins[0].description,
+    'Give Codex a team of external co-engineers without giving up control. Delegating to Co-Engineer starts one bounded run. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.',
+  );
+  assert.deepEqual(marketplace.plugins[0].keywords, [
+    'codex',
+    'co-engineer',
+    'grok',
+    'cursor',
+    'muse',
+    'delegating',
+    'chatting',
+    'isolated-assignments',
+  ]);
+  assert.equal(marketplace.interface.logo, 'plugins/codex-co-engineer/assets/experience/mark.svg');
+  assert.equal(marketplace.interface.poster, 'docs/assets/co-engineer-3.4.0/poster.jpg');
+  assert.equal(marketplace.interface.heroMp4, 'docs/assets/co-engineer-3.4.0/hero-muted.mp4');
+  assert.equal(marketplace.interface.heroWebm, 'docs/assets/co-engineer-3.4.0/hero-muted.webm');
+  assert.doesNotMatch(JSON.stringify(marketplace), /3\.1\.0/u);
+  assert.doesNotMatch(JSON.stringify(marketplace), /codex-co-engineer-3\.1\.0/u);
+  assert.doesNotMatch(JSON.stringify(marketplace), /Using DSH Co-Engineer/u);
 
   const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.3.0.md'), 'utf8');
   assert.match(notes, /Codex-Co-Engineer 3\.3\.0/u);
