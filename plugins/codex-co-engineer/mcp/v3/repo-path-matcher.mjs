@@ -48,15 +48,16 @@
 // Reflect.apply, or Function#call/#bind therefore neither alters acceptance,
 // executes caller code, relaxes bounds, nor exposes private authority.
 //
-// Bounded work, charged honestly: parsing is bounded by the fixed pattern
-// caps. Matching work is bounded twice over — once per single call against
-// GLOB_MATCH_STEP_BUDGET and once per batch as an aggregate product rejected
-// before the first match. Both charges are computed from the private IR
-// BEFORE any matching runs, and both charge character-class internals:
-// every single adds 1 step and every range adds 2, so range-heavy patterns
-// pay for the membership scans they cause and hostile range-count/work
-// amplification is rejected deterministically instead of hiding behind a
-// naive atom count.
+// Bounded work, charged honestly: ingress validation is bounded by the
+// fixed pattern, path, and batch caps and is not match-matrix work.
+// Match-matrix work is bounded twice over — once per single call against
+// GLOB_MATCH_STEP_BUDGET and once per batch as an aggregate product
+// rejected before any match-matrix DP. Both charges are computed from the
+// private IR BEFORE any matching runs, and both charge character-class
+// internals: every single adds 1 step and every range adds 2, so
+// range-heavy patterns pay for the membership scans they cause and
+// hostile range-count/work amplification is rejected deterministically
+// instead of hiding behind a naive atom count.
 //
 // Algorithm: bounded dynamic programming twice over — (pattern-segment x
 // path-segment) pairs, then (atom x code point) pairs with correctly seeded
@@ -76,9 +77,10 @@ export const REPO_PATH_MATCHER_ID = 'codex-co-engineer.repo-path-matcher.v1';
 
 // Bounds mirror the R1 repository-path validator and the R1 write-scope glob
 // limits so every manifest-accepted scope pattern stays inside the matchable
-// envelope. GLOB_MATCH_STEP_BUDGET sits far above the largest charged product
-// the caps allow and exists purely as defense in depth for both the
-// single-path matrix and the aggregate batch product.
+// envelope. GLOB_MATCH_STEP_BUDGET sits far above the largest charged
+// single-path product the caps allow and is defense in depth for that
+// matrix; a legal-cap aggregate batch product can exceed it and is rejected
+// before match-matrix DP rather than matched unbounded.
 export const REPO_PATH_MAX_BYTES = 4096;
 export const REPO_PATH_MAX_SEGMENTS = 64;
 export const REPO_PATH_SEGMENT_MAX_BYTES = 255;
