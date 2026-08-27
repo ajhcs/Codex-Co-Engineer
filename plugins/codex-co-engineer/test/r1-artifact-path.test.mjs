@@ -160,4 +160,3 @@ test('every raised path code stays inside the closed vocabulary', () => {
       assert.ok(codes.has(error.code), `unexpected code ${error.code}`);
     }
   }});
-
