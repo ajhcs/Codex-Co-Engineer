@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 240" role="img" aria-label="Co-Engineer">
+  <title>Co-Engineer interlocking-link mark</title>
+  <desc>Bounded vector derivation of the visible interlocking-link mark. Not a pixel-faithful copy of absent raster logos.</desc>
+  <rect width="1280" height="240" fill="#ffffff"/>
+  <defs>
+    <mask id="link-cut">
+      <rect width="1280" height="240" fill="#ffffff"/>
+      <g transform="translate(40,20) rotate(38 150 100)">
+        <rect x="118" y="78" width="44" height="44" fill="#000000"/>
+      </g>
+    </mask>
+  </defs>
+  <g fill="none" stroke="#111111" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(40,20) rotate(-38 90 100)" mask="url(#link-cut)">
+      <rect x="20" y="55" width="140" height="90" rx="45" ry="45"/>
+    </g>
+    <g transform="translate(40,20) rotate(38 150 100)">
+      <rect x="80" y="55" width="140" height="90" rx="45" ry="45"/>
+    </g>
+  </g>
+  <text x="300" y="158" fill="#111111" font-family="ui-sans-serif, system-ui, Helvetica, Arial, sans-serif" font-size="92" font-weight="700" letter-spacing="10">CODEX</text>
+</svg>
