@@ -6,22 +6,17 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  classifyExactProcessIdentity,
+  freezeExactProcessIdentity,
+  inspectExactProcessBoundary,
   launchProcessBoundary,
+  observeExactProcessIdentity,
   probeProcessBoundary,
+  PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS,
   stopProcessBoundary,
 } from '../plugins/codex-co-engineer/mcp/v3/process-boundary.mjs';
 
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === 'ESRCH') return false;
-    throw error;
-  }
-}
-
-async function waitFor(read, predicate, timeoutMs = 5_000) {
+async function waitFor(read, predicate, timeoutMs = PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.exact_unit_stop_and_empty_proof) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -35,11 +30,16 @@ async function waitFor(read, predicate, timeoutMs = 5_000) {
   throw new Error('Timed out waiting for the process-boundary acceptance condition.');
 }
 
+function descendantExited(classified) {
+  return classified?.class === 'exited' && classified.live !== true && classified.cgroup_empty_allowed === true;
+}
+
 const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-boundary-'));
 const fixture = path.join(root, 'worker.mjs');
 const pidFile = path.join(root, 'descendant.pid');
 let launched;
 let descendantPid;
+let descendantIdentity;
 
 try {
   await writeFile(fixture, [
@@ -66,15 +66,39 @@ try {
     () => readFile(pidFile, 'utf8'),
     (value) => Number.isInteger(Number(value.trim())),
   ));
-  assert.equal(processAlive(descendantPid), true);
-  const stopped = await stopProcessBoundary(launched.handle);
+  const observed = await observeExactProcessIdentity(descendantPid);
+  descendantIdentity = freezeExactProcessIdentity(observed);
+  assert.equal(Boolean(descendantIdentity), true, JSON.stringify(observed));
+  assert.equal(observed.state === 'Z' || observed.state === 'X' || observed.state === 'x', false);
+  const stopped = await stopProcessBoundary(launched.handle, {
+    rememberedIdentities: [descendantIdentity],
+    timeoutMs: PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.exact_unit_stop_and_empty_proof,
+  });
   assert.equal(stopped.cgroup_empty, true);
-  await waitFor(async () => processAlive(descendantPid), (alive) => alive === false);
+  const proof = await waitFor(async () => {
+    const inspection = await inspectExactProcessBoundary(launched.receipt, {
+      rememberedIdentities: [descendantIdentity],
+    });
+    const classified = classifyExactProcessIdentity({
+      expected: descendantIdentity,
+      observed: await observeExactProcessIdentity(descendantIdentity.pid),
+      boundary: {
+        expected_cgroup: launched.handle.control_group,
+        expected_unit: launched.handle.unit,
+        expected_invocation_id: launched.handle.invocation_id,
+        unit_inactive: inspection.state === 'inactive_empty',
+        cgroup_empty: inspection.state === 'inactive_empty' && inspection.empty === true,
+      },
+    });
+    if (classified.class === 'containment_failure_live_outside_cgroup' || classified.class === 'pid_reuse' || classified.class === 'namespace_mismatch') {
+      throw Object.assign(new Error(`owned descendant classification ${classified.class}`), { code: classified.code ?? classified.class });
+    }
+    return { inspection, classified };
+  }, ({ inspection, classified }) => inspection.state === 'inactive_empty' && descendantExited(classified));
+  assert.equal(proof.inspection.state, 'inactive_empty');
+  assert.equal(proof.classified.live, false);
   process.stdout.write(`${JSON.stringify({ boundary: probe.boundary, cgroup_empty: true, detached_descendant_alive: false })}\n`);
 } finally {
   if (launched?.handle) await stopProcessBoundary(launched.handle).catch(() => {});
-  if (descendantPid && processAlive(descendantPid)) {
-    try { process.kill(descendantPid, 'SIGKILL'); } catch {}
-  }
   await rm(root, { recursive: true, force: true });
 }

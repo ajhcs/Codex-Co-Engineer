@@ -22,9 +22,20 @@ export function lifecycleReceipt(overrides = {}) {
   };
 }
 
-export function procStat({ pid, ppid, startTicks, comm = 'wrap' }) {
-  const fields = ['S', String(ppid), '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', String(startTicks)];
+export function procStat({ pid, ppid, startTicks, comm = 'wrap', state = 'S' }) {
+  const fields = [state, String(ppid), '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', String(startTicks)];
   return `${pid} (${comm}) ${fields.join(' ')}`;
+}
+
+export function procStatus({ pid, nspid, state = 'S' }) {
+  const ns = nspid ?? String(pid);
+  const label = state === 'Z' ? 'zombie' : (state === 'X' || state === 'x' ? 'dead' : 'sleeping');
+  return [
+    'Name:\twrap',
+    `State:\t${state} (${label})`,
+    `Pid:\t${pid}`,
+    `NSpid:\t${ns}`,
+  ].join('\n');
 }
 
 export function incidentOneRuntime(overrides = {}) {
@@ -100,6 +111,13 @@ export function createBoundaryHarness({
   procErrors = {},
   cgroupErrors = {},
   extraMembers = [],
+  procStates = {},
+  procCgroups = {},
+  procTicks = {},
+  procNspid = {},
+  procNs = {},
+  statusErrors = {},
+  procPresentWhenEmpty = {},
 } = {}) {
   const state = {
     activeState,
@@ -134,20 +152,36 @@ export function createBoundaryHarness({
       }
       return `${membersOf().join('\n')}\n`;
     }
-    const procMatch = /\/proc\/(\d+)\/(stat|cgroup)$/u.exec(file);
+    const procMatch = /\/proc\/(\d+)\/(stat|cgroup|status)$/u.exec(file);
     if (procMatch) {
       const pid = Number(procMatch[1]);
       const kind = procMatch[2];
-      const errorCode = procErrors[pid] ?? procErrors[kind];
+      const errorCode = (kind === 'status' ? statusErrors[pid] : undefined) ?? procErrors[pid] ?? procErrors[kind];
       if (errorCode) throw Object.assign(new Error('proc unreadable'), { code: errorCode });
+      const gone = !state.populated && procPresentWhenEmpty[pid] !== true && !procStates[pid] && !procCgroups[pid];
+      if (gone) throw Object.assign(new Error('proc gone'), { code: 'ENOENT' });
+      const memberState = procStates[pid] ?? 'S';
+      const ticks = procTicks[pid] ?? (pid === leaderPid ? startTicks : workerTicks);
       if (kind === 'stat') {
         const ppid = pid === leaderPid ? 1 : leaderPid;
-        const ticks = pid === leaderPid ? startTicks : workerTicks;
-        return procStat({ pid, ppid, startTicks: ticks, comm: pid === leaderPid ? 'wrap' : 'node' });
+        return procStat({ pid, ppid, startTicks: ticks, comm: pid === leaderPid ? 'wrap' : 'node', state: memberState });
       }
-      return `0::${cgroup}\n`;
+      if (kind === 'status') {
+        return procStatus({ pid, nspid: procNspid[pid] ?? String(pid), state: memberState });
+      }
+      return `0::${procCgroups[pid] ?? cgroup}\n`;
     }
     throw Object.assign(new Error(`unexpected file ${file}`), { code: 'ENOENT' });
+  };
+
+  const readlink = async (file) => {
+    const match = /\/proc\/(\d+)\/ns\/pid$/u.exec(file);
+    if (!match) throw Object.assign(new Error(`unexpected link ${file}`), { code: 'ENOENT' });
+    const pid = Number(match[1]);
+    if (procErrors[pid] || procErrors.ns) throw Object.assign(new Error('ns unreadable'), { code: procErrors[pid] ?? procErrors.ns });
+    const gone = !state.populated && procPresentWhenEmpty[pid] !== true && !procStates[pid] && !procCgroups[pid];
+    if (gone) throw Object.assign(new Error('proc gone'), { code: 'ENOENT' });
+    return procNs[pid] ?? 'pid:[4026531836]';
   };
 
   const execFile = async (_command, args) => {
@@ -200,6 +234,7 @@ export function createBoundaryHarness({
     spawn: () => { throw new Error('launch is out of scope'); },
     execFile,
     readFile,
+    readlink,
     sleep: async () => {},
   };
 

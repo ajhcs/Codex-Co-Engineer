@@ -475,6 +475,45 @@ test('R-TRUTH classifier runs only after lifecycle finality', async () => {
   });
 });
 
+test('lock is retained until exact inactive_empty then released', async () => {
+  await withRoot(async (root) => {
+    const cwd = path.join(root, 'worktree');
+    const escaped = createBoundaryHarness({
+      activeState: 'inactive',
+      populated: false,
+      procCgroups: { 4300: '/user.slice/user-1000.slice/user@1000.service/app.slice/escaped.service' },
+    });
+    const taskRecord = terminalTaskRecord({ id: 'lock-until-empty', cwd, worktree_task: 'lock-until-empty' });
+    const runtime = {
+      pid: 4242,
+      process_start_ticks: '100',
+      command: 'worktree-bootstrap',
+      process_boundary: escaped.receipt,
+      remembered_process_identities: [{ pid: 4300, start_ticks: '110', cgroup: escaped.receipt.control_group }],
+    };
+    await storeTerminal(root, taskRecord, runtime);
+    const { execute, calls } = lockExecute(taskRecord, cwd);
+    const blocked = await settleLocalTaskLifecycle(root, (await readTask(root, 'lock-until-empty')).task, runtime, settleDeps(escaped, { execute }));
+    assert.equal(blocked.final, false);
+    assert.equal(blocked.boundary, 'unknown');
+    assert.equal(calls.some((entry) => entry[1]?.[1] === 'clean'), false);
+    assert.equal((await readTask(root, 'lock-until-empty')).task.status, 'completed');
+
+    const emptyHarness = createBoundaryHarness({ activeState: 'inactive', populated: false });
+    const { execute: executeEmpty, calls: emptyCalls } = lockExecute(taskRecord, cwd);
+    const released = await settleLocalTaskLifecycle(
+      root,
+      (await readTask(root, 'lock-until-empty')).task,
+      runtime,
+      settleDeps(emptyHarness, { execute: executeEmpty }),
+    );
+    assert.equal(released.final, true);
+    assert.equal(released.boundary, 'inactive_empty');
+    assert.equal(released.lock, 'cleaned');
+    assert.equal(emptyCalls.filter((entry) => entry[1]?.[1] === 'clean').length, 1);
+  });
+});
+
 test('legacy terminal receipts without a local boundary stay on the R-TRUTH seam', async () => {
   await withRoot(async (root) => {
     const cwd = path.join(root, 'worktree');

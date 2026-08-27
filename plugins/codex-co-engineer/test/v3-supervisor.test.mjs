@@ -29,7 +29,7 @@ import {
   makeRunReply,
 } from './fixtures/r1-run-tool-adapter-fixtures.mjs';
 import { createClock, createLifecycleFns } from './fixtures/r1-run-runtime-fixtures.mjs';
-import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask } from '../mcp/v3/task-store.mjs';
+import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
 import { runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -769,6 +769,66 @@ test('boundary rollback failure preserves a recoverable runtime and transport-lo
       stopBoundary: async (runtime) => { recovered = runtime; },
     });
     assert.deepEqual(recovered.process_boundary, receipt);
+    assert.equal(cancelled.status, 'transport_lost');
+    assert.equal((await readTask(root, 'boundary-recovery')).task.status, 'transport_lost');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancel projects cancelled only after exact inactive_empty proof', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-cancel-proof-'));
+  const repo = path.join(root, 'repo');
+  const receipt = {
+    version: 1,
+    boundary: 'systemd-user-service-cgroup',
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+    description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    invocation_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    control_group: '/user.slice/user-1000.slice/user@1000.service/app.slice/codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+  };
+  try {
+    await mkdir(repo);
+    await createTask({
+      root,
+      prompt: 'cancel requires empty proof',
+      record: {
+        id: 'cancel-proof',
+        status: 'running',
+        provider: 'grok',
+        cwd: repo,
+        workspace_kind: 'managed-worktree',
+        worktree_task: 'cancel-proof',
+      },
+    });
+    await writeRuntimeRecord(root, 'cancel-proof', {
+      pid: 4242,
+      process_start_ticks: '100',
+      command: process.execPath,
+      process_boundary: receipt,
+    });
+    const lockCalls = [];
+    const failed = await cancelTask(root, 'cancel-proof', {
+      stopBoundary: async () => ({ stopped: true, cgroup_empty: true }),
+      inspectBoundary: async () => ({ state: 'unknown', empty: false, stop_allowed: false, code: 'cgroup_not_empty' }),
+      execute: async (command, args) => {
+        lockCalls.push([command, args]);
+        throw new Error('lock must not be cleaned');
+      },
+    });
+    assert.equal(failed.status, 'transport_lost');
+    assert.equal(lockCalls.some((entry) => entry[1]?.[1] === 'clean'), false);
+    await updateTask(root, 'cancel-proof', { status: 'running' });
+    const cancelled = await cancelTask(root, 'cancel-proof', {
+      stopBoundary: async () => ({ stopped: true, cgroup_empty: true }),
+      inspectBoundary: async () => ({ state: 'inactive_empty', empty: true, stop_allowed: false }),
+      execute: async (command, args) => {
+        lockCalls.push([command, args]);
+        if (args?.[1] === 'inspect') return { stdout: JSON.stringify({ state: 'unlocked' }) };
+        if (args?.[1] === 'clean') throw new Error('already unlocked');
+        return { stdout: '' };
+      },
+    });
     assert.equal(cancelled.status, 'cancelled');
   } finally {
     await rm(root, { recursive: true, force: true });

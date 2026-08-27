@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn, execFile as nodeExecFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile as nodeReadFile } from 'node:fs/promises';
+import { readFile as nodeReadFile, readlink as nodeReadlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -48,6 +48,17 @@ export const PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS = Object.freeze({
   cgroup_poll_interval: 25,
 });
 export const PROCESS_BOUNDARY_STATES = Object.freeze(['inactive_empty', 'active', 'unknown']);
+export const PROCESS_IDENTITY_CLASSES = Object.freeze([
+  'exited',
+  'live_in_cgroup',
+  'containment_failure_live_outside_cgroup',
+  'pid_reuse',
+  'namespace_mismatch',
+  'visibility_unknown',
+  'identity_mismatch',
+]);
+const EXITED_PROC_STATES = new Set(['Z', 'X', 'x']);
+const NS_PID_LINK = /^pid:\[(\d+)\]$/u;
 
 const SYSTEMD_RUN = '/usr/bin/systemd-run';
 const SYSTEMCTL = '/usr/bin/systemctl';
@@ -81,6 +92,7 @@ function defaultAdapter() {
     spawn: nodeSpawn,
     execFile: defaultExecFile,
     readFile: (file) => nodeReadFile(file, 'utf8'),
+    readlink: (file) => nodeReadlink(file),
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   };
 }
@@ -398,8 +410,12 @@ async function waitForEmpty(record, timeoutMs) {
   while (Date.now() < deadline) {
     const shown = await showUnit(record.host, record.receipt.unit);
     if (!shown.found) return true;
-    validateOwnedUnit(record.receipt, shown.properties);
-    if (await cgroupEmpty(record.host, record.receipt.control_group)) return true;
+    const live = ACTIVE_UNIT_STATES.has(shown.properties.ActiveState);
+    if (live) validateOwnedUnit(record.receipt, shown.properties);
+    else if (!generationMatches(record.receipt, shown.properties, { requireControlGroup: false })) {
+      fail('ownership_mismatch', 'The systemd process boundary no longer matches its owned generation.');
+    }
+    if (!live && await cgroupEmpty(record.host, record.receipt.control_group)) return true;
     await record.host.sleep(PROCESS_BOUNDARY_DEFAULTS.pollMs);
   }
   return false;
@@ -443,19 +459,53 @@ export async function inspectProcessBoundary(handle, { adapter } = {}) {
   });
 }
 
-export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS_BOUNDARY_DEFAULTS.stopTimeoutMs } = {}) {
+function expectedLeaderFromRecord(record) {
+  const pid = Number(record?.child?.pid);
+  const ticks = record?.leaderIdentity?.start_ticks;
+  if (!Number.isSafeInteger(pid) || pid < 2 || typeof ticks !== 'string' || ticks.length === 0) return null;
+  return { pid, process_start_ticks: ticks };
+}
+
+async function proveHandleInactiveEmpty(record, rememberedIdentities) {
+  const inspection = await inspectExactProcessBoundary(record.receipt, {
+    adapter: record.host,
+    expectedLeader: expectedLeaderFromRecord(record),
+    rememberedIdentities,
+  });
+  if (inspection.state === 'inactive_empty' && inspection.empty === true) return inspection;
+  fail(inspection.code ?? 'cgroup_not_empty', 'Owned systemd process boundary still has descendants after TERM and KILL.');
+}
+
+export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS_BOUNDARY_DEFAULTS.stopTimeoutMs, rememberedIdentities } = {}) {
   const record = recordFromHandle(handle, adapter);
-  if (record.stopped) return Object.freeze({ stopped: true, cgroup_empty: true, idempotent: true });
+  const remembered = normalizeRememberedIdentities(
+    [...(record.rememberedIdentities ?? []), ...(rememberedIdentities ?? [])],
+    expectedLeaderFromRecord(record),
+  );
+  if (record.stopped) {
+    await proveHandleInactiveEmpty(record, remembered);
+    return Object.freeze({ stopped: true, cgroup_empty: true, idempotent: true });
+  }
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100) fail('invalid_timeout', 'timeoutMs must be at least 100ms.');
   if (record.handoffPath) await cleanupCredentialHandoff(record.handoffPath).catch(() => {});
   record.handoffPath = undefined;
 
   const initial = await showUnit(record.host, record.receipt.unit);
   if (!initial.found) {
+    await proveHandleInactiveEmpty(record, remembered);
     record.stopped = true;
     return Object.freeze({ stopped: true, cgroup_empty: true, idempotent: true });
   }
   validateOwnedUnit(record.receipt, initial.properties);
+  const cgroup = await inspectCgroupPath(record.host, record.receipt.control_group);
+  if (cgroup.visibility === 'unknown') {
+    fail(cgroup.code ?? 'worker_boundary_membership_unknown', 'Owned process-boundary membership could not be identified exactly.');
+  }
+  const snapshotted = [
+    ...remembered,
+    ...await snapshotRememberedIdentities(record.host, cgroup.members ?? []),
+  ];
+  record.rememberedIdentities = snapshotted;
   await systemctlAction(record.host, ['--user', 'kill', '--kill-whom=all', '--signal=TERM', record.receipt.unit], timeoutMs);
   let empty = await waitForEmpty(record, timeoutMs);
   let forced = false;
@@ -471,6 +521,7 @@ export async function stopProcessBoundary(handle, { adapter, timeoutMs = PROCESS
     }
   }
   if (!empty) fail('cgroup_not_empty', 'Owned systemd process boundary still has descendants after TERM and KILL.');
+  await proveHandleInactiveEmpty(record, snapshotted);
   record.stopped = true;
   return Object.freeze({ stopped: true, cgroup_empty: true, forced, idempotent: false });
 }
@@ -556,7 +607,18 @@ export async function launchProcessBoundary({ command, args = [], cwd, env = pro
         });
         const worker = Object.freeze({ pid: mainPid, unref() {} });
         const handle = Object.freeze({ kind: 'systemd-user-process-boundary', ...receipt });
-        HANDLES.set(handle, { host, receipt, child: worker, launcher: child, stopped: false, handoffPath });
+        const leaderObserved = await observeExactProcessIdentity(mainPid, { adapter: host });
+        const leaderIdentity = freezeExactProcessIdentity(leaderObserved);
+        HANDLES.set(handle, {
+          host,
+          receipt,
+          child: worker,
+          launcher: child,
+          stopped: false,
+          handoffPath,
+          leaderIdentity,
+          rememberedIdentities: leaderIdentity ? [leaderIdentity] : [],
+        });
         return { handle, child: worker, receipt };
       }
       await host.sleep(PROCESS_BOUNDARY_DEFAULTS.pollMs);
@@ -604,10 +666,33 @@ function parseProcStat(text) {
   const close = raw.lastIndexOf(')');
   if (close < 0) return null;
   const fields = raw.slice(close + 2).trim().split(/\s+/u);
+  const state = fields[0];
   const ppid = Number(fields[1]);
   const startTicks = fields[19];
-  if (!Number.isInteger(ppid) || ppid < 0 || !startTicks) return null;
-  return { ppid, start_ticks: startTicks };
+  if (!/^[A-Za-z]$/u.test(state) || !Number.isInteger(ppid) || ppid < 0 || !startTicks) return null;
+  return { state, ppid, start_ticks: startTicks };
+}
+
+function parseProcStatus(text) {
+  const raw = String(text ?? '');
+  let nspid;
+  let state;
+  for (const line of raw.split(/\r?\n/u)) {
+    if (line.startsWith('NSpid:')) {
+      const value = line.slice('NSpid:'.length).trim();
+      if (value && /^[0-9]+(?:[ \t]+[0-9]+)*$/u.test(value)) nspid = value.replace(/\s+/gu, ' ');
+    } else if (line.startsWith('State:')) {
+      const value = line.slice('State:'.length).trim();
+      if (/^[A-Za-z]/u.test(value)) state = value[0];
+    }
+  }
+  if (!state) return null;
+  return { state, nspid };
+}
+
+function parseNsPidInode(text) {
+  const match = NS_PID_LINK.exec(String(text ?? '').trim());
+  return match ? match[1] : null;
 }
 
 function parseProcCgroup(text) {
@@ -626,6 +711,382 @@ function parseCgroupProcs(text) {
     pids.push(pid);
   }
   return pids;
+}
+
+function freezeProcessIdentityClassification(values) {
+  return Object.freeze({
+    class: values.class,
+    pid: values.pid ?? null,
+    start_ticks: values.start_ticks ?? null,
+    nspid: values.nspid ?? null,
+    ns_inode: values.ns_inode ?? null,
+    state: values.state ?? null,
+    cgroup: values.cgroup ?? null,
+    live: values.live === true,
+    exited: values.exited === true,
+    fail_closed: values.fail_closed === true,
+    cgroup_empty_allowed: values.cgroup_empty_allowed === true,
+    code: values.code ?? null,
+  });
+}
+
+function identityPid(value) {
+  const pid = Number(value?.pid);
+  return Number.isSafeInteger(pid) && pid >= 1 ? pid : null;
+}
+
+function identityStartTicks(value) {
+  const ticks = value?.start_ticks ?? value?.process_start_ticks;
+  return typeof ticks === 'string' && ticks.length > 0 ? ticks : null;
+}
+
+export function freezeExactProcessIdentity(observed) {
+  const pid = identityPid(observed);
+  const startTicks = identityStartTicks(observed);
+  if (!pid || !startTicks || observed?.missing === true || observed?.unreadable === true || observed?.incomplete === true) {
+    return null;
+  }
+  return Object.freeze({
+    pid,
+    start_ticks: startTicks,
+    ...(typeof observed.nspid === 'string' && observed.nspid.length > 0 ? { nspid: observed.nspid } : {}),
+    ...(typeof observed.ns_inode === 'string' && observed.ns_inode.length > 0 ? { ns_inode: observed.ns_inode } : {}),
+    ...(typeof observed.cgroup === 'string' && observed.cgroup.length > 0 ? { cgroup: observed.cgroup } : {}),
+  });
+}
+
+function expectedCgroupOf(expected, boundary) {
+  if (typeof expected?.cgroup === 'string' && expected.cgroup.length > 0) return expected.cgroup;
+  if (typeof boundary?.expected_cgroup === 'string' && boundary.expected_cgroup.length > 0) return boundary.expected_cgroup;
+  return null;
+}
+
+function boundaryInactiveEmpty(boundary) {
+  return boundary?.unit_inactive === true && boundary?.cgroup_empty === true;
+}
+
+/**
+ * Exact process-identity classifier. kill(0) and /proc existence are never
+ * live proof. Matching Z/X is exited only with exact identity plus an
+ * inactive empty owned cgroup. A matching non-zombie outside that cgroup is
+ * a containment failure and must never report empty/safe.
+ */
+export function classifyExactProcessIdentity(input = {}) {
+  const expected = input.expected;
+  const observed = input.observed;
+  const boundary = input.boundary ?? {};
+  const pid = identityPid(expected);
+  const expectedTicks = identityStartTicks(expected);
+  const observedUnit = typeof boundary.observed_unit === 'string' && boundary.observed_unit.length > 0
+    ? boundary.observed_unit : null;
+  const observedInvocation = typeof boundary.observed_invocation_id === 'string' && boundary.observed_invocation_id.length > 0
+    ? boundary.observed_invocation_id : null;
+  const observedDescription = typeof boundary.observed_description === 'string' && boundary.observed_description.length > 0
+    ? boundary.observed_description : null;
+  if (boundary.expected_unit != null && observedUnit != null && boundary.expected_unit !== observedUnit) {
+    return freezeProcessIdentityClassification({
+      class: 'identity_mismatch',
+      pid,
+      fail_closed: true,
+      code: 'worker_boundary_identity_mismatch',
+    });
+  }
+  if (boundary.expected_invocation_id != null && observedInvocation != null
+    && boundary.expected_invocation_id !== observedInvocation) {
+    return freezeProcessIdentityClassification({
+      class: 'identity_mismatch',
+      pid,
+      fail_closed: true,
+      code: 'worker_boundary_identity_mismatch',
+    });
+  }
+  if (boundary.expected_description != null && observedDescription != null
+    && boundary.expected_description !== observedDescription) {
+    return freezeProcessIdentityClassification({
+      class: 'identity_mismatch',
+      pid,
+      fail_closed: true,
+      code: 'worker_boundary_identity_mismatch',
+    });
+  }
+  if (!pid || !expectedTicks) {
+    return freezeProcessIdentityClassification({
+      class: 'visibility_unknown',
+      pid,
+      fail_closed: true,
+      code: 'worker_boundary_pid_visibility_unknown',
+    });
+  }
+  if (!observed || observed.unreadable === true || observed.incomplete === true) {
+    return freezeProcessIdentityClassification({
+      class: 'visibility_unknown',
+      pid,
+      start_ticks: expectedTicks,
+      fail_closed: true,
+      code: 'worker_boundary_pid_visibility_unknown',
+    });
+  }
+  if (observed.missing === true) {
+    const exited = boundaryInactiveEmpty(boundary);
+    return freezeProcessIdentityClassification({
+      class: exited ? 'exited' : 'visibility_unknown',
+      pid,
+      start_ticks: expectedTicks,
+      live: false,
+      exited,
+      fail_closed: !exited,
+      cgroup_empty_allowed: exited,
+      code: exited ? null : 'worker_boundary_pid_visibility_unknown',
+    });
+  }
+  const observedPid = identityPid(observed);
+  const observedTicks = identityStartTicks(observed);
+  const state = typeof observed.state === 'string' ? observed.state : null;
+  const cgroup = typeof observed.cgroup === 'string' && observed.cgroup.length > 0 ? observed.cgroup : null;
+  if (!observedPid || !observedTicks || !state || !cgroup) {
+    return freezeProcessIdentityClassification({
+      class: 'visibility_unknown',
+      pid,
+      start_ticks: expectedTicks,
+      fail_closed: true,
+      code: 'worker_boundary_pid_visibility_unknown',
+    });
+  }
+  if (observedPid !== pid || observedTicks !== expectedTicks) {
+    return freezeProcessIdentityClassification({
+      class: 'pid_reuse',
+      pid: observedPid,
+      start_ticks: observedTicks,
+      nspid: observed.nspid ?? null,
+      ns_inode: observed.ns_inode ?? null,
+      state,
+      cgroup,
+      fail_closed: true,
+      code: 'worker_boundary_identity_mismatch',
+    });
+  }
+  if (typeof expected.nspid === 'string' && expected.nspid.length > 0) {
+    if (typeof observed.nspid !== 'string' || observed.nspid.length === 0) {
+      return freezeProcessIdentityClassification({
+        class: 'visibility_unknown',
+        pid,
+        start_ticks: expectedTicks,
+        state,
+        cgroup,
+        fail_closed: true,
+        code: 'worker_boundary_pid_visibility_unknown',
+      });
+    }
+    if (observed.nspid !== expected.nspid) {
+      return freezeProcessIdentityClassification({
+        class: 'namespace_mismatch',
+        pid,
+        start_ticks: expectedTicks,
+        nspid: observed.nspid,
+        ns_inode: observed.ns_inode ?? null,
+        state,
+        cgroup,
+        fail_closed: true,
+        code: 'worker_boundary_identity_mismatch',
+      });
+    }
+  }
+  if (typeof expected.ns_inode === 'string' && expected.ns_inode.length > 0) {
+    if (typeof observed.ns_inode !== 'string' || observed.ns_inode.length === 0) {
+      return freezeProcessIdentityClassification({
+        class: 'visibility_unknown',
+        pid,
+        start_ticks: expectedTicks,
+        nspid: observed.nspid ?? null,
+        state,
+        cgroup,
+        fail_closed: true,
+        code: 'worker_boundary_pid_visibility_unknown',
+      });
+    }
+    if (observed.ns_inode !== expected.ns_inode) {
+      return freezeProcessIdentityClassification({
+        class: 'namespace_mismatch',
+        pid,
+        start_ticks: expectedTicks,
+        nspid: observed.nspid ?? null,
+        ns_inode: observed.ns_inode,
+        state,
+        cgroup,
+        fail_closed: true,
+        code: 'worker_boundary_identity_mismatch',
+      });
+    }
+  }
+  const ownedCgroup = expectedCgroupOf(expected, boundary);
+  if (!ownedCgroup) {
+    return freezeProcessIdentityClassification({
+      class: 'visibility_unknown',
+      pid,
+      start_ticks: expectedTicks,
+      nspid: observed.nspid ?? null,
+      ns_inode: observed.ns_inode ?? null,
+      state,
+      cgroup,
+      fail_closed: true,
+      code: 'worker_boundary_pid_visibility_unknown',
+    });
+  }
+  if (EXITED_PROC_STATES.has(state)) {
+    const exited = boundaryInactiveEmpty(boundary);
+    return freezeProcessIdentityClassification({
+      class: exited ? 'exited' : 'visibility_unknown',
+      pid,
+      start_ticks: expectedTicks,
+      nspid: observed.nspid ?? null,
+      ns_inode: observed.ns_inode ?? null,
+      state,
+      cgroup,
+      live: false,
+      exited,
+      fail_closed: !exited,
+      cgroup_empty_allowed: exited,
+      code: exited ? null : 'worker_boundary_pid_visibility_unknown',
+    });
+  }
+  if (cgroup === ownedCgroup) {
+    return freezeProcessIdentityClassification({
+      class: 'live_in_cgroup',
+      pid,
+      start_ticks: expectedTicks,
+      nspid: observed.nspid ?? null,
+      ns_inode: observed.ns_inode ?? null,
+      state,
+      cgroup,
+      live: true,
+      fail_closed: true,
+      code: 'worker_boundary_not_empty',
+    });
+  }
+  return freezeProcessIdentityClassification({
+    class: 'containment_failure_live_outside_cgroup',
+    pid,
+    start_ticks: expectedTicks,
+    nspid: observed.nspid ?? null,
+    ns_inode: observed.ns_inode ?? null,
+    state,
+    cgroup,
+    live: true,
+    fail_closed: true,
+    code: 'cgroup_not_empty',
+  });
+}
+
+async function readProcText(host, file) {
+  try {
+    return { ok: true, text: await host.readFile(file) };
+  } catch (error) {
+    return { ok: false, code: error?.code, error };
+  }
+}
+
+async function readNsInode(host, pid) {
+  const file = `/proc/${pid}/ns/pid`;
+  if (typeof host.readlink !== 'function') return { unavailable: true };
+  try {
+    const parsed = parseNsPidInode(await host.readlink(file));
+    return parsed ? { inode: parsed } : { unavailable: true };
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ESRCH' || error?.code === 'EINVAL') return { unavailable: true };
+    return { unreadable: true };
+  }
+}
+
+export async function observeExactProcessIdentity(pid, { adapter } = {}) {
+  const host = requireAdapter(adapter);
+  const id = Number(pid);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return Object.freeze({ pid: id, unreadable: true, incomplete: true });
+  }
+  const [statFile, statusFile, cgroupFile] = await Promise.all([
+    readProcText(host, `/proc/${id}/stat`),
+    readProcText(host, `/proc/${id}/status`),
+    readProcText(host, `/proc/${id}/cgroup`),
+  ]);
+  const missing = [statFile, statusFile, cgroupFile].every((entry) => !entry.ok && (entry.code === 'ENOENT' || entry.code === 'ESRCH'));
+  if (missing) return Object.freeze({ pid: id, missing: true });
+  if (!statFile.ok || !statusFile.ok || !cgroupFile.ok) {
+    const vanished = [statFile, statusFile, cgroupFile].some((entry) => !entry.ok && (entry.code === 'ENOENT' || entry.code === 'ESRCH'));
+    return Object.freeze({
+      pid: id,
+      unreadable: true,
+      incomplete: true,
+      missing: vanished,
+    });
+  }
+  const parsed = parseProcStat(statFile.text);
+  const status = parseProcStatus(statusFile.text);
+  const cgroup = parseProcCgroup(cgroupFile.text);
+  if (!parsed || !status || !cgroup || parsed.state !== status.state) {
+    return Object.freeze({ pid: id, unreadable: true, incomplete: true });
+  }
+  const ns = await readNsInode(host, id);
+  if (ns.unreadable === true) return Object.freeze({ pid: id, unreadable: true, incomplete: true });
+  return Object.freeze({
+    pid: id,
+    state: parsed.state,
+    start_ticks: parsed.start_ticks,
+    ppid: parsed.ppid,
+    nspid: status.nspid,
+    ns_inode: ns.inode,
+    cgroup,
+  });
+}
+
+function normalizeRememberedIdentities(values, expectedLeader) {
+  const out = [];
+  const seen = new Set();
+  const add = (item) => {
+    const frozen = freezeExactProcessIdentity(item) ?? (identityPid(item) && identityStartTicks(item)
+      ? Object.freeze({
+        pid: identityPid(item),
+        start_ticks: identityStartTicks(item),
+        ...(typeof item.nspid === 'string' && item.nspid.length > 0 ? { nspid: item.nspid } : {}),
+        ...(typeof item.ns_inode === 'string' && item.ns_inode.length > 0 ? { ns_inode: item.ns_inode } : {}),
+        ...(typeof item.cgroup === 'string' && item.cgroup.length > 0 ? { cgroup: item.cgroup } : {}),
+      })
+      : null);
+    if (!frozen) return;
+    const key = `${frozen.pid}:${frozen.start_ticks}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(frozen);
+  };
+  if (Array.isArray(values)) {
+    for (const item of values) add(item);
+  }
+  add(expectedLeader);
+  return out;
+}
+
+async function snapshotRememberedIdentities(host, pids) {
+  const remembered = [];
+  for (const pid of pids ?? []) {
+    const observed = await observeExactProcessIdentity(pid, { adapter: host });
+    if (observed.unreadable === true || observed.incomplete === true) {
+      fail('worker_boundary_pid_visibility_unknown', 'Owned process-boundary membership could not be identified exactly.');
+    }
+    const identity = freezeExactProcessIdentity(observed);
+    if (identity) remembered.push(identity);
+  }
+  return remembered;
+}
+
+async function rememberedBlockEmpty(host, remembered, boundary) {
+  for (const expected of remembered) {
+    const observed = await observeExactProcessIdentity(expected.pid, { adapter: host });
+    const classified = classifyExactProcessIdentity({ expected, observed, boundary });
+    if (classified.cgroup_empty_allowed === true && classified.fail_closed !== true && classified.live !== true) {
+      continue;
+    }
+    return classified;
+  }
+  return null;
 }
 
 function omittedIdentityProperties(properties, { requireControlGroup }) {
@@ -745,7 +1206,7 @@ function membersRootedInLeader(members, leaderPid) {
   return true;
 }
 
-export async function inspectExactProcessBoundary(receipt, { adapter, expectedLeader } = {}) {
+export async function inspectExactProcessBoundary(receipt, { adapter, expectedLeader, rememberedIdentities } = {}) {
   const host = requireAdapter(adapter);
   let normalized;
   try {
@@ -765,6 +1226,51 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
       receipt,
     });
   }
+
+  const remembered = normalizeRememberedIdentities(rememberedIdentities, expectedLeader);
+  const proveInactiveEmpty = async (shownUnit) => {
+    const blocked = await rememberedBlockEmpty(host, remembered, {
+      expected_cgroup: normalized.control_group,
+      unit_inactive: true,
+      cgroup_empty: true,
+      expected_unit: normalized.unit,
+      expected_invocation_id: normalized.invocation_id,
+      expected_description: normalized.description,
+      observed_unit: shownUnit?.properties?.Id,
+      observed_invocation_id: shownUnit?.properties?.InvocationID,
+      observed_description: shownUnit?.properties?.Description,
+    });
+    if (blocked) {
+      return freezeBoundaryInspection({
+        state: 'unknown',
+        found: shownUnit?.found === true,
+        empty: false,
+        active_state: shownUnit?.properties?.ActiveState ?? null,
+        populated: false,
+        members: [],
+        identity_matched: blocked.class !== 'identity_mismatch'
+          && blocked.class !== 'pid_reuse'
+          && blocked.class !== 'namespace_mismatch',
+        visibility: blocked.class === 'visibility_unknown' ? 'unknown' : 'complete',
+        stop_allowed: false,
+        code: blocked.code ?? 'worker_boundary_inspect_failed',
+        receipt: normalized,
+      });
+    }
+    return freezeBoundaryInspection({
+      state: 'inactive_empty',
+      found: shownUnit?.found === true,
+      empty: true,
+      active_state: shownUnit?.properties?.ActiveState ?? null,
+      main_pid: Number(shownUnit?.properties?.MainPID) || 0,
+      populated: false,
+      members: [],
+      identity_matched: true,
+      visibility: 'complete',
+      stop_allowed: false,
+      receipt: normalized,
+    });
+  };
 
   let shown;
   try {
@@ -799,17 +1305,7 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
 
   if (!shown.found) {
     if (!cgroup.present && cgroup.populated === false) {
-      return freezeBoundaryInspection({
-        state: 'inactive_empty',
-        found: false,
-        empty: true,
-        populated: false,
-        members: [],
-        identity_matched: true,
-        visibility: 'complete',
-        stop_allowed: false,
-        receipt: normalized,
-      });
+      return proveInactiveEmpty(shown);
     }
     return freezeBoundaryInspection({
       state: 'unknown',
@@ -880,19 +1376,7 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
         receipt: normalized,
       });
     }
-    return freezeBoundaryInspection({
-      state: 'inactive_empty',
-      found: true,
-      empty: true,
-      active_state: activeState,
-      main_pid: Number(shown.properties.MainPID) || 0,
-      populated: false,
-      members: [],
-      identity_matched: true,
-      visibility: 'complete',
-      stop_allowed: false,
-      receipt: normalized,
-    });
+    return proveInactiveEmpty(shown);
   }
 
   if (!cgroup.populated) {
@@ -1037,11 +1521,12 @@ export async function inspectExactProcessBoundary(receipt, { adapter, expectedLe
 export async function stopExactProcessBoundary(receipt, {
   adapter,
   expectedLeader,
+  rememberedIdentities,
   timeoutMs = PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.exact_unit_stop_and_empty_proof,
 } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100) fail('invalid_timeout', 'timeoutMs must be at least 100ms.');
   const host = requireAdapter(adapter);
-  const initial = await inspectExactProcessBoundary(receipt, { adapter: host, expectedLeader });
+  const initial = await inspectExactProcessBoundary(receipt, { adapter: host, expectedLeader, rememberedIdentities });
   if (initial.state === 'inactive_empty') {
     return Object.freeze({
       stopped: true,
@@ -1054,11 +1539,19 @@ export async function stopExactProcessBoundary(receipt, {
   if (initial.state !== 'active' || initial.stop_allowed !== true) {
     fail(initial.code ?? 'worker_boundary_inspect_failed', 'Exact process-boundary stop is refused without complete task-owned identity.');
   }
+  const remembered = [
+    ...normalizeRememberedIdentities(rememberedIdentities, expectedLeader),
+    ...await snapshotRememberedIdentities(host, initial.members),
+  ];
   await systemctlAction(host, ['--user', 'stop', initial.receipt.unit], timeoutMs);
   const deadline = Date.now() + timeoutMs;
   let latest = initial;
   while (Date.now() < deadline) {
-    latest = await inspectExactProcessBoundary(initial.receipt, { adapter: host, expectedLeader });
+    latest = await inspectExactProcessBoundary(initial.receipt, {
+      adapter: host,
+      expectedLeader,
+      rememberedIdentities: remembered,
+    });
     if (latest.state === 'inactive_empty') {
       return Object.freeze({
         stopped: true,

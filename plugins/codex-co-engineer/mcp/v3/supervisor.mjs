@@ -57,7 +57,6 @@ import {
   launchProcessBoundary,
   probeProcessBoundary,
   PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS,
-  restoreProcessBoundary,
   stopExactProcessBoundary,
   stopProcessBoundary,
 } from './process-boundary.mjs';
@@ -861,6 +860,16 @@ function expectedLeaderFromRuntime(runtime) {
   return { pid, process_start_ticks: runtime.process_start_ticks };
 }
 
+function rememberedIdentitiesFromRuntime(runtime) {
+  const remembered = [];
+  if (Array.isArray(runtime?.remembered_process_identities)) {
+    remembered.push(...runtime.remembered_process_identities);
+  }
+  const leader = expectedLeaderFromRuntime(runtime);
+  if (leader) remembered.push(leader);
+  return remembered;
+}
+
 async function inspectRuntimeBoundary(runtime, dependencies = {}) {
   if (!runtime?.process_boundary) return null;
   const inspect = dependencies.inspectBoundary ?? inspectExactProcessBoundary;
@@ -868,6 +877,7 @@ async function inspectRuntimeBoundary(runtime, dependencies = {}) {
     return await inspect(runtime.process_boundary, {
       adapter: dependencies.adapter,
       expectedLeader: expectedLeaderFromRuntime(runtime),
+      rememberedIdentities: rememberedIdentitiesFromRuntime(runtime),
     });
   } catch {
     return Object.freeze({
@@ -891,10 +901,18 @@ function taskRuntime(runtime, task) {
   return runtime ?? task?.runtime_recovery ?? null;
 }
 
-async function stopRuntimeBoundary(runtime) {
+async function stopRuntimeBoundary(runtime, dependencies = {}) {
   if (!runtime?.process_boundary) return null;
-  const handle = restoreProcessBoundary(runtime.process_boundary);
-  return stopProcessBoundary(handle);
+  return (dependencies.stopExactBoundary ?? stopExactProcessBoundary)(runtime.process_boundary, {
+    adapter: dependencies.adapter,
+    expectedLeader: expectedLeaderFromRuntime(runtime),
+    rememberedIdentities: rememberedIdentitiesFromRuntime(runtime),
+    timeoutMs: dependencies.stopTimeoutMs,
+  });
+}
+
+function boundaryIsInactiveEmpty(inspection) {
+  return inspection?.state === 'inactive_empty' && inspection.empty !== false;
 }
 
 function currentProviderIdentity(task) {
@@ -1237,6 +1255,7 @@ export async function settleLocalTaskLifecycle(root, task, runtime, dependencies
         await (dependencies.stopExactBoundary ?? stopExactProcessBoundary)(boundRuntime.process_boundary, {
           adapter: dependencies.adapter,
           expectedLeader: expectedLeaderFromRuntime(boundRuntime),
+          rememberedIdentities: rememberedIdentitiesFromRuntime(boundRuntime),
           timeoutMs: dependencies.stopTimeoutMs,
         });
         recovered = true;
@@ -1430,8 +1449,10 @@ async function reconcileInactiveTask(root, task, runtime, dependencies = {}) {
       await (dependencies.stopBoundary ?? stopExactProcessBoundary)(boundRuntime.process_boundary, {
         adapter: dependencies.adapter,
         expectedLeader: expectedLeaderFromRuntime(boundRuntime),
+        rememberedIdentities: rememberedIdentitiesFromRuntime(boundRuntime),
       });
-      boundaryStopped = true;
+      const inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);
+      boundaryStopped = boundaryIsInactiveEmpty(inspection);
     } catch {
       // Keep the task reconcilable when exact cgroup cleanup cannot be proven.
     }
@@ -1781,7 +1802,7 @@ export async function cancelTask(root, taskId, dependencies = {}) {
   await clearTaskLaunchReservation(root, taskId, task.launch_reservation?.token).catch(() => {});
   if (runtime?.process_boundary) {
     try {
-      await (dependencies.stopBoundary ?? stopRuntimeBoundary)(runtime);
+      await (dependencies.stopBoundary ?? ((bound) => stopRuntimeBoundary(bound, dependencies)))(runtime);
     } catch (error) {
       await recordManagedCleanup(root, task, dependencies.execute, {
         requireInactiveEmpty: true,
@@ -1790,6 +1811,20 @@ export async function cancelTask(root, taskId, dependencies = {}) {
       return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
         status: 'transport_lost',
         error: { code: error?.code ?? 'cancel_incomplete', message: 'The owned local task cgroup could not be proven empty.' },
+      }));
+    }
+    const inspection = await inspectRuntimeBoundary(runtime, dependencies);
+    if (!boundaryIsInactiveEmpty(inspection)) {
+      await recordManagedCleanup(root, task, dependencies.execute, {
+        requireInactiveEmpty: true,
+        boundaryState: inspection?.state === 'active' ? 'active' : 'unknown',
+      });
+      return projectSupervisorTerminalReceipt(await updateTask(root, taskId, {
+        status: 'transport_lost',
+        error: {
+          code: inspection?.code ?? 'cancel_incomplete',
+          message: 'The owned local task cgroup could not be proven empty.',
+        },
       }));
     }
     await recordManagedCleanup(root, task, dependencies.execute, {

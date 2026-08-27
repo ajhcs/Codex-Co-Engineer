@@ -4,9 +4,11 @@ import test from 'node:test';
 
 import {
   buildProcessBoundaryArgv,
+  classifyExactProcessIdentity,
   inspectExactProcessBoundary,
   inspectProcessBoundary,
   launchProcessBoundary,
+  PROCESS_IDENTITY_CLASSES,
   probeProcessBoundary,
   ProcessBoundaryError,
   restoreProcessBoundary,
@@ -16,6 +18,8 @@ import {
 import {
   createBoundaryHarness,
   lifecycleReceipt,
+  procStat,
+  procStatus,
 } from './fixtures/r1-terminal-boundary-lifecycle-fixtures.mjs';
 
 function receipt(overrides = {}) {
@@ -137,7 +141,18 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
         'MainPID=4242',
       ].join('\n') };
     },
-    readFile: async () => 'populated 1\nfrozen 0\n',
+    readFile: async (file) => {
+      if (file.endsWith('/cgroup.events')) return 'populated 1\nfrozen 0\n';
+      if (file.endsWith('/cgroup.procs')) return '4242\n';
+      const procMatch = /\/proc\/(\d+)\/(stat|cgroup|status)$/u.exec(file);
+      if (procMatch?.[2] === 'stat') return procStat({ pid: Number(procMatch[1]), ppid: 1, startTicks: '100' });
+      if (procMatch?.[2] === 'status') return procStatus({ pid: Number(procMatch[1]) });
+      if (procMatch?.[2] === 'cgroup') {
+        return '0::/user.slice/user-1000.slice/user@1000.service/app.slice/codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service\n';
+      }
+      return 'populated 1\nfrozen 0\n';
+    },
+    readlink: async () => 'pid:[4026531836]',
     sleep: async () => {},
   };
   const environment = { HOME: '/home/test-user', MODEL_API_KEY: 'provider-secret', PATH: '/bin' };
@@ -170,7 +185,26 @@ test('launch preserves cwd, full env, stdio, and provider command while verifyin
   assert.equal(value.child.pid, 4242);
   assert.equal(calls[0].args.includes('--property=StandardOutput=append:/state/task.log'), true);
   assert.equal(calls[0].args.some((entry) => String(entry).includes('credential-handoff-loader.mjs')), true);
-  host.readFile = async () => 'populated 0\nfrozen 0\n';
+  host.readFile = async (file) => {
+    if (file.endsWith('/cgroup.events')) return 'populated 0\nfrozen 0\n';
+    if (file.endsWith('/cgroup.procs')) return '';
+    throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+  };
+  host.execFile = async (_command, args) => {
+    const unit = args.find((value) => value.startsWith('codex-co-engineer-') && value.endsWith('.service'))
+      ?? 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service';
+    const token = unit.slice('codex-co-engineer-'.length, -'.service'.length);
+    return { stdout: [
+      `Id=${unit}`,
+      `Description=codex-co-engineer-task:${token}`,
+      'LoadState=loaded',
+      'ActiveState=inactive',
+      `ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}`,
+      'KillMode=control-group',
+      'InvocationID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'MainPID=0',
+    ].join('\n') };
+  };
   await stopProcessBoundary(value.handle, { adapter: host, timeoutMs: 100 });
 });
 
@@ -220,13 +254,30 @@ test('stop signals all members, escalates only after the owned cgroup stays popu
           `ControlGroup=${receipt().control_group}`,
           'KillMode=control-group',
           `InvocationID=${receipt().invocation_id}`,
+          `MainPID=${populated ? 4242 : 0}`,
         ].join('\n') };
       }
       actions.push(args);
-      if (args[1] === 'kill' && args.at(-2) === '--signal=KILL') populated = false;
+      if (args[1] === 'kill' && args.at(-2) === '--signal=KILL') {
+        populated = false;
+        active = 'inactive';
+      }
       return { stdout: '' };
     },
-    readFile: async () => `populated ${populated ? 1 : 0}\nfrozen 0\n`,
+    readFile: async (file) => {
+      if (file.endsWith('/cgroup.events')) return `populated ${populated ? 1 : 0}\nfrozen 0\n`;
+      if (file.endsWith('/cgroup.procs')) return populated ? '4242\n' : '';
+      const procMatch = /\/proc\/(\d+)\/(stat|cgroup|status)$/u.exec(file);
+      if (!procMatch) return '';
+      if (!populated) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      if (procMatch[2] === 'stat') return procStat({ pid: Number(procMatch[1]), ppid: 1, startTicks: '100' });
+      if (procMatch[2] === 'status') return procStatus({ pid: Number(procMatch[1]) });
+      return `0::${receipt().control_group}\n`;
+    },
+    readlink: async () => {
+      if (!populated) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      return 'pid:[4026531836]';
+    },
     sleep: async () => {},
   };
   const handle = restoreProcessBoundary(receipt(), { adapter: host });
@@ -239,7 +290,6 @@ test('stop signals all members, escalates only after the owned cgroup stays popu
   ]);
   const second = await stopProcessBoundary(handle, { adapter: host, timeoutMs: 100 });
   assert.equal(second.idempotent, true);
-  active = 'inactive';
   assert.equal((await inspectProcessBoundary(handle, { adapter: host })).found, true);
 });
 
@@ -318,4 +368,178 @@ test('exact inspection does not treat a mismatched generation as this task', asy
   assert.equal(inspection.state, 'unknown');
   assert.equal(inspection.identity_matched, false);
   assert.equal(inspection.stop_allowed, false);
+});
+
+function identityBoundary(receipt, extras = {}) {
+  return {
+    expected_cgroup: receipt.control_group,
+    expected_unit: receipt.unit,
+    expected_invocation_id: receipt.invocation_id,
+    expected_description: receipt.description,
+    unit_inactive: extras.unit_inactive === true,
+    cgroup_empty: extras.cgroup_empty === true,
+    observed_unit: extras.observed_unit ?? receipt.unit,
+    observed_invocation_id: extras.observed_invocation_id ?? receipt.invocation_id,
+    observed_description: extras.observed_description ?? receipt.description,
+  };
+}
+
+test('exact identity classifier treats matching Z and X as exited only with inactive empty cgroup', () => {
+  const receipt = lifecycleReceipt();
+  const expected = { pid: 4242, start_ticks: '100', nspid: '4242', ns_inode: '4026531836', cgroup: receipt.control_group };
+  for (const state of ['Z', 'X']) {
+    const observed = { pid: 4242, start_ticks: '100', nspid: '4242', ns_inode: '4026531836', state, cgroup: receipt.control_group };
+    const blocked = classifyExactProcessIdentity({
+      expected,
+      observed,
+      boundary: identityBoundary(receipt, { unit_inactive: false, cgroup_empty: false }),
+    });
+    assert.equal(blocked.class, 'visibility_unknown');
+    assert.equal(blocked.exited, false);
+    assert.equal(blocked.cgroup_empty_allowed, false);
+    const exited = classifyExactProcessIdentity({
+      expected,
+      observed,
+      boundary: identityBoundary(receipt, { unit_inactive: true, cgroup_empty: true }),
+    });
+    assert.equal(exited.class, 'exited');
+    assert.equal(exited.exited, true);
+    assert.equal(exited.live, false);
+    assert.equal(exited.cgroup_empty_allowed, true);
+    assert.equal(PROCESS_IDENTITY_CLASSES.includes(exited.class), true);
+  }
+});
+
+test('matching live escaped descendant is containment failure and never empty', () => {
+  const receipt = lifecycleReceipt();
+  const classified = classifyExactProcessIdentity({
+    expected: { pid: 4300, start_ticks: '110', nspid: '4300', cgroup: receipt.control_group },
+    observed: {
+      pid: 4300,
+      start_ticks: '110',
+      nspid: '4300',
+      state: 'S',
+      cgroup: '/user.slice/user-1000.slice/user@1000.service/app.slice/foreign.service',
+    },
+    boundary: identityBoundary(receipt, { unit_inactive: true, cgroup_empty: true }),
+  });
+  assert.equal(classified.class, 'containment_failure_live_outside_cgroup');
+  assert.equal(classified.live, true);
+  assert.equal(classified.cgroup_empty_allowed, false);
+  assert.equal(classified.code, 'cgroup_not_empty');
+});
+
+test('PID reuse via different start ticks fails closed', () => {
+  const receipt = lifecycleReceipt();
+  const classified = classifyExactProcessIdentity({
+    expected: { pid: 4242, start_ticks: '100', cgroup: receipt.control_group },
+    observed: { pid: 4242, start_ticks: '999', state: 'S', cgroup: receipt.control_group },
+    boundary: identityBoundary(receipt, { unit_inactive: true, cgroup_empty: true }),
+  });
+  assert.equal(classified.class, 'pid_reuse');
+  assert.equal(classified.fail_closed, true);
+  assert.equal(classified.cgroup_empty_allowed, false);
+  assert.equal(classified.code, 'worker_boundary_identity_mismatch');
+});
+
+test('namespace mismatch and unreadable proc fail closed', () => {
+  const receipt = lifecycleReceipt();
+  const mismatch = classifyExactProcessIdentity({
+    expected: { pid: 4242, start_ticks: '100', nspid: '4242', ns_inode: '4026531836', cgroup: receipt.control_group },
+    observed: {
+      pid: 4242,
+      start_ticks: '100',
+      nspid: '1',
+      ns_inode: '4026531836',
+      state: 'S',
+      cgroup: receipt.control_group,
+    },
+    boundary: identityBoundary(receipt, { unit_inactive: true, cgroup_empty: true }),
+  });
+  assert.equal(mismatch.class, 'namespace_mismatch');
+  assert.equal(mismatch.fail_closed, true);
+  const unread = classifyExactProcessIdentity({
+    expected: { pid: 4242, start_ticks: '100', cgroup: receipt.control_group },
+    observed: { unreadable: true },
+    boundary: identityBoundary(receipt, { unit_inactive: true, cgroup_empty: true }),
+  });
+  assert.equal(unread.class, 'visibility_unknown');
+  assert.equal(unread.fail_closed, true);
+  const missingWithoutEmpty = classifyExactProcessIdentity({
+    expected: { pid: 4242, start_ticks: '100', cgroup: receipt.control_group },
+    observed: { missing: true },
+    boundary: identityBoundary(receipt, { unit_inactive: false, cgroup_empty: false }),
+  });
+  assert.equal(missingWithoutEmpty.fail_closed, true);
+  assert.equal(missingWithoutEmpty.exited, false);
+});
+
+test('exact inspection refuses inactive_empty for a live escaped remembered descendant', async () => {
+  const harness = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    procCgroups: { 4300: '/user.slice/user-1000.slice/user@1000.service/app.slice/escaped.service' },
+    procTicks: { 4300: '110' },
+  });
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    rememberedIdentities: [{ pid: 4300, start_ticks: '110', cgroup: harness.receipt.control_group }],
+  });
+  assert.equal(inspection.state, 'unknown');
+  assert.equal(inspection.empty, false);
+  assert.equal(inspection.stop_allowed, false);
+  assert.equal(inspection.code, 'cgroup_not_empty');
+  await assert.rejects(
+    stopExactProcessBoundary(harness.receipt, {
+      adapter: harness.adapter,
+      expectedLeader: harness.leader,
+      rememberedIdentities: [{ pid: 4300, start_ticks: '110', cgroup: harness.receipt.control_group }],
+      timeoutMs: 100,
+    }),
+    (error) => error.code === 'cgroup_not_empty',
+  );
+});
+
+test('exact inspection treats matching zombie descendants as exited once the unit is inactive and empty', async () => {
+  const harness = createBoundaryHarness({
+    activeState: 'inactive',
+    populated: false,
+    procStates: { 4300: 'Z' },
+    procPresentWhenEmpty: { 4300: true },
+  });
+  const inspection = await inspectExactProcessBoundary(harness.receipt, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+    rememberedIdentities: [{ pid: 4300, start_ticks: '110', nspid: '4300', cgroup: harness.receipt.control_group }],
+  });
+  assert.equal(inspection.state, 'inactive_empty');
+  assert.equal(inspection.empty, true);
+});
+
+test('forged unit identity cannot stop or clean another boundary', async () => {
+  const harness = createBoundaryHarness();
+  const forged = lifecycleReceipt({ token: 'ffffffffffffffffffffffffffffffff', invocation_id: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' });
+  const inspection = await inspectExactProcessBoundary(forged, {
+    adapter: harness.adapter,
+    expectedLeader: harness.leader,
+  });
+  assert.equal(inspection.state, 'unknown');
+  assert.equal(inspection.identity_matched, false);
+  await assert.rejects(
+    stopExactProcessBoundary(forged, { adapter: harness.adapter, expectedLeader: harness.leader, timeoutMs: 100 }),
+    (error) => error.code === 'worker_boundary_identity_mismatch',
+  );
+  assert.equal(harness.state.stopCalls, 0);
+});
+
+test('kill(0) success is never treated as live proof by the classifier', () => {
+  const receipt = lifecycleReceipt();
+  const zombie = classifyExactProcessIdentity({
+    expected: { pid: 7, start_ticks: '1', cgroup: receipt.control_group },
+    observed: { pid: 7, start_ticks: '1', state: 'Z', cgroup: receipt.control_group },
+    boundary: identityBoundary(receipt, { unit_inactive: true, cgroup_empty: true }),
+  });
+  assert.equal(zombie.class, 'exited');
+  assert.equal(zombie.live, false);
 });
