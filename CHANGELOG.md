@@ -2,7 +2,32 @@
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-08-28
+
+3.4.0 is the Co-Engineer experience and efficiency release. It keeps the
+five-tool MCP catalog and 3.2.1 compatibility path while making bounded runs
+easier to start, cheaper to supervise, more truthful under interruption, and
+safer to publish.
+
 ### Added
+
+- **Luna-first interrupt orchestration.** Luna Max can remain the low-cost
+  relay/control layer for typed task-to-task messages and wake Sol only for
+  meaningful events or decisions. Attempt and generation fences reject stale
+  deliveries; thread messages remain coordination evidence rather than
+  implicit merge authority.
+- **Deterministic event reduction and lane health.** Routine progress is
+  reduced without another model pass. Completed, blocked, failed, question,
+  timeout, user-update, and merge-ready boundaries produce compact,
+  replayable acknowledgement evidence and progressive lane status.
+- **Truthful usage accounting.** Immutable `UsageLedgerV1` receipts separate
+  provider-reported tokens, host-visible model bytes, retrievable evidence,
+  submissions, invocations, waits, attention rounds, retries, elapsed time,
+  and explicitly unknown measurements. Eight-lane ledgers have fixed
+  non-caller-selectable complexity and byte bounds.
+- **Proof-bound cleanup planning.** Cleanup revalidates task, worktree, lock,
+  ref, and expected SHA immediately before action and reports machine-readable
+  blockers instead of inferring ownership from age.
 
 - **PR-ready final decision card.** Adds additive v3
   `final-decision-card.mjs`: a side-effect-free projection of typed
