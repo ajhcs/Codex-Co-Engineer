@@ -14,7 +14,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
-const RELEASE_VERSION = '3.3.0';
+const RELEASE_VERSION = '3.4.0';
 
 function fail(message) { throw new Error(message); }
 const absolute = (relative) => path.join(ROOT, relative);
@@ -27,7 +27,7 @@ const required = [
   'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/adr/0001-r1-bounded-run-architecture.md',
   'docs/threat-model.md', 'docs/releases/v3.1.0.md',
   'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md', 'docs/releases/v3.2.1.md',
-  'docs/releases/v3.3.0.md',
+  'docs/releases/v3.3.0.md', 'docs/releases/v3.4.0.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',

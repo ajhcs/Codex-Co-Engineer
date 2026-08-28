@@ -33,7 +33,7 @@ documentation does not claim a Co-Engineer UI on every Codex Desktop
 host.
 
 The stable machine identifier is `codex-co-engineer`. Published package
-notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
+notes: [docs/releases/v3.4.0.md](docs/releases/v3.4.0.md).
 
 ## Visual demo
 

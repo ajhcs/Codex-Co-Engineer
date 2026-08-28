@@ -14,8 +14,8 @@ Cursor Co-Engineer`, and `Using Muse Co-Engineer`. Cursor on this
 computer and Cursor Cloud both stay Cursor Co-Engineer in public speech.
 
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-The current published package version is 3.3.0. This README does not
-claim a later package is already published.
+The current release candidate is 3.4.0. Publication is bound to the exact
+reviewed tag and GitHub Release rather than inferred from this README.
 
 Any extra Co-Engineer panel is optional, feature-detected, and
 host-specific. Complete headless fallback: the Delegating/Chatting
