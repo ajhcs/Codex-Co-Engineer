@@ -100,6 +100,8 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.ok(readme.includes(heroWebm));
   assert.ok(readme.indexOf(poster) < readme.indexOf(heroMp4));
   assert.ok(readme.indexOf(heroMp4) < readme.indexOf(heroWebm));
+  assert.match(readme, /poster is the static,[\s\S]*reduced-motion,[\s\S]*GitHub fallback/u);
+  assert.match(readme, /If embedded playback is unavailable/u);
   assert.doesNotMatch(readme.slice(0, readme.indexOf('## What Codex-Co-Engineer is for')), /co-engineer\.png/u);
   assert.doesNotMatch(readme, /placeholder/iu);
   assert.doesNotMatch(readme, /does not add a replacement asset/iu);
@@ -126,6 +128,15 @@ test('visitor README leads with the product shot and copy/paste install', async 
     await access(path.join(REPO, relative));
     const info = await stat(path.join(REPO, relative));
     assert.equal(info.isFile(), true, relative);
+  }
+
+  const docsPoster = await readFile(path.join(REPO, 'docs/assets/co-engineer-3.4.0/poster.svg'), 'utf8');
+  const pluginPoster = await readFile(path.join(ROOT, 'assets', 'experience', 'poster.svg'), 'utf8');
+  for (const source of [docsPoster, pluginPoster]) {
+    assert.match(source, /<title>Co-Engineer<\/title>/u);
+    assert.match(source, />Co-Engineer<\/text>/u);
+    assert.doesNotMatch(source, />CODEX<\/text>/u);
+    assert.match(source, /Give Codex a team of external co-engineers without giving up control/u);
   }
   for (const stale of [
     'docs/assets/codex-co-engineer-3.1.0.jpg',

@@ -253,6 +253,9 @@ test('readable posters carry the product contract and are not blank', async () =
       assert.match(text, /aria-label="Co-Engineer"/u);
     }
     if (relative.endsWith('poster.svg')) {
+      assert.match(text, /<title>Co-Engineer<\/title>/u);
+      assert.match(text, />Co-Engineer<\/text>/u);
+      assert.doesNotMatch(text, />CODEX<\/text>/u);
       assert.match(text, /aria-label="Give Codex a team of external co-engineers without giving up control."/u);
       assert.equal(text.includes(fixture.product_lead), true, relative);
       assert.equal(text.includes(fixture.honest_claim.statement), true, relative);

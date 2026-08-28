@@ -21,7 +21,7 @@
         <rect x="80" y="55" width="140" height="90" rx="45" ry="45"/>
       </g>
     </g>
-    <text x="300" y="158" fill="#111111" font-family="ui-sans-serif, system-ui, Helvetica, Arial, sans-serif" font-size="92" font-weight="700" letter-spacing="10">CODEX</text>
+    <text x="300" y="154" fill="#111111" font-family="ui-sans-serif, system-ui, Helvetica, Arial, sans-serif" font-size="78" font-weight="700" letter-spacing="2">Co-Engineer</text>
   </svg>
 
   <text x="960" y="460" text-anchor="middle" fill="#111111" font-family="ui-sans-serif, system-ui, Helvetica, Arial, sans-serif" font-size="42" font-weight="700">Give Codex a team of external co-engineers without giving up control.</text>

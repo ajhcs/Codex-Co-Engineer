@@ -4,8 +4,9 @@ Give Codex a team of external co-engineers without giving up control.
 
 This is the UX-05 record for bounded Co-Engineer visual assets. It freezes
 source identity, derivation commands, hashes, and the GitHub/README-compatible
-relative-path contract. It does not change README, runtime, skills, package
-version, changelog, or release surfaces. Plugin and marketplace version stay
+relative-path contract. README may embed these accepted derivatives; this
+inventory does not change runtime, skills, package version, changelog, or
+release surfaces. Plugin and marketplace version stay
 `3.3.0` until REL-01.
 
 The honest product claim is:
@@ -95,7 +96,10 @@ rasters.
     "ffmpeg -y -i docs/assets/co-engineer-3.4.0/sources/source-a.mp4 -map 0:v:0 -an -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.0 -vf 'scale=960:544:flags=lanczos' -r 24 -crf 32 -preset slow -movflags +faststart -map_metadata -1 plugins/codex-co-engineer/assets/experience/hero-muted.mp4",
     "ffmpeg -y -i docs/assets/co-engineer-3.4.0/sources/source-a.mp4 -map 0:v:0 -an -c:v libvpx-vp9 -pix_fmt yuv420p -b:v 0 -crf 38 -row-mt 1 -deadline good -vf 'scale=960:544:flags=lanczos' -r 24 -map_metadata -1 plugins/codex-co-engineer/assets/experience/hero-muted.webm",
     "ffmpeg -y -ss 0.20 -i docs/assets/co-engineer-3.4.0/sources/source-a.mp4 -map 0:v:0 -frames:v 1 -q:v 5 docs/assets/co-engineer-3.4.0/frame-poster.jpg",
-    "ffmpeg -y -ss 0.20 -i docs/assets/co-engineer-3.4.0/sources/source-a.mp4 -map 0:v:0 -frames:v 1 -q:v 6 -vf 'scale=960:544:flags=lanczos' plugins/codex-co-engineer/assets/experience/frame-poster.jpg"
+    "ffmpeg -y -ss 0.20 -i docs/assets/co-engineer-3.4.0/sources/source-a.mp4 -map 0:v:0 -frames:v 1 -q:v 6 -vf 'scale=960:544:flags=lanczos' plugins/codex-co-engineer/assets/experience/frame-poster.jpg",
+    "Playwright Chromium renders docs/assets/co-engineer-3.4.0/poster.svg at an exact 1920x1088 viewport to a temporary PNG",
+    "ffmpeg -y -i <rendered-poster.png> -frames:v 1 -q:v 5 docs/assets/co-engineer-3.4.0/poster.jpg",
+    "ffmpeg -y -i <rendered-poster.png> -vf 'scale=960:544:flags=lanczos' -frames:v 1 -q:v 3 plugins/codex-co-engineer/assets/experience/poster.jpg"
   ],
   "github_readme_contract": [
     "docs/assets/co-engineer-3.4.0/poster.jpg",
@@ -182,8 +186,8 @@ rasters.
     {
       "path": "docs/assets/co-engineer-3.4.0/poster.jpg",
       "role": "docs-readable-poster",
-      "sha256": "dbffa9e0f85e6dc170f535c88ee6124870f2e4e044f7dce59d2769f5634d0930",
-      "bytes": 127183,
+      "sha256": "abc2bb22bf120486ce94c8c8894cd8b913d29f7f1b122ddd5a9448a17094c8f5",
+      "bytes": 158143,
       "width": 1920,
       "height": 1088,
       "codec": "jpeg",
@@ -193,8 +197,8 @@ rasters.
     {
       "path": "docs/assets/co-engineer-3.4.0/poster.svg",
       "role": "docs-readable-poster-vector",
-      "sha256": "6195cd38dcf89dbc62039b98d1606c5a2dedef8403916bcc59ad0b03b5f502a7",
-      "bytes": 3608,
+      "sha256": "c61b77eae87c93b6a7c5a05219eebdd427c50d65f0bd4d50dd9695213c456250",
+      "bytes": 3613,
       "width": 1920,
       "height": 1088,
       "codec": "svg"
@@ -245,8 +249,8 @@ rasters.
     {
       "path": "plugins/codex-co-engineer/assets/experience/poster.jpg",
       "role": "plugin-readable-poster",
-      "sha256": "f2cb95b06d9733cbf0bcd8dc207dee4ac5cca2c0e727722d626341df49318332",
-      "bytes": 54109,
+      "sha256": "081c7f88bd03c32596a5a99b1d8b89b150f48d1ab8d67861484f93f30e1715ad",
+      "bytes": 65939,
       "width": 960,
       "height": 544,
       "codec": "jpeg",
@@ -256,8 +260,8 @@ rasters.
     {
       "path": "plugins/codex-co-engineer/assets/experience/poster.svg",
       "role": "plugin-readable-poster-vector",
-      "sha256": "6195cd38dcf89dbc62039b98d1606c5a2dedef8403916bcc59ad0b03b5f502a7",
-      "bytes": 3608,
+      "sha256": "c61b77eae87c93b6a7c5a05219eebdd427c50d65f0bd4d50dd9695213c456250",
+      "bytes": 3613,
       "codec": "svg"
     },
     {
@@ -273,8 +277,8 @@ rasters.
 
 ## GitHub and README relative contract
 
-This slice does not edit `README.md`. Later README work may cite these
-exact relative paths:
+The README cites these exact relative paths and keeps the readable poster as
+the GitHub, reduced-motion, and embedded-playback fallback:
 
 ```markdown
 ![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/poster.jpg)

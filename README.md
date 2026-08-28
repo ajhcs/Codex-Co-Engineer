@@ -32,8 +32,9 @@ notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 
 ## Visual demo
 
-The current visual demo uses the accepted 3.4.0 poster and muted hero.
-There is no autoplay audio.
+The current visual demo uses the accepted 3.4.0 Co-Engineer poster and
+muted hero. There is no autoplay audio. The poster is the static,
+reduced-motion, and GitHub fallback.
 
 ![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/poster.jpg)
 
@@ -41,6 +42,10 @@ There is no autoplay audio.
   <source src="docs/assets/co-engineer-3.4.0/hero-muted.mp4" type="video/mp4">
   <source src="docs/assets/co-engineer-3.4.0/hero-muted.webm" type="video/webm">
 </video>
+
+If embedded playback is unavailable, open the muted
+[MP4](docs/assets/co-engineer-3.4.0/hero-muted.mp4) or
+[WebM](docs/assets/co-engineer-3.4.0/hero-muted.webm) directly.
 
 ## First 60 seconds
 
