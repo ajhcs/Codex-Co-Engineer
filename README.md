@@ -32,9 +32,13 @@ notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 
 ## Visual demo
 
-The current visual demo uses the accepted 3.4.0 Co-Engineer poster and
-muted hero. There is no autoplay audio. The poster is the static,
-reduced-motion, and GitHub fallback.
+This provisional 3.4.0 reference demo preserves the approved product
+promise and Co-Engineer identity while the final user-designed README
+image set is prepared. It is not the final release artwork. There is no
+autoplay audio. The poster is the static, reduced-motion, and GitHub
+fallback.
+
+<!-- README_ART_SLOT: hero-demo -->
 
 ![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/poster.jpg)
 
@@ -53,6 +57,8 @@ After [install and authentication](#install-and-authentication), start a
 **new** Codex session and speak in ordinary language. You do not write
 tool payloads.
 
+### Your first delegation
+
 > Delegating to Co-Engineer: review the auth change with Grok Co-Engineer.
 
 Codex:
@@ -65,7 +71,11 @@ complete, Codex inspects it:
 
 > Co-Engineer finished, and I verified the candidate.
 
+<!-- README_ART_SLOT: first-delegation -->
+
 You still decide whether to keep, change, or discard the result.
+
+### Several independent assignments
 
 If you want several independent assignments in one run:
 
@@ -77,6 +87,8 @@ Codex:
 > I am delegating this to Co-Engineer. Co-Engineer is running 3
 > independent assignments.
 
+<!-- README_ART_SLOT: multi-lane-run -->
+
 If you have no saved profile and name no co-engineers, Codex asks once
 which co-engineers should take the independent assignments: Grok,
 Cursor, or Muse. It does not keep asking and does not invent a default
@@ -85,7 +97,7 @@ router.
 A longer walkthrough lives in
 [docs/co-engineer-quickstart.md](docs/co-engineer-quickstart.md).
 
-## What Codex-Co-Engineer is for
+## How a run works
 
 A run is one submission, one coordinated wait, and one verified
 decision. Independent means the assignments do not share a writer path.
@@ -123,6 +135,12 @@ predicts cost, or substitutes a different co-engineer.
 | Cursor Co-Engineer | Using Cursor Co-Engineer |
 | Muse Co-Engineer | Using Muse Co-Engineer |
 
+- **Using Grok Co-Engineer** runs an explicitly selected Grok assignment.
+- **Using Cursor Co-Engineer** covers Cursor on this computer or Cursor
+  Cloud; Codex keeps the location and immutable starting commit explicit.
+- **Using Muse Co-Engineer** runs the explicitly selected Muse profile and
+  model. It does not silently become another provider.
+
 You may name the Cursor place in plain language. Public speech still
 stays `Using Cursor Co-Engineer`. Muse is the public name for that
 route. Optional Ox Alpha stays a Muse-route model choice, not a separate
@@ -138,6 +156,8 @@ Codex:
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
 > Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
 > running 3 independent assignments.
+
+<!-- README_ART_SLOT: provider-choices -->
 
 ## Codex authority and safety
 
@@ -205,9 +225,12 @@ directory, normally `$XDG_STATE_HOME/codex-co-engineer` or
 `~/.local/state/codex-co-engineer`. Task directories are `0700`; files
 are `0600`. See [data handling](docs/data-handling.md).
 
-## Grouped attention and the final decision
+## Chatting, grouped attention, and the final decision
 
 Chatting with Co-Engineer during a live run is not a second delegation.
+It can inspect the current run, continue from its recorded cursor, answer
+one grouped decision, or cancel the existing run. It never creates
+unlimited persistent chat and never silently starts new work.
 
 The run is already in its one coordinated wait. More than one assignment
 needs a choice. Codex groups those questions into one decision.
@@ -221,12 +244,16 @@ You:
 
 > Use the stricter validator and keep the docs change as written.
 
+<!-- README_ART_SLOT: grouped-attention -->
+
 That answer is chatting: answer grouped attention. It is not a debate
 loop. Codex continues the same run with the same single wait.
 
 After the wait, Codex inspects the candidate. Only then may it say:
 
 > Co-Engineer finished, and I verified the candidate.
+
+<!-- README_ART_SLOT: verified-final-decision -->
 
 Verification is Codex's review of the candidate, not automatic merge.
 You keep control.
@@ -235,6 +262,8 @@ If a required assignment fails, cannot be answered, or stays unresolved,
 Codex reports that honestly. It does not say Co-Engineer finished, and I
 verified the candidate. A required gap blocks a complete candidate.
 Cancel is chatting with Co-Engineer, not a new delegation.
+
+<!-- README_ART_SLOT: failure-unresolved -->
 
 ## Install and authentication
 
@@ -250,6 +279,8 @@ codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
+
+<!-- README_ART_SLOT: install-auth -->
 
 `npm run setup` installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and
 the cohesive DSH `0.1.0-rc.7` composition. It does not log you into

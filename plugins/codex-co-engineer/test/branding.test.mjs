@@ -100,9 +100,9 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.ok(readme.includes(heroWebm));
   assert.ok(readme.indexOf(poster) < readme.indexOf(heroMp4));
   assert.ok(readme.indexOf(heroMp4) < readme.indexOf(heroWebm));
-  assert.match(readme, /poster is the static,[\s\S]*reduced-motion,[\s\S]*GitHub fallback/u);
+  assert.match(readme, /poster is the static,[\s\S]*reduced-motion,[\s\S]*GitHub\s+fallback/u);
   assert.match(readme, /If embedded playback is unavailable/u);
-  assert.doesNotMatch(readme.slice(0, readme.indexOf('## What Codex-Co-Engineer is for')), /co-engineer\.png/u);
+  assert.doesNotMatch(readme.slice(0, readme.indexOf('## How a run works')), /co-engineer\.png/u);
   assert.doesNotMatch(readme, /placeholder/iu);
   assert.doesNotMatch(readme, /does not add a replacement asset/iu);
   assert.doesNotMatch(readme, /codex-co-engineer-3\.1\.0/u);
@@ -156,6 +156,62 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
   assert.match(readme, /docs\/releases\/v3\.3\.0\.md/u);
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
+});
+
+test('README information architecture and final-art slots are frozen before art production', async () => {
+  const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
+  const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');
+  const headings = [
+    '## Visual demo',
+    '## First 60 seconds',
+    '## How a run works',
+    '## Provider choices',
+    '## Codex authority and safety',
+    '## Chatting, grouped attention, and the final decision',
+    '## Install and authentication',
+    '## Migrating from 3.2.1',
+    '## Troubleshooting',
+    '## Advanced Co-Engineer Control/API',
+  ];
+  let previous = -1;
+  for (const heading of headings) {
+    const index = readme.indexOf(heading);
+    assert.ok(index > previous, `${heading} is missing or out of order`);
+    previous = index;
+  }
+
+  const slots = [
+    'hero-demo',
+    'first-delegation',
+    'multi-lane-run',
+    'provider-choices',
+    'grouped-attention',
+    'verified-final-decision',
+    'failure-unresolved',
+    'install-auth',
+  ];
+  for (const slot of slots) {
+    assert.equal((readme.match(new RegExp(`README_ART_SLOT: ${slot}`, 'gu')) ?? []).length, 1, slot);
+    assert.ok(slotContract.includes('| `' + slot + '` |'), slot);
+  }
+  assert.match(slotContract, /provenance-preserved scaffolding and reference assets/u);
+  assert.match(slotContract, /not the\s+user-approved final README image set/u);
+  assert.match(slotContract, /exact release candidate on the shipping\s+Codex host/u);
+  assert.match(slotContract, /prefers-reduced-motion/u);
+  assert.match(slotContract, /GitHub rendering may omit the video player/u);
+});
+
+test('every repository-relative README link resolves from the repository root', async () => {
+  const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
+  const targets = new Set();
+  for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
+    const target = match[1];
+    if (/^(?:https?:|mailto:|#)/iu.test(target)) continue;
+    targets.add(decodeURIComponent(target.split('#', 1)[0]));
+  }
+  for (const target of targets) {
+    await access(path.resolve(REPO, target));
+  }
 });
 
 test('repository marketplace catalogs Codex-Co-Engineer 3.3.0', async () => {
