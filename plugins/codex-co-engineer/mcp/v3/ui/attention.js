@@ -41,6 +41,28 @@
   var OPTION_LIMIT = 8;
   var REPLY_ROUND = 1;
   var REPLY_ID = 'cce-attention-reply';
+  var RUN_REPLY_KEYS = ['batch_id', 'expected_revision', 'reply'];
+  var NESTED_REPLY_KEYS = ['answers', 'batch_id', 'round'];
+  var ANSWER_KEYS = ['assignment_id', 'question_id', 'response', 'session_id', 'task_id'];
+  var ARGUMENT_KEYS = ['run_id', 'run_reply'];
+  var GET_OWN_NAMES = Object.getOwnPropertyNames;
+  var GET_OWN_SYMBOLS = Object.getOwnPropertySymbols;
+  var GET_OWN_DESC = Object.getOwnPropertyDescriptor;
+  var nodeIsProxy = (function resolveNodeIsProxy() {
+    try {
+      var logFn = typeof console !== 'undefined' ? console.log : null;
+      if (typeof logFn !== 'function') return null;
+      var ctor = logFn.constructor;
+      if (typeof ctor !== 'function') return null;
+      var util = ctor('return typeof process==="object"&&process&&process.getBuiltinModule&&process.getBuiltinModule("node:util")')();
+      if (util && util.types && typeof util.types.isProxy === 'function') {
+        return function detectProxy(value) {
+          try { return util.types.isProxy(value) === true; } catch (e) { return true; }
+        };
+      }
+    } catch (e) {}
+    return null;
+  })();
   var FORBIDDEN_ARG_KEYS = {
     wait_until: true,
     wait_ms: true,
@@ -87,6 +109,159 @@
     return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
   }
 
+  function isProxyValue(value) {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
+    if (typeof nodeIsProxy === 'function') return nodeIsProxy(value);
+    return false;
+  }
+
+  function nonemptyCursor(value) {
+    return typeof value === 'string' && value !== '';
+  }
+
+  function keyAllowed(allowed, key) {
+    for (var i = 0; i < allowed.length; i += 1) {
+      if (allowed[i] === key) return true;
+    }
+    return false;
+  }
+
+  function inspectOwnRecord(value) {
+    if (value === null || typeof value !== 'object') return { ok: false, code: 'reply_missing' };
+    if (isProxyValue(value)) return { ok: false, code: 'proxy_denied' };
+    var names;
+    var symbols;
+    try {
+      names = GET_OWN_NAMES(value);
+      symbols = GET_OWN_SYMBOLS(value);
+    } catch (e) {
+      return { ok: false, code: 'proxy_denied' };
+    }
+    if (symbols && symbols.length > 0) return { ok: false, code: 'symbol_key_denied' };
+    var isArray = Array.isArray(value);
+    var keys = [];
+    var descriptors = [];
+    for (var i = 0; i < names.length; i += 1) {
+      var key = names[i];
+      var desc;
+      try {
+        desc = GET_OWN_DESC(value, key);
+      } catch (e) {
+        return { ok: false, code: 'proxy_denied' };
+      }
+      if (!desc) return { ok: false, code: 'non_enumerable_property_denied' };
+      if (desc.get !== undefined || desc.set !== undefined) {
+        return { ok: false, code: 'accessor_property_denied' };
+      }
+      if (isArray && key === 'length') {
+        if (desc.enumerable || typeof desc.value !== 'number' || !Number.isInteger(desc.value) || desc.value < 0) {
+          return { ok: false, code: 'invalid_array' };
+        }
+        continue;
+      }
+      if (!desc.enumerable) return { ok: false, code: 'non_enumerable_property_denied' };
+      if (desc.value === undefined) return { ok: false, code: 'own_undefined_denied' };
+      keys.push(key);
+      descriptors.push(desc);
+    }
+    if (isArray) {
+      var lengthDesc;
+      try {
+        lengthDesc = GET_OWN_DESC(value, 'length');
+      } catch (e) {
+        return { ok: false, code: 'proxy_denied' };
+      }
+      var length = lengthDesc && typeof lengthDesc.value === 'number' ? lengthDesc.value : value.length;
+      if (!Number.isInteger(length) || length < 0) return { ok: false, code: 'invalid_array' };
+      if (length > QUESTION_LIMIT) return { ok: false, code: 'out_of_range' };
+      for (var index = 0; index < length; index += 1) {
+        var indexKey = String(index);
+        if (!keyAllowed(keys, indexKey)) return { ok: false, code: 'invalid_array' };
+      }
+      if (keys.length !== length) return { ok: false, code: 'invalid_array' };
+    }
+    return { ok: true, keys: keys, descriptors: descriptors, isArray: isArray };
+  }
+
+  function closedFields(value, allowed, seen) {
+    var inspected = inspectOwnRecord(value);
+    if (!inspected.ok) return inspected;
+    if (inspected.isArray) return { ok: false, code: 'reply_missing' };
+    if (seen.indexOf(value) !== -1) return { ok: false, code: 'aliased_reference_denied' };
+    seen.push(value);
+    var fields = Object.create(null);
+    for (var i = 0; i < inspected.keys.length; i += 1) {
+      var key = inspected.keys[i];
+      if (!keyAllowed(allowed, key)) return { ok: false, code: 'unknown_key' };
+      fields[key] = inspected.descriptors[i].value;
+    }
+    for (var j = 0; j < allowed.length; j += 1) {
+      if (!Object.prototype.hasOwnProperty.call(fields, allowed[j])) {
+        return { ok: false, code: 'missing_key' };
+      }
+    }
+    return { ok: true, fields: fields };
+  }
+
+  function closedDenseArray(value, seen) {
+    var inspected = inspectOwnRecord(value);
+    if (!inspected.ok) return inspected;
+    if (!inspected.isArray) return { ok: false, code: 'invalid_array' };
+    if (seen.indexOf(value) !== -1) return { ok: false, code: 'aliased_reference_denied' };
+    seen.push(value);
+    var items = [];
+    for (var i = 0; i < inspected.keys.length; i += 1) {
+      items.push(inspected.descriptors[i].value);
+    }
+    return { ok: true, items: items };
+  }
+
+  function oversizedString(value, maxChars) {
+    return typeof value !== 'string' || value.length > maxChars;
+  }
+
+  function validateRunReply(runReply) {
+    var seen = [];
+    if (runReply === undefined || runReply === null) return { ok: false, code: 'reply_missing' };
+    var root = closedFields(runReply, RUN_REPLY_KEYS, seen);
+    if (!root.ok) return root;
+    if (typeof root.fields.batch_id !== 'string' || root.fields.batch_id === '' || root.fields.batch_id.length > 128) {
+      return { ok: false, code: 'batch_missing' };
+    }
+    if (!Number.isInteger(root.fields.expected_revision)) return { ok: false, code: 'revision_missing' };
+    var nested = closedFields(root.fields.reply, NESTED_REPLY_KEYS, seen);
+    if (!nested.ok) return nested;
+    if (nested.fields.round !== REPLY_ROUND) return { ok: false, code: 'round_mismatch' };
+    if (nested.fields.batch_id !== root.fields.batch_id) return { ok: false, code: 'batch_mismatch' };
+    var answers = closedDenseArray(nested.fields.answers, seen);
+    if (!answers.ok) return answers;
+    if (answers.items.length > QUESTION_LIMIT) return { ok: false, code: 'out_of_range' };
+    var seenAssignments = Object.create(null);
+    for (var i = 0; i < answers.items.length; i += 1) {
+      var row = closedFields(answers.items[i], ANSWER_KEYS, seen);
+      if (!row.ok) return row;
+      if (typeof row.fields.assignment_id !== 'string' || row.fields.assignment_id === '') {
+        return { ok: false, code: 'question_mismatch' };
+      }
+      if (seenAssignments[row.fields.assignment_id]) return { ok: false, code: 'duplicate_assignment_id' };
+      seenAssignments[row.fields.assignment_id] = true;
+      if (typeof row.fields.question_id !== 'string' || row.fields.question_id === '') {
+        return { ok: false, code: 'question_mismatch' };
+      }
+      if (typeof row.fields.session_id !== 'string' || row.fields.session_id === '') {
+        return { ok: false, code: 'question_mismatch' };
+      }
+      if (typeof row.fields.task_id !== 'string' || row.fields.task_id === '') {
+        return { ok: false, code: 'question_mismatch' };
+      }
+      if (typeof row.fields.response !== 'string' || row.fields.response === '') {
+        return { ok: false, code: 'question_mismatch' };
+      }
+      if (oversizedString(row.fields.response, RESPONSE_MAX)) return { ok: false, code: 'out_of_range' };
+    }
+    return { ok: true, code: null, value: root.fields };
+  }
+
   function safeToken(value, fallback) {
     var text = String(value || '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-');
     text = text.replace(/^-|-$/g, '');
@@ -114,8 +289,8 @@
     for (var i = 0; i < source.length && grouped.length < QUESTION_LIMIT; i += 1) {
       var question = source[i];
       if (!question || typeof question !== 'object') continue;
-      var key = String(question.assignment_id || '') + '\0' + String(question.question_id || '');
-      if (seen[key]) continue;
+      var key = typeof question.assignment_id === 'string' ? question.assignment_id : '';
+      if (key === '' || seen[key]) continue;
       seen[key] = true;
       grouped.push(question);
     }
@@ -156,11 +331,7 @@
         ? attention.unsupported.lanes
         : questions.filter(isUnsupportedQuestion).map(function (question) { return question.assignment_id; }),
     );
-    var eventCursor = typeof reply.event_cursor === 'string' && reply.event_cursor !== ''
-      ? reply.event_cursor
-      : (answerable.map(function (question) { return question.event_cursor; }).find(function (value) {
-        return typeof value === 'string' && value !== '';
-      }) || null);
+    var eventCursor = nonemptyCursor(reply.event_cursor) ? reply.event_cursor : null;
     var batchId = typeof runReply.batch_id === 'string' ? runReply.batch_id : (
       typeof nestedReply.batch_id === 'string' ? nestedReply.batch_id : null
     );
@@ -190,10 +361,17 @@
   }
 
   function identityKey(bound) {
-    if (!bound || !bound.run_id || !bound.batch_id || bound.revision == null || bound.event_cursor == null) {
+    if (!bound || !bound.run_id || !bound.batch_id || bound.revision == null || !nonemptyCursor(bound.event_cursor)) {
       return null;
     }
     return [bound.run_id, bound.batch_id, String(bound.revision), bound.event_cursor].join('\n');
+  }
+
+  function canonicalDeliveryId(bound) {
+    if (!bound || missingAuthority(bound)) return null;
+    var key = identityKey(bound);
+    if (!key) return null;
+    return [REPLY_ID, bound.run_id, bound.batch_id, String(bound.revision), bound.event_cursor].join(':');
   }
 
   function missingAuthority(bound) {
@@ -201,12 +379,14 @@
     if (!bound.run_id) return 'run_missing';
     if (!bound.batch_id) return 'batch_missing';
     if (!Number.isInteger(bound.revision)) return 'revision_missing';
-    if (!bound.event_cursor) return 'cursor_missing';
+    if (bound.cursor_resume !== true) return 'cursor_resume_missing';
+    if (!nonemptyCursor(bound.event_cursor)) return 'cursor_missing';
     if (bound.round !== REPLY_ROUND) return 'round_mismatch';
     for (var i = 0; i < bound.answerable.length; i += 1) {
       var question = bound.answerable[i];
       if (!question.question_id || !question.session_id || !question.task_id) return 'question_mismatch';
-      if (question.event_cursor && question.event_cursor !== bound.event_cursor) return 'cursor_mismatch';
+      if (!nonemptyCursor(question.event_cursor)) return 'cursor_missing';
+      if (question.event_cursor !== bound.event_cursor) return 'cursor_mismatch';
     }
     return null;
   }
@@ -214,9 +394,16 @@
   function answersMatch(expected, actual) {
     if (!Array.isArray(expected) || !Array.isArray(actual) || expected.length !== actual.length) return false;
     var byAssignment = Object.create(null);
-    for (var i = 0; i < expected.length; i += 1) byAssignment[expected[i].assignment_id] = expected[i];
+    for (var i = 0; i < expected.length; i += 1) {
+      if (byAssignment[expected[i].assignment_id]) return false;
+      byAssignment[expected[i].assignment_id] = expected[i];
+    }
+    var seenActual = Object.create(null);
     for (var j = 0; j < actual.length; j += 1) {
       var answer = actual[j];
+      if (!answer || typeof answer !== 'object') return false;
+      if (seenActual[answer.assignment_id]) return false;
+      seenActual[answer.assignment_id] = true;
       var item = byAssignment[answer.assignment_id];
       if (!item) return false;
       if (item.question_id !== answer.question_id) return false;
@@ -224,6 +411,9 @@
       if (item.task_id !== answer.task_id) return false;
       if (typeof answer.response !== 'string' || answer.response === '') return false;
       if (answer.response.length > RESPONSE_MAX) return false;
+    }
+    for (var k = 0; k < expected.length; k += 1) {
+      if (!seenActual[expected[k].assignment_id]) return false;
     }
     return true;
   }
@@ -256,7 +446,8 @@
     var missing = missingAuthority(bound);
     if (missing) return { ok: false, code: missing };
     if (bound.answerable.length === 0) return { ok: false, code: 'unsupported_only' };
-    if (!runReply || typeof runReply !== 'object') return { ok: false, code: 'reply_missing' };
+    var closed = validateRunReply(runReply);
+    if (!closed.ok) return { ok: false, code: closed.code };
     if (runReply.batch_id !== bound.batch_id) return { ok: false, code: 'batch_mismatch' };
     if (runReply.expected_revision !== bound.revision) return { ok: false, code: 'revision_mismatch' };
     var nested = asObject(runReply.reply);
@@ -296,14 +487,20 @@
 
   function isPermittedReplyCall(message, bound) {
     if (!message || message.method !== TOOL_CALL_METHOD) return false;
+    if (message.jsonrpc !== '2.0') return false;
+    var deliveryId = canonicalDeliveryId(bound);
+    if (deliveryId == null || typeof message.id !== 'string' || message.id !== deliveryId) return false;
+    if (isProxyValue(message) || isProxyValue(message.params)) return false;
     var params = asObject(message.params);
     if (!params || params.name !== 'task') return false;
     var args = asObject(params.arguments);
-    if (!args) return false;
-    var keys = Object.keys(args);
-    for (var i = 0; i < keys.length; i += 1) {
-      if (keys[i] !== 'run_id' && keys[i] !== 'run_reply') return false;
-      if (FORBIDDEN_ARG_KEYS[keys[i]]) return false;
+    if (!args || isProxyValue(args)) return false;
+    var inspected = inspectOwnRecord(args);
+    if (!inspected.ok || inspected.isArray) return false;
+    if (inspected.keys.length !== ARGUMENT_KEYS.length) return false;
+    for (var i = 0; i < inspected.keys.length; i += 1) {
+      if (!keyAllowed(ARGUMENT_KEYS, inspected.keys[i])) return false;
+      if (FORBIDDEN_ARG_KEYS[inspected.keys[i]]) return false;
     }
     if (args.run_id !== bound.run_id) return false;
     return authorizeReply(bound, args.run_reply).ok === true;
@@ -575,7 +772,7 @@
 
   function createAttentionSession(options) {
     var opts = options && typeof options === 'object' ? options : {};
-    var replayStore = opts.replayStore || createReplayStore();
+    var replayStore = opts.replayStore || defaultReplayStore;
     var outbound = [];
     var rejected = [];
     var painted = [];
@@ -675,9 +872,17 @@
         focusNow(state);
         return authorized;
       }
+      var deliveryId = canonicalDeliveryId(bound);
+      if (deliveryId == null) {
+        state = 'missing';
+        setLiveStatus(opts.root, STATUS_TEXT.missing, 'denied', true);
+        setSubmitEnabled(opts.root, false);
+        focusNow('missing');
+        return { ok: false, code: 'cursor_missing' };
+      }
       var message = {
         jsonrpc: '2.0',
-        id: REPLY_ID,
+        id: deliveryId,
         method: TOOL_CALL_METHOD,
         params: {
           name: 'task',
@@ -700,7 +905,7 @@
         return { ok: false, code: 'delivery_denied' };
       }
       markSubmittedBound(bound, replayStore);
-      sentReplyIds.push(REPLY_ID);
+      sentReplyIds.push(deliveryId);
       inFlight = false;
       state = 'submitted';
       setLiveStatus(opts.root, STATUS_TEXT.submitted, 'info', true);
@@ -742,7 +947,8 @@
         });
         return;
       }
-      if (Object.prototype.hasOwnProperty.call(data, 'id') && data.id === REPLY_ID && !data.method) {
+      if (Object.prototype.hasOwnProperty.call(data, 'id') && !data.method
+        && (sentReplyIds.indexOf(data.id) !== -1 || data.id === canonicalDeliveryId(bound))) {
         if (data.error) {
           state = 'denied';
           setLiveStatus(opts.root, STATUS_TEXT.denied, 'denied', true);
@@ -850,6 +1056,7 @@
     authorizeReply: authorizeReply,
     bindAttention: bindAttention,
     buildGroupedReply: buildGroupedReply,
+    canonicalDeliveryId: canonicalDeliveryId,
     connectAttentionCard: connectAttentionCard,
     createAttentionSession: createAttentionSession,
     focusPlan: focusPlan,
@@ -861,6 +1068,7 @@
     renderAttentionCardHtml: renderAttentionCardHtml,
     resetSubmittedForTests: resetSubmittedForTests,
     tabOrder: tabOrder,
+    validateRunReply: validateRunReply,
     visiblePlainText: visiblePlainText,
   });
 

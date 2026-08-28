@@ -137,6 +137,79 @@ function toolCalls(session) {
   return session.outbound.filter((message) => message.method === attentionUi.TOOL_CALL_METHOD);
 }
 
+function countingProxy(target) {
+  const counts = { get: 0, ownKeys: 0, getOwnPropertyDescriptor: 0, has: 0, apply: 0 };
+  const proxy = new Proxy(target, {
+    get(inner, property, receiver) {
+      counts.get += 1;
+      return Reflect.get(inner, property, receiver);
+    },
+    ownKeys(inner) {
+      counts.ownKeys += 1;
+      return Reflect.ownKeys(inner);
+    },
+    getOwnPropertyDescriptor(inner, property) {
+      counts.getOwnPropertyDescriptor += 1;
+      return Reflect.getOwnPropertyDescriptor(inner, property);
+    },
+    has(inner, property) {
+      counts.has += 1;
+      return Reflect.has(inner, property);
+    },
+    apply() {
+      counts.apply += 1;
+      throw new Error('proxy apply must never run');
+    },
+  });
+  return { proxy, counts };
+}
+
+function trapTotal(counts) {
+  return counts.get + counts.ownKeys + counts.getOwnPropertyDescriptor + counts.has + counts.apply;
+}
+
+function twoAnswerableProjection(projection) {
+  const next = structuredClone(projection);
+  const validator = next.attention.questions.find((question) => question.assignment_id === 'validator');
+  next.attention.questions.push({
+    ...validator,
+    assignment_id: 'docs',
+    question_id: 'q-docs',
+    session_id: 'sess-docs',
+    task_id: 'task-docs',
+    question: 'Keep the docs moving?',
+    options: ['yes', 'no'],
+    event_cursor: validator.event_cursor,
+    reply_capability: 'same_session',
+    disposition: 'pending',
+  });
+  next.attention.affected_lanes = [...new Set([...next.attention.affected_lanes, 'docs'])].sort();
+  next.attention.unaffected_lanes = next.attention.unaffected_lanes.filter((lane) => lane !== 'docs');
+  next.attention.reply.run_reply.reply.answers.push({
+    assignment_id: 'docs',
+    question_id: 'q-docs',
+    session_id: 'sess-docs',
+    task_id: 'task-docs',
+    response: null,
+  });
+  return next;
+}
+
+function permittedCall(bound, runReply, overrides = {}) {
+  return {
+    jsonrpc: '2.0',
+    id: Object.hasOwn(overrides, 'id') ? overrides.id : attentionUi.canonicalDeliveryId(bound),
+    method: attentionUi.TOOL_CALL_METHOD,
+    params: {
+      name: 'task',
+      arguments: {
+        run_id: overrides.run_id ?? bound.run_id,
+        run_reply: runReply,
+      },
+    },
+  };
+}
+
 test('missing and forged Apps or resource capabilities stay silent', async () => {
   const forged = await loadJson(FIXTURE_DIR, 'forged-capabilities.json');
   const appsOnly = await loadJson(FIXTURE_DIR, 'apps-only-client.json');
@@ -368,6 +441,55 @@ test('stale cursor, revision, and missing identities fail closed', async () => {
   assert.equal(missingQuestion, 'question_mismatch');
 });
 
+test('cursor_resume false, missing, mixed, and missing question cursors fail closed without fallback', async () => {
+  attentionUi.resetSubmittedForTests();
+  const projection = await attentionProjection();
+  const bound = attentionUi.bindAttention(projection);
+  const reply = attentionUi.buildGroupedReply(bound, { validator: 'stricter' });
+  assert.equal(bound.cursor_resume, true);
+  assert.equal(attentionUi.authorizeReply(bound, reply, { validator: 'stricter' }).ok, true);
+
+  const resumeFalse = { ...bound, cursor_resume: false };
+  assert.equal(attentionUi.missingAuthority(resumeFalse), 'cursor_resume_missing');
+  assert.equal(attentionUi.authorizeReply(resumeFalse, reply, { validator: 'stricter' }).ok, false);
+  assert.equal(attentionUi.canonicalDeliveryId(resumeFalse), null);
+
+  const resumeMissing = { ...bound };
+  delete resumeMissing.cursor_resume;
+  assert.equal(attentionUi.missingAuthority(resumeMissing), 'cursor_resume_missing');
+
+  const mixed = structuredClone(projection);
+  const mixedQuestion = mixed.attention.questions.find((question) => question.assignment_id === 'validator');
+  mixedQuestion.event_cursor = '99';
+  const mixedBound = attentionUi.bindAttention(mixed);
+  assert.equal(mixedBound.event_cursor, '12');
+  assert.equal(attentionUi.missingAuthority(mixedBound), 'cursor_mismatch');
+  assert.equal(attentionUi.authorizeReply(mixedBound, attentionUi.buildGroupedReply(mixedBound, {
+    validator: 'stricter',
+  }), { validator: 'stricter' }).ok, false);
+
+  const missingQuestionCursor = structuredClone(projection);
+  const missingQuestion = missingQuestionCursor.attention.questions.find((question) => (
+    question.assignment_id === 'validator'
+  ));
+  delete missingQuestion.event_cursor;
+  const missingQuestionBound = attentionUi.bindAttention(missingQuestionCursor);
+  assert.equal(missingQuestionBound.event_cursor, '12');
+  assert.equal(attentionUi.missingAuthority(missingQuestionBound), 'cursor_missing');
+
+  const fallbackDenied = structuredClone(projection);
+  delete fallbackDenied.attention.reply.event_cursor;
+  fallbackDenied.attention.questions[0].event_cursor = '12';
+  const fallbackBound = attentionUi.bindAttention(fallbackDenied);
+  assert.equal(fallbackBound.event_cursor, null);
+  assert.equal(attentionUi.missingAuthority(fallbackBound), 'cursor_missing');
+  const session = attentionUi.createAttentionSession();
+  session.paint(fallbackDenied);
+  const sent = session.submit({ validator: 'stricter' });
+  assert.equal(sent.ok, false);
+  assert.equal(toolCalls(session).length, 0);
+});
+
 test('cross-run and cross-batch replies are rejected', async () => {
   attentionUi.resetSubmittedForTests();
   const projection = await attentionProjection();
@@ -382,18 +504,7 @@ test('cross-run and cross-batch replies are rejected', async () => {
   assert.equal(otherBatch.code, 'batch_mismatch');
   const session = attentionUi.createAttentionSession();
   session.paint(projection);
-  const forged = {
-    jsonrpc: '2.0',
-    id: 'cce-attention-reply',
-    method: attentionUi.TOOL_CALL_METHOD,
-    params: {
-      name: 'task',
-      arguments: {
-        run_id: 'other-run',
-        run_reply: reply,
-      },
-    },
-  };
+  const forged = permittedCall(bound, reply, { run_id: 'other-run' });
   assert.equal(attentionUi.isPermittedReplyCall(forged, bound), false);
   session.handleMessage(forged);
   assert.equal(toolCalls(session).length, 0);
@@ -427,6 +538,181 @@ test('double submit and reconnect replay send only one tools/call', async () => 
   assert.equal(replayed.ok, false);
   assert.equal(replayed.code, 'already_submitted');
   assert.equal(toolCalls(replay).length, 0);
+});
+
+test('null, forged, and drifted delivery ids fail closed', async () => {
+  attentionUi.resetSubmittedForTests();
+  const projection = await attentionProjection();
+  const bound = attentionUi.bindAttention(projection);
+  const reply = attentionUi.buildGroupedReply(bound, { validator: 'stricter' });
+  const canonical = attentionUi.canonicalDeliveryId(bound);
+  assert.equal(typeof canonical, 'string');
+  assert.equal(canonical.includes(bound.event_cursor), true);
+  assert.equal(attentionUi.isPermittedReplyCall(permittedCall(bound, reply), bound), true);
+
+  const nullId = permittedCall(bound, reply, { id: null });
+  assert.equal(attentionUi.isPermittedReplyCall(nullId, bound), false);
+  const missingId = permittedCall(bound, reply);
+  delete missingId.id;
+  assert.equal(attentionUi.isPermittedReplyCall(missingId, bound), false);
+  const forgedId = permittedCall(bound, reply, { id: 'forged-delivery' });
+  assert.equal(attentionUi.isPermittedReplyCall(forgedId, bound), false);
+  const constantId = permittedCall(bound, reply, { id: attentionUi.REPLY_ID });
+  assert.equal(attentionUi.isPermittedReplyCall(constantId, bound), false);
+
+  const driftedBound = { ...bound, event_cursor: '1' };
+  driftedBound.answerable = bound.answerable.map((question) => ({ ...question, event_cursor: '1' }));
+  const driftedId = attentionUi.canonicalDeliveryId({
+    ...bound,
+    event_cursor: '99',
+    answerable: bound.answerable.map((question) => ({ ...question, event_cursor: '99' })),
+  });
+  assert.notEqual(driftedId, canonical);
+  assert.equal(attentionUi.isPermittedReplyCall(permittedCall(bound, reply, { id: driftedId }), bound), false);
+  assert.equal(attentionUi.isPermittedReplyCall(permittedCall(driftedBound, reply), bound), false);
+
+  const session = attentionUi.createAttentionSession();
+  session.paint(projection);
+  session.handleMessage(nullId);
+  session.handleMessage(forgedId);
+  session.handleMessage(permittedCall(bound, reply, { id: driftedId }));
+  assert.equal(toolCalls(session).length, 0);
+  assert.equal(session.rejected.includes(attentionUi.TOOL_CALL_METHOD), true);
+});
+
+test('two fresh sessions, reconnect, and double click share durable replay identity', async () => {
+  attentionUi.resetSubmittedForTests();
+  const projection = await attentionProjection();
+  const first = attentionUi.createAttentionSession();
+  first.start();
+  first.paint(projection);
+  const sent = first.submit({ validator: 'stricter' });
+  const doubleClick = first.submit({ validator: 'keep' });
+  assert.equal(sent.ok, true);
+  assert.equal(doubleClick.ok, false);
+  assert.equal(doubleClick.code, 'already_submitted');
+  assert.equal(toolCalls(first).length, 1);
+
+  const reconnect = attentionUi.createAttentionSession();
+  reconnect.start();
+  reconnect.paint(projection);
+  const replayed = reconnect.submit({ validator: 'stricter' });
+  assert.equal(replayed.ok, false);
+  assert.equal(replayed.code, 'already_submitted');
+  assert.equal(toolCalls(reconnect).length, 0);
+
+  const fresh = attentionUi.createAttentionSession();
+  fresh.start();
+  fresh.paint(projection);
+  const secondFresh = fresh.submit({ validator: 'stricter' });
+  assert.equal(secondFresh.ok, false);
+  assert.equal(secondFresh.code, 'already_submitted');
+  assert.equal(toolCalls(fresh).length, 0);
+  assert.equal(toolCalls(first)[0].id, attentionUi.canonicalDeliveryId(attentionUi.bindAttention(projection)));
+});
+
+test('multiple questions for one lane stay one group and duplicate assignment answers fail', async () => {
+  attentionUi.resetSubmittedForTests();
+  const projection = await attentionProjection();
+  const sameLane = structuredClone(projection);
+  const validatorIndex = sameLane.attention.questions.findIndex((question) => question.assignment_id === 'validator');
+  const validator = sameLane.attention.questions[validatorIndex];
+  sameLane.attention.questions.splice(validatorIndex + 1, 0, {
+    ...validator,
+    question_id: 'q-validator-extra',
+    question: 'A second question for the same lane',
+    options: ['later'],
+  });
+  const grouped = attentionUi.groupQuestions(sameLane.attention);
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped.filter((question) => question.assignment_id === 'validator').length, 1);
+  assert.equal(grouped.find((question) => question.assignment_id === 'validator').question_id, 'q-validator');
+  const html = attentionUi.renderAttentionCardHtml(sameLane);
+  assert.equal((html.match(/<fieldset>/g) || []).length, 1);
+  assert.equal(html.includes('A second question for the same lane'), false);
+
+  const twoLanes = twoAnswerableProjection(projection);
+  const bound = attentionUi.bindAttention(twoLanes);
+  assert.equal(bound.answerable.length, 2);
+  const valid = attentionUi.buildGroupedReply(bound, { validator: 'stricter', docs: 'yes' });
+  assert.equal(attentionUi.authorizeReply(bound, valid, { validator: 'stricter', docs: 'yes' }).ok, true);
+  const duplicate = {
+    batch_id: bound.batch_id,
+    expected_revision: bound.revision,
+    reply: {
+      round: 1,
+      batch_id: bound.batch_id,
+      answers: [
+        { ...valid.reply.answers[0], response: 'stricter' },
+        { ...valid.reply.answers[0], response: 'keep' },
+      ],
+    },
+  };
+  const rejected = attentionUi.authorizeReply(bound, duplicate, { validator: 'stricter', docs: 'yes' });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.code, 'duplicate_assignment_id');
+  const validated = attentionUi.validateRunReply(duplicate);
+  assert.equal(validated.ok, false);
+  assert.equal(validated.code, 'duplicate_assignment_id');
+});
+
+test('unknown nested keys, proxy, accessor, sparse, alias, and oversize fail closed without traps', async () => {
+  attentionUi.resetSubmittedForTests();
+  const projection = await attentionProjection();
+  const bound = attentionUi.bindAttention(projection);
+  const reply = attentionUi.buildGroupedReply(bound, { validator: 'stricter' });
+  assert.equal(attentionUi.validateRunReply(reply).ok, true);
+
+  const unknown = structuredClone(reply);
+  unknown.hidden = 'nope';
+  assert.equal(attentionUi.validateRunReply(unknown).code, 'unknown_key');
+  assert.equal(attentionUi.authorizeReply(bound, unknown, { validator: 'stricter' }).ok, false);
+  const nestedUnknown = structuredClone(reply);
+  nestedUnknown.reply.extra = true;
+  assert.equal(attentionUi.validateRunReply(nestedUnknown).code, 'unknown_key');
+  const answerUnknown = structuredClone(reply);
+  answerUnknown.reply.answers[0].note = 'progress';
+  assert.equal(attentionUi.validateRunReply(answerUnknown).code, 'unknown_key');
+
+  const { proxy, counts } = countingProxy(reply);
+  const proxied = attentionUi.validateRunReply(proxy);
+  assert.equal(proxied.ok, false);
+  assert.equal(proxied.code, 'proxy_denied');
+  assert.equal(trapTotal(counts), 0);
+  assert.equal(attentionUi.authorizeReply(bound, proxy, { validator: 'stricter' }).ok, false);
+  assert.equal(trapTotal(counts), 0);
+  assert.equal(attentionUi.isPermittedReplyCall(permittedCall(bound, proxy), bound), false);
+  assert.equal(trapTotal(counts), 0);
+
+  const accessor = structuredClone(reply);
+  Object.defineProperty(accessor, 'expected_revision', {
+    enumerable: true,
+    get() { throw new Error('accessor trap'); },
+  });
+  assert.equal(attentionUi.validateRunReply(accessor).code, 'accessor_property_denied');
+
+  const hidden = structuredClone(reply);
+  Object.defineProperty(hidden, 'secret', { value: 'hidden', enumerable: false });
+  assert.equal(attentionUi.validateRunReply(hidden).code, 'non_enumerable_property_denied');
+
+  const symbolic = structuredClone(reply);
+  Object.defineProperty(symbolic, Symbol('leak'), { value: 'x', enumerable: true });
+  assert.equal(attentionUi.validateRunReply(symbolic).code, 'symbol_key_denied');
+
+  const sparse = structuredClone(reply);
+  sparse.reply.answers = [];
+  sparse.reply.answers[1] = structuredClone(reply.reply.answers[0]);
+  sparse.reply.answers.length = 2;
+  assert.equal(attentionUi.validateRunReply(sparse).code, 'invalid_array');
+
+  const aliased = structuredClone(reply);
+  aliased.reply.answers = [aliased.reply, aliased.reply];
+  assert.equal(attentionUi.validateRunReply(aliased).code, 'aliased_reference_denied');
+
+  const oversize = structuredClone(reply);
+  oversize.reply.answers[0].response = 'x'.repeat(attentionUi.RESPONSE_MAX + 1);
+  assert.equal(attentionUi.validateRunReply(oversize).code, 'out_of_range');
+  assert.equal(attentionUi.authorizeReply(bound, oversize, { validator: 'stricter' }).ok, false);
 });
 
 test('unsupported provider replies stay visible unresolved lanes and are not answered', async () => {

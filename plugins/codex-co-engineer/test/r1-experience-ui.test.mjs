@@ -264,10 +264,14 @@ test('attention card groups current questions once and binds one structured repl
   assert.equal(bound.batch_id, receipt.attention.batch_id);
   assert.equal(bound.revision, 1);
   assert.equal(bound.event_cursor, '12');
+  assert.equal(bound.cursor_resume, true);
   const reply = attentionUi.buildGroupedReply(bound, { validator: 'stricter' });
   assert.equal(reply.reply.answers.length, 1);
   assert.equal(reply.reply.answers[0].assignment_id, 'validator');
   assert.equal(reply.reply.round, 1);
+  assert.deepEqual(Object.keys(reply).sort(), ['batch_id', 'expected_revision', 'reply']);
+  assert.deepEqual(Object.keys(reply.reply).sort(), ['answers', 'batch_id', 'round']);
+  assert.equal(attentionUi.validateRunReply(reply).ok, true);
   assert.equal(attentionUi.authorizeReply(bound, reply, { validator: 'stricter' }).ok, true);
   const session = attentionUi.createAttentionSession();
   session.start();
@@ -277,9 +281,13 @@ test('attention card groups current questions once and binds one structured repl
   const calls = session.outbound.filter((message) => message.method === attentionUi.TOOL_CALL_METHOD);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].params.name, 'task');
+  assert.equal(calls[0].id, attentionUi.canonicalDeliveryId(bound));
+  assert.equal(calls[0].id.includes(bound.event_cursor), true);
   assert.deepEqual(Object.keys(calls[0].params.arguments).sort(), ['run_id', 'run_reply']);
   assert.equal(calls[0].params.arguments.run_id, 'auth-split');
   assert.equal(calls[0].params.arguments.run_reply.expected_revision, 1);
+  assert.equal(Object.hasOwn(calls[0].params.arguments.run_reply, 'event_cursor'), false);
+  assert.equal(Object.hasOwn(calls[0].params.arguments.run_reply.reply, 'event_cursor'), false);
   assert.equal(session.focusPlan().target, 'cce-attention-status');
   assert.deepEqual(attentionUi.tabOrder(bound)[0], 'cce-answer-validator-stricter');
 });

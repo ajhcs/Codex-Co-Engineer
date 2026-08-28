@@ -28,12 +28,15 @@ Inline run card:
 
 Grouped attention card:
 
-- every current question, grouped once
+- every current question, grouped once per assignment lane
 - affected assignments that need this one decision
 - unaffected assignments that keep working
 - unsupported same-session providers as explicit unresolved assignments
 - exactly one bounded structured reply on the public `task` tool via `run_reply`
 - the reply bound to the exact run, session, attention batch, and event cursor
+- same-cursor resume only when `cursor_resume` is true and the batch and every
+  answerable question share one identical nonempty event cursor, with no
+  question-cursor fallback
 - resume of that same cursor without replay
 
 Final decision card:
@@ -60,11 +63,16 @@ The attention card sends at most one standards-compatible Apps host-bridge
   `expected_revision`, and one round of answers bound to assignment, question,
   session, and task ids
 
-It fails closed on a stale, missing, or mismatched cursor, run, batch,
-question, lane, revision, or delivery authority. A second click, a second
-submit, or a reconnect replay must not send a second reply. Unsupported
-Cursor Cloud and Muse same-session replies stay visible as unresolved
-lanes; they are not skipped and they do not start another session.
+It fails closed on a stale, missing, or mismatched cursor, missing
+`cursor_resume`, run, batch, question, lane, revision, or delivery
+authority. Duplicate assignment answers are rejected. Nested `run_reply`
+and answer objects are closed-schema checked before the host send. The
+`tools/call` JSON-RPC id is the non-null canonical delivery identity for
+that cursor; forged, null, or drifted ids fail. A second click, a second
+submit, a reconnect, or a fresh session replay must not send a second
+reply. Unsupported Cursor Cloud and Muse same-session replies stay visible
+as unresolved lanes; they are not skipped and they do not start another
+session.
 
 ## Headless fallback
 
