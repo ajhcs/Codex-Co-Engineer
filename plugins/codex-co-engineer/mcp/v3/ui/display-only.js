@@ -82,6 +82,18 @@
     return clipped === '' ? (fallback || NOT_AVAILABLE) : clipped;
   }
 
+  function hasTerminalPunctuation(value) {
+    return /[.!?]$/.test(value);
+  }
+
+  function joinRunPhrases(phrase, running) {
+    var left = displayString(phrase);
+    if (typeof running !== 'string') return left;
+    var right = clipText(running, OBJECTIVE_MAX).trim();
+    if (right === '') return left;
+    return left + (hasTerminalPunctuation(left) ? ' ' : '. ') + right;
+  }
+
   function sha40(value) {
     return typeof value === 'string' && SHA40.test(value) ? value.toLowerCase() : null;
   }
@@ -249,7 +261,7 @@
       '<article class="cce-card cce-card-run" data-cce-card="run" data-cce-display-only="true" aria-labelledby="cce-run-title">',
       '<header>',
       '<h1 id="cce-run-title">Co-Engineer run</h1>',
-      '<p class="cce-phrase">' + escapeHtml(displayString(phrase)) + (running ? ' ' + escapeHtml(displayString(running, '')) : '') + '</p>',
+      '<p class="cce-phrase">' + escapeHtml(joinRunPhrases(phrase, running)) + '</p>',
       '<p class="cce-authority">' + escapeHtml(CODEX_AUTHORITY_SENTENCE) + '</p>',
       '</header>',
       '<section aria-labelledby="cce-objective-heading">',
@@ -390,7 +402,7 @@
         : (phrases[0] || 'I am delegating this to Co-Engineer');
       var running = typeof safe.summary?.running === 'string' ? safe.summary.running : '';
       return {
-        phrase: running ? (displayString(phrase) + ' ' + displayString(running, '')) : displayString(phrase),
+        phrase: joinRunPhrases(phrase, running),
         objective: displayString(run.objective),
         base_sha: sha40(repository.base_sha) || NOT_AVAILABLE,
         digest: digestValue(repository.digest) || NOT_AVAILABLE,
