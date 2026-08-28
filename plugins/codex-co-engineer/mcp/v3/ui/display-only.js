@@ -245,6 +245,7 @@
     var baseSha = sha40(repository.base_sha);
     var digest = digestValue(repository.digest);
     return [
+      '<main>',
       '<article class="cce-card cce-card-run" data-cce-card="run" data-cce-display-only="true" aria-labelledby="cce-run-title">',
       '<header>',
       '<h1 id="cce-run-title">Co-Engineer run</h1>',
@@ -268,6 +269,7 @@
       '</section>',
       '<p class="cce-note">' + escapeHtml(DISPLAY_ONLY_NOTE) + '</p>',
       '</article>',
+      '</main>',
     ].join('');
   }
 
@@ -294,6 +296,7 @@
       ? '<p class="cce-phrase">' + escapeHtml(clipText(verified, QUESTION_MAX)) + '</p>'
       : '';
     return [
+      '<main>',
       '<article class="cce-card cce-card-final" data-cce-card="final" data-cce-display-only="true" aria-labelledby="cce-final-title">',
       '<header>',
       '<h1 id="cce-final-title">Co-Engineer final decision</h1>',
@@ -349,6 +352,7 @@
       '</section>',
       '<p class="cce-note">' + escapeHtml(DISPLAY_ONLY_NOTE) + '</p>',
       '</article>',
+      '</main>',
     ].join('');
   }
 
@@ -540,6 +544,43 @@
     }
   }
 
+  function parseHostContext(data) {
+    if (!data || typeof data !== 'object') return null;
+    var source = data.params && typeof data.params === 'object' ? data.params : data;
+    if (source.hostContext && typeof source.hostContext === 'object') source = source.hostContext;
+    if (source.result && source.result.hostContext && typeof source.result.hostContext === 'object') {
+      source = source.result.hostContext;
+    }
+    var theme = typeof source.theme === 'string' ? source.theme : null;
+    var locale = typeof source.locale === 'string'
+      ? source.locale
+      : (Array.isArray(source.locales) && typeof source.locales[0] === 'string' ? source.locales[0] : null);
+    var dir = typeof source.dir === 'string'
+      ? source.dir
+      : (typeof source.direction === 'string' ? source.direction : null);
+    if (!theme && !locale && !dir) return null;
+    return { theme: theme, locale: locale, dir: dir };
+  }
+
+  function applyHostContext(documentRef, context) {
+    if (!documentRef || !documentRef.documentElement || !context) return false;
+    var html = documentRef.documentElement;
+    if (context.theme === 'dark' || context.theme === 'light') {
+      html.setAttribute('data-cce-theme', context.theme);
+    }
+    if (typeof context.locale === 'string' && context.locale !== '') {
+      var lang = context.locale.replace(/_/g, '-');
+      html.setAttribute('lang', lang);
+      if (!context.dir && /^(ar|he|fa|ur)(?:-|$)/i.test(lang)) {
+        html.setAttribute('dir', 'rtl');
+      }
+    }
+    if (context.dir === 'rtl' || context.dir === 'ltr' || context.dir === 'auto') {
+      html.setAttribute('dir', context.dir);
+    }
+    return true;
+  }
+
   function createDisplayOnlySession(options) {
     var opts = options && typeof options === 'object' ? options : {};
     var card = INLINE_CARDS[opts.card] ? opts.card : null;
@@ -574,6 +615,9 @@
     function handleMessage(data) {
       if (!data || typeof data !== 'object') return;
       var inboundMethod = typeof data.method === 'string' ? data.method : null;
+      var hostContext = parseHostContext(data);
+      if (hostContext && opts.document) applyHostContext(opts.document, hostContext);
+      if (inboundMethod === 'ui/notifications/host-context-changed') return;
       if (inboundMethod && (isForbiddenHostMethod(inboundMethod) || inboundMethod.indexOf('ui/') !== 0)) {
         rejected.push(inboundMethod);
         return;
@@ -648,14 +692,18 @@
     DISPLAY_ONLY_NOTE: DISPLAY_ONLY_NOTE,
     NOT_AVAILABLE: NOT_AVAILABLE,
     TOOL_CALL_METHOD: TOOL_CALL_METHOD,
+    applyHostContext: applyHostContext,
     clipText: clipText,
     connectDisplayOnlyCard: connectDisplayOnlyCard,
     createDisplayOnlySession: createDisplayOnlySession,
+    displayString: displayString,
     documentContainsActionControls: documentContainsActionControls,
     escapeHtml: escapeHtml,
     fieldMap: fieldMap,
     isForbiddenHostMethod: isForbiddenHostMethod,
+    joinIds: joinIds,
     markupWithoutScripts: markupWithoutScripts,
+    parseHostContext: parseHostContext,
     redactDisplay: redactDisplay,
     renderFinalCardHtml: renderFinalCardHtml,
     renderInlineCardHtml: renderInlineCardHtml,
