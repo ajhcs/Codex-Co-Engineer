@@ -12,16 +12,16 @@ const FINAL_PLUGIN = 'assets/experience/final';
 const MANIFEST_RELATIVE = `${FINAL_DOCS}/manifest.json`;
 
 const PUBLISHED_README_STILLS = Object.freeze({
-  'hero-demo': `${FINAL_DOCS}/hero-architecture.png`,
-  'first-delegation': `${FINAL_DOCS}/first-delegation.jpg`,
-  'provider-choices': `${FINAL_DOCS}/provider-choices.jpg`,
-  'failure-unresolved': `${FINAL_DOCS}/failure-unresolved.jpg`,
-  'install-auth': `${FINAL_DOCS}/install-auth.jpg`,
+  'hero-demo': `${FINAL_DOCS}/derived/hero-demo.jpg`,
+  'first-delegation': `${FINAL_DOCS}/derived/first-delegation.jpg`,
+  'provider-choices': `${FINAL_DOCS}/derived/provider-choices.jpg`,
+  'failure-unresolved': `${FINAL_DOCS}/derived/failure-unresolved.jpg`,
+  'install-auth': `${FINAL_DOCS}/derived/install-auth.jpg`,
 });
 
 const HERO_MOTION = Object.freeze([
-  `${FINAL_DOCS}/hero-architecture-silent.mp4`,
-  `${FINAL_DOCS}/hero-architecture-silent.webm`,
+  `${FINAL_DOCS}/derived/hero-muted.mp4`,
+  `${FINAL_DOCS}/derived/hero-muted.webm`,
 ]);
 
 const HELD_SLOTS = Object.freeze(['grouped-attention', 'verified-final-decision']);
@@ -68,7 +68,7 @@ function collectStrings(value, into = []) {
 
 function findPublishable(manifest, matcher) {
   if (!manifest || typeof manifest !== 'object') return null;
-  const assets = manifest.assets;
+  const assets = manifest.inventory ?? manifest.assets;
   const candidates = [];
   if (Array.isArray(assets)) candidates.push(...assets);
   else if (assets && typeof assets === 'object') {
@@ -125,9 +125,9 @@ test('README final-art links stay relative, inventoried, and free of stale scaff
     assert.equal(links.has(motion), true, motion);
     assert.ok(readme.indexOf(PUBLISHED_README_STILLS['hero-demo']) < readme.indexOf(motion));
   }
-  assert.equal(links.has(`${FINAL_DOCS}/multi-lane-supplemental-poster.webp`), false);
-  assert.equal(links.has(`${FINAL_DOCS}/multi-lane-supplemental-silent.mp4`), false);
-  assert.equal(links.has(`${FINAL_DOCS}/multi-lane-supplemental-silent.webm`), false);
+  assert.equal(links.has(`${FINAL_DOCS}/derived/multi-lane-frame-poster.held.jpg`), false);
+  assert.equal(links.has(`${FINAL_DOCS}/derived/multi-lane-muted.held.mp4`), false);
+  assert.equal(links.has(`${FINAL_DOCS}/derived/multi-lane-muted.held.webm`), false);
   assert.doesNotMatch(readme, /multi-lane-run\.(?:jpg|jpeg|png|webp)/u);
   for (const stale of STALE_PATHS) {
     assert.equal(readme.includes(stale), false, stale);
@@ -137,9 +137,9 @@ test('README final-art links stay relative, inventoried, and free of stale scaff
   assert.equal(marketplace.interface.poster, PUBLISHED_README_STILLS['hero-demo']);
   assert.equal(marketplace.interface.heroMp4, HERO_MOTION[0]);
   assert.equal(marketplace.interface.heroWebm, HERO_MOTION[1]);
-  assert.equal(plugin.interface.poster, `./${FINAL_PLUGIN}/hero-architecture.png`);
-  assert.equal(plugin.interface.heroMp4, `./${FINAL_PLUGIN}/hero-architecture-silent.mp4`);
-  assert.equal(plugin.interface.heroWebm, `./${FINAL_PLUGIN}/hero-architecture-silent.webm`);
+  assert.equal(plugin.interface.poster, `./${FINAL_PLUGIN}/derived/hero-demo.jpg`);
+  assert.equal(plugin.interface.heroMp4, `./${FINAL_PLUGIN}/derived/hero-muted.mp4`);
+  assert.equal(plugin.interface.heroWebm, `./${FINAL_PLUGIN}/derived/hero-muted.webm`);
   for (const relative of [...expectedImages, ...HERO_MOTION]) {
     if (await optionalFile(relative)) {
       const info = await stat(path.join(REPO, relative));
@@ -245,11 +245,11 @@ test('final-art references are structurally valid and manifest-backed when compo
     assert.equal(slotContract.includes(relative), true, relative);
     assert.equal(links.has(relative), true, relative);
   }
-  assert.match(slotContract, /multi-lane-supplemental-silent\.mp4/u);
-  assert.match(slotContract, /publishable=true/u);
+  assert.match(slotContract, /multi-lane-muted\.held\.mp4/u);
+  assert.match(slotContract, /publishable=false/u);
   assert.match(readme, /malformed and is not published/u);
-  assert.match(readme, /conceptual only and is published only/u);
-  assert.match(readme, /manifest\.json` records\s+`publishable=true`/u);
+  assert.match(readme, /supplemental multi-lane motion is also held/u);
+  assert.match(readme, /does not truthfully depict independent assignments/u);
 
   if (!manifest) return;
 
@@ -267,11 +267,11 @@ test('final-art references are structurally valid and manifest-backed when compo
     );
     assert.notEqual(publishable, false, relative);
   }
-  const multiLaneLinked = [...links].some((target) => target.includes('multi-lane-supplemental'));
+  const multiLaneLinked = [...links].some((target) => target.includes('multi-lane'));
   if (multiLaneLinked) {
     const publishable = findPublishable(
       manifest,
-      (item) => /multi-lane-supplemental/u.test(item),
+      (item) => /multi-lane/u.test(item),
     );
     assert.equal(publishable, true, 'linked multi-lane motion requires publishable=true');
   }

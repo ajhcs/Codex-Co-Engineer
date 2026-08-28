@@ -49,9 +49,9 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   ]);
   assert.equal(manifest.interface.composerIcon, './assets/experience/mark.svg');
   assert.equal(manifest.interface.logo, './assets/experience/mark.svg');
-  assert.equal(manifest.interface.poster, './assets/experience/final/hero-architecture.png');
-  assert.equal(manifest.interface.heroMp4, './assets/experience/final/hero-architecture-silent.mp4');
-  assert.equal(manifest.interface.heroWebm, './assets/experience/final/hero-architecture-silent.webm');
+  assert.equal(manifest.interface.poster, './assets/experience/final/derived/hero-demo.jpg');
+  assert.equal(manifest.interface.heroMp4, './assets/experience/final/derived/hero-muted.mp4');
+  assert.equal(manifest.interface.heroWebm, './assets/experience/final/derived/hero-muted.webm');
   assert.doesNotMatch(JSON.stringify(manifest), /3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(manifest), /deepseek-harness/u);
   assert.doesNotMatch(JSON.stringify(manifest), /Using DSH Co-Engineer/u);
@@ -92,14 +92,14 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
 test('visitor README leads with the product shot and copy/paste install', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  const poster = 'docs/assets/co-engineer-3.4.0/final/hero-architecture.png';
-  const heroMp4 = 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.mp4';
-  const heroWebm = 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.webm';
+  const poster = 'docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg';
+  const heroMp4 = 'docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4';
+  const heroWebm = 'docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm';
   const stills = [
-    'docs/assets/co-engineer-3.4.0/final/first-delegation.jpg',
-    'docs/assets/co-engineer-3.4.0/final/provider-choices.jpg',
-    'docs/assets/co-engineer-3.4.0/final/failure-unresolved.jpg',
-    'docs/assets/co-engineer-3.4.0/final/install-auth.jpg',
+    'docs/assets/co-engineer-3.4.0/final/derived/first-delegation.jpg',
+    'docs/assets/co-engineer-3.4.0/final/derived/provider-choices.jpg',
+    'docs/assets/co-engineer-3.4.0/final/derived/failure-unresolved.jpg',
+    'docs/assets/co-engineer-3.4.0/final/derived/install-auth.jpg',
   ];
   assert.ok(readme.includes(poster));
   assert.ok(readme.includes(heroMp4));
@@ -274,9 +274,9 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.3.0', async () => {
     'isolated-assignments',
   ]);
   assert.equal(marketplace.interface.logo, 'plugins/codex-co-engineer/assets/experience/mark.svg');
-  assert.equal(marketplace.interface.poster, 'docs/assets/co-engineer-3.4.0/final/hero-architecture.png');
-  assert.equal(marketplace.interface.heroMp4, 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.mp4');
-  assert.equal(marketplace.interface.heroWebm, 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.webm');
+  assert.equal(marketplace.interface.poster, 'docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg');
+  assert.equal(marketplace.interface.heroMp4, 'docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4');
+  assert.equal(marketplace.interface.heroWebm, 'docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm');
   assert.doesNotMatch(JSON.stringify(marketplace), /3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(marketplace), /codex-co-engineer-3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(marketplace), /Using DSH Co-Engineer/u);

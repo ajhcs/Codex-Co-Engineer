@@ -40,11 +40,11 @@ Optional silent animation is linked explicitly.
 
 <!-- README_ART_SLOT: hero-demo -->
 
-![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/final/hero-architecture.png)
+![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg)
 
 Optional silent architecture animation:
-[MP4](docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.mp4) or
-[WebM](docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.webm).
+[MP4](docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4) or
+[WebM](docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm).
 
 ## First 60 seconds
 
@@ -68,7 +68,7 @@ complete, Codex inspects it:
 
 <!-- README_ART_SLOT: first-delegation -->
 
-![Conceptual illustration of a first Co-Engineer delegation: one explicit Grok assignment, one submission, and one verified candidate.](docs/assets/co-engineer-3.4.0/final/first-delegation.jpg)
+![Conceptual illustration of a first Co-Engineer delegation: one explicit Grok assignment, one submission, and one verified candidate.](docs/assets/co-engineer-3.4.0/final/derived/first-delegation.jpg)
 
 You still decide whether to keep, change, or discard the result.
 
@@ -86,10 +86,9 @@ Codex:
 
 <!-- README_ART_SLOT: multi-lane-run -->
 
-The supplied multi-lane static is malformed and is not published. Any
-supplemental multi-lane motion is conceptual only and is published only
-when `docs/assets/co-engineer-3.4.0/final/manifest.json` records
-`publishable=true` for that asset.
+The supplied multi-lane static is malformed and is not published. The
+supplemental multi-lane motion is also held: its Main/Sub-task hierarchy
+does not truthfully depict independent assignments on a run card.
 
 If you have no saved profile and name no co-engineers, Codex asks once
 which co-engineers should take the independent assignments: Grok,
@@ -161,7 +160,7 @@ Codex:
 
 <!-- README_ART_SLOT: provider-choices -->
 
-![Conceptual illustration of explicit Grok, Cursor, and Muse Co-Engineer choices, with no learned or global router.](docs/assets/co-engineer-3.4.0/final/provider-choices.jpg)
+![Conceptual illustration of explicit Grok, Cursor, and Muse Co-Engineer choices, with no learned or global router.](docs/assets/co-engineer-3.4.0/final/derived/provider-choices.jpg)
 
 ## Codex authority and safety
 
@@ -277,7 +276,7 @@ Cancel is chatting with Co-Engineer, not a new delegation.
 
 <!-- README_ART_SLOT: failure-unresolved -->
 
-![Conceptual illustration of a required Co-Engineer assignment that failed or stayed unresolved, so no verified candidate is claimed.](docs/assets/co-engineer-3.4.0/final/failure-unresolved.jpg)
+![Conceptual illustration of a required Co-Engineer assignment that failed or stayed unresolved, so no verified candidate is claimed.](docs/assets/co-engineer-3.4.0/final/derived/failure-unresolved.jpg)
 
 ## Install and authentication
 
@@ -296,7 +295,7 @@ npm --prefix plugins/codex-co-engineer run setup:check
 
 <!-- README_ART_SLOT: install-auth -->
 
-![Conceptual illustration of a clean Codex-Co-Engineer install and provider sign-in, with credentials and private paths omitted.](docs/assets/co-engineer-3.4.0/final/install-auth.jpg)
+![Conceptual illustration of a clean Codex-Co-Engineer install and provider sign-in, with credentials and private paths omitted.](docs/assets/co-engineer-3.4.0/final/derived/install-auth.jpg)
 
 `npm run setup` installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and
 the cohesive DSH `0.1.0-rc.7` composition. It does not log you into
