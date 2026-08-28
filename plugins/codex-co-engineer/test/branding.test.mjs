@@ -49,9 +49,9 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   ]);
   assert.equal(manifest.interface.composerIcon, './assets/experience/mark.svg');
   assert.equal(manifest.interface.logo, './assets/experience/mark.svg');
-  assert.equal(manifest.interface.poster, './assets/experience/poster.jpg');
-  assert.equal(manifest.interface.heroMp4, './assets/experience/hero-muted.mp4');
-  assert.equal(manifest.interface.heroWebm, './assets/experience/hero-muted.webm');
+  assert.equal(manifest.interface.poster, './assets/experience/final/hero-architecture.png');
+  assert.equal(manifest.interface.heroMp4, './assets/experience/final/hero-architecture-silent.mp4');
+  assert.equal(manifest.interface.heroWebm, './assets/experience/final/hero-architecture-silent.webm');
   assert.doesNotMatch(JSON.stringify(manifest), /3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(manifest), /deepseek-harness/u);
   assert.doesNotMatch(JSON.stringify(manifest), /Using DSH Co-Engineer/u);
@@ -92,21 +92,33 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
 test('visitor README leads with the product shot and copy/paste install', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  const poster = 'docs/assets/co-engineer-3.4.0/poster.jpg';
-  const heroMp4 = 'docs/assets/co-engineer-3.4.0/hero-muted.mp4';
-  const heroWebm = 'docs/assets/co-engineer-3.4.0/hero-muted.webm';
+  const poster = 'docs/assets/co-engineer-3.4.0/final/hero-architecture.png';
+  const heroMp4 = 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.mp4';
+  const heroWebm = 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.webm';
+  const stills = [
+    'docs/assets/co-engineer-3.4.0/final/first-delegation.jpg',
+    'docs/assets/co-engineer-3.4.0/final/provider-choices.jpg',
+    'docs/assets/co-engineer-3.4.0/final/failure-unresolved.jpg',
+    'docs/assets/co-engineer-3.4.0/final/install-auth.jpg',
+  ];
   assert.ok(readme.includes(poster));
   assert.ok(readme.includes(heroMp4));
   assert.ok(readme.includes(heroWebm));
   assert.ok(readme.indexOf(poster) < readme.indexOf(heroMp4));
   assert.ok(readme.indexOf(heroMp4) < readme.indexOf(heroWebm));
-  assert.match(readme, /poster is the static,[\s\S]*reduced-motion,[\s\S]*GitHub\s+fallback/u);
-  assert.match(readme, /If embedded playback is unavailable/u);
+  assert.match(readme, /static Co-Engineer architecture illustration is the authoritative/u);
+  assert.match(readme, /GitHub README Markdown cannot guarantee\s+video playback/u);
+  assert.match(readme, /There is no autoplay audio/u);
+  assert.match(readme, /Optional silent architecture animation/u);
+  assert.doesNotMatch(readme, /<video\b/iu);
+  assert.doesNotMatch(readme, /autoplay=/iu);
   assert.doesNotMatch(readme.slice(0, readme.indexOf('## How a run works')), /co-engineer\.png/u);
   assert.doesNotMatch(readme, /placeholder/iu);
   assert.doesNotMatch(readme, /does not add a replacement asset/iu);
   assert.doesNotMatch(readme, /codex-co-engineer-3\.1\.0/u);
   assert.doesNotMatch(readme, /docs\/assets\/codex-co-engineer-3\.1\.0\.(?:jpg|svg)/u);
+  assert.doesNotMatch(readme, /docs\/assets\/co-engineer-3\.4\.0\/poster\.jpg/u);
+  assert.doesNotMatch(readme, /docs\/assets\/co-engineer-3\.4\.0\/hero-muted\.(?:mp4|webm)/u);
 
   const referenced = new Set();
   for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
@@ -123,11 +135,16 @@ test('visitor README leads with the product shot and copy/paste install', async 
       referenced.add(target);
     }
   }
-  assert.deepEqual([...referenced].sort(), [heroMp4, heroWebm, poster].sort());
+  assert.deepEqual([...referenced].sort(), [poster, heroMp4, heroWebm, ...stills].sort());
   for (const relative of referenced) {
-    await access(path.join(REPO, relative));
-    const info = await stat(path.join(REPO, relative));
-    assert.equal(info.isFile(), true, relative);
+    assert.match(relative, /^docs\/assets\/co-engineer-3\.4\.0\/final\/[A-Za-z0-9./_-]+$/u);
+    try {
+      await access(path.join(REPO, relative));
+      const info = await stat(path.join(REPO, relative));
+      assert.equal(info.isFile(), true, relative);
+    } catch (error) {
+      assert.equal(error?.code, 'ENOENT', relative);
+    }
   }
 
   const docsPoster = await readFile(path.join(REPO, 'docs/assets/co-engineer-3.4.0/poster.svg'), 'utf8');
@@ -158,7 +175,7 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
 });
 
-test('README information architecture and final-art slots are frozen before art production', async () => {
+test('README information architecture maps safe final-art slots and keeps explicit holds', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');
   const headings = [
@@ -194,11 +211,16 @@ test('README information architecture and final-art slots are frozen before art 
     assert.equal((readme.match(new RegExp(`README_ART_SLOT: ${slot}`, 'gu')) ?? []).length, 1, slot);
     assert.ok(slotContract.includes('| `' + slot + '` |'), slot);
   }
-  assert.match(slotContract, /provenance-preserved scaffolding and reference assets/u);
-  assert.match(slotContract, /not the\s+user-approved final README image set/u);
-  assert.match(slotContract, /exact release candidate on the shipping\s+Codex host/u);
+  assert.match(slotContract, /[Rr]etained scaffolding/u);
+  assert.match(slotContract, /not the\s+published 3\.4\.0 README image set/u);
+  assert.match(slotContract, /exact release candidate on the\s+shipping Codex host/u);
   assert.match(slotContract, /prefers-reduced-motion/u);
   assert.match(slotContract, /GitHub rendering may omit the video player/u);
+  assert.match(slotContract, /grouped-attention[\s\S]*Held/u);
+  assert.match(slotContract, /verified-final-decision[\s\S]*Held/u);
+  assert.match(slotContract, /malformed multi-lane static/u);
+  assert.match(readme, /This image slot is held\. No supplied source shows grouped questions/u);
+  assert.match(readme, /Conceptual outcome art lacks branch, head, and\s+tree identities/u);
 });
 
 test('every repository-relative README link resolves from the repository root', async () => {
@@ -210,6 +232,15 @@ test('every repository-relative README link resolves from the repository root', 
     targets.add(decodeURIComponent(target.split('#', 1)[0]));
   }
   for (const target of targets) {
+    if (target.startsWith('docs/assets/co-engineer-3.4.0/final/')) {
+      assert.match(target, /^docs\/assets\/co-engineer-3\.4\.0\/final\/[A-Za-z0-9./_-]+$/u);
+      try {
+        await access(path.resolve(REPO, target));
+      } catch (error) {
+        assert.equal(error?.code, 'ENOENT', target);
+      }
+      continue;
+    }
     await access(path.resolve(REPO, target));
   }
 });
@@ -243,9 +274,9 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.3.0', async () => {
     'isolated-assignments',
   ]);
   assert.equal(marketplace.interface.logo, 'plugins/codex-co-engineer/assets/experience/mark.svg');
-  assert.equal(marketplace.interface.poster, 'docs/assets/co-engineer-3.4.0/poster.jpg');
-  assert.equal(marketplace.interface.heroMp4, 'docs/assets/co-engineer-3.4.0/hero-muted.mp4');
-  assert.equal(marketplace.interface.heroWebm, 'docs/assets/co-engineer-3.4.0/hero-muted.webm');
+  assert.equal(marketplace.interface.poster, 'docs/assets/co-engineer-3.4.0/final/hero-architecture.png');
+  assert.equal(marketplace.interface.heroMp4, 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.mp4');
+  assert.equal(marketplace.interface.heroWebm, 'docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.webm');
   assert.doesNotMatch(JSON.stringify(marketplace), /3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(marketplace), /codex-co-engineer-3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(marketplace), /Using DSH Co-Engineer/u);

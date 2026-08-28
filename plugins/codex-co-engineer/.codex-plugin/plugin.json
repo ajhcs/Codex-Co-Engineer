@@ -37,8 +37,8 @@
     "brandColor": "#111111",
     "composerIcon": "./assets/experience/mark.svg",
     "logo": "./assets/experience/mark.svg",
-    "poster": "./assets/experience/poster.jpg",
-    "heroMp4": "./assets/experience/hero-muted.mp4",
-    "heroWebm": "./assets/experience/hero-muted.webm"
+    "poster": "./assets/experience/final/hero-architecture.png",
+    "heroMp4": "./assets/experience/final/hero-architecture-silent.mp4",
+    "heroWebm": "./assets/experience/final/hero-architecture-silent.webm"
   }
 }

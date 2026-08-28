@@ -32,24 +32,19 @@ notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 
 ## Visual demo
 
-This provisional 3.4.0 reference demo preserves the approved product
-promise and Co-Engineer identity while the final user-designed README
-image set is prepared. It is not the final release artwork. There is no
-autoplay audio. The poster is the static, reduced-motion, and GitHub
-fallback.
+The static Co-Engineer architecture illustration is the authoritative
+GitHub-compatible visual. It uses the approved Co-Engineer identity. It
+is not a live-run screenshot. GitHub README Markdown cannot guarantee
+video playback or reduced-motion behavior. There is no autoplay audio.
+Optional silent animation is linked explicitly.
 
 <!-- README_ART_SLOT: hero-demo -->
 
-![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/poster.jpg)
+![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/final/hero-architecture.png)
 
-<video muted playsinline controls poster="docs/assets/co-engineer-3.4.0/poster.jpg">
-  <source src="docs/assets/co-engineer-3.4.0/hero-muted.mp4" type="video/mp4">
-  <source src="docs/assets/co-engineer-3.4.0/hero-muted.webm" type="video/webm">
-</video>
-
-If embedded playback is unavailable, open the muted
-[MP4](docs/assets/co-engineer-3.4.0/hero-muted.mp4) or
-[WebM](docs/assets/co-engineer-3.4.0/hero-muted.webm) directly.
+Optional silent architecture animation:
+[MP4](docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.mp4) or
+[WebM](docs/assets/co-engineer-3.4.0/final/hero-architecture-silent.webm).
 
 ## First 60 seconds
 
@@ -73,6 +68,8 @@ complete, Codex inspects it:
 
 <!-- README_ART_SLOT: first-delegation -->
 
+![Conceptual illustration of a first Co-Engineer delegation: one explicit Grok assignment, one submission, and one verified candidate.](docs/assets/co-engineer-3.4.0/final/first-delegation.jpg)
+
 You still decide whether to keep, change, or discard the result.
 
 ### Several independent assignments
@@ -88,6 +85,11 @@ Codex:
 > independent assignments.
 
 <!-- README_ART_SLOT: multi-lane-run -->
+
+The supplied multi-lane static is malformed and is not published. Any
+supplemental multi-lane motion is conceptual only and is published only
+when `docs/assets/co-engineer-3.4.0/final/manifest.json` records
+`publishable=true` for that asset.
 
 If you have no saved profile and name no co-engineers, Codex asks once
 which co-engineers should take the independent assignments: Grok,
@@ -158,6 +160,8 @@ Codex:
 > running 3 independent assignments.
 
 <!-- README_ART_SLOT: provider-choices -->
+
+![Conceptual illustration of explicit Grok, Cursor, and Muse Co-Engineer choices, with no learned or global router.](docs/assets/co-engineer-3.4.0/final/provider-choices.jpg)
 
 ## Codex authority and safety
 
@@ -246,6 +250,10 @@ You:
 
 <!-- README_ART_SLOT: grouped-attention -->
 
+This image slot is held. No supplied source shows grouped questions,
+affected and unaffected lanes, one structured response, and same-cursor
+resume together.
+
 That answer is chatting: answer grouped attention. It is not a debate
 loop. Codex continues the same run with the same single wait.
 
@@ -254,6 +262,10 @@ After the wait, Codex inspects the candidate. Only then may it say:
 > Co-Engineer finished, and I verified the candidate.
 
 <!-- README_ART_SLOT: verified-final-decision -->
+
+This image slot is held. Conceptual outcome art lacks branch, head, and
+tree identities plus the scope, tests, reviews, candidate, and
+sanitized-evidence contract.
 
 Verification is Codex's review of the candidate, not automatic merge.
 You keep control.
@@ -264,6 +276,8 @@ verified the candidate. A required gap blocks a complete candidate.
 Cancel is chatting with Co-Engineer, not a new delegation.
 
 <!-- README_ART_SLOT: failure-unresolved -->
+
+![Conceptual illustration of a required Co-Engineer assignment that failed or stayed unresolved, so no verified candidate is claimed.](docs/assets/co-engineer-3.4.0/final/failure-unresolved.jpg)
 
 ## Install and authentication
 
@@ -281,6 +295,8 @@ npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
 <!-- README_ART_SLOT: install-auth -->
+
+![Conceptual illustration of a clean Codex-Co-Engineer install and provider sign-in, with credentials and private paths omitted.](docs/assets/co-engineer-3.4.0/final/install-auth.jpg)
 
 `npm run setup` installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and
 the cohesive DSH `0.1.0-rc.7` composition. It does not log you into
