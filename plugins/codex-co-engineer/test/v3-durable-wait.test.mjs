@@ -41,6 +41,15 @@ function createMockWatch() {
   return { watch, state };
 }
 
+async function waitForMockErrorHandler(state, previous = null) {
+  const deadline = Date.now() + 1_000;
+  while (typeof state.errorHandler !== 'function' || state.errorHandler === previous) {
+    if (Date.now() >= deadline) assert.fail('mock watcher did not install its error handler');
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  return state.errorHandler;
+}
+
 test('terminal wait ignores text deltas and wakes on success, failure, timeout, and cancellation', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-durable-'));
   try {
@@ -316,10 +325,10 @@ test('watcher failure uses a low-frequency fallback instead of model-driven poll
       },
       fallback_ms: 1_000,
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    state.errorHandler(new Error('watch failed'));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    state.errorHandler(new Error('watch failed again'));
+    const firstErrorHandler = await waitForMockErrorHandler(state);
+    firstErrorHandler(new Error('watch failed'));
+    const secondErrorHandler = await waitForMockErrorHandler(state, firstErrorHandler);
+    secondErrorHandler(new Error('watch failed again'));
     const timedOut = await pending;
     assert.equal(timedOut.progress.wait_reason, 'timeout');
     assert.equal(state.closed, state.opened);

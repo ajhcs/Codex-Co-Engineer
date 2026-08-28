@@ -42,7 +42,7 @@ import {
   knownProvidersJoined,
   sortedCapturedKeys,
 } from './grammar.mjs';
-import { IDENTITY_LABELS, canonicalJsonStringify } from './identity.mjs';
+import { IDENTITY_LABELS, canonicalExtendedJsonStringify } from './identity.mjs';
 import {
   MAX_METRIC_COUNTER,
   TELEMETRY_CORRELATION_SCHEMA_ID,
@@ -60,6 +60,7 @@ import {
 import {
   assertDirectJsonClosure,
   assertNotProxy,
+  freezeData,
 } from './selection-json.mjs';
 
 export const USAGE_LEDGER_SCHEMA_ID = 'codex-co-engineer.usage-ledger.v1';
@@ -139,7 +140,7 @@ export const MAX_USAGE_SEQ = MAX_USAGE_RECEIPTS;
 export const MAX_USAGE_BUDGETS = 16;
 export const MAX_USAGE_THRESHOLD_EVENTS = 64;
 export const MAX_USAGE_RECEIPT_BYTES = 2048;
-export const MAX_USAGE_LEDGER_BYTES = 65_536;
+export const MAX_USAGE_LEDGER_BYTES = 131_072;
 export const MAX_TOKEN_COUNT = 1_000_000_000;
 export const MAX_COST_MILLICENTS = 1_000_000_000_000;
 export const MAX_USAGE_BYTES = 1_073_741_824;
@@ -226,13 +227,14 @@ const DATE_PARSE = Date.parse;
 const DATE_ISO = Date.prototype.toISOString;
 const BUFFER_BYTE_LENGTH = NodeBuffer.byteLength;
 const CREATE_HASH = createHash;
+const JSON_PARSE = JSON.parse;
 const STRING = String;
 const ARRAY_FROM = Array.from;
 const MIN_ATTEMPT = MIN_DISPATCH_ATTEMPT;
 const MAX_ATTEMPT = MAX_DISPATCH_ATTEMPT;
 
 function usageDigest(label, value) {
-  const canonical = canonicalJsonStringify(value);
+  const canonical = canonicalExtendedJsonStringify(value);
   const digest = CREATE_HASH('sha256')
     .update(USAGE_LEDGER_HASH_DOMAIN, 'utf8')
     .update('\n', 'utf8')
@@ -246,7 +248,7 @@ function usageDigest(label, value) {
 }
 
 function canonicalEqual(left, right) {
-  return canonicalJsonStringify(left) === canonicalJsonStringify(right);
+  return canonicalExtendedJsonStringify(left) === canonicalExtendedJsonStringify(right);
 }
 
 function assertCount(value, path, { min = 0, max }) {
@@ -483,7 +485,7 @@ function parseUsageReceipt(value, path = 'receipt') {
     fail('identity_mismatch', `${path}.digest`,
       'Usage receipt digest does not match its identity-bound canonical form.');
   }
-  const encoded = canonicalJsonStringify({ ...payload, digest });
+  const encoded = canonicalExtendedJsonStringify({ ...payload, digest });
   if (BUFFER_BYTE_LENGTH(encoded, 'utf8') > MAX_USAGE_RECEIPT_BYTES) {
     fail('out_of_range', path, `Usage receipt exceeds ${MAX_USAGE_RECEIPT_BYTES} bytes.`);
   }
@@ -837,6 +839,10 @@ function deriveTotals(latest, observationCount) {
   };
 }
 
+function snapshotUsageLedger(record) {
+  return freezeData(JSON_PARSE(canonicalExtendedJsonStringify(record)));
+}
+
 function deriveLedger(revision, budgets, receipts) {
   const latest = latestByIdentity(receipts);
   const aggregates = deriveAggregates(latest);
@@ -853,7 +859,7 @@ function deriveLedger(revision, budgets, receipts) {
   };
   const digest = usageDigest('ledger.v1', payload);
   const record = { ...payload, digest };
-  const encoded = canonicalJsonStringify(record);
+  const encoded = canonicalExtendedJsonStringify(record);
   if (BUFFER_BYTE_LENGTH(encoded, 'utf8') > MAX_USAGE_LEDGER_BYTES) {
     fail('out_of_range', 'ledger', `Usage ledger exceeds ${MAX_USAGE_LEDGER_BYTES} bytes.`);
   }
@@ -917,6 +923,8 @@ function assertReceiptAppend(previousReceipts, next) {
 }
 
 function parseUsageLedger(value, path = 'ledger') {
+  // Apply the ledger's fixed extended complexity cap before any schema walk.
+  canonicalExtendedJsonStringify(value);
   const record = closedUsageObject(value, path, USAGE_LEDGER_KEYS);
   if (record.schema !== USAGE_LEDGER_SCHEMA_ID) {
     fail('invalid_format', `${path}.schema`,
@@ -952,13 +960,13 @@ function parseUsageLedger(value, path = 'ledger') {
 }
 
 export function validateUsageLedgerV1(value) {
-  return snapshotRecord(parseUsageLedger(value, 'ledger'));
+  return snapshotUsageLedger(parseUsageLedger(value, 'ledger'));
 }
 
 export function openUsageLedgerV1(input) {
   const fields = closedUsageObject(input, 'usage_ledger_input', USAGE_LEDGER_INPUT_KEYS);
   const budgets = parseBudgets(fields.budgets, 'usage_ledger_input.budgets');
-  return snapshotRecord(deriveLedger(0, budgets, []));
+  return snapshotUsageLedger(deriveLedger(0, budgets, []));
 }
 
 export function appendUsageReceiptV1(previousValue, observation) {
@@ -973,7 +981,7 @@ export function appendUsageReceiptV1(previousValue, observation) {
   }
   assertReceiptAppend(previous.receipts, nextReceipt);
   const receipts = [...previous.receipts, nextReceipt];
-  return snapshotRecord(deriveLedger(previous.revision + 1, previous.budgets, receipts));
+  return snapshotUsageLedger(deriveLedger(previous.revision + 1, previous.budgets, receipts));
 }
 
 export function assertUsageLedgerContinuityV1(previousValue, nextValue) {

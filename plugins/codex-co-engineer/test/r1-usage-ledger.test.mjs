@@ -518,3 +518,20 @@ test('run-runtime homogeneous complete lanes roll up provider-reported tokens', 
   assert.equal(inspected.usage.totals.provider_usage.output_tokens.value, 6);
   assert.notEqual(inspected.usage.totals.provider_usage.input_tokens.trust, 'host_authoritative');
 });
+
+test('run-runtime accepts and reopens the maximum eight-lane usage ledger', async () => {
+  const assignments = Array.from({ length: 8 }, (_, index) => makeAssignment({
+    assignmentId: `usage-lane-${index + 1}`,
+    taskId: `usage-task-${index + 1}`,
+    writeScope: [`usage-${index + 1}/**`],
+  }));
+  const harness = createRuntime();
+  const request = makeSubmitRequest({ assignments });
+  const submitted = await harness.runtime.submitRun(request);
+  assert.equal(submitted.usage.receipts.length, 8);
+  assert.equal(submitted.usage.totals.identity_count, 8);
+  const inspected = await harness.runtime.inspectRun({ run_id: request.run_id });
+  assert.equal(inspected.usage.receipts.length, 8);
+  assert.equal(inspected.usage.digest, submitted.usage.digest);
+  assert.equal(inspected.usage.totals.identity_count, 8);
+});
