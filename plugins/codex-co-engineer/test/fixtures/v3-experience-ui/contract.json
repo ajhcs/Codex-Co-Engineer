@@ -1,13 +1,15 @@
 {
   "schema": "codex-co-engineer.experience-ui.v1",
-  "slice": "UI-01",
-  "cards": ["run", "final"],
-  "unregistered_cards": ["shell", "attention"],
+  "slice": "UI-02",
+  "cards": ["run", "attention", "final"],
+  "display_only_cards": ["run", "final"],
+  "unregistered_cards": ["shell"],
   "tools": ["status", "delegate", "task", "tasks", "cancel"],
   "mime_type": "text/html;profile=mcp-app",
   "extension_id": "io.modelcontextprotocol/ui",
   "uris": {
     "run": "ui://codex-co-engineer/experience/run",
+    "attention": "ui://codex-co-engineer/experience/attention",
     "final": "ui://codex-co-engineer/experience/final"
   },
   "authority_sentence": "Codex remains chief engineer, reviewer, and merge authority.",
