@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR-ready final decision card.** Adds additive v3
+  `final-decision-card.mjs`: a side-effect-free projection of typed
+  candidate identity, worktree cleanliness, verifier/test/CI evidence and
+  freshness, non-force push state, draft PR identity, and
+  provider/assignment attribution. `ready_for_sol_merge` is computed only
+  from those facts, never from provider prose, hidden or unknown checks,
+  stale evidence, missing topology, missing verifier acceptance, a dirty
+  worktree, an unpublished head, a mismatched PR head, protected-ref
+  mutation, or unresolved lanes. Otherwise the card emits a complete
+  bounded list of exact blockers. Progressive disclosure keeps a compact
+  model-facing summary plus artifact references, with deterministic
+  truncation provenance. The public label is `PR-ready` or `Blocked`.
+  The card cannot merge; Sol High/XHigh alone may regular-merge after
+  exact-head, tree, current-green-CI, and topology CAS checks. Coverage
+  lives in `test/r1-final-decision-card.test.mjs` and
+  `test/r1-final-decision-card-adversarial.test.mjs`; the boundary lives
+  in `docs/final-decision-card.md`.
+
+### Fixed
+
+- **PR-ready card identity, lanes, draft PR, and git operation.**
+  `exact_head`/`exact_tree` now bind independently observed identities
+  carried by verifier, test/CI, push, and PR receipts; format-only SHAs
+  and stale booleans never authorize a substituted head or tree. Required
+  lanes qualify only when explicitly accepted; cancelled, failed,
+  blocked, `needs_attention`, unresolved, `transport_lost`,
+  `environment_blocked`, unknown, or nonterminal required lanes block
+  readiness. Draft PR evidence must prove repository, host/provider,
+  target branch, exact head, open+draft state; a number-only or arbitrary
+  HTTPS URL is not trusted. A typed `active_git_operation` other than
+  `none` blocks readiness even when porcelain is clean.
+- **PR-ready card artifact attribution integrity.** Lane-scoped artifact
+  references bind to an `assignment_id` present in the parsed
+  attribution set for the exact run. A ghost or unknown assignment is a
+  deterministic blocker, is never projected as trusted, and never yields
+  `ready_for_sol_merge`. The card does not infer a run-level external
+  artifact class; ArtifactRefV1 remains lane-scoped.
+
 ## [3.3.0] - 2026-08-27
 
 R1 bounded-run release on the same five-tool MCP catalog. One run is 1–8

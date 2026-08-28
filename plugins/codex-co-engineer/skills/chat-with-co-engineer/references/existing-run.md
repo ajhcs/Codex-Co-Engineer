@@ -10,7 +10,7 @@ Inspect first. Cancel only that same run if it is stuck. Say that chatting inspe
 
 User: Chatting with Co-Engineer: continue and tell me when you have checked the candidate.
 
-If the candidate is complete, inspect it, then say `Co-Engineer finished, and I verified the candidate. You still decide whether to keep, change, or discard it.` That sentence is not itself a merge. External workers may commit. A scoped publisher may non-force push only the task branch and open a draft pull request. Sol High or Sol XHigh alone performs regular merge after exact-head, current-green-CI, and topology checks. The user retains release, tag, version, and protected-ref authority.
+If the candidate is complete, inspect it, then say `Co-Engineer finished, and I verified the candidate. You still decide whether to keep, change, or discard it.` That sentence is not itself a merge. External workers may commit. A scoped publisher may non-force push only the task branch and open a draft pull request. The PR-ready card reports exact HEAD and tree bound to current evidence, cleanliness including any in-progress Git operation, accepted required lanes, the open draft pull request's repository and host identity, and either ready for Sol merge or the exact blockers. Only Sol High or Sol XHigh may regular-merge after exact-head, current-green-CI, verifier, and topology checks. The user retains release, tag, version, protected-ref, and product-policy authority.
 
 ## Grouped attention
 

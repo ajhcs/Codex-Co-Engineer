@@ -49,6 +49,13 @@
   var DISPLAY_ONLY_NOTE =
     'Display only. This card cannot merge, push, rebase, create a pull request, tag, or release.';
   var NOT_AVAILABLE = 'Not available';
+  var UNKNOWN = 'unknown';
+  var TARGET_MAX = 128;
+  var CHANGED_MAX = 512;
+  var USAGE_MAX = 512;
+  var EVIDENCE_REF_MAX = 16;
+  var BRANCH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
   var OBJECTIVE_MAX = 512;
   var QUESTION_MAX = 320;
 
@@ -100,6 +107,166 @@
 
   function digestValue(value) {
     return typeof value === 'string' && DIGEST.test(value) ? value : null;
+  }
+
+  function branchNameOk(value) {
+    if (typeof value !== 'string' || value.trim() === '') return false;
+    if (value.length > 200) return false;
+    if (value.includes('..') || value.includes('//') || value.includes(' ')) return false;
+    var parts = value.split('/');
+    if (parts.length < 1 || parts.length > 8) return false;
+    for (var i = 0; i < parts.length; i += 1) {
+      var seg = parts[i];
+      if (seg.length === 0 || seg.length > 64) return false;
+      if (!BRANCH_SEGMENT.test(seg)) return false;
+    }
+    return true;
+  }
+
+  function branchLabel(value) {
+    if (typeof value !== 'string' || value.trim() === '') return NOT_AVAILABLE;
+    var trimmed = value.trim();
+    if (!branchNameOk(trimmed)) return NOT_AVAILABLE;
+    return clipText(trimmed, TARGET_MAX);
+  }
+
+  function changedSummaryLabel(value) {
+    if (typeof value === 'string') {
+      var t = clipText(value.trim(), CHANGED_MAX).trim();
+      return t === '' ? NOT_AVAILABLE : t;
+    }
+    if (Array.isArray(value)) {
+      var parts = [];
+      for (var i = 0; i < value.length && parts.length < 8; i += 1) {
+        if (typeof value[i] === 'string' && value[i].trim() !== '') parts.push(clipText(value[i].trim(), 96));
+      }
+      return parts.length > 0 ? parts.join(', ') : NOT_AVAILABLE;
+    }
+    if (value && typeof value === 'object') {
+      if (typeof value.summary === 'string') {
+        var s = clipText(value.summary.trim(), CHANGED_MAX).trim();
+        if (s !== '') return s;
+      }
+      if (typeof value.count === 'number' && Number.isInteger(value.count)) {
+        return String(value.count) + ' files';
+      }
+    }
+    return NOT_AVAILABLE;
+  }
+
+  function cleanStateLabel(value) {
+    if (value === true) return 'clean';
+    if (value === false) return 'dirty';
+    if (value === 'clean') return 'clean';
+    if (value === 'dirty') return 'dirty';
+    return UNKNOWN;
+  }
+
+  function blockersLabel(value) {
+    if (!Array.isArray(value) || value.length === 0) return 'None';
+    var names = [];
+    for (var i = 0; i < value.length && names.length < 8; i += 1) {
+      if (typeof value[i] === 'string' && value[i].trim() !== '') names.push(clipText(value[i].trim(), 96));
+      else if (value[i] && typeof value[i] === 'object' && typeof value[i].reason === 'string' && value[i].reason.trim() !== '') names.push(clipText(value[i].reason.trim(), 96));
+    }
+    return names.length > 0 ? names.join(', ') : 'None';
+  }
+
+  function pushStateLabel(value) {
+    if (value === true) return 'pushed';
+    if (value === false) return 'not pushed';
+    if (typeof value === 'string' && value.trim() !== '') return clipText(value.trim(), 128);
+    if (value && typeof value === 'object') {
+      if (Array.isArray(value.branches) && value.branches.length > 0) {
+        var b = [];
+        for (var i = 0; i < value.branches.length && b.length < 4; i += 1) if (typeof value.branches[i] === 'string' && value.branches[i].trim() !== '') b.push(clipText(value.branches[i].trim(), 64));
+        if (b.length > 0) return b.join(', ');
+      }
+      if (typeof value.pushed === 'boolean') return value.pushed ? 'pushed' : 'not pushed';
+    }
+    return NOT_AVAILABLE;
+  }
+
+  function draftPrLabel(value) {
+    if (!value || typeof value !== 'object') {
+      if (typeof value === 'string' && value.trim() !== '') return clipText(value.trim(), 128);
+      return NOT_AVAILABLE;
+    }
+    if (typeof value.url === 'string' && value.url.trim() !== '') return clipText(value.url.trim(), 256);
+    if (typeof value.number === 'number' && Number.isInteger(value.number)) return '#' + String(value.number);
+    if (typeof value.head === 'string' && /^[a-fA-F0-9]{40}$/.test(value.head)) return value.head.toLowerCase();
+    if (typeof value.ref === 'string' && value.ref.trim() !== '') return clipText(value.ref.trim(), 128);
+    return NOT_AVAILABLE;
+  }
+
+  function usageLedgerLabel(value) {
+    if (value == null) return UNKNOWN;
+    if (typeof value === 'string') {
+      var t = clipText(value.trim(), USAGE_MAX).trim();
+      return t === '' ? UNKNOWN : t;
+    }
+    if (typeof value === 'object') {
+      if (typeof value.summary === 'string') {
+        var s = clipText(value.summary.trim(), USAGE_MAX).trim();
+        if (s !== '') return s;
+      }
+      if (typeof value.compact === 'string') {
+        var c = clipText(value.compact.trim(), USAGE_MAX).trim();
+        if (c !== '') return c;
+      }
+      // Known compact shape: {tokens, cost} etc
+      try {
+        var json = JSON.stringify(value);
+        if (json.length <= USAGE_MAX) return clipText(json, USAGE_MAX);
+        return clipText(json.slice(0, USAGE_MAX), USAGE_MAX);
+      } catch (e) { return UNKNOWN; }
+    }
+    return UNKNOWN;
+  }
+
+  function evidenceRefsLabel(value, fallbackKinds) {
+    var list = null;
+    if (Array.isArray(value) && value.length > 0) list = value;
+    else if (Array.isArray(fallbackKinds) && fallbackKinds.length > 0) list = fallbackKinds;
+    if (!list || list.length === 0) return NOT_AVAILABLE;
+    var out = [];
+    for (var i = 0; i < list.length && out.length < EVIDENCE_REF_MAX; i += 1) {
+      var entry = list[i];
+      var kind = null;
+      if (typeof entry === 'string' && /^[a-z_]{3,32}$/.test(entry) && Object.prototype.hasOwnProperty.call(KNOWN_EVIDENCE_KINDS, entry)) kind = entry;
+      else if (entry && typeof entry === 'object' && typeof entry.kind === 'string' && /^[a-z_]{3,32}$/.test(entry.kind) && Object.prototype.hasOwnProperty.call(KNOWN_EVIDENCE_KINDS, entry.kind)) kind = entry.kind;
+      if (kind) out.push(kind);
+    }
+    return out.length > 0 ? out.join(', ') : NOT_AVAILABLE;
+  }
+
+  function solReadyLabel(experience) {
+    var finalCard = experience && experience.final && typeof experience.final === 'object' ? experience.final : null;
+    if (!finalCard) return 'no';
+    var v = finalCard.ready_for_sol_merge;
+    // Only strictly boolean true counts, and must be typed evidence: require evidence present true and candidate composed true if available
+    if (v !== true) return 'no';
+    var evidence = finalCard.evidence && typeof finalCard.evidence === 'object' ? finalCard.evidence : null;
+    var candidate = finalCard.candidate && typeof finalCard.candidate === 'object' ? finalCard.candidate : null;
+    // typed evidence requires evidence.present === true or evidence.digest valid; be strict but not fabricate
+    if (!evidence || evidence.present !== true) return 'no';
+    // If candidate exists, require composed true to avoid false ready
+    if (candidate && candidate.composed !== true) return 'no';
+    return 'yes';
+  }
+
+  function healthLabel(value) {
+    if (value === true || value === 'healthy' || value === 'ok') return 'healthy';
+    if (value === false || value === 'unhealthy' || value === 'failed') return 'unhealthy';
+    if (typeof value === 'string' && value.trim() !== '') return clipText(value.trim(), 64);
+    return NOT_AVAILABLE;
+  }
+
+  function pendingIdsLabel(value) {
+    if (!Array.isArray(value) || value.length === 0) return 'None';
+    var ids = [];
+    for (var i = 0; i < value.length && ids.length < 8; i += 1) if (typeof value[i] === 'string' && value[i].trim() !== '') ids.push(clipText(value[i].trim(), 64));
+    return ids.length > 0 ? ids.join(', ') : 'None';
   }
 
   function ownerOnlyKey(key) {
@@ -247,6 +414,7 @@
   function renderRunCardHtml(experience) {
     var run = experience && experience.run && typeof experience.run === 'object' ? experience.run : {};
     var repository = run.repository && typeof run.repository === 'object' ? run.repository : {};
+    var runningInfo = run.running && typeof run.running === 'object' ? run.running : {};
     var phrases = experience && experience.summary && Array.isArray(experience.summary.phrases)
       ? experience.summary.phrases
       : [];
@@ -256,6 +424,12 @@
     var running = typeof experience?.summary?.running === 'string' ? experience.summary.running : '';
     var baseSha = sha40(repository.base_sha);
     var digest = digestValue(repository.digest);
+    var runningProvider = displayString(runningInfo.provider_phrase || runningInfo.provider, NOT_AVAILABLE);
+    var runningBranch = branchLabel(runningInfo.branch);
+    var runningHead = sha40(runningInfo.head) || NOT_AVAILABLE;
+    var runningHealth = typeof runningInfo.health === 'string' ? clipText(runningInfo.health, 64) : (runningInfo.health == null ? NOT_AVAILABLE : NOT_AVAILABLE);
+    if (runningHealth === '') runningHealth = NOT_AVAILABLE;
+    var runningPending = pendingIdsLabel(runningInfo.pending_ids);
     return [
       '<main>',
       '<article class="cce-card cce-card-run" data-cce-card="run" data-cce-display-only="true" aria-labelledby="cce-run-title">',
@@ -279,6 +453,17 @@
       '<h2 id="cce-lanes-heading">Assignments</h2>',
       renderLaneList(run.lanes),
       '</section>',
+      '<section aria-labelledby="cce-running-heading">',
+      '<h2 id="cce-running-heading">Running</h2>',
+      '<dl>',
+      '<div><dt>Provider</dt><dd data-field="running_provider">' + escapeHtml(runningProvider) + '</dd></div>',
+      '<div><dt>Branch</dt><dd data-field="running_branch">' + escapeHtml(runningBranch) + '</dd></div>',
+      '<div><dt>Head</dt><dd data-field="running_head">' + escapeHtml(runningHead) + '</dd></div>',
+      '<div><dt>Health</dt><dd data-field="running_health">' + escapeHtml(runningHealth) + '</dd></div>',
+      '<div><dt>Pending IDs</dt><dd data-field="running_pending">' + escapeHtml(runningPending) + '</dd></div>',
+      '</dl>',
+      '<p class="cce-note">Efficiency: provider, branch, head, health, and pending IDs without routine wake.</p>',
+      '</section>',
       '<p class="cce-note">' + escapeHtml(DISPLAY_ONLY_NOTE) + '</p>',
       '</article>',
       '</main>',
@@ -294,6 +479,28 @@
     var git = finalCard.git && typeof finalCard.git === 'object' ? finalCard.git : {};
     var candidate = finalCard.candidate && typeof finalCard.candidate === 'object' ? finalCard.candidate : {};
     var evidence = finalCard.evidence && typeof finalCard.evidence === 'object' ? finalCard.evidence : {};
+    var pr = finalCard.pr_ready && typeof finalCard.pr_ready === 'object' ? finalCard.pr_ready : {};
+    // Back-compat fallbacks for direct pr fields
+    var ownedBranch = branchLabel(pr.owned_branch != null ? pr.owned_branch : git.branch);
+    var targetBranch = branchLabel(pr.target != null ? pr.target : git.target);
+    var changedSummary = typeof pr.changed_summary === 'string' ? clipText(pr.changed_summary, CHANGED_MAX) : (typeof finalCard.changed_summary === 'string' ? clipText(finalCard.changed_summary, CHANGED_MAX) : NOT_AVAILABLE);
+    if (!changedSummary || changedSummary.trim() === '') changedSummary = NOT_AVAILABLE;
+    var cleanState = cleanStateLabel(pr.clean_state != null ? pr.clean_state : finalCard.clean_state);
+    var verification = pr.verification && typeof pr.verification === 'object' ? pr.verification : {};
+    var blockers = blockersLabel(verification.blockers);
+    var verificationLine = verification.present === true ? 'present' : (verification.present === false ? 'absent' : NOT_AVAILABLE);
+    if (Array.isArray(verification.tests) && verification.tests.length > 0) verificationLine += ', tests: ' + joinIds(verification.tests);
+    else if (verification.tests_present === true) verificationLine += ', tests present';
+    if (verification.tests_passed === true) verificationLine += ' (passed)';
+    var pushState = typeof pr.push_state === 'string' ? clipText(pr.push_state, 128) : pushStateLabel(pr.push_state);
+    if (!pushState || pushState.trim() === '') pushState = NOT_AVAILABLE;
+    var draftPr = typeof pr.draft_pr === 'string' ? clipText(pr.draft_pr, 256) : draftPrLabel(pr.draft_pr);
+    if (!draftPr || draftPr.trim() === '') draftPr = NOT_AVAILABLE;
+    var currentPrHead = sha40(pr.current_pr_head != null ? pr.current_pr_head : finalCard.current_pr_head) || NOT_AVAILABLE;
+    var solReady = solReadyLabel(experience);
+    var usageLedger = typeof pr.usage_ledger_summary === 'string' ? clipText(pr.usage_ledger_summary, USAGE_MAX) : (typeof finalCard.usage_ledger_summary === 'string' ? clipText(finalCard.usage_ledger_summary, USAGE_MAX) : UNKNOWN);
+    if (!usageLedger || usageLedger.trim() === '') usageLedger = UNKNOWN;
+    var evidenceRefs = evidenceRefsLabel(pr.evidence_refs != null ? pr.evidence_refs : finalCard.evidence_refs, evidence.kinds);
     var verified = experience && experience.summary && typeof experience.summary.verified_final === 'string'
       ? experience.summary.verified_final
       : '';
@@ -326,10 +533,37 @@
       '<section aria-labelledby="cce-git-heading">',
       '<h2 id="cce-git-heading">Git identity</h2>',
       '<dl>',
-      '<div><dt>Branch</dt><dd data-field="branch">' + escapeHtml(displayString(git.branch)) + '</dd></div>',
+      '<div><dt>Branch</dt><dd data-field="branch">' + escapeHtml(ownedBranch) + '</dd></div>',
       '<div><dt>Head</dt><dd data-field="head">' + escapeHtml(sha40(git.head) || NOT_AVAILABLE) + '</dd></div>',
       '<div><dt>Tree</dt><dd data-field="tree">' + escapeHtml(sha40(git.tree) || NOT_AVAILABLE) + '</dd></div>',
+      '<div><dt>Base SHA</dt><dd data-field="base_sha">' + escapeHtml(sha40(git.base_sha) || NOT_AVAILABLE) + '</dd></div>',
+      '<div><dt>Target</dt><dd data-field="target">' + escapeHtml(targetBranch) + '</dd></div>',
       '</dl>',
+      '</section>',
+      '<section aria-labelledby="cce-changed-heading">',
+      '<h2 id="cce-changed-heading">Changed</h2>',
+      '<p data-field="changed_summary">' + escapeHtml(changedSummary) + '</p>',
+      '</section>',
+      '<section aria-labelledby="cce-clean-heading">',
+      '<h2 id="cce-clean-heading">Clean state</h2>',
+      '<p data-field="clean_state">' + escapeHtml(cleanState) + '</p>',
+      '</section>',
+      '<section aria-labelledby="cce-verification-heading">',
+      '<h2 id="cce-verification-heading">Verification</h2>',
+      '<p data-field="verification">' + escapeHtml(verificationLine) + '</p>',
+      '<p data-field="blockers">Blockers: ' + escapeHtml(blockers) + '</p>',
+      '</section>',
+      '<section aria-labelledby="cce-push-heading">',
+      '<h2 id="cce-push-heading">Push / PR</h2>',
+      '<dl>',
+      '<div><dt>Push</dt><dd data-field="push_state">' + escapeHtml(pushState) + '</dd></div>',
+      '<div><dt>Draft PR</dt><dd data-field="draft_pr">' + escapeHtml(draftPr) + '</dd></div>',
+      '<div><dt>Current PR Head</dt><dd data-field="current_pr_head">' + escapeHtml(currentPrHead) + '</dd></div>',
+      '</dl>',
+      '</section>',
+      '<section aria-labelledby="cce-sol-heading">',
+      '<h2 id="cce-sol-heading">Ready for Sol merge</h2>',
+      '<p data-field="ready_for_sol_merge">' + escapeHtml(solReady) + '</p>',
       '</section>',
       '<section aria-labelledby="cce-scope-heading">',
       '<h2 id="cce-scope-heading">Scope</h2>',
@@ -352,6 +586,10 @@
       '<div><dt>Accepted</dt><dd>' + escapeHtml(boolLabel(candidate.accepted === true)) + '</dd></div>',
       '</dl>',
       '</section>',
+      '<section aria-labelledby="cce-usage-heading">',
+      '<h2 id="cce-usage-heading">Usage</h2>',
+      '<p data-field="usage_ledger_summary">' + escapeHtml(usageLedger) + '</p>',
+      '</section>',
       '<section aria-labelledby="cce-evidence-heading">',
       '<h2 id="cce-evidence-heading">Evidence</h2>',
       '<dl>',
@@ -360,6 +598,7 @@
       '<div><dt>Facts</dt><dd>' + escapeHtml(String(Number.isInteger(evidence.fact_count) ? evidence.fact_count : 0)) + '</dd></div>',
       '<div><dt>Claims</dt><dd>' + escapeHtml(String(Number.isInteger(evidence.claim_count) ? evidence.claim_count : 0)) + '</dd></div>',
       '<div><dt>Kinds</dt><dd>' + escapeHtml(kinds.length > 0 ? kinds.join(', ') : NOT_AVAILABLE) + '</dd></div>',
+      '<div><dt>Refs</dt><dd data-field="evidence_refs">' + escapeHtml(evidenceRefs) + '</dd></div>',
       '</dl>',
       '</section>',
       '<p class="cce-note">' + escapeHtml(DISPLAY_ONLY_NOTE) + '</p>',
@@ -396,6 +635,7 @@
     if (card === 'run') {
       var run = safe.run && typeof safe.run === 'object' ? safe.run : {};
       var repository = run.repository && typeof run.repository === 'object' ? run.repository : {};
+      var runningInfo = run.running && typeof run.running === 'object' ? run.running : {};
       var phrases = safe.summary && Array.isArray(safe.summary.phrases) ? safe.summary.phrases : [];
       var phrase = typeof safe.summary?.delegating === 'string'
         ? safe.summary.delegating
@@ -407,11 +647,17 @@
         base_sha: sha40(repository.base_sha) || NOT_AVAILABLE,
         digest: digestValue(repository.digest) || NOT_AVAILABLE,
         lanes: laneItems(run.lanes),
+        running_provider: displayString(runningInfo.provider_phrase || runningInfo.provider, NOT_AVAILABLE),
+        running_branch: branchLabel(runningInfo.branch),
+        running_head: sha40(runningInfo.head) || NOT_AVAILABLE,
+        running_health: typeof runningInfo.health === 'string' && runningInfo.health.trim() !== '' ? clipText(runningInfo.health.trim(), 64) : NOT_AVAILABLE,
+        running_pending: pendingIdsLabel(runningInfo.pending_ids),
       };
     }
     if (card === 'final') {
       var finalCard = safe.final && typeof safe.final === 'object' ? safe.final : {};
       var git = finalCard.git && typeof finalCard.git === 'object' ? finalCard.git : {};
+      var pr = finalCard.pr_ready && typeof finalCard.pr_ready === 'object' ? finalCard.pr_ready : {};
       var candidate = finalCard.candidate && typeof finalCard.candidate === 'object' ? finalCard.candidate : {};
       var evidence = finalCard.evidence && typeof finalCard.evidence === 'object' ? finalCard.evidence : {};
       var kinds = Array.isArray(evidence.kinds) ? evidence.kinds.filter(function (kind) {
@@ -422,14 +668,32 @@
         && candidate.composed === true
         && candidate.ready_for_codex_review === true
         && candidate.accepted === true;
+      var verif = pr.verification && typeof pr.verification === 'object' ? pr.verification : {};
       return {
         verified_final: allowedVerified ? clipText(verified, QUESTION_MAX) : '',
         accepted_lanes: joinIds(finalCard.accepted_lanes),
         failed_lanes: joinIds(finalCard.failed_lanes),
         unresolved_lanes: joinIds(finalCard.unresolved_lanes),
-        branch: displayString(git.branch),
+        branch: branchLabel(pr.owned_branch != null ? pr.owned_branch : git.branch),
         head: sha40(git.head) || NOT_AVAILABLE,
         tree: sha40(git.tree) || NOT_AVAILABLE,
+        base_sha: sha40(git.base_sha) || NOT_AVAILABLE,
+        target: branchLabel(pr.target != null ? pr.target : git.target),
+        changed_summary: typeof pr.changed_summary === 'string' && pr.changed_summary.trim() !== '' ? clipText(pr.changed_summary.trim(), CHANGED_MAX) : (typeof finalCard.changed_summary === 'string' && finalCard.changed_summary.trim() !== '' ? clipText(finalCard.changed_summary.trim(), CHANGED_MAX) : NOT_AVAILABLE),
+        clean_state: cleanStateLabel(pr.clean_state != null ? pr.clean_state : finalCard.clean_state),
+        verification: (function(){
+          var blockers = blockersLabel(verif.blockers);
+          var line = verif.present === true ? 'present' : (verif.present === false ? 'absent' : NOT_AVAILABLE);
+          if (Array.isArray(verif.tests) && verif.tests.length > 0) line += ', tests: ' + joinIds(verif.tests);
+          else if (verif.tests_present === true) line += ', tests present';
+          if (verif.tests_passed === true) line += ' (passed)';
+          return line + '; Blockers: ' + blockers;
+        })(),
+        blockers: blockersLabel(verif.blockers),
+        push_state: typeof pr.push_state === 'string' && pr.push_state.trim() !== '' ? clipText(pr.push_state.trim(), 128) : pushStateLabel(pr.push_state),
+        draft_pr: typeof pr.draft_pr === 'string' && pr.draft_pr.trim() !== '' ? clipText(pr.draft_pr.trim(), 256) : draftPrLabel(pr.draft_pr),
+        current_pr_head: sha40(pr.current_pr_head != null ? pr.current_pr_head : finalCard.current_pr_head) || NOT_AVAILABLE,
+        ready_for_sol_merge: solReadyLabel(safe),
         scope: Array.isArray(finalCard.scope) ? finalCard.scope.slice(0, 8) : [],
         tests: presenceLine(finalCard.tests, 'No test lanes'),
         reviews: presenceLine(finalCard.reviews, 'No review lanes'),
@@ -442,6 +706,13 @@
         evidence_facts: String(Number.isInteger(evidence.fact_count) ? evidence.fact_count : 0),
         evidence_claims: String(Number.isInteger(evidence.claim_count) ? evidence.claim_count : 0),
         evidence_kinds: kinds.length > 0 ? kinds.join(', ') : NOT_AVAILABLE,
+        evidence_refs: evidenceRefsLabel(pr.evidence_refs != null ? pr.evidence_refs : finalCard.evidence_refs, evidence.kinds),
+        usage_ledger_summary: (function(){
+          var v = pr.usage_ledger_summary != null ? pr.usage_ledger_summary : finalCard.usage_ledger_summary;
+          if (typeof v === 'string' && v.trim() !== '') return clipText(v.trim(), USAGE_MAX);
+          if (v == null) return UNKNOWN;
+          return clipText(String(v), USAGE_MAX);
+        })(),
       };
     }
     return {};
