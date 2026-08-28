@@ -52,10 +52,14 @@ Public state remains:
 
 `succeeded` is projected only for `completed` receipts that carry neither
 an explicit terminal error envelope nor a whole-result terminal
-transport/provider error. A demonstrable false-success projects
-`projected_status=failed` / `state=failed` with reason
-`completed_with_terminal_error`. The reason never echoes provider text,
-paths, URLs, or secrets.
+transport/provider error, and that do not complete after a structured
+Grok `ask_user_question` failure with `question_id` null. A demonstrable
+false-success projects `projected_status=failed` / `state=failed` with
+reason `completed_with_terminal_error` or
+`completed_with_unanswerable_attention`. The reason never echoes provider
+text, paths, URLs, or secrets. A successful result that merely quotes an
+unanswered question remains `succeeded`; the classifier does not guess
+from arbitrary prose.
 
 `transport_lost` stays nonterminal reconciliation uncertainty. The
 classifier does not promote it to `failed` or any stored terminal status.
@@ -67,6 +71,12 @@ as `completed` is the authoritative counterexample. Whether that failure
 arrives as `task.error` or as the whole `task.result`, the projection
 must not report `state=succeeded`. A successful result that merely quotes
 the phrase in a larger transcript remains `succeeded`.
+
+A stored `completed` Grok receipt whose structured last event is
+`ask_user_question` unsupported and whose `question_id` is null is the
+grouped-attention counterexample. Projection must not report
+`state=succeeded`. The unanswered question text in `result` is preserved
+as evidence and is not parsed to invent a question identity.
 
 ## 3.2.1 shapes
 

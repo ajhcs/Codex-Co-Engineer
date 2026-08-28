@@ -160,6 +160,12 @@ export function createScriptedGrokAcpTransportV1(script = {}) {
       session_id: request.session_id ?? sessionId,
       ...identityFromRequest(request),
     })),
+    reply: (request) => play('reply', request, () => ({
+      answered: true,
+      session_id: request.session_id ?? sessionId,
+      question_id: request.question_id,
+      ...identityFromRequest(request),
+    })),
   };
   TRANSPORT_CALLS.set(transport, calls);
   return transport;
