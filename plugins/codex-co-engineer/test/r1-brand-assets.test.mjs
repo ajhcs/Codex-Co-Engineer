@@ -359,7 +359,7 @@ test('plugin defaultPrompt stays within PluginInterface bounds and UX-01 coverag
   ]);
 });
 
-test('marketplace and plugin metadata stay on 3.3.0, UX-01 language, and 3.4.0 assets', async () => {
+test('marketplace and plugin metadata stay on 3.4.0, UX-01 language, and 3.4.0 assets', async () => {
   const fixture = JSON.parse(await readFile(CONTRACT_JSON, 'utf8'));
   const plugin = JSON.parse(
     await readFile(path.join(PLUGIN, '.codex-plugin', 'plugin.json'), 'utf8'),
@@ -370,8 +370,8 @@ test('marketplace and plugin metadata stay on 3.3.0, UX-01 language, and 3.4.0 a
   const provenanceText = await readFile(PROVENANCE, 'utf8');
   const poster = await readFile(path.join(REPO, 'docs/assets/co-engineer-3.4.0/poster.svg'), 'utf8');
 
-  assert.equal(plugin.version, '3.3.0');
-  assert.equal(marketplace.plugins[0].version, '3.3.0');
+  assert.equal(plugin.version, '3.4.0');
+  assert.equal(marketplace.plugins[0].version, '3.4.0');
   for (const text of [
     JSON.stringify(plugin),
     JSON.stringify(marketplace),
