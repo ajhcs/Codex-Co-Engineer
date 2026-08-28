@@ -1,0 +1,15 @@
+{
+  "id": "cursor-direct-canonical",
+  "skill": "use-cursor-co-engineer",
+  "activation": "direct",
+  "user_prompt": "Using Cursor Co-Engineer, review the operator guide on this computer.",
+  "ask_once": false,
+  "expected_skills": ["use-cursor-co-engineer"],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

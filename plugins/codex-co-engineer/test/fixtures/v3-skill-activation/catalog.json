@@ -1,0 +1,101 @@
+{
+  "schema": "codex-co-engineer.skill-activation.v1",
+  "version": 1,
+  "goal_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer"
+  ],
+  "advanced_skill": "control-codex-co-engineer-agents",
+  "display_names": {
+    "delegate-to-co-engineer": "Delegating to Co-Engineer",
+    "chat-with-co-engineer": "Chatting with Co-Engineer",
+    "use-grok-co-engineer": "Using Grok Co-Engineer",
+    "use-cursor-co-engineer": "Using Cursor Co-Engineer",
+    "use-muse-co-engineer": "Using Muse Co-Engineer",
+    "control-codex-co-engineer-agents": "Advanced Co-Engineer Control"
+  },
+  "canonical_skill_phrases": {
+    "delegate-to-co-engineer": "Delegating to Co-Engineer",
+    "chat-with-co-engineer": "Chatting with Co-Engineer",
+    "use-grok-co-engineer": "Using Grok Co-Engineer",
+    "use-cursor-co-engineer": "Using Cursor Co-Engineer",
+    "use-muse-co-engineer": "Using Muse Co-Engineer"
+  },
+  "provider_direct_patterns": {
+    "use-grok-co-engineer": "Grok Co-Engineer",
+    "use-cursor-co-engineer": "Cursor Co-Engineer",
+    "use-muse-co-engineer": "Muse Co-Engineer"
+  },
+  "mcp_authoring_signals": [
+    "MCP JSON",
+    "payload I should paste",
+    "paste the payload",
+    "tool payloads I should paste"
+  ],
+  "jargon_signals": [
+    "Pxx",
+    "R-TRUTH",
+    "AttentionBatch"
+  ],
+  "forbidden_claim_signals": [
+    "credit reduction",
+    "8x speed",
+    "universal UI",
+    "SOTA routing"
+  ],
+  "other_negative_signals": [
+    "sixth tool",
+    "poll every assignment"
+  ],
+  "control_plane_signals": [
+    "control-plane",
+    "event_cursor",
+    "raw MCP",
+    "MCP arguments",
+    "MCP payload",
+    "five MCP tools",
+    "worktree-bootstrap",
+    "wait_ms",
+    "workspace_mode",
+    "starting_ref"
+  ],
+  "chat_indirect_signals": [
+    "Continue the running Co-Engineer work",
+    "continue the running Co-Engineer",
+    "inspect the running work",
+    "Cancel that run",
+    "cancel the existing Co-Engineer",
+    "running Co-Engineer work"
+  ],
+  "delegate_indirect_signals": [
+    "Give Codex a team of external co-engineers without giving up control.",
+    "team of external co-engineers",
+    "isolated external co-engineers",
+    "independent assignments"
+  ],
+  "forbidden_entrypoint_terms": [
+    "Pxx",
+    "R-TRUTH",
+    "AttentionBatch"
+  ],
+  "forbidden_provider_phrases": [
+    "Using DSH Co-Engineer",
+    "Using Ox Co-Engineer",
+    "Using Cursor Local Co-Engineer",
+    "Using Cursor Cloud Co-Engineer"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "aggregate_wait_count": 1,
+    "verified_final_decisions": 1,
+    "same_run_cursor": true,
+    "max_isolated_external_co_engineers": 8
+  },
+  "honest_claim": "up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision",
+  "product_lead": "Give Codex a team of external co-engineers without giving up control.",
+  "advanced_display_name": "Advanced Co-Engineer Control"
+}

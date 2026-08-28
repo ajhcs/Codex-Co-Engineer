@@ -1,0 +1,36 @@
+{
+  "id": "journey-one-lane",
+  "activation": "direct",
+  "journey": "one-lane",
+  "turns": [
+    {
+      "user": "Review the auth change with Grok Co-Engineer.",
+      "codex": "I am delegating this to Co-Engineer. Using Grok Co-Engineer. Co-Engineer is running 1 independent assignment."
+    },
+    {
+      "user": "Continue when it is done.",
+      "codex": "Co-Engineer finished, and I verified the candidate."
+    }
+  ],
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Using Grok Co-Engineer",
+    "Co-Engineer is running 1 independent assignment",
+    "Co-Engineer finished, and I verified the candidate."
+  ],
+  "forbidden_in_response": [
+    "MCP JSON",
+    "AttentionBatch",
+    "R-TRUTH",
+    "credit reduction"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": true,
+    "chatting_actions": [
+      "continue"
+    ],
+    "verified_final": true
+  }
+}

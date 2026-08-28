@@ -1,0 +1,15 @@
+{
+  "id": "delegate-indirect-multi-lane",
+  "skill": "delegate-to-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Split this into three isolated independent assignments: API validation, the operator guide, and a review of both diffs.",
+  "ask_once": true,
+  "expected_skills": ["delegate-to-co-engineer"],
+  "forbidden_skills": [
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

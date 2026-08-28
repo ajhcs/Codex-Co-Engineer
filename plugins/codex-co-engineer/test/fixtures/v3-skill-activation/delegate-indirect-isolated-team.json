@@ -1,0 +1,15 @@
+{
+  "id": "delegate-indirect-isolated-team",
+  "skill": "delegate-to-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Have a few isolated external co-engineers take independent assignments on the API and the docs, then wait once so I can review.",
+  "ask_once": true,
+  "expected_skills": ["delegate-to-co-engineer"],
+  "forbidden_skills": [
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

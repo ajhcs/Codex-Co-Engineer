@@ -1,0 +1,26 @@
+{
+  "id": "direct-chatting",
+  "activation": "direct",
+  "journey": null,
+  "user_prompt": "Chatting with Co-Engineer: inspect the running work, then cancel it if it is stuck.",
+  "codex_response": "Chatting with Co-Engineer inspects or cancels the existing run. I will inspect it, and I can cancel that same run. I am not starting another bounded run.",
+  "expected_phrases": [
+    "Chatting with Co-Engineer"
+  ],
+  "forbidden_in_response": [
+    "I am delegating this to Co-Engineer",
+    "Co-Engineer finished, and I verified the candidate.",
+    "credit reduction",
+    "8x speed"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": null,
+    "chatting": true,
+    "chatting_actions": [
+      "inspect",
+      "cancel"
+    ],
+    "verified_final": false
+  }
+}

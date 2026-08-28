@@ -1,0 +1,23 @@
+{
+  "id": "direct-delegating",
+  "activation": "direct",
+  "journey": null,
+  "user_prompt": "Delegating to Co-Engineer: review the auth change in isolation.",
+  "codex_response": "I am delegating this to Co-Engineer. Co-Engineer is running 1 independent assignment.",
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Co-Engineer is running 1 independent assignment"
+  ],
+  "forbidden_in_response": [
+    "credit reduction",
+    "8x speed",
+    "universal UI",
+    "SOTA routing"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": false,
+    "verified_final": false
+  }
+}

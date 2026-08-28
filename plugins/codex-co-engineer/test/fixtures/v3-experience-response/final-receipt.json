@@ -1,0 +1,60 @@
+{
+  "schema": "codex-co-engineer.run-tool-receipt.v1",
+  "version": 1,
+  "mode": "run",
+  "tool": "task",
+  "operation": "status",
+  "status": "completed",
+  "run_id": "auth-split",
+  "assignment_count": 3,
+  "objective": "Split the validator and the docs.",
+  "base_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "git": {
+    "base_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+  },
+  "journal": { "terminal": true, "run_outcome": "completed" },
+  "lanes": [
+    {
+      "assignment_id": "validator",
+      "provider": "grok",
+      "role": "implement",
+      "required": true,
+      "status": "completed",
+      "write_scope": ["src/validator/**"],
+      "task": {
+        "branch": "codex-co-engineer/runs/auth-split/validator",
+        "start_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tree_sha": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    {
+      "assignment_id": "docs",
+      "provider": "dsh",
+      "role": "implement",
+      "required": true,
+      "status": "failed",
+      "write_scope": ["docs/**"]
+    },
+    {
+      "assignment_id": "review",
+      "provider": "cursor-local",
+      "role": "review",
+      "required": false,
+      "status": "unresolved",
+      "write_scope": []
+    }
+  ],
+  "complete_candidate_blocked": true,
+  "candidate": {
+    "ref": "refs/codex-co-engineer/runs/auth-split/candidate",
+    "composed": false,
+    "ready_for_codex_review": false,
+    "authority": "p35",
+    "accepted": true
+  },
+  "evidence": {
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "facts": [{ "fact_kind": "git_identity" }, { "fact_kind": "head_sha" }],
+    "claims": [{ "claim_kind": "tests_passed" }]
+  }
+}

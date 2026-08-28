@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Co-Engineer grouped attention</title>
+  <style><!--CCE_CSS--></style>
+</head>
+<body>
+  <main>
+  <article class="cce-card cce-card-attention" data-cce-card="attention" data-cce-interactive="reply" aria-labelledby="cce-attention-title">
+    <header>
+      <h1 id="cce-attention-title">Co-Engineer grouped attention</h1>
+      <p class="cce-phrase" data-field="phrase">Co-Engineer needs one decision from you</p>
+      <p class="cce-authority">Codex remains chief engineer, reviewer, and merge authority.</p>
+    </header>
+    <section aria-labelledby="cce-questions-heading">
+      <h2 id="cce-questions-heading">Questions</h2>
+      <ol class="cce-questions" data-field="questions">
+        <li class="cce-empty">Not available</li>
+      </ol>
+    </section>
+    <section aria-labelledby="cce-affected-heading">
+      <h2 id="cce-affected-heading">Affected assignments</h2>
+      <p class="cce-note">These assignments need this one decision.</p>
+      <ul class="cce-lane-names" data-field="affected_lanes">
+        <li class="cce-empty">Not available</li>
+      </ul>
+    </section>
+    <section aria-labelledby="cce-unaffected-heading">
+      <h2 id="cce-unaffected-heading">Unaffected assignments</h2>
+      <p class="cce-note">These assignments keep working.</p>
+      <ul class="cce-lane-names" data-field="unaffected_lanes">
+        <li class="cce-empty">Not available</li>
+      </ul>
+    </section>
+    <section aria-labelledby="cce-unresolved-heading">
+      <h2 id="cce-unresolved-heading">Unresolved assignments</h2>
+      <p class="cce-note">Assignments that cannot take a same-session reply stay unresolved. They are not skipped and do not start another run.</p>
+      <ul class="cce-lane-names" data-field="unresolved_lanes">
+        <li class="cce-empty">None</li>
+      </ul>
+    </section>
+    <form class="cce-reply" data-cce-reply-form="true" id="cce-attention-form" action="#" method="post" novalidate>
+      <p class="cce-visually-hidden" id="cce-reply-help">Send exactly one grouped decision for the current run. This does not merge, push, or start another run.</p>
+      <button class="cce-submit" type="submit" id="cce-attention-submit" data-field="submit" aria-describedby="cce-reply-help" disabled>Send one decision</button>
+    </form>
+    <p class="cce-status" role="status" aria-live="polite" aria-atomic="true" id="cce-attention-status" data-field="status" tabindex="-1">Waiting for the grouped questions.</p>
+    <p class="cce-note">One grouped decision. This card cannot merge, push, rebase, create a pull request, tag, or release. Unaffected assignments keep working.</p>
+  </article>
+  </main>
+  <script><!--CCE_JS--></script>
+</body>
+</html>

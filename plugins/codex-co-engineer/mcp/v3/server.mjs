@@ -19,7 +19,20 @@ import {
 } from './compact-task.mjs';
 import { deadlineProjection } from './deadline.mjs';
 import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
-import { buildToolResult, normalizeResponseMode } from './response.mjs';
+import {
+  advertiseMcpAppsCapability,
+  buildToolResult,
+  listExperienceUiResourcesForClient,
+  normalizeResponseMode,
+  readExperienceUiResourceForClient,
+  resolveExperienceResultMeta,
+  resolveExperienceToolMeta,
+} from './response.mjs';
+import {
+  MCP_RESOURCE_NOT_FOUND,
+  clientAdvertisesCompatibleAppsUi,
+  experienceUiResourcesForClient,
+} from './experience-ui-resource.mjs';
 import { listTasks, listTasksPage, stateRoot, waitForAnyTaskProgress } from './task-store.mjs';
 import {
   cancelTask,
@@ -37,7 +50,36 @@ import {
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
+let clientCapabilities = null;
 const inflight = new Map();
+
+function uiResources() {
+  return experienceUiResourcesForClient(clientCapabilities);
+}
+
+function serverCapabilities() {
+  const capabilities = { tools: { listChanged: false } };
+  const apps = advertiseMcpAppsCapability({
+    clientCapabilities,
+    resources: uiResources(),
+  });
+  if (apps) {
+    capabilities.extensions = apps;
+    capabilities.resources = { listChanged: false };
+  }
+  return capabilities;
+}
+
+function advertisedTools() {
+  return TOOLS.map((tool) => {
+    const meta = resolveExperienceToolMeta(tool.name, {
+      clientCapabilities,
+      resources: uiResources(),
+    });
+    if (!meta) return tool;
+    return { ...tool, _meta: meta };
+  });
+}
 
 const RESPONSE_MODE_PROPERTY = {
   type: 'string',
@@ -428,7 +470,14 @@ function takePresentationArgs(args = {}) {
 }
 
 function result(value, { responseMode } = {}) {
-  return buildToolResult(value, { responseMode });
+  const uiMeta = value?.mode === 'run'
+    ? resolveExperienceResultMeta({
+      card: value?.experience?.card ?? null,
+      clientCapabilities,
+      resources: uiResources(),
+    })
+    : null;
+  return buildToolResult(value, { responseMode, uiMeta });
 }
 
 function errorResult(error, { responseMode } = {}) {
@@ -537,19 +586,62 @@ async function handle(message) {
   if (message.method === 'initialize') {
     const requested = message.params?.protocolVersion;
     negotiated = PROTOCOLS.has(requested) ? requested : '2025-11-25';
+    clientCapabilities = message.params?.capabilities ?? null;
     send({
       jsonrpc: '2.0',
       id: message.id,
       result: {
         protocolVersion: negotiated,
-        capabilities: { tools: { listChanged: false } },
+        capabilities: serverCapabilities(),
         serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: VERSION },
       },
     });
     return;
   }
   if (message.method === 'tools/list') {
-    send({ jsonrpc: '2.0', id: message.id, result: { tools: TOOLS } });
+    send({ jsonrpc: '2.0', id: message.id, result: { tools: advertisedTools() } });
+    return;
+  }
+  if (message.method === 'resources/list') {
+    const listed = listExperienceUiResourcesForClient({
+      clientCapabilities,
+      resources: uiResources(),
+    });
+    if (listed == null) {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Method not found: ${message.method}` } });
+      return;
+    }
+    send({ jsonrpc: '2.0', id: message.id, result: { resources: listed } });
+    return;
+  }
+  if (message.method === 'resources/read') {
+    if (!clientAdvertisesCompatibleAppsUi(clientCapabilities)) {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Method not found: ${message.method}` } });
+      return;
+    }
+    const resource = readExperienceUiResourceForClient(message.params?.uri, {
+      clientCapabilities,
+      resources: uiResources(),
+    });
+    if (resource == null) {
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: MCP_RESOURCE_NOT_FOUND, message: 'Resource not found' },
+      });
+      return;
+    }
+    send({
+      jsonrpc: '2.0',
+      id: message.id,
+      result: {
+        contents: [{
+          uri: resource.uri,
+          mimeType: resource.mimeType,
+          text: resource.text,
+        }],
+      },
+    });
     return;
   }
   if (message.method === 'tools/call') {

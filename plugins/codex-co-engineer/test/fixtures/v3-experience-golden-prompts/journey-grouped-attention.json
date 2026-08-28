@@ -1,0 +1,33 @@
+{
+  "id": "journey-grouped-attention",
+  "activation": "direct",
+  "journey": "grouped-attention",
+  "turns": [
+    {
+      "user": "Chatting with Co-Engineer: the running work asked more than one question.",
+      "codex": "Co-Engineer needs one decision from you."
+    },
+    {
+      "user": "Use the stricter validator and keep the docs change as written.",
+      "codex": "I recorded that one decision and I am continuing the same Co-Engineer run. This is not a new delegation."
+    }
+  ],
+  "expected_phrases": [
+    "Co-Engineer needs one decision from you"
+  ],
+  "forbidden_in_response": [
+    "I am delegating this to Co-Engineer",
+    "AttentionBatch",
+    "debate"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": true,
+    "chatting_actions": [
+      "answer grouped attention",
+      "continue"
+    ],
+    "verified_final": false
+  }
+}

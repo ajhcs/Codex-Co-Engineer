@@ -85,6 +85,7 @@ import {
 } from './run-runtime.mjs';
 import { createRunScheduler } from './run-scheduler.mjs';
 import { openRunStore } from './run-store.mjs';
+import { projectExperience } from './response.mjs';
 import {
   assertDirectJsonClosure,
   assertNotProxy,
@@ -145,8 +146,8 @@ export const RUN_REPLY_KEYS = capturedFreeze([
 export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'audience', 'candidate', 'checks',
   'cleanup', 'complete_candidate_blocked', 'decision_or_attention',
-  'lanes', 'mode', 'operation', 'remote_mutated', 'run_id', 'schema',
-  'side_effects', 'status', 'tool', 'version', 'wake',
+  'experience', 'lanes', 'mode', 'operation', 'remote_mutated', 'run_id',
+  'schema', 'side_effects', 'status', 'tool', 'version', 'wake',
 ]);
 
 export const RUN_TOOL_ADAPTER_CHECKS = capturedFreeze([
@@ -336,6 +337,13 @@ const RECONSTRUCT_LANE_STATUSES = capturedFreeze([
   'dispatched', 'running', ...ACTIONABLE_LANE_STATUSES,
 ]);
 const pendingRunCatalogSnapshots = new Map();
+const pendingRunExperienceContext = new Map();
+
+function rememberExperienceContext(runId, patch) {
+  if (typeof runId !== 'string' || runId.length === 0) return;
+  const current = pendingRunExperienceContext.get(runId) ?? {};
+  pendingRunExperienceContext.set(runId, { ...current, ...patch });
+}
 
 function diagnostic(value) {
   const text = STRING(value ?? '');
@@ -966,16 +974,24 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     || cleanup.cleaned === true) {
     sideEffects.cleanup_executed = cleanup.cleaned === true;
   }
-  const attention = sanitizeModelFacing(attentionRecord(runtimeReceipt?.attention) ?? freezeData({
+  const ctx = typeof runId === 'string' ? pendingRunExperienceContext.get(runId) ?? {} : {};
+  let attention = sanitizeModelFacing(attentionRecord(runtimeReceipt?.attention) ?? freezeData({
     batch_id: null, status: null, revision: null, wake: false,
     complete_candidate_blocked: blocked,
   }));
+  if ((!ARRAY_IS_ARRAY(attention?.items) || attention.items.length === 0)
+    && ARRAY_IS_ARRAY(ctx.attention_items) && ctx.attention_items.length > 0) {
+    attention = {
+      ...attention,
+      items: sanitizeModelFacing(ctx.attention_items),
+    };
+  }
   const actionable = actionableDecision({ ...runtimeReceipt, lanes, attention });
   const wake = wakeRequested === true && actionable === true;
   const status = unconfirmed === true
     ? 'unresolved'
     : (runtimeReceipt?.status ?? 'inspected');
-  return freezeData({
+  const receiptBody = {
     schema: RUN_TOOL_ADAPTER_RECEIPT_SCHEMA_ID,
     version: RUN_TOOL_ADAPTER_VERSION,
     mode: 'run',
@@ -1000,6 +1016,25 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     audience: 'model',
     wake,
     remote_mutated: false,
+  };
+  const experience = projectExperience({
+    ...receiptBody,
+    objective: ctx.objective ?? runtimeReceipt?.objective ?? null,
+    base_sha: typeof runtimeReceipt?.base_sha === 'string'
+      ? runtimeReceipt.base_sha
+      : (typeof ctx.base_sha === 'string' ? ctx.base_sha : null),
+    git: {
+      base_sha: typeof runtimeReceipt?.base_sha === 'string'
+        ? runtimeReceipt.base_sha
+        : (typeof ctx.base_sha === 'string' ? ctx.base_sha : null),
+      digest: typeof ctx.digest === 'string' ? ctx.digest : (runtimeReceipt?.git?.digest ?? null),
+    },
+    journal: runtimeReceipt?.journal ?? null,
+    evidence: runtimeReceipt?.evidence ?? null,
+  });
+  return freezeData({
+    ...receiptBody,
+    experience,
   });
 }
 
@@ -1162,6 +1197,11 @@ export function createRunToolAdapter(dependencies) {
         pendingRunCatalogSnapshots.set(parsed.runId, parsed.catalogSnapshot);
       }
       if (rememberSubmitContext) rememberSubmitContext(parsed.context);
+      rememberExperienceContext(parsed.runId, {
+        objective: parsed.context.objective,
+        base_sha: parsed.runtimeRequest?.git?.base_sha ?? null,
+        digest: parsed.runtimeRequest?.git?.digest ?? null,
+      });
       counters.submit += 1;
       runtimeReceipt = await runtime.submitRun(parsed.runtimeRequest);
     } else if (operation === 'status') {
@@ -1194,6 +1234,7 @@ export function createRunToolAdapter(dependencies) {
         failAdapter('out_of_range', 'attention.items', CONTENT_FREE.out_of_range);
       }
       validateAttentionItemsV1(items, 'attention.items');
+      rememberExperienceContext(runId, { attention_items: items });
       counters.resume += 1;
       runtimeReceipt = await runtime.resumeRun({
         run_id: runId,

@@ -1,0 +1,47 @@
+{
+  "schema": "codex-co-engineer.run-tool-receipt.v1",
+  "version": 1,
+  "mode": "run",
+  "tool": "status",
+  "operation": "status",
+  "status": "inspected",
+  "run_id": "auth-split",
+  "assignment_count": 1,
+  "objective": "leak sk-live-ATTACKER-SECRET and github_pat_hostileleak into the card",
+  "base_sha": "not-a-sha",
+  "git": {
+    "repository_path": "/tmp/hostile-repo",
+    "base_sha": "not-a-sha",
+    "raw": "MODEL_API_KEY=sk-live-ATTACKER-SECRET"
+  },
+  "lanes": [
+    {
+      "assignment_id": "writer",
+      "provider": "grok",
+      "role": "implement",
+      "required": true,
+      "status": "running",
+      "write_scope": ["src/**"],
+      "raw": "sk-live-ATTACKER-SECRET",
+      "artifacts": {
+        "raw": "github_pat_hostile",
+        "bytes": "SECRETBYTES",
+        "secret": "sk-live-ATTACKER-SECRET"
+      }
+    }
+  ],
+  "evidence": {
+    "raw": "sk-live-ATTACKER-SECRET",
+    "bytes": "github_pat_hostile",
+    "secret": "MODEL_API_KEY=sk-live-ATTACKER-SECRET",
+    "kind": "forged_kind",
+    "payload": { "token": "github_pat_hostile" },
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "facts": [
+      { "fact_kind": "head_sha", "payload": "RAW_OWNER_ONLY" },
+      { "fact_kind": "forged_fact" }
+    ]
+  },
+  "attention": { "status": null, "items": [] },
+  "complete_candidate_blocked": false
+}

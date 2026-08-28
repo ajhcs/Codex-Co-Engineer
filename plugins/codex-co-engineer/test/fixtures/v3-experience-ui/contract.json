@@ -1,0 +1,20 @@
+{
+  "schema": "codex-co-engineer.experience-ui.v1",
+  "slice": "UI-02",
+  "cards": ["run", "attention", "final"],
+  "display_only_cards": ["run", "final"],
+  "unregistered_cards": ["shell"],
+  "tools": ["status", "delegate", "task", "tasks", "cancel"],
+  "mime_type": "text/html;profile=mcp-app",
+  "extension_id": "io.modelcontextprotocol/ui",
+  "uris": {
+    "run": "ui://codex-co-engineer/experience/run",
+    "attention": "ui://codex-co-engineer/experience/attention",
+    "final": "ui://codex-co-engineer/experience/final"
+  },
+  "authority_sentence": "Codex remains chief engineer, reviewer, and merge authority.",
+  "denied_controls": ["merge", "push", "rebase", "create_pr", "create-pr", "tag", "release"],
+  "fonts": "ui-sans-serif, system-ui, Helvetica, Arial, sans-serif",
+  "colors": ["#111111", "#374151", "#4B5563", "#6B7280"],
+  "support": "host-specific/unproven until QA-01"
+}

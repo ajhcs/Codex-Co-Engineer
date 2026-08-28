@@ -1,0 +1,15 @@
+{
+  "id": "delegate-indirect-product-lead",
+  "skill": "delegate-to-co-engineer",
+  "activation": "indirect",
+  "user_prompt": "Give Codex a team of external co-engineers without giving up control. Split the validator and the docs.",
+  "ask_once": true,
+  "expected_skills": ["delegate-to-co-engineer"],
+  "forbidden_skills": [
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

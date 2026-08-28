@@ -1,12 +1,28 @@
 {
   "name": "codex-co-engineer",
   "interface": {
-    "displayName": "Codex-Co-Engineer"
+    "displayName": "Codex-Co-Engineer",
+    "shortDescription": "Give Codex a team of external co-engineers without giving up control.",
+    "longDescription": "Give Codex a team of external co-engineers without giving up control. Codex remains chief engineer, reviewer, and merge authority. Delegating to Co-Engineer starts one bounded run. Chatting with Co-Engineer inspects, continues, answers grouped attention, or cancels that existing run. Public provider names are Using Grok Co-Engineer, Using Cursor Co-Engineer, and Using Muse Co-Engineer. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.",
+    "brandColor": "#111111",
+    "logo": "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+    "poster": "docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg"
   },
   "plugins": [
     {
       "name": "codex-co-engineer",
       "version": "3.3.0",
+      "description": "Give Codex a team of external co-engineers without giving up control. Delegating to Co-Engineer starts one bounded run. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.",
+      "keywords": [
+        "codex",
+        "co-engineer",
+        "grok",
+        "cursor",
+        "muse",
+        "delegating",
+        "chatting",
+        "isolated-assignments"
+      ],
       "source": {
         "source": "local",
         "path": "./plugins/codex-co-engineer"

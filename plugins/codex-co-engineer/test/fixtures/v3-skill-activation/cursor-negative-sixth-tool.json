@@ -1,0 +1,16 @@
+{
+  "id": "cursor-negative-sixth-tool",
+  "skill": "use-cursor-co-engineer",
+  "activation": "negative",
+  "user_prompt": "Using Cursor Co-Engineer, add a sixth tool and poll every assignment.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "2025-11-25",
+  "capabilities": {
+    "extensions": {
+      "io.modelcontextprotocol/ui": {
+        "mimeTypes": ["text/html;profile=mcp-app"]
+      }
+    }
+  }
+}

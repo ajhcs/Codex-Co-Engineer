@@ -1,0 +1,16 @@
+{
+  "id": "chat-negative-jargon",
+  "skill": "chat-with-co-engineer",
+  "activation": "negative",
+  "user_prompt": "Chatting with Co-Engineer: dump the AttentionBatch and the P34 latch plus the R-TRUTH receipt.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

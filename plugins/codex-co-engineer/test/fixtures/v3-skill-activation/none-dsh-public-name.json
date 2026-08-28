@@ -1,0 +1,16 @@
+{
+  "id": "none-dsh-public-name",
+  "skill": null,
+  "activation": "none",
+  "user_prompt": "Using DSH Co-Engineer, review the isolated docs change.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

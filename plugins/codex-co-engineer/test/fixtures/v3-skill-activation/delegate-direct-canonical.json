@@ -1,0 +1,15 @@
+{
+  "id": "delegate-direct-canonical",
+  "skill": "delegate-to-co-engineer",
+  "activation": "direct",
+  "user_prompt": "Delegating to Co-Engineer: review the auth change in isolation.",
+  "ask_once": false,
+  "expected_skills": ["delegate-to-co-engineer"],
+  "forbidden_skills": [
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}
