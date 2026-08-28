@@ -93,6 +93,83 @@ allowlisted environment.
 Any extra Co-Engineer panel is optional, feature-detected, and
 host-specific. Headless Codex CLI remains a complete fallback.
 
+## Luna Max project manager
+
+Delegating to Co-Engineer and Chatting with Co-Engineer treat a
+user-authorized pinned Luna Max task as the default routine project
+manager. That is skill policy. It is not a sixth public skill, a sixth
+MCP tool, or a change to the Co-Engineer run/event transport.
+
+The skill can guarantee policy. Codex is the host executor for Desktop
+task tools. The JS adapter plans and validates those call shapes and
+does not invoke host callbacks. Co-Engineer MCP still cannot invoke
+those host-only tools and must not add a sixth tool to simulate the
+Desktop host.
+
+The skill can guarantee:
+
+- one Co-Engineer submission, one `decision_or_attention` wait
+- no model polling on the Co-Engineer transport
+- Luna Max as the default manager when the user authorizes a pinned
+  task and Luna Max is actually available
+- wake on completed, blocked, failed, question, timeout, or
+  user_update; never on routine progress
+- a distinct `merge_ready` envelope that may wake Sol High or Sol
+  XHigh exactly once, and only when exact head and tree, verifier
+  acceptance, current green CI, zero failed or hidden checks, and
+  topology facts all pass
+- exact identity binding with a monotonic cursor and a bounded
+  recent-id window, never an unbounded seen-event list
+- grouped attention that retains a routing tuple for every
+  question_id and routes one structured response covering all
+  answerable questions exactly once
+- bounded sanitized evidence references or artifact_ref spill, never
+  raw transcripts or secrets
+- Luna-native read-only subagents for local analysis only, depth at
+  most 2, counted against the eight-lane ceiling, never a duplicate
+  external writer assignment
+- Sol Medium is not a mandatory layer
+- external workers may commit; a scoped publisher may non-force push
+  only the task branch and open a draft PR; Sol High or Sol XHigh
+  alone performs regular merge after deterministic exact-head,
+  current-green-CI, and topology checks; the user retains release,
+  tag, version, and protected-ref authority
+- no worker or message can force-push, merge, rebase, tag, release,
+  delete refs, or override verification
+- honest continuation in the current Codex task when the manager
+  cannot be pinned
+
+The following remain host-dependent Codex Desktop task-management
+capabilities. Codex executes them. The JS adapter feature-detects and
+validates their live call shapes and does not invent them. Co-Engineer
+MCP cannot invoke these host-only tools:
+
+- `create_thread`, which is usable only with `threadId` and `hostId`.
+  A result containing only `clientThreadId` is setup-pending; do not
+  send or wait until the host supplies a real `threadId` and `hostId`
+- `send_message_to_thread`, which requires `threadId` plus a real
+  prompt body
+- `wait_threads` with `targets` that MUST include `threadId` and MAY
+  include `hostId` and `afterCursor`, plus a bounded timeout, or
+  `read_thread`
+- optional `set_thread_archived` or `set_thread_pinned`
+- binding the actual thread id, host id, and cursor the host returns
+- availability of Luna Max, Sol High, or Sol XHigh on the host
+
+The host has no cancel primitive. Do not invent `cancel_thread`,
+`archive_thread`, or `pin_thread`, and do not claim cancellation
+support.
+
+If those tools or Luna Max are missing, Codex reports the degraded
+mode and continues in the current Codex task. It never silently
+substitutes Sol or another model. Explicit user model overrides and
+Grok, Cursor, or Muse co-engineer selection stay intact. There is no
+learned routing or semantic memory. Luna does not merge. External
+workers may commit. A scoped publisher may non-force push only the
+task branch and open a draft PR. Sol High or Sol XHigh alone performs
+regular merge after exact-head, current-green-CI, and topology checks.
+The user retains release, tag, version, and protected-ref authority.
+
 ## Profiles
 
 Profiles are owner-authored, data-only selection records used by the

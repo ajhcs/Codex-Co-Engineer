@@ -311,6 +311,19 @@ function assertGoalEntrypoint(skillId, files, catalog) {
   assert.equal(packText.includes('decision_or_attention'), true, `${skillId} missing aggregate wait`);
   assert.match(packText, /same run cursor/u, `${skillId} missing same run cursor`);
   assert.match(files.skillMd, /Codex remains/u, `${skillId} missing Codex authority`);
+  assert.match(files.skillMd, /External workers may commit/u, `${skillId} missing worker commit authority`);
+  assert.match(
+    files.skillMd,
+    /scoped publisher may non-force push only the task branch/u,
+    `${skillId} missing scoped publisher`,
+  );
+  assert.match(files.skillMd, /Sol High or Sol XHigh/u, `${skillId} missing Sol merge actor`);
+  assert.match(files.skillMd, /The user retains/u, `${skillId} missing retained user authority`);
+  assert.doesNotMatch(
+    files.skillMd,
+    /reviewer and merge authority/u,
+    `${skillId} still names Codex as merge authority`,
+  );
   assert.match(files.skillMd, /Never ask the user to construct tool payloads/u, skillId);
   assert.match(files.skillMd, /\$control-codex-co-engineer-agents/u, skillId);
 }
@@ -580,6 +593,58 @@ test('activation contract rejects jargon entrypoints, sixth tools, and misrouted
       'delegate-to-co-engineer',
     ),
     /must quote string display_name/u,
+  );
+});
+
+test('Delegating and Chatting teach Luna Max PM without a sixth public skill', async () => {
+  const bundle = await loadBundle();
+  const skillDirs = (await readdir(SKILLS)).sort();
+  assert.deepEqual(skillDirs, [...ALL_SKILLS].sort());
+  assert.equal(skillDirs.includes('luna-max-pm'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(bundle.catalog.canonical_skill_phrases, 'luna-max-pm'), false);
+
+  const { skillRequiredPhrases } = await import('../skills/delegate-to-co-engineer/references/luna-pm-relay.mjs');
+  const phrases = skillRequiredPhrases();
+  const delegatePack = Object.values(bundle.skillFiles['delegate-to-co-engineer'].pack).join('\n');
+  const chatPack = Object.values(bundle.skillFiles['chat-with-co-engineer'].pack).join('\n');
+  for (const phrase of phrases) {
+    assert.equal(delegatePack.includes(phrase), true, `delegate pack missing ${phrase}`);
+    assert.equal(chatPack.includes(phrase), true, `chat pack missing ${phrase}`);
+  }
+  assert.match(bundle.skillFiles['delegate-to-co-engineer'].skillMd, /pin one Luna Max task/u);
+  assert.match(bundle.skillFiles['chat-with-co-engineer'].skillMd, /Normal completion does not wake Sol/u);
+  assert.match(delegatePack, /I am not substituting Sol/u);
+  assert.match(chatPack, /I am not substituting Sol/u);
+
+  const byId = new Map(bundle.examples.map((example) => [example.id, example]));
+  assert.equal(byId.get('delegate-direct-luna-pm').skill, 'delegate-to-co-engineer');
+  assert.equal(byId.get('chat-direct-luna-blocked').skill, 'chat-with-co-engineer');
+  assert.equal(byId.get('none-luna-without-co-engineer').activation, 'none');
+});
+
+test('classifier keeps Luna Max on Delegating or Chatting and does not invent a Luna skill', async () => {
+  const { catalog } = await loadBundle();
+  assert.deepEqual(
+    classifySkillActivation(
+      'Delegating to Co-Engineer: pin Luna Max as the project manager for this isolated review.',
+      catalog,
+    ),
+    { skills: ['delegate-to-co-engineer'], activation: 'direct' },
+  );
+  assert.deepEqual(
+    classifySkillActivation(
+      'Chatting with Co-Engineer: Luna Max reported a blocked assignment.',
+      catalog,
+    ),
+    { skills: ['chat-with-co-engineer'], activation: 'direct' },
+  );
+  assert.deepEqual(
+    classifySkillActivation('Use Luna Max for a local analysis of this helper.', catalog),
+    { skills: [], activation: 'none' },
+  );
+  assert.deepEqual(
+    classifySkillActivation('Using Luna Co-Engineer, review the isolated docs change.', catalog),
+    { skills: [], activation: 'none' },
   );
 });
 

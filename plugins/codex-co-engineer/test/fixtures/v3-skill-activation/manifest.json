@@ -3,12 +3,14 @@
   "version": 1,
   "examples": [
     "delegate-direct-canonical.json",
+    "delegate-direct-luna-pm.json",
     "delegate-indirect-product-lead.json",
     "delegate-indirect-isolated-team.json",
     "delegate-indirect-multi-lane.json",
     "delegate-direct-provider-choice.json",
     "delegate-negative-mcp-json.json",
     "chat-direct-canonical.json",
+    "chat-direct-luna-blocked.json",
     "chat-direct-grouped-attention.json",
     "chat-direct-verified-final.json",
     "chat-indirect-continue.json",
@@ -25,6 +27,7 @@
     "advanced-control-event-cursor.json",
     "advanced-control-mcp-arguments.json",
     "none-ordinary-coding.json",
+    "none-luna-without-co-engineer.json",
     "none-dsh-public-name.json"
   ]
 }

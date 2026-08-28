@@ -1,0 +1,24 @@
+{
+  "id": "direct-luna-pm",
+  "activation": "direct",
+  "journey": null,
+  "user_prompt": "Delegating to Co-Engineer: pin Luna Max as the project manager for this isolated review.",
+  "codex_response": "I am delegating this to Co-Engineer. Luna Max is the project manager for this Co-Engineer run. Co-Engineer is running 1 independent assignment.",
+  "expected_phrases": [
+    "I am delegating this to Co-Engineer",
+    "Luna Max is the project manager for this Co-Engineer run",
+    "Co-Engineer is running 1 independent assignment"
+  ],
+  "forbidden_in_response": [
+    "Sol Medium",
+    "I am substituting Sol",
+    "credit reduction",
+    "8x speed"
+  ],
+  "coordination": {
+    "submissions": 1,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": false,
+    "verified_final": false
+  }
+}

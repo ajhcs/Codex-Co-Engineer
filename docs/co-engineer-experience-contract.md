@@ -4,8 +4,12 @@ Give Codex a team of external co-engineers without giving up control.
 
 This is the public-language contract later UX slices consume. It freezes
 terminology, Codex speech, activation, the five-tool catalog, and the
-one-submission coordination shape. It does not change runtime, README,
-skill, manifest, marketplace, asset, version, changelog, or release
+one-submission coordination shape. The Luna Max TaskPort skill guarantees
+policy and is the host executor for Desktop task tools. The JS adapter
+plans and validates those call shapes; it does not invoke host callbacks.
+Co-Engineer MCP still does not invoke those host-only tools and must not
+add a sixth tool to simulate the Desktop host. This slice does not change
+README, manifest, marketplace, asset, version, changelog, or release
 surfaces.
 
 Owned files:
@@ -15,6 +19,10 @@ Owned files:
 - `plugins/codex-co-engineer/test/r1-experience-contract.test.mjs`
 - `plugins/codex-co-engineer/test/fixtures/v3-experience-contract.json`
 - `plugins/codex-co-engineer/test/fixtures/v3-experience-golden-prompts/**`
+- `plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/luna-pm.md`
+- `plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/luna-pm-relay.mjs`
+- `plugins/codex-co-engineer/mcp/v3/luna-pm-host-adapter.mjs`
+- `plugins/codex-co-engineer/skills/chat-with-co-engineer/references/luna-pm-events.md`
 - this document
 
 Normal users speak and read only the public language below. They never
@@ -27,8 +35,12 @@ Exact sentence:
 
 `Give Codex a team of external co-engineers without giving up control.`
 
-Codex remains chief engineer, reviewer, and merge authority. External
-co-engineers do isolated assigned work. The user keeps control.
+Codex remains chief engineer and reviewer. External co-engineers do
+isolated assigned work. External workers may commit. A scoped publisher
+may non-force push only the task branch and open a draft PR. Sol High
+or Sol XHigh alone performs regular merge after deterministic
+exact-head, current-green-CI, and topology checks. The user retains
+release, tag, version, and protected-ref authority.
 
 ## Canonical phrases
 
@@ -108,6 +120,62 @@ Every bounded-run journey is one submission, one aggregate
 progress never wakes that wait. Codex does not poll each assignment and
 does not add a second submission to continue, inspect, or answer.
 
+## Luna Max project manager
+
+Luna Max is the default routine project manager when the user authorizes
+it and Luna Max is actually available. It is not a sixth public phrase
+or sixth tool. The Co-Engineer run/event transport stays available and
+performs no model polling. Co-Engineer MCP cannot invoke host-only Codex
+task tools. The skill guarantees policy and executes the host tools. The
+JS adapter plans and validates those call shapes. The Co-Engineer event
+store remains source of truth. A user-authorized
+pinned Luna Max task wakes on completed, blocked, failed, question,
+timeout, or user_update envelopes. Routine progress does not wake a
+model. A distinct `merge_ready` envelope may wake Sol High or Sol XHigh
+exactly once, and only when exact head and tree, verifier acceptance,
+current green CI, zero failed or hidden checks, and topology facts all
+pass.
+
+This skill layer can guarantee that policy, identity binding, monotonic
+cursor resume, sanitized evidence references, and honest degraded
+speech. It cannot create Desktop threads by itself. Codex Desktop
+`create_thread`, `send_message_to_thread`, and `wait_threads` or
+`read_thread` tools are host-dependent. Codex is the host executor. A
+usable `create_thread` result includes `threadId` and `hostId`. A result
+containing only `clientThreadId` is setup-pending; do not send or wait
+until the host supplies a real `threadId` and `hostId`. `wait_threads`
+targets MUST include `threadId` and MAY include `hostId` and
+`afterCursor`, plus a bounded timeout.
+`send_message_to_thread` requires `threadId` plus a real prompt body.
+Optional `set_thread_archived` and `set_thread_pinned` exist only when
+the host provides them. There is no host cancel primitive. Bind only the
+actual thread id, host id, and cursor the host returns. If those tools
+or Luna Max are unavailable, Codex continues in the current Codex task
+and says so. It never silently substitutes Sol or invents another model.
+
+Sol Medium is not a mandatory layer. External workers may commit. A
+scoped publisher may non-force push only the task-owned unprotected Codex
+branch and open or update a draft pull request after the user authorizes
+publication. Sol High or Sol XHigh alone performs regular merge after
+deterministic exact-head, current-green-CI, and topology checks, and
+remains an on-demand exception adjudicator. The user retains release,
+tag, version, and protected-ref authority. No worker or message can
+force-push, merge, rebase, tag, release, delete refs, or override
+verification. Normal completion never wakes Sol. Sol escalation
+is exactly: a verified `merge_ready` packet, conflicting exact evidence or
+reviewer verdicts, security or protected-ref risk, composition
+ambiguity, repeated deterministic rejection, a release-authority
+decision, or explicit user escalation.
+
+Luna may use bounded native read-only subagents for local analysis with
+inherited capabilities, depth at most 2, counted against the eight-lane
+ceiling. They must not duplicate a Co-Engineer external writer
+assignment or widen Git or merge authority. Grouped attention retains a
+routing tuple for every question_id and routes one structured response
+covering all answerable questions exactly once. Explicit user model
+overrides and Grok, Cursor, or Muse selection stay intact. Luna does not
+merge. There is no learned routing or semantic memory.
+
 ## Provider display
 
 | Internal slot | Public phrase |
@@ -171,10 +239,13 @@ golden Codex responses may not.
 
 ## Non-goals
 
-This slice does not implement runtime, tools, README, skill, manifest,
-marketplace, asset, version, changelog, release, Git remote, or
-protected-ref behavior. It does not claim Gate A, credit economics, or
-context-efficiency results.
+This slice does not implement runtime, ACP drivers, supervisor,
+task-store, run-runtime, attention, provider transports, README,
+manifest, marketplace, asset, version, changelog, or release behavior.
+Delegating to Co-Engineer and Chatting with Co-Engineer carry the Luna
+Max TaskPort; it is not a sixth public skill. Git publication and Sol
+merge stay fail-closed policy. It does not claim Gate A, credit
+economics, or context-efficiency results.
 
 ## Testing
 

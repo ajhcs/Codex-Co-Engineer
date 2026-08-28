@@ -98,7 +98,12 @@ Co-Engineer finished, and I verified the candidate. You may cancel:
 The honest shape is up to eight isolated external co-engineers, one
 bounded run, one coordinated wait, one verified decision.
 
-Codex remains chief engineer. You remain merge authority.
+Codex remains chief engineer and reviewer. External workers may commit.
+A scoped publisher may non-force push only the task branch and open a
+draft PR. Sol High or Sol XHigh alone may perform a regular merge after
+deterministic exact-head/tree, current green CI, verifier, and topology
+checks. The user retains version, tag, release, protected-ref, and
+product-policy authority.
 
 Next:
 
