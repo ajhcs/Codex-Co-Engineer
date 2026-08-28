@@ -22,6 +22,15 @@ import {
   openLocalProviderArtifactStoreV1,
   sinkLocalProviderResultV1,
 } from './local-provider-result-sink.mjs';
+import {
+  elicitationContentFromReply,
+  elicitationOptions,
+  eventsHaveUnsupportedAskUserQuestion,
+  isAskUserQuestionName,
+  isStructuredAskUserQuestionUnsupported,
+  liveQuestionId,
+  questionBridgeUnavailableError,
+} from './grok-question-bridge.mjs';
 import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
 import { boundedProviderResult, boundedProviderValue, createProviderResultAccumulator, providerCharCount } from './provider-result.mjs';
 import { RunContractV1Error } from './run-manifest.mjs';
@@ -382,6 +391,8 @@ function taskTimeoutMs(task, now = Date.now()) {
 
 function isUserFacingPermission(params) {
   const title = String(params?.raw?.toolCall?.title ?? params?.raw?.question ?? '');
+  const toolCallId = String(params?.raw?.toolCall?.toolCallId ?? params?.raw?.toolCall?.id ?? '');
+  if (isAskUserQuestionName(title) || isAskUserQuestionName(toolCallId)) return true;
   return /\?|user input|needs? attention|confirm|approval required|fake permission/iu.test(title);
 }
 
@@ -405,6 +416,29 @@ async function handlePermissionRequest(root, taskId, params, signal) {
   });
   const reply = await waitForReply(root, taskId, questionId, { signal });
   return replyDecision(reply, params.raw?.options ?? []);
+}
+
+async function handleElicitationRequest(root, taskId, params, signal) {
+  const raw = params?.raw ?? params ?? {};
+  const sessionId = params?.sessionId ?? raw.sessionId;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    return { action: 'cancel' };
+  }
+  const questionId = safeQuestionId(
+    raw.toolCallId ?? raw.elicitationId ?? raw.toolCall?.toolCallId ?? randomUUID(),
+  );
+  await recordNeedsAttention(root, taskId, {
+    session_id: sessionId,
+    question_id: questionId,
+    prompt: typeof raw.message === 'string' ? raw.message : 'Provider requested a decision.',
+    options: elicitationOptions(raw.requestedSchema),
+    stage: 'provider_feedback',
+  });
+  const reply = await waitForReply(root, taskId, questionId, { signal });
+  return {
+    action: 'accept',
+    content: elicitationContentFromReply(reply, raw.requestedSchema),
+  };
 }
 
 function startDeadlineWatch(root, taskId, onTimeout) {
@@ -1188,6 +1222,7 @@ async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal
     timeoutMs,
     closedProviderEnv: env,
     onPermissionRequest: (params, extra = {}) => handlePermissionRequest(root, taskId, params, extra.signal ?? signal),
+    onElicitationRequest: (params, extra = {}) => handleElicitationRequest(root, taskId, params, extra.signal ?? signal),
   });
 }
 
@@ -1270,10 +1305,12 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     const cancel = () => turn.cancel({ reason: 'signal' }).catch(() => {});
     controller.signal.addEventListener('abort', cancel, { once: true });
     let lastEvent = null;
+    const observedEvents = [];
     const output = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
     const complete = createLocalProviderResultCollectorV1();
     try {
       for await (const event of turn.events) {
+        observedEvents.push(event);
         if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
           output.append(event.text);
           complete.append(event.text);
@@ -1287,7 +1324,18 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     }
 
     const result = await turn.result;
-    const status = result.status === 'completed' ? 'completed' : result.status;
+    const current = (await readTask(root, taskId)).task;
+    const unsupportedQuestion = isStructuredAskUserQuestionUnsupported(lastEvent)
+      || eventsHaveUnsupportedAskUserQuestion(observedEvents);
+    const latchedQuestion = liveQuestionId(current.attention);
+    let status = result.status === 'completed' ? 'completed' : result.status;
+    let terminalError;
+    if (result.status === 'failed') {
+      terminalError = publicError(result.error, prompt);
+    } else if (status === 'completed' && unsupportedQuestion && !latchedQuestion) {
+      status = 'failed';
+      terminalError = questionBridgeUnavailableError();
+    }
     const bounded = output.finish();
     const closeEvidence = await closeOnce();
     const terminal = await persistWorkerTerminal(root, taskId, {
@@ -1296,7 +1344,8 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       last_event: lastEvent,
       result: bounded.value,
       ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
-      ...(result.status === 'failed' ? { error: publicError(result.error, prompt), fallback_safe: false } : {}),
+      ...(unsupportedQuestion && !latchedQuestion ? { question_bridge: 'unavailable' } : {}),
+      ...(terminalError ? { error: terminalError, fallback_safe: false } : {}),
     }, closeEvidence, { wtb_handoff: 'not_applicable' });
     const snapshot = complete.snapshot();
     return attachLocalProviderResultSink(

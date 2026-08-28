@@ -176,6 +176,26 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
 });
 
+test('public README and quickstart keep Sol merge and retained user authority', async () => {
+  const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
+  const quickstart = await readFile(path.join(REPO, 'docs/co-engineer-quickstart.md'), 'utf8');
+  for (const [label, text] of [
+    ['README', readme],
+    ['quickstart', quickstart],
+  ]) {
+    assert.match(text, /External workers may commit/u, label);
+    assert.match(text, /scoped publisher may non-force push only the task branch/u, label);
+    assert.match(text, /Sol High or Sol XHigh/u, label);
+    assert.match(text, /exact-head\/tree/u, label);
+    assert.match(text, /current green CI/u, label);
+    assert.match(text, /verifier/u, label);
+    assert.match(text, /product-policy/u, label);
+    assert.doesNotMatch(text, /reviewer, and merge authority/u, label);
+    assert.doesNotMatch(text, /You remain(?: the)? merge authority/u, label);
+    assert.doesNotMatch(text, /Codex controls the final merge/u, label);
+  }
+});
+
 test('README information architecture maps safe final-art slots and keeps explicit holds', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');

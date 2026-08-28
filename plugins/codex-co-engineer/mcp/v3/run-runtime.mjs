@@ -54,6 +54,10 @@ import {
   hasOwn,
   ownDataValue,
 } from './selection-json.mjs';
+import {
+  openUsageLedgerV1,
+  recordRuntimeUsageObservationV1,
+} from './usage-ledger.mjs';
 
 export const RUN_RUNTIME_SCHEMA_ID = 'codex-co-engineer.run-runtime.v1';
 export const RUN_RUNTIME_VERSION = 1;
@@ -148,7 +152,7 @@ export const RUN_RUNTIME_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'base_sha', 'checks', 'cleanup',
   'complete_candidate_blocked', 'created', 'cursor', 'journal', 'lanes',
   'observed_at', 'remote_mutated', 'run_id', 'schema', 'side_effects',
-  'status', 'version', 'wake',
+  'status', 'usage', 'version', 'wake',
 ]);
 export const RUN_RUNTIME_JOURNAL_KEYS = capturedFreeze([
   'head_hash', 'mode', 'revision', 'run_opened', 'run_outcome', 'terminal',
@@ -888,11 +892,202 @@ function blockedFrom(schedulerReceipt, attention, lanes) {
   return false;
 }
 
+function numericOwn(value, key) {
+  if (value === undefined || value === null || typeof value !== 'object' || ARRAY_IS_ARRAY(value)
+    || IS_PROXY(value) || !hasOwn(value, key)) {
+    return undefined;
+  }
+  const raw = value[key];
+  return NUMBER_IS_SAFE_INTEGER(raw) ? raw : undefined;
+}
+
+function laneUsageRecord(lane) {
+  if (lane === undefined || lane === null || typeof lane !== 'object' || ARRAY_IS_ARRAY(lane)
+    || IS_PROXY(lane)) {
+    return undefined;
+  }
+  if (hasOwn(lane, 'usage')) return lane.usage;
+  if (hasOwn(lane, 'provider_usage')) return lane.provider_usage;
+  return undefined;
+}
+
+function providerUsageFromLane(lane) {
+  const raw = laneUsageRecord(lane);
+  if (raw === undefined || raw === null || typeof raw !== 'object' || ARRAY_IS_ARRAY(raw)
+    || IS_PROXY(raw)) {
+    return undefined;
+  }
+  const patch = {};
+  let seen = false;
+  for (const key of ['input_tokens', 'output_tokens', 'cache_tokens', 'cost_millicents']) {
+    const value = numericOwn(raw, key);
+    if (value === undefined) continue;
+    patch[key] = value;
+    seen = true;
+  }
+  return seen ? patch : undefined;
+}
+
+function laneArtifactRows(lane) {
+  if (lane === undefined || lane === null || typeof lane !== 'object' || ARRAY_IS_ARRAY(lane)
+    || IS_PROXY(lane)) {
+    return undefined;
+  }
+  if (!hasOwn(lane, 'artifacts')) return undefined;
+  const wrapper = lane.artifacts;
+  if (ARRAY_IS_ARRAY(wrapper)) return wrapper;
+  if (wrapper === undefined || wrapper === null || typeof wrapper !== 'object'
+    || ARRAY_IS_ARRAY(wrapper) || IS_PROXY(wrapper) || !hasOwn(wrapper, 'artifacts')) {
+    return undefined;
+  }
+  const rows = wrapper.artifacts;
+  return ARRAY_IS_ARRAY(rows) ? rows : undefined;
+}
+
+function evidenceBytesFromLane(lane) {
+  const artifacts = laneArtifactRows(lane);
+  if (!ARRAY_IS_ARRAY(artifacts)) return undefined;
+  let sum = 0;
+  let seen = false;
+  for (const item of artifacts) {
+    const value = numericOwn(item, 'sanitized_byte_length')
+      ?? numericOwn(item, 'byte_length')
+      ?? numericOwn(item, 'selected_byte_length');
+    if (value === undefined) return undefined;
+    sum += value;
+    seen = true;
+  }
+  return seen ? sum : undefined;
+}
+
+function laneAttribution(lane) {
+  if (lane === undefined || lane === null || typeof lane !== 'object' || ARRAY_IS_ARRAY(lane)
+    || IS_PROXY(lane)) {
+    return null;
+  }
+  const assignmentId = typeof lane.assignment_id === 'string' ? lane.assignment_id : null;
+  const provider = typeof lane.provider === 'string' ? lane.provider : null;
+  const model = typeof lane.model === 'string' ? lane.model : null;
+  if (assignmentId === null || provider === null || model === null) return null;
+  return { assignment_id: assignmentId, provider, model };
+}
+
+function mergeLaneRow(current, lane) {
+  if (typeof lane.provider === 'string') current.provider = lane.provider;
+  if (typeof lane.model === 'string') current.model = lane.model;
+  if (hasOwn(lane, 'usage')) current.usage = lane.usage;
+  if (hasOwn(lane, 'provider_usage')) current.provider_usage = lane.provider_usage;
+  if (hasOwn(lane, 'artifacts')) current.artifacts = lane.artifacts;
+}
+
+function lanesForUsage(record, extras) {
+  const order = [];
+  const byId = new Map();
+  const consider = (lane) => {
+    if (lane === undefined || lane === null || typeof lane !== 'object' || ARRAY_IS_ARRAY(lane)
+      || IS_PROXY(lane) || typeof lane.assignment_id !== 'string') {
+      return;
+    }
+    const assignmentId = lane.assignment_id;
+    let current = byId.get(assignmentId);
+    if (current === undefined) {
+      current = { assignment_id: assignmentId };
+      byId.set(assignmentId, current);
+      order.push(assignmentId);
+    }
+    mergeLaneRow(current, lane);
+  };
+  if (ARRAY_IS_ARRAY(record.assignments)) {
+    for (let index = 0; index < record.assignments.length; index += 1) {
+      consider(record.assignments[index]);
+    }
+  }
+  const schedulerLanes = extras.schedulerReceipt?.lanes;
+  if (ARRAY_IS_ARRAY(schedulerLanes)) {
+    for (let index = 0; index < schedulerLanes.length; index += 1) {
+      consider(schedulerLanes[index]);
+    }
+  }
+  if (ARRAY_IS_ARRAY(extras.lanes)) {
+    for (let index = 0; index < extras.lanes.length; index += 1) {
+      consider(extras.lanes[index]);
+    }
+  }
+  const lanes = [];
+  for (let index = 0; index < order.length; index += 1) {
+    lanes.push(byId.get(order[index]));
+  }
+  return lanes;
+}
+
+function hostUsagePatch(record, extras, telemetry, evidenceBytes) {
+  const hostUsage = {
+    submissions: 1,
+  };
+  if (extras.dispatched === true || record.dispatched === true) {
+    hostUsage.provider_invocations = 1;
+  }
+  const attempt = telemetry.attempt;
+  if (NUMBER_IS_SAFE_INTEGER(attempt) && attempt >= 1) {
+    hostUsage.retry_count = attempt - 1;
+  }
+  const elapsed = telemetry.timing?.total_duration_ms;
+  if (NUMBER_IS_SAFE_INTEGER(elapsed)) hostUsage.elapsed_ms = elapsed;
+  if (evidenceBytes !== undefined) hostUsage.retrievable_evidence_bytes = evidenceBytes;
+  const attentionRevision = extras.attention?.revision;
+  if (NUMBER_IS_SAFE_INTEGER(attentionRevision) && attentionRevision > 0) {
+    hostUsage.attention_rounds = attentionRevision;
+  }
+  return hostUsage;
+}
+
+function recordLaneObservation(ledger, telemetry, extras, record, lane) {
+  const attribution = laneAttribution(lane);
+  const observation = {
+    telemetry,
+    recorded_at: extras.observedAt,
+    host_usage: hostUsagePatch(record, extras, telemetry, evidenceBytesFromLane(lane)),
+  };
+  if (attribution !== null) {
+    observation.assignment_id = attribution.assignment_id;
+    observation.provider = attribution.provider;
+    observation.model = attribution.model;
+    const providerUsage = providerUsageFromLane(lane);
+    if (providerUsage !== undefined) observation.provider_usage = providerUsage;
+  }
+  return recordRuntimeUsageObservationV1(ledger, observation);
+}
+
+function recordUsageFor(record, extras) {
+  const telemetry = record.telemetry;
+  if (telemetry === undefined || telemetry === null) {
+    if (!record.usageLedger) record.usageLedger = openUsageLedgerV1({ budgets: [] });
+    return record.usageLedger;
+  }
+  let ledger = record.usageLedger ?? openUsageLedgerV1({ budgets: [] });
+  const lanes = lanesForUsage(record, extras);
+  if (lanes.length === 0) {
+    ledger = recordRuntimeUsageObservationV1(ledger, {
+      telemetry,
+      recorded_at: extras.observedAt,
+      host_usage: hostUsagePatch(record, extras, telemetry, undefined),
+    });
+    record.usageLedger = ledger;
+    return ledger;
+  }
+  for (let index = 0; index < lanes.length; index += 1) {
+    ledger = recordLaneObservation(ledger, telemetry, extras, record, lanes[index]);
+  }
+  record.usageLedger = ledger;
+  return ledger;
+}
+
 function receiptFor(record, extras) {
   const sideEffects = emptySideEffects();
   if (extras.dispatched) sideEffects.task_dispatched = true;
   if (extras.cancelled) sideEffects.task_cancelled = true;
   const lanes = extras.lanes ?? [];
+  const usage = recordUsageFor(record, extras);
   return freezeData({
     schema: RUN_RUNTIME_RECEIPT_SCHEMA_ID,
     version: RUN_RUNTIME_VERSION,
@@ -916,6 +1111,7 @@ function receiptFor(record, extras) {
     side_effects: sideEffects,
     complete_candidate_blocked: blockedFrom(extras.schedulerReceipt, extras.attention, lanes),
     observed_at: extras.observedAt,
+    usage,
     wake: false,
     remote_mutated: false,
   });
@@ -1317,6 +1513,8 @@ export function createRunRuntime(dependencies) {
       journal_mode: coordination !== null ? 'aggregate' : 'legacy',
       dispatched: true,
       durable: true,
+      telemetry: stored?.telemetry ?? null,
+      usageLedger: openUsageLedgerV1({ budgets: [] }),
     };
     runs.set(runId, record);
     return record;
@@ -1399,6 +1597,8 @@ export function createRunRuntime(dependencies) {
         request_idempotency_key: idempotencyKey,
         journal_mode: coordination !== null ? 'aggregate' : 'legacy',
         dispatched: false,
+        telemetry: ownDataValue(parsed, 'telemetry', 'telemetry'),
+        usageLedger: openUsageLedgerV1({ budgets: [] }),
       };
       if (!created) {
         // Durable P24 identity already exists. Never redispatch.

@@ -281,3 +281,71 @@ test('denied verdicts project content-free P13-compatible facts and discrepancie
   parseVerifiedFactV1(allowed.facts[0]);
   assert.equal(allowed.discrepancies.length, 0);
 });
+
+function publicationFields(overrides = {}) {
+  return {
+    user_authorized_publication: true,
+    draft: true,
+    force: false,
+    expected_head: BASE_SHA,
+    current_head: BASE_SHA,
+    current_tree: BASE_SHA,
+    candidate_tree: BASE_SHA,
+    ci_green: true,
+    ci_current: true,
+    failed_check_count: 0,
+    hidden_failed_checks: false,
+    verifier_accepted: true,
+    merge_topology_ok: true,
+    ...overrides,
+  };
+}
+
+test('publisher may non-force push the owned unprotected Codex lane and open a draft PR', () => {
+  const push = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'push',
+    ref: laneRef,
+    publication: publicationFields(),
+  }));
+  assert.equal(push.verdict, 'allowed');
+  assert.equal(push.actor, 'publisher');
+  assertContentFree(push);
+
+  const draft = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'create_pr',
+    ref: laneRef,
+    publication: publicationFields(),
+  }));
+  assert.equal(draft.verdict, 'allowed');
+  assertContentFree(draft);
+});
+
+test('Sol may regular-merge after expected-head CAS, current green CI, and verifier receipts', () => {
+  const merge = classifyGitOperationV1(operationRequest({
+    actor: 'sol',
+    operation: 'merge_pr',
+    ref: laneRef,
+    identity: validIdentity({ head_sha: BASE_SHA }),
+    publication: publicationFields(),
+  }));
+  assert.equal(merge.verdict, 'allowed');
+  assert.equal(merge.actor, 'sol');
+  assertContentFree(merge);
+});
+
+test('Luna remains read-only for Git and cannot merge', () => {
+  const inspect = classifyGitOperationV1(operationRequest({
+    actor: 'luna',
+    operation: 'read_only_inspect',
+  }));
+  assert.equal(inspect.verdict, 'allowed');
+  const merge = classifyGitOperationV1(operationRequest({
+    actor: 'luna',
+    operation: 'merge_pr',
+    ref: laneRef,
+  }));
+  assert.equal(merge.verdict, 'denied');
+  assert.equal(merge.code, 'merge_authority_denied');
+});

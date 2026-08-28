@@ -106,6 +106,7 @@ export const PARAMS_MAX_KEYS = 8;
 export const PARAM_VALUE_MAX_BYTES = 256;
 export const MAX_MANIFEST_DEPTH = 32;
 export const MAX_MANIFEST_NODES = 2048;
+export const MAX_EXTENDED_CANONICAL_NODES = 8192;
 export const MAX_MANIFEST_OBJECT_KEYS = 64;
 export const MAX_MANIFEST_TOTAL_STRING_BYTES = 524_288;
 export const MAX_MANIFEST_KEY_BYTES = 128;
@@ -379,9 +380,8 @@ export function assertDenseJsonArray(value, path) {
   }
 }
 
-// Bound direct-JS abuse before sorted-key and character-level scans. The
-// limits leave ample room for the maximum valid eight-lane manifest.
-export function assertManifestComplexity(root) {
+// Bound direct-JS abuse before sorted-key and character-level scans.
+function assertJsonComplexity(root, maxNodes, surface) {
   const stack = [{ value: root, path: '$', depth: 0 }];
   const seen = new WeakSet();
   let nodes = 0;
@@ -389,8 +389,8 @@ export function assertManifestComplexity(root) {
   while (stack.length > 0) {
     const { value, path, depth } = stack.pop();
     nodes += 1;
-    if (nodes > MAX_MANIFEST_NODES) {
-      fail('manifest_too_complex', path, `Manifest exceeds ${MAX_MANIFEST_NODES} values.`);
+    if (nodes > maxNodes) {
+      fail('manifest_too_complex', path, `${surface} exceeds ${maxNodes} values.`);
     }
     if (typeof value === 'string') {
       if (value.length > MAX_MANIFEST_TOTAL_STRING_BYTES) {
@@ -425,9 +425,9 @@ export function assertManifestComplexity(root) {
         `${path} must be concrete JSON data, not a Proxy.`);
     }
     if (capturedIsArray(value)) {
-      if (value.length > MAX_MANIFEST_NODES) {
+      if (value.length > maxNodes) {
         fail('manifest_too_complex', path,
-          `${path} exceeds ${MAX_MANIFEST_NODES} array elements.`);
+          `${path} exceeds ${maxNodes} array elements.`);
       }
       assertDenseJsonArray(value, path);
       for (let i = value.length - 1; i >= 0; i -= 1) {
@@ -459,6 +459,17 @@ export function assertManifestComplexity(root) {
       stack.push({ value: childValue, path: `${path}.${key}`, depth: depth + 1 });
     }
   }
+}
+
+// Preserve the exact RunManifestV1 security boundary.
+export function assertManifestComplexity(root) {
+  assertJsonComplexity(root, MAX_MANIFEST_NODES, 'Manifest');
+}
+
+// Fixed-cap canonicalization for larger platform-owned evidence records.
+// The cap is not caller-selectable and does not widen RunManifestV1 input.
+export function assertExtendedCanonicalComplexity(root) {
+  assertJsonComplexity(root, MAX_EXTENDED_CANONICAL_NODES, 'Canonical evidence');
 }
 
 function classCodeForKey(key, allowed) {

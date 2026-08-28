@@ -81,6 +81,7 @@ html[data-cce-theme="dark"] {
   to { opacity: 1; }
 }
 
+html { text-size-adjust: 100%; -webkit-text-size-adjust: 100%; }
 html,
 body {
   margin: 0;

@@ -5,7 +5,7 @@ description: Delegate isolated Co-Engineer work specifically to Cursor. Use when
 
 # Using Cursor Co-Engineer
 
-This is one new bounded run with Cursor as the chosen co-engineer. Codex remains reviewer and merge authority.
+This is one new bounded run with Cursor as the chosen co-engineer. Codex remains chief engineer and reviewer. External workers may commit. A scoped publisher may non-force push only the task branch and open a draft PR. Sol High or Sol XHigh alone may perform a regular merge after deterministic exact-head/tree, current green CI, verifier, and topology checks. The user retains version, tag, release, protected-ref, and product-policy authority.
 
 If the user also named Grok or Muse, use `$delegate-to-co-engineer` and keep every named co-engineer in that one run. Inspecting, continuing, answering, or cancelling existing work uses `$chat-with-co-engineer`. Raw MCP, event-cursor, or control-plane debugging uses `$control-codex-co-engineer-agents`.
 

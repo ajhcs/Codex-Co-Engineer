@@ -36,19 +36,37 @@
     <section aria-labelledby="cce-git-heading">
       <h2 id="cce-git-heading">Git identity</h2>
       <dl>
-        <div>
-          <dt>Branch</dt>
-          <dd data-field="branch">Not available</dd>
-        </div>
-        <div>
-          <dt>Head</dt>
-          <dd data-field="head">Not available</dd>
-        </div>
-        <div>
-          <dt>Tree</dt>
-          <dd data-field="tree">Not available</dd>
-        </div>
+        <div><dt>Branch</dt><dd data-field="branch">Not available</dd></div>
+        <div><dt>Head</dt><dd data-field="head">Not available</dd></div>
+        <div><dt>Tree</dt><dd data-field="tree">Not available</dd></div>
+        <div><dt>Base SHA</dt><dd data-field="base_sha">Not available</dd></div>
+        <div><dt>Target</dt><dd data-field="target">Not available</dd></div>
       </dl>
+    </section>
+    <section aria-labelledby="cce-changed-heading">
+      <h2 id="cce-changed-heading">Changed</h2>
+      <p data-field="changed_summary">Not available</p>
+    </section>
+    <section aria-labelledby="cce-clean-heading">
+      <h2 id="cce-clean-heading">Clean state</h2>
+      <p data-field="clean_state">unknown</p>
+    </section>
+    <section aria-labelledby="cce-verification-heading">
+      <h2 id="cce-verification-heading">Verification</h2>
+      <p data-field="verification">Not available</p>
+      <p data-field="blockers">Blockers: None</p>
+    </section>
+    <section aria-labelledby="cce-push-heading">
+      <h2 id="cce-push-heading">Push / PR</h2>
+      <dl>
+        <div><dt>Push</dt><dd data-field="push_state">Not available</dd></div>
+        <div><dt>Draft PR</dt><dd data-field="draft_pr">Not available</dd></div>
+        <div><dt>Current PR Head</dt><dd data-field="current_pr_head">Not available</dd></div>
+      </dl>
+    </section>
+    <section aria-labelledby="cce-sol-heading">
+      <h2 id="cce-sol-heading">Ready for Sol merge</h2>
+      <p data-field="ready_for_sol_merge">no</p>
     </section>
     <section aria-labelledby="cce-scope-heading">
       <h2 id="cce-scope-heading">Scope</h2>
@@ -85,6 +103,10 @@
         </div>
       </dl>
     </section>
+    <section aria-labelledby="cce-usage-heading">
+      <h2 id="cce-usage-heading">Usage</h2>
+      <p data-field="usage_ledger_summary">unknown</p>
+    </section>
     <section aria-labelledby="cce-evidence-heading">
       <h2 id="cce-evidence-heading">Evidence</h2>
       <dl>
@@ -104,10 +126,8 @@
           <dt>Claims</dt>
           <dd data-field="evidence_claims">Not available</dd>
         </div>
-        <div>
-          <dt>Kinds</dt>
-          <dd data-field="evidence_kinds">Not available</dd>
-        </div>
+        <div><dt>Kinds</dt><dd data-field="evidence_kinds">Not available</dd></div>
+        <div><dt>Refs</dt><dd data-field="evidence_refs">Not available</dd></div>
       </dl>
     </section>
     <p class="cce-note">Display only. This card cannot merge, push, rebase, create a pull request, tag, or release.</p>

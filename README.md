@@ -7,10 +7,15 @@ Give Codex a team of external co-engineers without giving up control.
 [![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Codex remains chief engineer, reviewer, and merge authority. External
-co-engineers do isolated assigned work. You keep control. The honest
-shape is up to eight isolated external co-engineers, one bounded run,
-one coordinated wait, one verified decision.
+Codex remains chief engineer and reviewer. External co-engineers do
+isolated assigned work. External workers may commit. A scoped publisher
+may non-force push only the task branch and open a draft PR. Sol High
+or Sol XHigh alone may perform a regular merge after deterministic
+exact-head/tree, current green CI, verifier, and topology checks. The
+user retains version, tag, release, protected-ref, and product-policy
+authority. You keep control. The honest shape is up to eight isolated
+external co-engineers, one bounded run, one coordinated wait, one
+verified decision.
 
 `Delegating to Co-Engineer` starts that one bounded run. `Chatting with
 Co-Engineer` inspects, continues, answers grouped attention, or cancels
@@ -157,10 +162,14 @@ Codex:
 
 ## Codex authority and safety
 
-Codex remains the chief engineer. You remain the merge authority.
-External co-engineers stay isolated. One bounded run is in flight at a
-time for this work. Chatting never becomes a second submission. Failure
-stays visible.
+Codex remains the chief engineer and reviewer. External workers may
+commit. A scoped publisher may non-force push only the task branch and
+open a draft PR. Sol High or Sol XHigh alone may perform a regular merge
+after deterministic exact-head/tree, current green CI, verifier, and
+topology checks. The user retains version, tag, release, protected-ref,
+and product-policy authority. External co-engineers stay isolated. One
+bounded run is in flight at a time for this work. Chatting never becomes
+a second submission. Failure stays visible.
 
 Selecting a provider authorizes the assignment prompt and repository
 content to be sent to that provider. Private repositories are supported
@@ -212,8 +221,11 @@ it as a provider visibility failure and fix reachability before
 retrying; do not blindly replay the work.
 
 Local implementations return a branch and handoff for Codex to inspect.
-Codex may push and open a PR only after confirming that real commits
-exist. Codex controls the final merge.
+External workers may commit. A scoped publisher may non-force push only
+the task branch and open a draft PR after confirming that real commits
+exist. Sol High or Sol XHigh alone may perform a regular merge after
+deterministic exact-head/tree, current green CI, verifier, and topology
+checks.
 
 Task prompts, events, logs, runtime identities, local paths, branch
 names, and opaque provider IDs are stored under the owner-only state
@@ -430,7 +442,8 @@ Local 3.2.1 review:
 }
 ```
 
-Inspect the receipt before Codex pushes, opens a PR, or merges.
+Inspect the receipt before a scoped publisher non-force pushes the task
+branch, opens a draft PR, or Sol High or Sol XHigh merges.
 
 Cursor Cloud implementation:
 

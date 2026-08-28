@@ -24,6 +24,7 @@ Inline run card:
 - objective
 - repository digest and base SHA
 - each lane's provider, write scope, and state
+- efficiency inline without routine wake: provider, branch, head, health, and pending IDs (bounded)
 - explicit Codex authority: Codex remains chief engineer, reviewer, and merge authority
 
 Grouped attention card:
@@ -39,12 +40,16 @@ Grouped attention card:
   question-cursor fallback
 - resume of that same cursor without replay
 
-Final decision card:
+Final decision card (Codex-native PR-ready):
 
-- accepted, failed, and unresolved lanes
-- branch, head, and tree
-- scope, tests, reviews, candidate, and evidence
+- owned branch, head, tree, base, and target (truthfully displayed from supplied identity, validated, bounded)
+- changed summary, clean state (unknown when absent), verification/blockers (truthful, bounded)
+- push / draft PR / current PR head (Not available when absent; Current PR Head is SHA-40 or Not available)
+- ready_for_sol_merge only from typed boolean true with evidence present and candidate composed, otherwise no (never from strings or numbers)
+- UsageLedger-compatible compact summary or unknown (bounded, redacted; no fabricated facts)
+- bounded safe evidence refs (only known evidence kinds, max 16)
 - the verified-final sentence only when UX-04 already allows it
+- accepted, failed, and unresolved lanes; scope, tests, reviews, candidate, and evidence
 
 The cards never expose merge, push, rebase, create-PR, tag, or release
 controls. Rendering or reading them must not dispatch, wait, cleanup, merge,
@@ -144,19 +149,21 @@ There is no decorative background animation.
 ## Owned files
 
 - `plugins/codex-co-engineer/mcp/v3/experience-ui-resource.mjs`
-- `plugins/codex-co-engineer/mcp/v3/ui/**`
+- `plugins/codex-co-engineer/mcp/v3/ui/**` (`final.html`, `run.html`, `display-only.js`, `foundation.css`)
 - `plugins/codex-co-engineer/mcp/v3/server.mjs` (capability-gated list/read/meta only; UI-01 wiring preserved)
 - `plugins/codex-co-engineer/test/r1-experience-ui.test.mjs`
 - `plugins/codex-co-engineer/test/r1-experience-ui-adversarial.test.mjs`
 - `plugins/codex-co-engineer/test/fixtures/v3-experience-ui/**`
 - this document
 
+Path ceiling: `experience-ui-resource.mjs`; `ui/final.html, run.html, display-only.js, foundation.css`; `r1-experience-ui` tests/adversarial/fixtures; `docs/mcp-apps-ui.md`.
+
 ## Non-goals
 
 This slice does not implement a shell app, a sixth tool, merge/push/PR
 controls, README/skill/manifest/version changes, unlimited persistent chat,
-or a claim that every MCP host will render the cards. Real-host support
-stays unproven until QA-01.
+or a claim that every MCP host will render the cards. It does not run Git
+actions or fabricate facts. Real-host support stays unproven until QA-01.
 
 ## Testing
 

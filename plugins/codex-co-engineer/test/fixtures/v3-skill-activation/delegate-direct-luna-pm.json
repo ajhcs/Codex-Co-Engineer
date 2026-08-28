@@ -1,0 +1,15 @@
+{
+  "id": "delegate-direct-luna-pm",
+  "skill": "delegate-to-co-engineer",
+  "activation": "direct",
+  "user_prompt": "Delegating to Co-Engineer: pin Luna Max as the project manager for this isolated review.",
+  "ask_once": false,
+  "expected_skills": ["delegate-to-co-engineer"],
+  "forbidden_skills": [
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

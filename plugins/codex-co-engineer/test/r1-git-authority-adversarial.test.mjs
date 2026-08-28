@@ -426,6 +426,118 @@ test('bounds abuse of history arrays refs and keys is rejected', () => {
   assert.equal(errorOf(() => classifyGitOperationV1(bulky)).code, 'out_of_range');
 });
 
+test('publisher and Sol publication probes fail closed without force tag release or protected writes', () => {
+  const owned = expectedLaneRefV1({
+    run_id: RUN_ID, assignment_id: ASSIGNMENT_ID, manifest_digest_hex: MANIFEST_DIGEST_HEX,
+  });
+  const publication = {
+    user_authorized_publication: true,
+    draft: true,
+    force: false,
+    expected_head: BASE_SHA,
+    current_head: BASE_SHA,
+    current_tree: BASE_SHA,
+    candidate_tree: BASE_SHA,
+    ci_green: true,
+    ci_current: true,
+    failed_check_count: 0,
+    hidden_failed_checks: false,
+    verifier_accepted: true,
+    merge_topology_ok: true,
+  };
+
+  const otherLane = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'push',
+    ref: 'refs/heads/codex/run-aaaaaaaaaaaaaaaa/lane-beta',
+    publication,
+  }));
+  assert.equal(otherLane.verdict, 'denied');
+  assertContentFree(otherLane);
+
+  const main = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'push',
+    ref: 'refs/heads/main',
+    publication,
+  }));
+  assert.equal(main.code, 'default_branch_target_denied');
+
+  const nonDraft = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'create_pr',
+    ref: owned,
+    publication: { ...publication, draft: false },
+  }));
+  assert.equal(nonDraft.code, 'non_draft_pr_denied');
+
+  const force = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'push',
+    ref: owned,
+    publication: { ...publication, force: true },
+  }));
+  assert.equal(force.code, 'push_authority_denied');
+
+  const forcePush = classifyGitOperationV1(operationRequest({
+    actor: 'publisher',
+    operation: 'force_push',
+    ref: owned,
+    publication,
+  }));
+  assert.equal(forcePush.code, 'push_authority_denied');
+
+  const tag = classifyGitOperationV1(operationRequest({
+    actor: 'sol',
+    operation: 'tag_create',
+    ref: owned,
+    publication,
+  }));
+  assert.equal(tag.code, 'protected_ref_write_denied');
+  const release = classifyGitOperationV1(operationRequest({
+    actor: 'sol',
+    operation: 'release_create',
+    ref: owned,
+    publication,
+  }));
+  assert.equal(release.code, 'protected_ref_write_denied');
+
+  const changedHead = classifyGitOperationV1(operationRequest({
+    actor: 'sol',
+    operation: 'merge_pr',
+    ref: owned,
+    identity: validIdentity({ head_sha: BASE_SHA }),
+    publication: { ...publication, current_head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
+  }));
+  assert.equal(changedHead.code, 'expected_head_mismatch');
+
+  const staleCi = classifyGitOperationV1(operationRequest({
+    actor: 'sol',
+    operation: 'merge_pr',
+    ref: owned,
+    identity: validIdentity({ head_sha: BASE_SHA }),
+    publication: { ...publication, ci_current: false },
+  }));
+  assert.equal(staleCi.code, 'stale_ci');
+
+  const failed = classifyGitOperationV1(operationRequest({
+    actor: 'sol',
+    operation: 'merge_pr',
+    ref: owned,
+    identity: validIdentity({ head_sha: BASE_SHA }),
+    publication: { ...publication, failed_check_count: 2, ci_green: false },
+  }));
+  assert.equal(failed.code, 'failed_checks_present');
+
+  const workerMerge = classifyGitOperationV1(operationRequest({
+    actor: 'worker',
+    operation: 'merge_pr',
+    ref: owned,
+    publication,
+  }));
+  assert.equal(workerMerge.code, 'merge_authority_denied');
+});
+
 test('policy customization and evidence projection stay closed and content-free', () => {
   const evidence = projectAuthorityEvidenceV1(classifyGitOperationV1(operationRequest({
     operation: 'push',

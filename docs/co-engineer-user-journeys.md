@@ -73,9 +73,13 @@ may it say:
 
 Co-Engineer finished, and I verified the candidate.
 
-Verification is Codex's review of the candidate, not automatic merge.
-The user keeps control. Downstream slices must not treat the sentence
-as a merge, push, or pull-request claim.
+Verification is Codex's review of the candidate, not itself a merge.
+External workers may commit. A scoped publisher may non-force push only
+the task branch and open a draft PR. Sol High or Sol XHigh alone
+performs regular merge after exact-head, current-green-CI, and topology
+checks. The user retains release, tag, version, and protected-ref
+authority. Downstream slices must not treat the sentence as a completed
+merge.
 
 ## Failure/unresolved
 
@@ -129,12 +133,42 @@ That is still one submission and one coordinated wait. The ask happens
 before delegation. Afterward, chatting with Co-Engineer can inspect,
 continue, answer grouped attention, or cancel.
 
+## Project manager
+
+The public phrases stay Delegating to Co-Engineer and Chatting with
+Co-Engineer. Luna Max is the default project manager for that same run
+when the user authorizes a pinned task, Luna Max is available, and the
+host can create a thread, send a message to that thread, and wait on or
+read it.
+
+User: Delegating to Co-Engineer: pin Luna Max as the project manager
+for this isolated review.
+
+Codex: I am delegating this to Co-Engineer. Luna Max is the project
+manager for this Co-Engineer run. Co-Engineer is running 1 independent
+assignment.
+
+That is still one submission and one coordinated wait. Luna Max wakes
+when the work is completed, blocked, failed, asking a question, timed
+out, or carrying a user update. Routine progress does not wake it.
+Normal completion does not wake Sol. When the work is publication-ready
+and exact head, tree, verifier, current green CI, and topology facts
+pass, Codex may ask Sol High or Sol XHigh once to integrate the draft
+pull request.
+
+If Luna Max or those host task tools are missing, Codex continues in
+this conversation and says so. It does not substitute Sol.
+
 ## Control retained
 
 Across every journey:
 
-- Codex remains the chief engineer.
-- The user remains the merge authority.
+- Codex remains the chief engineer and reviewer.
+- External workers may commit. A scoped publisher may non-force push
+  only the task branch and open a draft pull request. Luna Max does
+  not merge. Sol High or Sol XHigh alone performs regular merge after
+  exact-head, current-green-CI, and topology checks. The user retains
+  release, tag, version, and protected-ref authority.
 - External co-engineers stay isolated.
 - One bounded run is in flight at a time for this work.
 - Chatting never becomes a second submission.

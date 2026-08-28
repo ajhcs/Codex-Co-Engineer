@@ -219,6 +219,19 @@ function assertFixtureShape(fixture) {
   assert.deepEqual(fixture.journeys, Object.keys(JOURNEY_HEADINGS));
   assert.deepEqual(fixture.activation_classes, ['direct', 'indirect', 'negative']);
   assert.deepEqual(fixture.activation_order, ['negative', 'direct', 'indirect', 'none']);
+  assert.equal(fixture.luna_pm.default_model, 'luna-max');
+  assert.equal(fixture.luna_pm.public_skill, false);
+  assert.equal(fixture.luna_pm.sol_medium_mandatory, false);
+  assert.equal(fixture.luna_pm.degraded_mode, 'current_codex_task');
+  assert.equal(fixture.luna_pm.never_wake_sol_on, 'completed');
+  assert.deepEqual(fixture.luna_pm.host_task_tools, [
+    'create_thread',
+    'send_message_to_thread',
+    'wait_threads',
+    'read_thread',
+  ]);
+  assert.equal(fixture.luna_pm.wake_events.length, 7);
+  assert.equal(fixture.luna_pm.sol_escalation_criteria.length, 6);
 }
 
 function assertDocsMatchFixture(contractText, journeysText, fixture) {
@@ -294,6 +307,17 @@ function assertDocsMatchFixture(contractText, journeysText, fixture) {
   const groupedBody = sectionBody(journeysText, JOURNEY_HEADINGS['grouped-attention']);
   assert.equal(folded(groupedBody).includes(fixture.codex_phrases.attention), true);
   assert.match(folded(groupedBody), /not a second delegation/u);
+
+  assert.match(contractText, /Luna Max project manager/u);
+  assert.match(contractText, /never silently substitutes Sol/u);
+  assert.match(contractText, /Normal completion never wakes Sol/u);
+  assert.match(contractText, /create_thread/u);
+  assert.match(contractText, /send_message_to_thread/u);
+  assert.match(contractText, /wait_threads/u);
+  assert.match(contractText, /read_thread/u);
+  assert.match(journeysText, /## Project manager/u);
+  assert.match(journeysText, /does not substitute Sol/u);
+  assert.match(journeysText, /Luna Max is the default project manager/u);
 
   const askOnceBody = sectionBody(journeysText, JOURNEY_HEADINGS['no-profile-ask-once']);
   assert.match(folded(askOnceBody), /asks once/u);
@@ -391,6 +415,9 @@ function assertExperienceContract({ contractText, journeysText, fixture, goldens
     'negative-mcp-json',
     'negative-internal-jargon',
     'negative-unsubstantiated-claims',
+    'direct-luna-pm',
+    'direct-luna-pm-degraded',
+    'direct-luna-pm-sol-exception',
   ]) {
     assert.equal(byId.has(id), true, `missing activation golden ${id}`);
   }
