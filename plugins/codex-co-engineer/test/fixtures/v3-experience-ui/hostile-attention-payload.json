@@ -1,0 +1,85 @@
+{
+  "schema": "codex-co-engineer.experience-projection.v1",
+  "version": 1,
+  "card": "attention",
+  "run_id": "auth-split",
+  "summary": {
+    "phrases": ["Co-Engineer needs one decision from you"],
+    "delegating": null,
+    "running": null,
+    "attention": "Co-Engineer needs one decision from you",
+    "verified_final": null
+  },
+  "attention": {
+    "questions": [
+      {
+        "assignment_id": "validator",
+        "question_id": "q-validator",
+        "session_id": "sess-validator",
+        "task_id": "task-validator",
+        "question": "<script>alert(1)</script> Use the stricter validator? sk-live-ATTACKER-SECRET",
+        "options": ["stricter", "keep\"><img src=x onerror=alert(1)>"],
+        "event_cursor": "12",
+        "reply_capability": "same_session",
+        "disposition": "pending",
+        "prompt": "OWNER_ONLY_PROMPT",
+        "secret": "sk-live-ATTACKER-SECRET"
+      },
+      {
+        "assignment_id": "validator",
+        "question_id": "q-validator",
+        "session_id": "sess-validator",
+        "task_id": "task-validator",
+        "question": "duplicate should group once",
+        "options": ["dup"],
+        "event_cursor": "12",
+        "reply_capability": "same_session",
+        "disposition": "pending"
+      },
+      {
+        "assignment_id": "cloud-review",
+        "question_id": "q-cloud",
+        "session_id": "sess-cloud",
+        "task_id": "task-cloud",
+        "question": "Cloud cannot host a same-session reply github_pat_hostileleak",
+        "options": ["approve"],
+        "event_cursor": "3",
+        "reply_capability": "unsupported",
+        "disposition": "unresolved"
+      }
+    ],
+    "affected_lanes": ["cloud-review", "validator"],
+    "unaffected_lanes": ["docs"],
+    "reply": {
+      "structured": true,
+      "rounds": 1,
+      "cursor_resume": true,
+      "event_cursor": "12",
+      "run_reply": {
+        "batch_id": "att-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expected_revision": 1,
+        "reply": {
+          "round": 1,
+          "batch_id": "att-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "answers": [
+            {
+              "assignment_id": "validator",
+              "question_id": "q-validator",
+              "session_id": "sess-validator",
+              "task_id": "task-validator",
+              "response": null
+            }
+          ]
+        }
+      }
+    },
+    "unsupported": {
+      "lanes": ["cloud-review"],
+      "unresolved": true,
+      "code": "same_session_reply_unsupported"
+    }
+  },
+  "raw": "RAW_OWNER_ONLY",
+  "secret": "sk-live-ATTACKER-SECRET",
+  "prompt": "hidden owner prompt"
+}

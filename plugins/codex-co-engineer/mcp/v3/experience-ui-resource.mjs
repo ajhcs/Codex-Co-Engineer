@@ -11,13 +11,16 @@ import {
 } from './response.mjs';
 
 export const MCP_RESOURCE_NOT_FOUND = -32002;
-export const INLINE_EXPERIENCE_UI_CARDS = Object.freeze(['run', 'final']);
+export const DISPLAY_ONLY_EXPERIENCE_UI_CARDS = Object.freeze(['run', 'final']);
+export const INLINE_EXPERIENCE_UI_CARDS = Object.freeze(['run', 'attention', 'final']);
 export const INLINE_EXPERIENCE_UI_URIS = Object.freeze({
   run: EXPERIENCE_UI_RESOURCE_URIS.run,
+  attention: EXPERIENCE_UI_RESOURCE_URIS.attention,
   final: EXPERIENCE_UI_RESOURCE_URIS.final,
 });
 export const INLINE_EXPERIENCE_UI_NAMES = Object.freeze({
   run: 'Co-Engineer run',
+  attention: 'Co-Engineer grouped attention',
   final: 'Co-Engineer final decision',
 });
 
@@ -29,23 +32,33 @@ function readUi(name) {
 }
 
 const DISPLAY_ONLY_SOURCE = readUi('display-only.js');
+const ATTENTION_SOURCE = readUi('attention.js');
 const FOUNDATION_CSS = readUi('foundation.css');
 
-function loadDisplayOnlyApi() {
+function loadUiApis() {
   const sandbox = { console };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(DISPLAY_ONLY_SOURCE, sandbox, {
     filename: fileURLToPath(new URL('display-only.js', UI_DIR)),
   });
-  const api = sandbox.CodexCoEngineerExperienceUi;
-  if (!api || typeof api !== 'object') {
+  vm.runInContext(ATTENTION_SOURCE, sandbox, {
+    filename: fileURLToPath(new URL('attention.js', UI_DIR)),
+  });
+  const display = sandbox.CodexCoEngineerExperienceUi;
+  const attention = sandbox.CodexCoEngineerAttentionUi;
+  if (!display || typeof display !== 'object') {
     throw new Error('Display-only experience UI failed to load.');
   }
-  return api;
+  if (!attention || typeof attention !== 'object') {
+    throw new Error('Attention experience UI failed to load.');
+  }
+  return { display, attention };
 }
 
-export const CodexCoEngineerExperienceUi = loadDisplayOnlyApi();
+const loaded = loadUiApis();
+export const CodexCoEngineerExperienceUi = loaded.display;
+export const CodexCoEngineerAttentionUi = loaded.attention;
 
 function sealedRegistry(registry) {
   return Object.freeze({
@@ -58,9 +71,18 @@ function sealedRegistry(registry) {
   });
 }
 
-function assembleDocument(template) {
-  const script = `${DISPLAY_ONLY_SOURCE}
-if (globalThis.document) {
+function assembleDocument(card, template) {
+  const attentionBoot = card === 'attention'
+    ? `if (globalThis.document) {
+  const start = () => globalThis.CodexCoEngineerAttentionUi.connectAttentionCard(globalThis.document);
+  if (globalThis.document.readyState === 'loading') {
+    globalThis.document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+}
+`
+    : `if (globalThis.document) {
   const start = () => globalThis.CodexCoEngineerExperienceUi.connectDisplayOnlyCard(globalThis.document);
   if (globalThis.document.readyState === 'loading') {
     globalThis.document.addEventListener('DOMContentLoaded', start);
@@ -69,6 +91,12 @@ if (globalThis.document) {
   }
 }
 `;
+  const script = card === 'attention'
+    ? `${DISPLAY_ONLY_SOURCE}
+${ATTENTION_SOURCE}
+${attentionBoot}`
+    : `${DISPLAY_ONLY_SOURCE}
+${attentionBoot}`;
   return template
     .replace('<!--CCE_CSS-->', FOUNDATION_CSS)
     .replace('<!--CCE_JS-->', script);
@@ -77,8 +105,9 @@ if (globalThis.document) {
 function buildInlineRegistry() {
   const registry = createExperienceUiResourceRegistry();
   const documents = {
-    run: assembleDocument(readUi('run.html')),
-    final: assembleDocument(readUi('final.html')),
+    run: assembleDocument('run', readUi('run.html')),
+    attention: assembleDocument('attention', readUi('attention.html')),
+    final: assembleDocument('final', readUi('final.html')),
   };
   for (const card of INLINE_EXPERIENCE_UI_CARDS) {
     registry.register({

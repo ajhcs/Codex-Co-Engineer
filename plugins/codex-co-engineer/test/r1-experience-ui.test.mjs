@@ -1,5 +1,5 @@
-// UI-01 display-only MCP Apps run and final cards: capability-gated
-// resources, UX-04 metadata reuse, and complete headless fallback.
+// UI-02 grouped attention plus accessibility: capability-gated resources,
+// UX-04 metadata reuse, preserved UI-01 cards, and complete headless fallback.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,6 +11,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DISPLAY_ONLY_EXPERIENCE_UI_CARDS,
   INLINE_EXPERIENCE_UI_CARDS,
   INLINE_EXPERIENCE_UI_URIS,
   clientAdvertisesCompatibleAppsUi,
@@ -18,6 +19,7 @@ import {
   experienceUiResourcesForClient,
   listInlineExperienceUiResources,
   readInlineExperienceUiResource,
+  CodexCoEngineerAttentionUi as attentionUi,
   CodexCoEngineerExperienceUi as ui,
 } from '../mcp/v3/experience-ui-resource.mjs';
 import {
@@ -55,7 +57,7 @@ function compatibleCapabilities() {
 }
 
 async function withServer(callback) {
-  const state = await mkdtemp(path.join(tmpdir(), 'cce-ui01-'));
+  const state = await mkdtemp(path.join(tmpdir(), 'cce-ui02-'));
   const child = spawn(process.execPath, ['--no-warnings', SERVER], {
     env: {
       ...process.env,
@@ -108,12 +110,15 @@ async function conversation(messages) {
   });
 }
 
-test('inline registry registers only run and final ui:// resources', async () => {
+test('inline registry registers run, attention, and final ui:// resources', async () => {
+  attentionUi.resetSubmittedForTests();
   const contract = await loadJson(FIXTURE_DIR, 'contract.json');
   const listed = listInlineExperienceUiResources();
   assert.deepEqual(INLINE_EXPERIENCE_UI_CARDS, contract.cards);
-  assert.equal(listed.length, 2);
+  assert.deepEqual(DISPLAY_ONLY_EXPERIENCE_UI_CARDS, contract.display_only_cards);
+  assert.equal(listed.length, 3);
   assert.deepEqual(listed.map((resource) => resource.uri).sort(), [
+    INLINE_EXPERIENCE_UI_URIS.attention,
     INLINE_EXPERIENCE_UI_URIS.final,
     INLINE_EXPERIENCE_UI_URIS.run,
   ].sort());
@@ -122,10 +127,16 @@ test('inline registry registers only run and final ui:// resources', async () =>
     const read = readInlineExperienceUiResource(resource.uri);
     assert.equal(read.mimeType, MCP_APPS_MIME_TYPE);
     assert.match(read.text, /<!DOCTYPE html>/u);
-    assert.equal(ui.documentContainsActionControls(read.text), false);
+    assert.match(read.text, /<main>/u);
+    assert.match(read.text, /lang="en"/u);
+    assert.match(read.text, /dir="ltr"/u);
+    assert.match(read.text, /color-scheme/u);
   }
+  const run = readInlineExperienceUiResource(INLINE_EXPERIENCE_UI_URIS.run);
+  const finalCard = readInlineExperienceUiResource(INLINE_EXPERIENCE_UI_URIS.final);
+  assert.equal(ui.documentContainsActionControls(run.text), false);
+  assert.equal(ui.documentContainsActionControls(finalCard.text), false);
   assert.equal(readInlineExperienceUiResource(EXPERIENCE_UI_RESOURCE_URIS.shell), null);
-  assert.equal(readInlineExperienceUiResource(EXPERIENCE_UI_RESOURCE_URIS.attention), null);
   const registry = experienceUiResourceRegistryForInlineCards();
   assert.equal(registry.register({
     uri: EXPERIENCE_UI_RESOURCE_URIS.shell,
@@ -135,16 +146,21 @@ test('inline registry registers only run and final ui:// resources', async () =>
   assert.equal(experienceUiResourceRegistry().list().length, 0);
 });
 
-test('compatible Apps plus resources clients receive nested metadata and the two cards', () => {
+test('compatible Apps plus resources clients receive nested metadata for all three cards', () => {
   const capabilities = compatibleCapabilities();
   assert.equal(clientAdvertisesCompatibleAppsUi(capabilities), true);
   const resources = experienceUiResourcesForClient(capabilities);
   const advertised = advertiseMcpAppsCapability({ clientCapabilities: capabilities, resources });
   assert.deepEqual(advertised[MCP_APPS_EXTENSION_ID].mimeTypes, [MCP_APPS_MIME_TYPE]);
   const listed = listExperienceUiResourcesForClient({ clientCapabilities: capabilities, resources });
-  assert.equal(listed.length, 2);
+  assert.equal(listed.length, 3);
   const runMeta = resolveExperienceResultMeta({
     card: 'run',
+    clientCapabilities: capabilities,
+    resources,
+  });
+  const attentionMeta = resolveExperienceResultMeta({
+    card: 'attention',
     clientCapabilities: capabilities,
     resources,
   });
@@ -154,18 +170,14 @@ test('compatible Apps plus resources clients receive nested metadata and the two
     resources,
   });
   assert.deepEqual(runMeta, { ui: { resourceUri: INLINE_EXPERIENCE_UI_URIS.run } });
+  assert.deepEqual(attentionMeta, { ui: { resourceUri: INLINE_EXPERIENCE_UI_URIS.attention } });
   assert.deepEqual(finalMeta, { ui: { resourceUri: INLINE_EXPERIENCE_UI_URIS.final } });
-  assert.equal(resolveExperienceResultMeta({
-    card: 'attention',
-    clientCapabilities: capabilities,
-    resources,
-  }), null);
   assert.equal(resolveExperienceToolMeta('delegate', {
     clientCapabilities: capabilities,
     resources,
   }), null);
-  const wrapped = buildToolResult({ mode: 'run', experience: { card: 'run' } }, { uiMeta: runMeta });
-  assert.deepEqual(wrapped._meta, runMeta);
+  const wrapped = buildToolResult({ mode: 'run', experience: { card: 'attention' } }, { uiMeta: attentionMeta });
+  assert.deepEqual(wrapped._meta, attentionMeta);
   assert.equal(Object.hasOwn(wrapped._meta, 'ui/resourceUri'), false);
 });
 
@@ -174,6 +186,7 @@ test('run card HTML shows objective, repository SHA, lanes, and Codex authority'
   const projection = projectExperience(receipt);
   const html = ui.renderRunCardHtml(projection);
   const text = ui.visiblePlainText(html);
+  assert.match(html, /<main>/u);
   assert.match(html, /<article\b/u);
   assert.match(html, /<h1 id="cce-run-title">Co-Engineer run<\/h1>/u);
   assert.match(html, /<h2 id="cce-objective-heading">Objective<\/h2>/u);
@@ -191,7 +204,8 @@ test('run card HTML shows objective, repository SHA, lanes, and Codex authority'
   assert.match(resource.text, /ui-sans-serif, system-ui, Helvetica, Arial, sans-serif/u);
   assert.match(resource.text, /#111111/u);
   assert.match(resource.text, /#374151/u);
-  assert.equal(resource.text.includes('@keyframes'), false);
+  assert.match(resource.text, /prefers-reduced-motion/u);
+  assert.equal(resource.text.includes('infinite'), false);
   assert.equal(ui.documentContainsActionControls(resource.text), false);
   assert.equal(ui.markupWithoutScripts(resource.text).toLowerCase().includes('<' + 'button'), false);
 });
@@ -218,7 +232,67 @@ test('final card HTML buckets lanes, git identity, and evidence without action c
   assert.equal(/\bMerge\b/.test(ui.markupWithoutScripts(html).match(/<button[\s\S]*?<\/button>/u)?.[0] ?? ''), false);
 });
 
-test('compatible MCP server lists and reads only the inline cards', async () => {
+test('attention card groups current questions once and binds one structured reply', async () => {
+  attentionUi.resetSubmittedForTests();
+  const receipt = await loadJson(RESPONSE_DIR, 'attention-receipt.json');
+  const projection = projectExperience(receipt);
+  const html = attentionUi.renderAttentionCardHtml(projection);
+  const text = attentionUi.visiblePlainText(html);
+  assert.equal(projection.card, 'attention');
+  assert.equal(attentionUi.groupQuestions(projection.attention).length, 2);
+  assert.equal(attentionUi.answerableQuestions(projection.attention).length, 1);
+  assert.match(html, /<main>/u);
+  assert.match(html, /<h1 id="cce-attention-title">Co-Engineer grouped attention<\/h1>/u);
+  assert.match(html, /<h2 id="cce-questions-heading">Questions<\/h2>/u);
+  assert.match(html, /<h2 id="cce-affected-heading">Affected assignments<\/h2>/u);
+  assert.match(html, /<h2 id="cce-unaffected-heading">Unaffected assignments<\/h2>/u);
+  assert.match(html, /<ol class="cce-questions"/u);
+  assert.match(html, /<label for="cce-answer-validator-stricter">/u);
+  assert.equal(text.includes('Use the stricter validator?'), true);
+  assert.equal(text.includes('Cloud cannot host a same-session reply'), true);
+  assert.equal(text.includes('validator'), true);
+  assert.equal(text.includes('cloud-review'), true);
+  assert.equal(text.includes('docs'), true);
+  assert.equal(text.includes('These assignments keep working.'), true);
+  assert.equal(text.includes('stays unresolved'), true);
+  assert.equal(text.includes(attentionUi.AUTHORITY_SENTENCE), true);
+  assert.equal((html.match(/<form\b/g) || []).length, 1);
+  assert.equal((html.match(/type="submit"/g) || []).length, 1);
+  const bound = attentionUi.bindAttention(projection);
+  assert.equal(attentionUi.missingAuthority(bound), null);
+  assert.equal(bound.run_id, 'auth-split');
+  assert.equal(bound.batch_id, receipt.attention.batch_id);
+  assert.equal(bound.revision, 1);
+  assert.equal(bound.event_cursor, '12');
+  assert.equal(bound.cursor_resume, true);
+  const reply = attentionUi.buildGroupedReply(bound, { validator: 'stricter' });
+  assert.equal(reply.reply.answers.length, 1);
+  assert.equal(reply.reply.answers[0].assignment_id, 'validator');
+  assert.equal(reply.reply.round, 1);
+  assert.deepEqual(Object.keys(reply).sort(), ['batch_id', 'expected_revision', 'reply']);
+  assert.deepEqual(Object.keys(reply.reply).sort(), ['answers', 'batch_id', 'round']);
+  assert.equal(attentionUi.validateRunReply(reply).ok, true);
+  assert.equal(attentionUi.authorizeReply(bound, reply, { validator: 'stricter' }).ok, true);
+  const session = attentionUi.createAttentionSession();
+  session.start();
+  assert.equal(session.paint(projection), true);
+  const sent = session.submit({ validator: 'stricter' });
+  assert.equal(sent.ok, true);
+  const calls = session.outbound.filter((message) => message.method === attentionUi.TOOL_CALL_METHOD);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.name, 'task');
+  assert.equal(calls[0].id, attentionUi.canonicalDeliveryId(bound));
+  assert.equal(calls[0].id.includes(bound.event_cursor), true);
+  assert.deepEqual(Object.keys(calls[0].params.arguments).sort(), ['run_id', 'run_reply']);
+  assert.equal(calls[0].params.arguments.run_id, 'auth-split');
+  assert.equal(calls[0].params.arguments.run_reply.expected_revision, 1);
+  assert.equal(Object.hasOwn(calls[0].params.arguments.run_reply, 'event_cursor'), false);
+  assert.equal(Object.hasOwn(calls[0].params.arguments.run_reply.reply, 'event_cursor'), false);
+  assert.equal(session.focusPlan().target, 'cce-attention-status');
+  assert.deepEqual(attentionUi.tabOrder(bound)[0], 'cce-answer-validator-stricter');
+});
+
+test('compatible MCP server lists and reads the three registered cards', async () => {
   const init = await loadJson(FIXTURE_DIR, 'compatible-client.json');
   const values = await conversation([
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: init },
@@ -226,7 +300,8 @@ test('compatible MCP server lists and reads only the inline cards', async () => 
     { jsonrpc: '2.0', id: 3, method: 'resources/list', params: {} },
     { jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri: INLINE_EXPERIENCE_UI_URIS.run } },
     { jsonrpc: '2.0', id: 5, method: 'resources/read', params: { uri: INLINE_EXPERIENCE_UI_URIS.final } },
-    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'status', arguments: {} } },
+    { jsonrpc: '2.0', id: 6, method: 'resources/read', params: { uri: INLINE_EXPERIENCE_UI_URIS.attention } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'status', arguments: {} } },
   ]);
   assert.equal(values[0].result.capabilities.tools.listChanged, false);
   assert.deepEqual(
@@ -241,15 +316,19 @@ test('compatible MCP server lists and reads only the inline cards', async () => 
   }
   const listed = values[2].result.resources.map((resource) => resource.uri).sort();
   assert.deepEqual(listed, [
+    INLINE_EXPERIENCE_UI_URIS.attention,
     INLINE_EXPERIENCE_UI_URIS.final,
     INLINE_EXPERIENCE_UI_URIS.run,
   ].sort());
   assert.equal(values[3].result.contents[0].mimeType, MCP_APPS_MIME_TYPE);
   assert.equal(values[4].result.contents[0].mimeType, MCP_APPS_MIME_TYPE);
+  assert.equal(values[5].result.contents[0].mimeType, MCP_APPS_MIME_TYPE);
   assert.match(values[3].result.contents[0].text, /data-cce-card="run"/u);
   assert.match(values[4].result.contents[0].text, /data-cce-card="final"/u);
-  assert.equal(Object.hasOwn(values[5].result, '_meta'), false);
-  assert.equal(values[5].result.content[0].text, JSON.stringify(values[5].result.structuredContent));
+  assert.match(values[5].result.contents[0].text, /data-cce-card="attention"/u);
+  assert.match(values[5].result.contents[0].text, /aria-live="polite"/u);
+  assert.equal(Object.hasOwn(values[6].result, '_meta'), false);
+  assert.equal(values[6].result.content[0].text, JSON.stringify(values[6].result.structuredContent));
 });
 
 test('docs freeze host-specific unproven support and sequential ownership', async () => {
@@ -257,10 +336,12 @@ test('docs freeze host-specific unproven support and sequential ownership', asyn
   const contract = await loadJson(FIXTURE_DIR, 'contract.json');
   assert.match(docs, /host-specific\/unproven until QA-01/u);
   assert.equal(docs.includes(contract.support), true);
-  assert.match(docs, /Attention\s+interaction is UI-02/u);
-  assert.match(docs, /Keyboard, focus, reduced-motion, and final\s+accessibility qualification are UI-02\/QA-01/u);
+  assert.match(docs, /Grouped attention card/u);
+  assert.match(docs, /exactly one bounded structured reply/u);
+  assert.match(docs, /prefers-reduced-motion/u);
   assert.match(docs, /display-only/iu);
   assert.equal(docs.includes('universal UI'), true);
   assert.match(docs, /Do not claim credit reduction, 8x speed, universal UI/u);
   assert.equal(PUBLIC_MCP_TOOLS.length, 5);
+  assert.match(docs, /Real-host support\s+stays unproven until QA-01/u);
 });

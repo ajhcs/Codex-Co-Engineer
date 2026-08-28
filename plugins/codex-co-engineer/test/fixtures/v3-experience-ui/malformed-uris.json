@@ -1,6 +1,6 @@
 {
   "unknown_shell": "ui://codex-co-engineer/experience",
-  "unknown_attention": "ui://codex-co-engineer/experience/attention",
+  "unknown_attention_forged": "ui://codex-co-engineer/experience/attention-forged",
   "unknown_sixth": "ui://codex-co-engineer/experience/supervise",
   "file": "file:///etc/passwd",
   "https": "https://evil.example/app.html",
