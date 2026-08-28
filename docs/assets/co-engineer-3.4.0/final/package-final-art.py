@@ -27,6 +27,24 @@ PLUGIN_VERSION = "3.3.0"
 
 SOURCE_SPECS = (
     {
+        "id": "co-engineer-wordmark",
+        "filename": "grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+        "sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+        "original_filename": "grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+        "redacted_origin": "owner-intake/CheapTesting/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+        "attachment_id": None,
+        "kind": "image",
+    },
+    {
+        "id": "co-engineer-square-mark",
+        "filename": "chatgpt-image-aug-27-2026-square-mark.png",
+        "sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+        "original_filename": "ChatGPT Image Aug 27, 2026, 01_51_12 PM.png",
+        "redacted_origin": "owner-intake/CheapTesting/ChatGPT Image Aug 27, 2026, 01_51_12 PM.png",
+        "attachment_id": None,
+        "kind": "image",
+    },
+    {
         "id": "architecture-static",
         "filename": "856Qz.png",
         "sha256": "aad77a7e0c19919e6325c555ace274759bb81e0c7341487b998a76f05acaeb74",
@@ -131,7 +149,38 @@ SIZE_CEILINGS = {
     "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-frame-poster.held.jpg": 40000,
     "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-muted.held.mp4": 200000,
     "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-muted.held.webm": 400000,
+    "docs/assets/co-engineer-3.4.0/final/derived/wordmark.png": 100000,
+    "docs/assets/co-engineer-3.4.0/final/derived/square-mark.png": 180000,
+    "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png": 100000,
+    "plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png": 180000,
 }
+
+IDENTITY_JOBS = (
+    {
+        "name": "wordmark.png",
+        "source_id": "co-engineer-wordmark",
+        "width": 1024,
+        "height": 576,
+        "mode": "RGBA",
+        "slot": "identity-wordmark",
+        "role_docs": "docs-identity-wordmark",
+        "role_plugin": "plugin-identity-wordmark",
+        "alt_text": "Approved Co-Engineer wordmark",
+        "notes": "Deterministic LANCZOS raster of the approved Co-Engineer wordmark. Alpha preserved for light and dark chrome. Not an SVG approximation.",
+    },
+    {
+        "name": "square-mark.png",
+        "source_id": "co-engineer-square-mark",
+        "width": 512,
+        "height": 512,
+        "mode": "RGB",
+        "slot": "identity-square-mark",
+        "role_docs": "docs-identity-square-mark",
+        "role_plugin": "plugin-identity-square-mark",
+        "alt_text": "Approved Co-Engineer square interlocking mark",
+        "notes": "Deterministic LANCZOS raster of the approved square interlocking mark for composerIcon. Not an SVG approximation.",
+    },
+)
 
 WHITE = "white"
 DARK = "0x0C0B10"
@@ -189,6 +238,35 @@ def pad_filter(width: int, height: int, color: str) -> str:
         f"force_divisible_by=2:flags=lanczos,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={color},setsar=1"
     )
+
+
+def encode_png_identity(src: Path, dest: Path, width: int, height: int, mode: str) -> list[str]:
+    from PIL import Image
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.open(src).convert(mode).resize((width, height), Image.Resampling.LANCZOS)
+    image.save(dest, format="PNG", compress_level=9, optimize=False)
+    return [
+        "python3",
+        "PIL.Image.convert+resize(LANCZOS)+PNG(compress_level=9,optimize=False)",
+        rel(src),
+        rel(dest),
+        mode,
+        str(width),
+        str(height),
+    ]
+
+
+def identity_argv(src: Path, dest: Path, width: int, height: int, mode: str) -> list[str]:
+    return [
+        "python3",
+        "PIL.Image.convert+resize(LANCZOS)+PNG(compress_level=9,optimize=False)",
+        rel(src),
+        rel(dest),
+        mode,
+        str(width),
+        str(height),
+    ]
 
 
 def rel(path: Path) -> str:
@@ -507,10 +585,10 @@ def derived_record(
             }
         ],
     }
-    if path.suffix.lower() in {".jpg", ".jpeg"}:
+    if path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
         actual_w, actual_h = jpeg_size(path)
         if (actual_w, actual_h) != (width, height):
-            fail(f"{path} jpeg size {actual_w}x{actual_h} != {width}x{height}")
+            fail(f"{path} image size {actual_w}x{actual_h} != {width}x{height}")
     ceiling = SIZE_CEILINGS.get(rel(path))
     if ceiling is not None and path.stat().st_size > ceiling:
         fail(f"{path} exceeds ceiling {ceiling}")
@@ -543,7 +621,7 @@ def derived_record(
         "publishable": publishable,
         "hold_reason": hold_reason,
         "muted": muted,
-        "audio": False if muted or path.suffix.lower() in {".jpg", ".jpeg"} else None,
+        "audio": False if muted or path.suffix.lower() in {".jpg", ".jpeg", ".png"} else None,
         "exact_host_screenshot": exact_host_screenshot,
         "alt_text": alt_text,
         "notes": notes,
@@ -599,6 +677,32 @@ def main() -> None:
     skip_encode = all(path.is_file() for path in expected_derived_paths()) and "--force-encode" not in sys.argv
     if skip_encode:
         derived_commands = load_existing_commands()
+
+    identity_paths = [
+        tree / job["name"] for tree in (DOCS_DERIVED, PLUGIN_DERIVED) for job in IDENTITY_JOBS
+    ]
+    skip_identity = all(path.is_file() for path in identity_paths) and "--force-encode" not in sys.argv
+    for job in IDENTITY_JOBS:
+        docs_path = DOCS_DERIVED / job["name"]
+        plugin_path = PLUGIN_DERIVED / job["name"]
+        source_path = src[job["source_id"]]
+        if skip_identity:
+            derived_commands.setdefault(
+                rel(docs_path),
+                identity_argv(source_path, docs_path, job["width"], job["height"], job["mode"]),
+            )
+            derived_commands.setdefault(
+                rel(plugin_path),
+                ["cp", "--", rel(docs_path), rel(plugin_path)],
+            )
+            continue
+        derived_commands[rel(docs_path)] = encode_png_identity(
+            source_path, docs_path, job["width"], job["height"], job["mode"]
+        )
+        shutil.copyfile(docs_path, plugin_path)
+        if sha256_file(docs_path) != sha256_file(plugin_path):
+            fail(f"identity mirror mismatch {plugin_path}")
+        derived_commands[rel(plugin_path)] = ["cp", "--", rel(docs_path), rel(plugin_path)]
 
     still_jobs = [
         ("hero-demo.jpg", "architecture-static", 1920, 1088, WHITE, 960, 544, "hero-demo"),
@@ -751,6 +855,43 @@ def main() -> None:
 
     derived_meta = [
         {
+            "name": "wordmark.png",
+            "source_id": "co-engineer-wordmark",
+            "slot": "identity-wordmark",
+            "publishable": True,
+            "hold_reason": None,
+            "role_docs": "docs-identity-wordmark",
+            "role_plugin": "plugin-identity-wordmark",
+            "docs_wh": (1024, 576),
+            "plugin_wh": (1024, 576),
+            "muted": True,
+            "exact": False,
+            "alt_text": "Approved Co-Engineer wordmark",
+            "notes": (
+                "Deterministic LANCZOS raster of the approved Co-Engineer wordmark. "
+                "Alpha preserved for light and dark chrome. Used as logo/marketplace identity. "
+                "Not an SVG approximation."
+            ),
+        },
+        {
+            "name": "square-mark.png",
+            "source_id": "co-engineer-square-mark",
+            "slot": "identity-square-mark",
+            "publishable": True,
+            "hold_reason": None,
+            "role_docs": "docs-identity-square-mark",
+            "role_plugin": "plugin-identity-square-mark",
+            "docs_wh": (512, 512),
+            "plugin_wh": (512, 512),
+            "muted": True,
+            "exact": False,
+            "alt_text": "Approved Co-Engineer square interlocking mark",
+            "notes": (
+                "Deterministic LANCZOS raster of the approved square interlocking mark. "
+                "Used as composerIcon. Not an SVG approximation."
+            ),
+        },
+        {
             "name": "hero-demo.jpg",
             "source_id": "architecture-static",
             "slot": "hero-demo",
@@ -773,46 +914,58 @@ def main() -> None:
             "name": "hero-frame-poster.jpg",
             "source_id": "architecture-motion",
             "slot": "hero-demo",
-            "publishable": True,
-            "hold_reason": None,
+            "publishable": False,
+            "hold_reason": (
+                "Rejected from public README, plugin, and marketplace interfaces. "
+                "Static-first shipping uses hero-demo.jpg only. Motion poster retained "
+                "as non-publishable provenance and is not repaired."
+            ),
             "role_docs": "docs-hero-motion-frame-poster",
             "role_plugin": "plugin-hero-motion-frame-poster",
             "docs_wh": (1920, 1088),
             "plugin_wh": (960, 544),
             "muted": True,
             "exact": False,
-            "alt_text": PRODUCT_LEAD,
-            "notes": "Truthful frame poster from the architecture motion source at 0.20s.",
+            "alt_text": None,
+            "notes": "Non-publishable frame poster from the architecture motion source at 0.20s.",
         },
         {
             "name": "hero-muted.mp4",
             "source_id": "architecture-motion",
             "slot": "hero-demo",
-            "publishable": True,
-            "hold_reason": None,
+            "publishable": False,
+            "hold_reason": (
+                "Rejected from public README, plugin, and marketplace interfaces. "
+                "Static-first shipping uses hero-demo.jpg only. Motion retained as "
+                "non-publishable provenance and is not repaired."
+            ),
             "role_docs": "docs-hero-muted-mp4",
             "role_plugin": "plugin-hero-muted-mp4",
             "docs_wh": (1920, 1088),
             "plugin_wh": (960, 544),
             "muted": True,
             "exact": False,
-            "alt_text": PRODUCT_LEAD,
-            "notes": "Silent architecture motion for the hero slot. Audio and cover art stripped.",
+            "alt_text": None,
+            "notes": "Silent architecture motion retained as non-publishable provenance. Not linked publicly.",
         },
         {
             "name": "hero-muted.webm",
             "source_id": "architecture-motion",
             "slot": "hero-demo",
-            "publishable": True,
-            "hold_reason": None,
+            "publishable": False,
+            "hold_reason": (
+                "Rejected from public README, plugin, and marketplace interfaces. "
+                "Static-first shipping uses hero-demo.jpg only. Motion retained as "
+                "non-publishable provenance and is not repaired."
+            ),
             "role_docs": "docs-hero-muted-webm",
             "role_plugin": "plugin-hero-muted-webm",
             "docs_wh": (1920, 1088),
             "plugin_wh": (960, 544),
             "muted": True,
             "exact": False,
-            "alt_text": PRODUCT_LEAD,
-            "notes": "Silent architecture motion for the hero slot. Audio and cover art stripped.",
+            "alt_text": None,
+            "notes": "Silent architecture motion retained as non-publishable provenance. Not linked publicly.",
         },
         {
             "name": "first-delegation.jpg",
@@ -963,7 +1116,7 @@ def main() -> None:
         },
     ]
 
-    codec_by_suffix = {".jpg": "mjpeg", ".mp4": "h264", ".webm": "vp9"}
+    codec_by_suffix = {".jpg": "mjpeg", ".png": "png", ".mp4": "h264", ".webm": "vp9"}
     for meta in derived_meta:
         for tree, role_key, wh in (
             (DOCS_DERIVED, "role_docs", meta["docs_wh"]),
@@ -994,27 +1147,31 @@ def main() -> None:
         {
             "slot": "grouped-attention",
             "publishable": False,
+            "optional": True,
+            "rel01_required": False,
             "reason": (
-                "No supplied source explicitly depicts grouped attention, affected/unaffected "
-                "lanes, one structured reply, or a resumed cursor. No asset was fabricated."
+                "Optional future exact-host enhancement, not a 3.4.0 REL-01 input. "
+                "No host UI was fabricated."
             ),
         },
         {
             "slot": "verified-final-decision",
             "publishable": False,
+            "optional": True,
+            "rel01_required": False,
             "reason": (
-                "The conceptual combined-outcome art does not show branch, head, tree, scope, "
-                "tests, reviews, candidate, or sanitized-evidence details. It is mapped only to "
-                "failure-unresolved and is not relabeled as an exact final-decision screenshot."
+                "Optional future exact-host enhancement, not a 3.4.0 REL-01 input. "
+                "No host UI was fabricated."
             ),
         },
         {
             "slot": "multi-lane-run",
             "publishable": False,
+            "optional": True,
+            "rel01_required": False,
             "reason": (
-                "The multi-lane static is malformed ('Changes return ition'). The multi-lane "
-                "motion is packaged as silent supplemental only and uses unsupported Main/Sub-task "
-                "hierarchy rather than independent assignments on a run card."
+                "Optional future exact-host enhancement, not a 3.4.0 REL-01 input. "
+                "Existing motion is retained as non-publishable provenance and is not repaired."
             ),
         },
     ]
@@ -1030,11 +1187,13 @@ def main() -> None:
             "docs/assets/co-engineer-3.4.0/final",
             "plugins/codex-co-engineer/assets/experience/final",
         ],
-        "readme_replacement": False,
+        "readme_replacement": True,
+        "static_first": True,
         "note": (
-            "This slice packages user-supplied 3.4.0 final-art sources and fit/encoding "
-            "derivatives under final/ trees. It does not replace the current README "
-            "scaffolding poster/hero, change plugin version, or invent missing states."
+            "Static-first 3.4.0 closure. Public README, plugin, and marketplace interfaces "
+            "ship the clean static hero and approved Co-Engineer raster identity. Rejected "
+            "hero motion and optional multi-lane/grouped-attention/verified-final slots stay "
+            "unlinked. Plugin version stays 3.3.0. No missing host UI was fabricated."
         ),
         "tool_versions": {
             "ffmpeg": tool_version("ffmpeg"),
@@ -1054,6 +1213,8 @@ def main() -> None:
                 "static": "architecture-static",
                 "motion": "architecture-motion",
                 "publishable": True,
+                "motion_publishable": False,
+                "note": "Static-first. Only hero-demo.jpg is public.",
             },
             "first-delegation": {"static": "first-delegation-static", "publishable": True},
             "provider-choices": {"static": "provider-choices-static", "publishable": True},
@@ -1063,13 +1224,45 @@ def main() -> None:
                 "note": "Conceptual combined outcome only; not verified-final-decision.",
             },
             "install-auth": {"static": "install-auth-static", "publishable": True},
+            "identity-wordmark": {
+                "static": "co-engineer-wordmark",
+                "publishable": True,
+                "role": "logo",
+            },
+            "identity-square-mark": {
+                "static": "co-engineer-square-mark",
+                "publishable": True,
+                "role": "composerIcon",
+            },
             "multi-lane-run": {
                 "static": "multi-lane-static-malformed",
                 "motion": "multi-lane-motion",
                 "publishable": False,
+                "optional": True,
+                "rel01_required": False,
             },
-            "grouped-attention": {"static": None, "publishable": False},
-            "verified-final-decision": {"static": None, "publishable": False},
+            "grouped-attention": {
+                "static": None,
+                "publishable": False,
+                "optional": True,
+                "rel01_required": False,
+            },
+            "verified-final-decision": {
+                "static": None,
+                "publishable": False,
+                "optional": True,
+                "rel01_required": False,
+            },
+        },
+        "shipping_interface": {
+            "composerIcon": "plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png",
+            "logo": "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+            "marketplace_logo": "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+            "poster": "docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg",
+            "plugin_poster": "plugins/codex-co-engineer/assets/experience/final/derived/hero-demo.jpg",
+            "heroMp4": None,
+            "heroWebm": None,
+            "static_first": True,
         },
         "holds": holds,
         "inventory": inventory,

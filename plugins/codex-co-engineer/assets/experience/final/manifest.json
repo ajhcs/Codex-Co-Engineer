@@ -9,8 +9,9 @@
     "docs/assets/co-engineer-3.4.0/final",
     "plugins/codex-co-engineer/assets/experience/final"
   ],
-  "readme_replacement": false,
-  "note": "This slice packages user-supplied 3.4.0 final-art sources and fit/encoding derivatives under final/ trees. It does not replace the current README scaffolding poster/hero, change plugin version, or invent missing states.",
+  "readme_replacement": true,
+  "static_first": true,
+  "note": "Static-first 3.4.0 closure. Public README, plugin, and marketplace interfaces ship the clean static hero and approved Co-Engineer raster identity. Rejected hero motion and optional multi-lane/grouped-attention/verified-final slots stay unlinked. Plugin version stays 3.3.0. No missing host UI was fabricated.",
   "tool_versions": {
     "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
     "ffprobe": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers",
@@ -47,13 +48,19 @@
     "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-run.held.jpg": 100000,
     "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-frame-poster.held.jpg": 40000,
     "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-muted.held.mp4": 200000,
-    "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-muted.held.webm": 400000
+    "plugins/codex-co-engineer/assets/experience/final/derived/multi-lane-muted.held.webm": 400000,
+    "docs/assets/co-engineer-3.4.0/final/derived/wordmark.png": 100000,
+    "docs/assets/co-engineer-3.4.0/final/derived/square-mark.png": 180000,
+    "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png": 100000,
+    "plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png": 180000
   },
   "slot_mapping": {
     "hero-demo": {
       "static": "architecture-static",
       "motion": "architecture-motion",
-      "publishable": true
+      "publishable": true,
+      "motion_publishable": false,
+      "note": "Static-first. Only hero-demo.jpg is public."
     },
     "first-delegation": {
       "static": "first-delegation-static",
@@ -72,38 +79,230 @@
       "static": "install-auth-static",
       "publishable": true
     },
+    "identity-wordmark": {
+      "static": "co-engineer-wordmark",
+      "publishable": true,
+      "role": "logo"
+    },
+    "identity-square-mark": {
+      "static": "co-engineer-square-mark",
+      "publishable": true,
+      "role": "composerIcon"
+    },
     "multi-lane-run": {
       "static": "multi-lane-static-malformed",
       "motion": "multi-lane-motion",
-      "publishable": false
+      "publishable": false,
+      "optional": true,
+      "rel01_required": false
     },
     "grouped-attention": {
       "static": null,
-      "publishable": false
+      "publishable": false,
+      "optional": true,
+      "rel01_required": false
     },
     "verified-final-decision": {
       "static": null,
-      "publishable": false
+      "publishable": false,
+      "optional": true,
+      "rel01_required": false
     }
+  },
+  "shipping_interface": {
+    "composerIcon": "plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png",
+    "logo": "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+    "marketplace_logo": "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+    "poster": "docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg",
+    "plugin_poster": "plugins/codex-co-engineer/assets/experience/final/derived/hero-demo.jpg",
+    "heroMp4": null,
+    "heroWebm": null,
+    "static_first": true
   },
   "holds": [
     {
       "slot": "grouped-attention",
       "publishable": false,
-      "reason": "No supplied source explicitly depicts grouped attention, affected/unaffected lanes, one structured reply, or a resumed cursor. No asset was fabricated."
+      "optional": true,
+      "rel01_required": false,
+      "reason": "Optional future exact-host enhancement, not a 3.4.0 REL-01 input. No host UI was fabricated."
     },
     {
       "slot": "verified-final-decision",
       "publishable": false,
-      "reason": "The conceptual combined-outcome art does not show branch, head, tree, scope, tests, reviews, candidate, or sanitized-evidence details. It is mapped only to failure-unresolved and is not relabeled as an exact final-decision screenshot."
+      "optional": true,
+      "rel01_required": false,
+      "reason": "Optional future exact-host enhancement, not a 3.4.0 REL-01 input. No host UI was fabricated."
     },
     {
       "slot": "multi-lane-run",
       "publishable": false,
-      "reason": "The multi-lane static is malformed ('Changes return ition'). The multi-lane motion is packaged as silent supplemental only and uses unsupported Main/Sub-task hierarchy rather than independent assignments on a run card."
+      "optional": true,
+      "rel01_required": false,
+      "reason": "Optional future exact-host enhancement, not a 3.4.0 REL-01 input. Existing motion is retained as non-publishable provenance and is not repaired."
     }
   ],
   "inventory": [
+    {
+      "id": "co-engineer-wordmark",
+      "role": "byte-exact-original",
+      "path": "docs/assets/co-engineer-3.4.0/final/sources/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+      "original_filename": "grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+      "redacted_origin": "owner-intake/CheapTesting/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+      "attachment_id": null,
+      "sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+      "bytes": 1250372,
+      "width": 1792,
+      "height": 1008,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "png_pipe",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 1792,
+            "height": 1008,
+            "avg_frame_rate": "25/1",
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+      "transformation": "cp -- <verified-original> <repo-path>",
+      "intended_slot": null,
+      "publishable": false,
+      "hold_reason": "Provenance original; not a shipping derivative.",
+      "kind": "source"
+    },
+    {
+      "id": "co-engineer-wordmark",
+      "role": "byte-exact-original",
+      "path": "plugins/codex-co-engineer/assets/experience/final/sources/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+      "original_filename": "grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+      "redacted_origin": "owner-intake/CheapTesting/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+      "attachment_id": null,
+      "sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+      "bytes": 1250372,
+      "width": 1792,
+      "height": 1008,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "png_pipe",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 1792,
+            "height": 1008,
+            "avg_frame_rate": "25/1",
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+      "transformation": "cp -- <verified-original> <repo-path>",
+      "intended_slot": null,
+      "publishable": false,
+      "hold_reason": "Provenance original; not a shipping derivative.",
+      "kind": "source"
+    },
+    {
+      "id": "co-engineer-square-mark",
+      "role": "byte-exact-original",
+      "path": "docs/assets/co-engineer-3.4.0/final/sources/chatgpt-image-aug-27-2026-square-mark.png",
+      "original_filename": "ChatGPT Image Aug 27, 2026, 01_51_12 PM.png",
+      "redacted_origin": "owner-intake/CheapTesting/ChatGPT Image Aug 27, 2026, 01_51_12 PM.png",
+      "attachment_id": null,
+      "sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+      "bytes": 736141,
+      "width": 1254,
+      "height": 1254,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "png_pipe",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 1254,
+            "height": 1254,
+            "avg_frame_rate": "25/1",
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+      "transformation": "cp -- <verified-original> <repo-path>",
+      "intended_slot": null,
+      "publishable": false,
+      "hold_reason": "Provenance original; not a shipping derivative.",
+      "kind": "source"
+    },
+    {
+      "id": "co-engineer-square-mark",
+      "role": "byte-exact-original",
+      "path": "plugins/codex-co-engineer/assets/experience/final/sources/chatgpt-image-aug-27-2026-square-mark.png",
+      "original_filename": "ChatGPT Image Aug 27, 2026, 01_51_12 PM.png",
+      "redacted_origin": "owner-intake/CheapTesting/ChatGPT Image Aug 27, 2026, 01_51_12 PM.png",
+      "attachment_id": null,
+      "sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+      "bytes": 736141,
+      "width": 1254,
+      "height": 1254,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "png_pipe",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 1254,
+            "height": 1254,
+            "avg_frame_rate": "25/1",
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+      "transformation": "cp -- <verified-original> <repo-path>",
+      "intended_slot": null,
+      "publishable": false,
+      "hold_reason": "Provenance original; not a shipping derivative.",
+      "kind": "source"
+    },
     {
       "id": "architecture-static",
       "role": "byte-exact-original",
@@ -841,6 +1040,212 @@
       "kind": "source"
     },
     {
+      "id": "docs__assets__co-engineer-3.4.0__final__derived__wordmark.png",
+      "role": "docs-identity-wordmark",
+      "path": "docs/assets/co-engineer-3.4.0/final/derived/wordmark.png",
+      "sha256": "5f3f4e2c7dea674bc7e6f558a70ebecc78031c364f5821c3165c344e341561d5",
+      "bytes": 71971,
+      "width": 1024,
+      "height": 576,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "image2",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 1024,
+            "height": 576,
+            "avg_frame_rate": null,
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_id": "co-engineer-wordmark",
+      "source_sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+      "transformation": "python3 PIL.Image.convert+resize(LANCZOS)+PNG(compress_level=9,optimize=False) docs/assets/co-engineer-3.4.0/final/sources/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png docs/assets/co-engineer-3.4.0/final/derived/wordmark.png RGBA 1024 576",
+      "transformation_argv": [
+        "python3",
+        "PIL.Image.convert+resize(LANCZOS)+PNG(compress_level=9,optimize=False)",
+        "docs/assets/co-engineer-3.4.0/final/sources/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png",
+        "docs/assets/co-engineer-3.4.0/final/derived/wordmark.png",
+        "RGBA",
+        "1024",
+        "576"
+      ],
+      "intended_slot": "identity-wordmark",
+      "publishable": true,
+      "hold_reason": null,
+      "muted": true,
+      "audio": false,
+      "exact_host_screenshot": false,
+      "alt_text": "Approved Co-Engineer wordmark",
+      "notes": "Deterministic LANCZOS raster of the approved Co-Engineer wordmark. Alpha preserved for light and dark chrome. Used as logo/marketplace identity. Not an SVG approximation.",
+      "kind": "derived",
+      "size_ceiling": 100000
+    },
+    {
+      "id": "plugins__codex-co-engineer__assets__experience__final__derived__wordmark.png",
+      "role": "plugin-identity-wordmark",
+      "path": "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+      "sha256": "5f3f4e2c7dea674bc7e6f558a70ebecc78031c364f5821c3165c344e341561d5",
+      "bytes": 71971,
+      "width": 1024,
+      "height": 576,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "image2",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 1024,
+            "height": 576,
+            "avg_frame_rate": null,
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_id": "co-engineer-wordmark",
+      "source_sha256": "fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca",
+      "transformation": "cp -- docs/assets/co-engineer-3.4.0/final/derived/wordmark.png plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png",
+      "transformation_argv": [
+        "cp",
+        "--",
+        "docs/assets/co-engineer-3.4.0/final/derived/wordmark.png",
+        "plugins/codex-co-engineer/assets/experience/final/derived/wordmark.png"
+      ],
+      "intended_slot": "identity-wordmark",
+      "publishable": true,
+      "hold_reason": null,
+      "muted": true,
+      "audio": false,
+      "exact_host_screenshot": false,
+      "alt_text": "Approved Co-Engineer wordmark",
+      "notes": "Deterministic LANCZOS raster of the approved Co-Engineer wordmark. Alpha preserved for light and dark chrome. Used as logo/marketplace identity. Not an SVG approximation.",
+      "kind": "derived",
+      "size_ceiling": 100000
+    },
+    {
+      "id": "docs__assets__co-engineer-3.4.0__final__derived__square-mark.png",
+      "role": "docs-identity-square-mark",
+      "path": "docs/assets/co-engineer-3.4.0/final/derived/square-mark.png",
+      "sha256": "0c9e38a12d8b91c1d5f7823a6fa227a9759a90e9253b609a23410b6c65bd79eb",
+      "bytes": 155333,
+      "width": 512,
+      "height": 512,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "image2",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 512,
+            "height": 512,
+            "avg_frame_rate": null,
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_id": "co-engineer-square-mark",
+      "source_sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+      "transformation": "python3 PIL.Image.convert+resize(LANCZOS)+PNG(compress_level=9,optimize=False) docs/assets/co-engineer-3.4.0/final/sources/chatgpt-image-aug-27-2026-square-mark.png docs/assets/co-engineer-3.4.0/final/derived/square-mark.png RGB 512 512",
+      "transformation_argv": [
+        "python3",
+        "PIL.Image.convert+resize(LANCZOS)+PNG(compress_level=9,optimize=False)",
+        "docs/assets/co-engineer-3.4.0/final/sources/chatgpt-image-aug-27-2026-square-mark.png",
+        "docs/assets/co-engineer-3.4.0/final/derived/square-mark.png",
+        "RGB",
+        "512",
+        "512"
+      ],
+      "intended_slot": "identity-square-mark",
+      "publishable": true,
+      "hold_reason": null,
+      "muted": true,
+      "audio": false,
+      "exact_host_screenshot": false,
+      "alt_text": "Approved Co-Engineer square interlocking mark",
+      "notes": "Deterministic LANCZOS raster of the approved square interlocking mark. Used as composerIcon. Not an SVG approximation.",
+      "kind": "derived",
+      "size_ceiling": 180000
+    },
+    {
+      "id": "plugins__codex-co-engineer__assets__experience__final__derived__square-mark.png",
+      "role": "plugin-identity-square-mark",
+      "path": "plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png",
+      "sha256": "0c9e38a12d8b91c1d5f7823a6fa227a9759a90e9253b609a23410b6c65bd79eb",
+      "bytes": 155333,
+      "width": 512,
+      "height": 512,
+      "duration_s": null,
+      "avg_frame_rate": null,
+      "codecs_streams": {
+        "nb_streams": 1,
+        "duration_s": null,
+        "format_name": "image2",
+        "bit_rate": null,
+        "streams": [
+          {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "png",
+            "width": 512,
+            "height": 512,
+            "avg_frame_rate": null,
+            "duration": null,
+            "channels": null,
+            "sample_rate": null,
+            "attached_pic": false
+          }
+        ]
+      },
+      "source_id": "co-engineer-square-mark",
+      "source_sha256": "6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa",
+      "transformation": "cp -- docs/assets/co-engineer-3.4.0/final/derived/square-mark.png plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png",
+      "transformation_argv": [
+        "cp",
+        "--",
+        "docs/assets/co-engineer-3.4.0/final/derived/square-mark.png",
+        "plugins/codex-co-engineer/assets/experience/final/derived/square-mark.png"
+      ],
+      "intended_slot": "identity-square-mark",
+      "publishable": true,
+      "hold_reason": null,
+      "muted": true,
+      "audio": false,
+      "exact_host_screenshot": false,
+      "alt_text": "Approved Co-Engineer square interlocking mark",
+      "notes": "Deterministic LANCZOS raster of the approved square interlocking mark. Used as composerIcon. Not an SVG approximation.",
+      "kind": "derived",
+      "size_ceiling": 180000
+    },
+    {
       "id": "docs__assets__co-engineer-3.4.0__final__derived__hero-demo.jpg",
       "role": "docs-hero-demo-static",
       "path": "docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg",
@@ -1020,13 +1425,13 @@
         "docs/assets/co-engineer-3.4.0/final/derived/hero-frame-poster.jpg"
       ],
       "intended_slot": "hero-demo",
-      "publishable": true,
-      "hold_reason": null,
+      "publishable": false,
+      "hold_reason": "Rejected from public README, plugin, and marketplace interfaces. Static-first shipping uses hero-demo.jpg only. Motion poster retained as non-publishable provenance and is not repaired.",
       "muted": true,
       "audio": false,
       "exact_host_screenshot": false,
-      "alt_text": "Give Codex a team of external co-engineers without giving up control.",
-      "notes": "Truthful frame poster from the architecture motion source at 0.20s.",
+      "alt_text": null,
+      "notes": "Non-publishable frame poster from the architecture motion source at 0.20s.",
       "kind": "derived",
       "size_ceiling": 200000
     },
@@ -1086,13 +1491,13 @@
         "plugins/codex-co-engineer/assets/experience/final/derived/hero-frame-poster.jpg"
       ],
       "intended_slot": "hero-demo",
-      "publishable": true,
-      "hold_reason": null,
+      "publishable": false,
+      "hold_reason": "Rejected from public README, plugin, and marketplace interfaces. Static-first shipping uses hero-demo.jpg only. Motion poster retained as non-publishable provenance and is not repaired.",
       "muted": true,
       "audio": false,
       "exact_host_screenshot": false,
-      "alt_text": "Give Codex a team of external co-engineers without giving up control.",
-      "notes": "Truthful frame poster from the architecture motion source at 0.20s.",
+      "alt_text": null,
+      "notes": "Non-publishable frame poster from the architecture motion source at 0.20s.",
       "kind": "derived",
       "size_ceiling": 40000
     },
@@ -1167,13 +1572,13 @@
         "docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4"
       ],
       "intended_slot": "hero-demo",
-      "publishable": true,
-      "hold_reason": null,
+      "publishable": false,
+      "hold_reason": "Rejected from public README, plugin, and marketplace interfaces. Static-first shipping uses hero-demo.jpg only. Motion retained as non-publishable provenance and is not repaired.",
       "muted": true,
       "audio": false,
       "exact_host_screenshot": false,
-      "alt_text": "Give Codex a team of external co-engineers without giving up control.",
-      "notes": "Silent architecture motion for the hero slot. Audio and cover art stripped.",
+      "alt_text": null,
+      "notes": "Silent architecture motion retained as non-publishable provenance. Not linked publicly.",
       "kind": "derived",
       "size_ceiling": 800000
     },
@@ -1248,13 +1653,13 @@
         "plugins/codex-co-engineer/assets/experience/final/derived/hero-muted.mp4"
       ],
       "intended_slot": "hero-demo",
-      "publishable": true,
-      "hold_reason": null,
+      "publishable": false,
+      "hold_reason": "Rejected from public README, plugin, and marketplace interfaces. Static-first shipping uses hero-demo.jpg only. Motion retained as non-publishable provenance and is not repaired.",
       "muted": true,
       "audio": false,
       "exact_host_screenshot": false,
-      "alt_text": "Give Codex a team of external co-engineers without giving up control.",
-      "notes": "Silent architecture motion for the hero slot. Audio and cover art stripped.",
+      "alt_text": null,
+      "notes": "Silent architecture motion retained as non-publishable provenance. Not linked publicly.",
       "kind": "derived",
       "size_ceiling": 200000
     },
@@ -1327,13 +1732,13 @@
         "docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm"
       ],
       "intended_slot": "hero-demo",
-      "publishable": true,
-      "hold_reason": null,
+      "publishable": false,
+      "hold_reason": "Rejected from public README, plugin, and marketplace interfaces. Static-first shipping uses hero-demo.jpg only. Motion retained as non-publishable provenance and is not repaired.",
       "muted": true,
       "audio": false,
       "exact_host_screenshot": false,
-      "alt_text": "Give Codex a team of external co-engineers without giving up control.",
-      "notes": "Silent architecture motion for the hero slot. Audio and cover art stripped.",
+      "alt_text": null,
+      "notes": "Silent architecture motion retained as non-publishable provenance. Not linked publicly.",
       "kind": "derived",
       "size_ceiling": 800000
     },
@@ -1406,13 +1811,13 @@
         "plugins/codex-co-engineer/assets/experience/final/derived/hero-muted.webm"
       ],
       "intended_slot": "hero-demo",
-      "publishable": true,
-      "hold_reason": null,
+      "publishable": false,
+      "hold_reason": "Rejected from public README, plugin, and marketplace interfaces. Static-first shipping uses hero-demo.jpg only. Motion retained as non-publishable provenance and is not repaired.",
       "muted": true,
       "audio": false,
       "exact_host_screenshot": false,
-      "alt_text": "Give Codex a team of external co-engineers without giving up control.",
-      "notes": "Silent architecture motion for the hero slot. Audio and cover art stripped.",
+      "alt_text": null,
+      "notes": "Silent architecture motion retained as non-publishable provenance. Not linked publicly.",
       "kind": "derived",
       "size_ceiling": 400000
     },
