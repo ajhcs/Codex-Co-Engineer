@@ -35,10 +35,8 @@
       "Chatting with Co-Engineer: inspect the current run."
     ],
     "brandColor": "#111111",
-    "composerIcon": "./assets/experience/mark.svg",
-    "logo": "./assets/experience/mark.svg",
-    "poster": "./assets/experience/final/derived/hero-demo.jpg",
-    "heroMp4": "./assets/experience/final/derived/hero-muted.mp4",
-    "heroWebm": "./assets/experience/final/derived/hero-muted.webm"
+    "composerIcon": "./assets/experience/final/derived/square-mark.png",
+    "logo": "./assets/experience/final/derived/wordmark.png",
+    "poster": "./assets/experience/final/derived/hero-demo.jpg"
   }
 }

@@ -11,10 +11,12 @@ in:
 - `plugins/codex-co-engineer/assets/experience/final/manifest.json`
 
 Those two files are byte-identical. Originals are preserved under each owned
-tree at `final/sources/` using the intake filenames. Shipping derivatives for
-fit, encoding, silence, size, and accessibility live under `final/derived/`.
-This slice does not replace the current README scaffolding poster or hero, and
-it does not invent missing host states.
+tree at `final/sources/` using intake filenames, including the two approved
+identity rasters. Shipping derivatives for fit, encoding, silence, size, and
+accessibility live under `final/derived/`. Public interfaces are static-first:
+the clean hero still and approved identity rasters ship; rejected motion stays
+unlinked. Optional multi-lane, grouped-attention, and verified-final-decision
+art remains absent. No missing host UI was fabricated.
 
 The honest product claim remains: up to eight isolated external co-engineers,
 one bounded run, one coordinated wait, one verified decision.
@@ -26,6 +28,8 @@ roots are recorded in public prose.
 
 | ID | Original filename | Redacted origin | SHA-256 | Bytes |
 | --- | --- | --- | --- | --- |
+| co-engineer-wordmark | `grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png` | `owner-intake/CheapTesting/grok-image-d7f8b7c9-c929-4a3f-96d0-35f69ffb1403.png` | `fcd7e67237e8bac3d2dd5c7c21b37e61df4acefac01cd2172c25c80372e03bca` | 1250372 |
+| co-engineer-square-mark | `ChatGPT Image Aug 27, 2026, 01_51_12 PM.png` | `owner-intake/CheapTesting/ChatGPT Image Aug 27, 2026, 01_51_12 PM.png` | `6282ebb40e87fe0ef71069e1e2cd7603d05f21dfe0ad2623605194702f5180fa` | 736141 |
 | architecture-static | `856Qz.png` | `owner-intake/CheapTesting/856Qz.png` | `aad77a7e0c19919e6325c555ace274759bb81e0c7341487b998a76f05acaeb74` | 181725 |
 | first-delegation-static | `grok-image-7845770e-036e-42aa-baf0-4fdf1737fe5d.jpg` | `owner-intake/CheapTesting/grok-image-7845770e-036e-42aa-baf0-4fdf1737fe5d.jpg` | `0aa5595d0d71438b14ded380857483e61dd807b25db9cda59b143c02faafc678` | 217921 |
 | multi-lane-static-malformed | `grok-image-688b2e53-8327-4db7-8fca-017315787f0f.jpg` | `owner-intake/CheapTesting/grok-image-688b2e53-8327-4db7-8fca-017315787f0f.jpg` | `37bc5cd0382829799aea0b638b54636be1d8a575546aa16f9aa9809703d8e44f` | 260551 |
@@ -43,40 +47,53 @@ have a single video stream and no audio.
 
 | Slot | Source | Shipping | Publishable |
 | --- | --- | --- | --- |
-| `hero-demo` | architecture still + silent architecture motion | `derived/hero-demo.jpg`, `hero-muted.mp4`, `hero-muted.webm`, `hero-frame-poster.jpg` | yes |
+| `hero-demo` | architecture still | `derived/hero-demo.jpg` | yes |
 | `first-delegation` | first-delegation still | `derived/first-delegation.jpg` | yes |
 | `provider-choices` | provider-choices still | `derived/provider-choices.jpg` | yes |
 | `failure-unresolved` | conceptual combined outcome only | `derived/failure-unresolved.jpg` | yes |
 | `install-auth` | install/auth still | `derived/install-auth.jpg` | yes |
-| `multi-lane-run` | malformed static + inspected motion | `*.held.*` derivatives | no |
-| `grouped-attention` | none supplied | none fabricated | no |
-| `verified-final-decision` | none that shows required details | none relabeled | no |
+| `identity-wordmark` | approved Co-Engineer wordmark | `derived/wordmark.png` as logo/marketplace | yes |
+| `identity-square-mark` | approved square interlocking mark | `derived/square-mark.png` as composerIcon | yes |
+| `multi-lane-run` | retained non-publishable provenance | none public | no; optional, not REL-01 |
+| `grouped-attention` | none supplied | none fabricated | no; optional, not REL-01 |
+| `verified-final-decision` | none that shows required details | none fabricated | no; optional, not REL-01 |
 
-Publishable stills and motion are conceptual illustrations, not exact Codex
-host screenshots. Derivatives pad to the frozen slot aspect instead of
-stretching or cropping meaning. Docs hero is 1920×1088; other docs stills are
-1600×1000; plugin hero is 960×544; other plugin stills are 800×500.
+Publishable stills are conceptual illustrations, not exact Codex host
+screenshots. Identity derivatives are rasters of the approved originals.
+Docs hero is 1920×1088; other docs stills are 1600×1000; plugin hero is
+960×544; other plugin stills are 800×500. Wordmark identity is 1024×576;
+square mark identity is 512×512.
 
-## Holds
+## Optional slots and retained provenance
 
-- **grouped-attention.** No supplied source depicts grouped questions,
-  affected/unaffected lanes, one structured reply, or a resumed cursor.
-- **verified-final-decision.** The conceptual combined-outcome art does not
-  show branch, head, tree, scope, tests, reviews, candidate, or sanitized
-  evidence. It is used only for `failure-unresolved`.
-- **multi-lane-run static.** Preserved, `publishable=false`, because it
-  contains the malformed phrase `Changes return ition`.
-- **multi-lane-run motion.** Packaged as silent supplemental after frame
-  inspection. Frames do not inherit `Changes return ition`, but they use
-  unsupported Main task / Sub-task hierarchy rather than independent
-  assignments on a run card, so `publishable=false`.
+- **grouped-attention.** Optional future exact-host enhancement, not a
+  3.4.0 REL-01 input. README tells the grouped-attention story in prose.
+  No host UI was fabricated.
+- **verified-final-decision.** Optional future exact-host enhancement, not
+  a 3.4.0 REL-01 input. README describes the verified evidence packet in
+  prose. No host UI was fabricated.
+- **multi-lane-run.** Optional future exact-host enhancement, not a 3.4.0
+  REL-01 input. Existing files remain non-publishable provenance outside
+  public links and shipping interface inventory. They are not repaired.
+- **hero motion.** Rejected from README, plugin, and marketplace
+  interfaces. Static-first shipping uses `hero-demo.jpg` only. Motion
+  files stay on disk as non-publishable provenance and are not repaired.
+
+The invented `CODEX` `mark.svg` identity is unlinked from shipping
+`composerIcon`, `logo`, and marketplace identity. Approved identity is
+the Co-Engineer wordmark raster and the square interlocking mark raster.
+No replacement SVG was drawn.
+
+Codex Desktop wide/narrow, light/dark, 200% zoom, reduced-motion, missing
+optional media, keyboard/focus, plugin-catalog, and composer-icon
+qualification is recorded under the existing headless-complete contract
+for this writer: no Desktop host was available in the managed worktree.
 
 ## Budgets and tools
 
-Frozen README/package ceilings used here: docs hero still ≤200000 bytes, docs
-motion ≤800000, other docs stills ≤350 KiB, plugin hero still ≤80000, plugin
-hero MP4 ≤200000, plugin WebM ≤400000. Exact per-file ceilings are in the
-manifest.
+Frozen README/package ceilings used here: docs hero still ≤200000 bytes, other
+docs stills ≤350 KiB, plugin hero still ≤80000, identity wordmark ≤100000,
+identity square mark ≤180000. Exact per-file ceilings are in the manifest.
 
 Re-derive with `python3 docs/assets/co-engineer-3.4.0/final/package-final-art.py`
 (add `--force-encode` to rebuild binaries). Tooling: ffmpeg/ffprobe 6.1.1,

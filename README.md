@@ -34,17 +34,11 @@ notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
 
 The static Co-Engineer architecture illustration is the authoritative
 GitHub-compatible visual. It uses the approved Co-Engineer identity. It
-is not a live-run screenshot. GitHub README Markdown cannot guarantee
-video playback or reduced-motion behavior. There is no autoplay audio.
-Optional silent animation is linked explicitly.
+is not a live-run screenshot. There is no autoplay audio.
 
 <!-- README_ART_SLOT: hero-demo -->
 
 ![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg)
-
-Optional silent architecture animation:
-[MP4](docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4) or
-[WebM](docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm).
 
 ## First 60 seconds
 
@@ -86,9 +80,8 @@ Codex:
 
 <!-- README_ART_SLOT: multi-lane-run -->
 
-The supplied multi-lane static is malformed and is not published. The
-supplemental multi-lane motion is also held: its Main/Sub-task hierarchy
-does not truthfully depict independent assignments on a run card.
+Independent assignments stay isolated. They do not share a writer path.
+Codex submits once, waits once, and inspects the whole set together.
 
 If you have no saved profile and name no co-engineers, Codex asks once
 which co-engineers should take the independent assignments: Grok,
@@ -249,9 +242,9 @@ You:
 
 <!-- README_ART_SLOT: grouped-attention -->
 
-This image slot is held. No supplied source shows grouped questions,
-affected and unaffected lanes, one structured response, and same-cursor
-resume together.
+One grouped decision covers every assignment that asked. Lanes that did
+not ask keep working. Codex resumes from the same cursor after you
+answer.
 
 That answer is chatting: answer grouped attention. It is not a debate
 loop. Codex continues the same run with the same single wait.
@@ -262,12 +255,10 @@ After the wait, Codex inspects the candidate. Only then may it say:
 
 <!-- README_ART_SLOT: verified-final-decision -->
 
-This image slot is held. Conceptual outcome art lacks branch, head, and
-tree identities plus the scope, tests, reviews, candidate, and
-sanitized-evidence contract.
-
-Verification is Codex's review of the candidate, not automatic merge.
-You keep control.
+The verified result is an evidence packet Codex has inspected: the
+candidate, its branch, head, and tree, plus the scope, tests, and
+reviews that support the decision. Verification is Codex's review of
+that packet, not automatic merge. You keep control.
 
 If a required assignment fails, cannot be answered, or stays unresolved,
 Codex reports that honestly. It does not say Co-Engineer finished, and I
