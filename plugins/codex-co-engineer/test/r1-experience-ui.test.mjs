@@ -23,6 +23,7 @@ import {
   CodexCoEngineerExperienceUi as ui,
 } from '../mcp/v3/experience-ui-resource.mjs';
 import {
+  EXPERIENCE_PHRASES,
   EXPERIENCE_UI_RESOURCE_URIS,
   MCP_APPS_EXTENSION_ID,
   MCP_APPS_MIME_TYPE,
@@ -108,6 +109,25 @@ async function conversation(messages) {
     for (const message of messages) values.push(await request(message));
     return values;
   });
+}
+
+function runPhraseMarkup(html) {
+  const match = String(html).match(/<p class="cce-phrase">([\s\S]*?)<\/p>/u);
+  return match ? match[1] : null;
+}
+
+function phrasePaintRoot() {
+  const phrase = {
+    attrs: { 'data-field': 'phrase' },
+    textContent: 'Waiting for the run projection.',
+    getAttribute(name) { return this.attrs[name]; },
+  };
+  return {
+    phrase,
+    querySelector(selector) {
+      return selector === '[data-field="phrase"]' ? phrase : null;
+    },
+  };
 }
 
 test('inline registry registers run, attention, and final ui:// resources', async () => {
@@ -197,6 +217,11 @@ test('run card HTML shows objective, repository SHA, lanes, and Codex authority'
   assert.equal(text.includes('Using Muse Co-Engineer'), true);
   assert.equal(text.includes('src/validator/**'), true);
   assert.equal(text.includes('running'), true);
+  assert.equal(
+    text.includes('I am delegating this to Co-Engineer. Co-Engineer is running 2 independent assignments'),
+    true,
+  );
+  assert.equal(text.includes('I am delegating this to Co-Engineer Co-Engineer is running'), false);
   assert.equal(text.includes(ui.CODEX_AUTHORITY_SENTENCE), true);
   assert.equal(ui.documentContainsActionControls(html), false);
   const resource = readInlineExperienceUiResource(INLINE_EXPERIENCE_UI_URIS.run);
@@ -208,6 +233,81 @@ test('run card HTML shows objective, repository SHA, lanes, and Codex authority'
   assert.equal(resource.text.includes('infinite'), false);
   assert.equal(ui.documentContainsActionControls(resource.text), false);
   assert.equal(ui.markupWithoutScripts(resource.text).toLowerCase().includes('<' + 'button'), false);
+});
+
+test('run card joins canonical delegating and running with one sentence boundary', async () => {
+  const receipt = await loadJson(RESPONSE_DIR, 'run-receipt.json');
+  const projection = projectExperience(receipt);
+  const joined = 'I am delegating this to Co-Engineer. Co-Engineer is running 2 independent assignments';
+  const html = ui.renderRunCardHtml(projection);
+  const text = ui.visiblePlainText(html);
+  const root = phrasePaintRoot();
+  const session = ui.createDisplayOnlySession({ card: 'run', document: {}, root });
+  assert.equal(session.paint(projection), true);
+  assert.equal(projection.summary.delegating, EXPERIENCE_PHRASES.delegating);
+  assert.equal(projection.summary.running, 'Co-Engineer is running 2 independent assignments');
+  assert.equal(/[.!?]$/.test(projection.summary.delegating), false);
+  assert.equal(runPhraseMarkup(html), joined);
+  assert.equal(ui.fieldMap('run', projection).phrase, joined);
+  assert.equal(root.phrase.textContent, joined);
+  assert.equal(text.includes(joined), true);
+  assert.equal(html.includes('I am delegating this to Co-Engineer. Co-Engineer is running 2 independent assignments'), true);
+  assert.equal(html.includes('I am delegating this to Co-Engineer Co-Engineer is running'), false);
+  assert.equal(html.includes('..'), false);
+});
+
+test('run card preserves existing terminal punctuation and missing running text', async () => {
+  const receipt = await loadJson(RESPONSE_DIR, 'run-receipt.json');
+  const base = projectExperience(receipt);
+  const running = base.summary.running;
+  const rows = [
+    {
+      delegating: EXPERIENCE_PHRASES.delegating,
+      joined: `${EXPERIENCE_PHRASES.delegating}. ${running}`,
+    },
+    {
+      delegating: `${EXPERIENCE_PHRASES.delegating}.`,
+      joined: `${EXPERIENCE_PHRASES.delegating}. ${running}`,
+    },
+    {
+      delegating: `${EXPERIENCE_PHRASES.delegating}?`,
+      joined: `${EXPERIENCE_PHRASES.delegating}? ${running}`,
+    },
+    {
+      delegating: `${EXPERIENCE_PHRASES.delegating}!`,
+      joined: `${EXPERIENCE_PHRASES.delegating}! ${running}`,
+    },
+  ];
+  for (const row of rows) {
+    const next = structuredClone(base);
+    next.summary.delegating = row.delegating;
+    const html = ui.renderRunCardHtml(next);
+    const root = phrasePaintRoot();
+    ui.createDisplayOnlySession({ card: 'run', document: {}, root }).paint(next);
+    assert.equal(next.summary.delegating, row.delegating, row.delegating);
+    assert.equal(next.summary.running, running, row.delegating);
+    assert.equal(ui.fieldMap('run', next).phrase, row.joined, row.delegating);
+    assert.equal(runPhraseMarkup(html), row.joined, row.delegating);
+    assert.equal(root.phrase.textContent, row.joined, row.delegating);
+    assert.equal(runPhraseMarkup(html).includes('..'), false, row.delegating);
+    assert.equal(runPhraseMarkup(html).includes('?.'), false, row.delegating);
+    assert.equal(runPhraseMarkup(html).includes('!.'), false, row.delegating);
+  }
+
+  const missing = [undefined, null, '', '   ', 2];
+  for (const runningValue of missing) {
+    const next = structuredClone(base);
+    next.summary.running = runningValue;
+    const html = ui.renderRunCardHtml(next);
+    const root = phrasePaintRoot();
+    ui.createDisplayOnlySession({ card: 'run', document: {}, root }).paint(next);
+    assert.equal(Object.hasOwn(next.summary, 'running') ? next.summary.running : undefined, runningValue);
+    assert.equal(ui.fieldMap('run', next).phrase, EXPERIENCE_PHRASES.delegating, String(runningValue));
+    assert.equal(runPhraseMarkup(html), EXPERIENCE_PHRASES.delegating, String(runningValue));
+    assert.equal(root.phrase.textContent, EXPERIENCE_PHRASES.delegating, String(runningValue));
+    assert.equal(html.includes('Co-Engineer is running'), false, String(runningValue));
+    assert.equal(html.includes(`${EXPERIENCE_PHRASES.delegating}.`), false, String(runningValue));
+  }
 });
 
 test('final card HTML buckets lanes, git identity, and evidence without action controls', async () => {

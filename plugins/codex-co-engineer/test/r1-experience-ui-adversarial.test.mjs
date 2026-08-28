@@ -308,6 +308,43 @@ test('owner-only evidence, secrets, and injection never enter painted HTML', asy
   assert.equal(ui.visiblePlainText(rawHtml).includes(HOSTILE_PATH), false);
 });
 
+test('run card phrase join preserves both sentences through hostile and oversize input', async () => {
+  const raw = await loadJson(FIXTURE_DIR, 'hostile-card-payload.json');
+  const canonical = 'I am delegating this to Co-Engineer. Co-Engineer is running 1 independent assignment';
+  const rawHtml = ui.renderRunCardHtml(raw);
+  const phraseMatch = rawHtml.match(/<p class="cce-phrase">([\s\S]*?)<\/p>/u);
+  assert.equal(raw.summary.delegating, EXPERIENCE_PHRASES.delegating);
+  assert.equal(raw.summary.running, 'Co-Engineer is running 1 independent assignment');
+  assert.equal(ui.fieldMap('run', raw).phrase, canonical);
+  assert.equal(phraseMatch?.[1], canonical);
+  assert.equal(ui.visiblePlainText(rawHtml).includes(canonical), true);
+  assert.equal(rawHtml.includes('I am delegating this to Co-Engineer Co-Engineer is running'), false);
+
+  const oversize = structuredClone(raw);
+  oversize.summary.delegating = `<script>alert(1)</script>${'A'.repeat(600)}`;
+  oversize.summary.running = `github_pat_hostileleak ${'B'.repeat(600)}`;
+  const originalDelegating = oversize.summary.delegating;
+  const originalRunning = oversize.summary.running;
+  const left = ui.displayString(originalDelegating);
+  const right = ui.displayString(originalRunning, '');
+  const joined = `${left}. ${right}`;
+  const oversizeHtml = ui.renderRunCardHtml(oversize);
+  const oversizePhrase = oversizeHtml.match(/<p class="cce-phrase">([\s\S]*?)<\/p>/u)?.[1];
+  assert.equal(oversize.summary.delegating, originalDelegating);
+  assert.equal(oversize.summary.running, originalRunning);
+  assert.equal(left.length, 512);
+  assert.equal(right.length, 512);
+  assert.equal(ui.fieldMap('run', oversize).phrase, joined);
+  assert.equal(oversizePhrase, ui.escapeHtml(joined));
+  assert.equal(ui.visiblePlainText(oversizeHtml).includes(left), true);
+  assert.equal(ui.visiblePlainText(oversizeHtml).includes(right), true);
+  assert.equal(oversizeHtml.includes('<' + 'script>alert(1)</' + 'script>'), false);
+  assert.equal(oversizeHtml.includes('&lt;script&gt;'), true);
+  assert.equal(joined.includes('[REDACTED]'), true);
+  assert.equal(joined.includes('github_pat_hostileleak'), false);
+  assert.equal(joined.includes('..'), false);
+});
+
 test('grouped cardinality stays one group of at most eight unique questions', async () => {
   attentionUi.resetSubmittedForTests();
   const hostile = await loadJson(FIXTURE_DIR, 'hostile-attention-payload.json');
