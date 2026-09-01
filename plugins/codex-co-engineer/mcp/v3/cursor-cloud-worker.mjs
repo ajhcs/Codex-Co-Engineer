@@ -1038,6 +1038,7 @@ export async function runCursorCloudTask({
     });
     if (running.status !== 'running') fail('transport_lost', 'Cursor Cloud run could not be registered in the task receipt.');
     await appendTaskEvent(root, taskId, { type: 'transport', state: 'prompt_dispatched', transport: 'cursor-sdk', agent_id: agentId, run_id: run.id });
+    await updateTask(root, taskId, { dispatch_evidence: 'authoritative' });
     const stopRemote = () => {
       if (!stopPromise) stopPromise = stopRemoteRun(client, { ...task, provider_agent_id: agentId }, key, run, waitPromise);
       return stopPromise;

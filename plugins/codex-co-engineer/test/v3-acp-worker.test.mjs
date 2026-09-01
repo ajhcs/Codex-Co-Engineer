@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText, workerSeamIncident } from '../mcp/v3/acp-worker.mjs';
+import { boundedEvent, publicError, reconnectAcpTask, runAcpTask, runCliFallback, sanitizeText, workerSeamIncident } from '../mcp/v3/acp-worker.mjs';
 import { installClosedProviderTestInjection } from '../mcp/v3/credential-boundary.mjs';
 import { submitReply } from '../mcp/v3/mailbox.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
@@ -109,6 +109,53 @@ test('does not start a fresh ACP worker from transport_lost', async () => {
     runAcpTask({ root: value.root, taskId: value.taskId }),
     (error) => error.code === 'transport_lost',
   );
+});
+
+test('reconnects an acknowledged ACP session without replaying its prompt', async () => {
+  const value = await fixture({ id: 'same-session-reconnect' });
+  await updateTask(value.root, value.taskId, {
+    status: 'transport_lost',
+    transport: 'acp',
+    prompt_dispatched: true,
+    dispatch_evidence: 'authoritative',
+    acp_session_id: 'persisted-acp-session',
+  });
+  let ensureInput;
+  let startTurnCalled = false;
+  let closed = false;
+  const resumed = await reconnectAcpTask({
+    root: value.root,
+    taskId: value.taskId,
+    runtimeFactory: async () => ({
+      ensureSession: async (input) => {
+        ensureInput = input;
+        return {
+          backendSessionId: 'persisted-acp-session',
+          agentSessionId: 'persisted-agent-session',
+        };
+      },
+      getStatus: async () => ({ status: 'running' }),
+      startTurn: async () => {
+        startTurnCalled = true;
+        throw new Error('resume path must not start a turn');
+      },
+      close: async () => {
+        closed = true;
+      },
+    }),
+  });
+
+  assert.equal(resumed.reconnected, true);
+  assert.equal(resumed.prompt_replayed, false);
+  assert.equal(ensureInput.resumeSessionId, 'persisted-acp-session');
+  assert.equal(startTurnCalled, false);
+  assert.equal(closed, true);
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'running');
+  assert.equal(task.prompt_dispatched, true);
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.match(events, /session_reconnected/u);
+  assert.match(events, /prompt_replayed":false/u);
 });
 
 test('recursively bounds and redacts provider events and errors', () => {

@@ -25,6 +25,8 @@ import {
   PUBLIC_MCP_CATALOG,
   RUN_TOOL_ADAPTER_ALWAYS_FALSE_SIDE_EFFECTS,
   RUN_TOOL_ADAPTER_SCHEMA_ID,
+  SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX,
+  SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX,
   RUN_TOOL_OPERATIONS,
   classifyDeniedGitOperationV1,
   classifyRunToolCall,
@@ -130,6 +132,75 @@ test('submit maps delegate.run onto one 1-8 lane runtime submission', async () =
   assert.equal(isRunOwnedCandidateRefV1(receipt.candidate.ref, RUN_ID), true);
   assert.equal(receipt.candidate.ref, expectedCandidateRefV1({ run_id: RUN_ID }));
   assert.match(receipt.candidate.ref, new RegExp(`^${CANDIDATE_REF_NAMESPACE}`));
+});
+
+test('simple run status and receipts remain within their structured byte caps', async () => {
+  const legacy = createAdapter();
+  const handoff = {
+    schema: 'codex-co-engineer.partial-handoff.v1',
+    worktree: '/tmp/worktree',
+    branch: 'codex/very-long-branch',
+    starting_sha: 'a'.repeat(40),
+    current_head: 'b'.repeat(40),
+    clean: false,
+    changed_files: Array.from({ length: 64 }, (_, index) => `${'src/'.padEnd(1000, 'x')}${index}`),
+    commits: Array.from({ length: 64 }, () => 'c'.repeat(40)),
+    no_commit: false,
+    partial_diff: true,
+    last_acknowledged_provider_event: 'file_changed',
+    recovery_classification: 'timed_out_with_partial_work',
+    safe_next_actions: Array.from({ length: 8 }, () => 'Review the retained worktree and handoff evidence.'.repeat(100)),
+  };
+  const simpleReceipt = {
+    schema: 'codex-co-engineer.run-admission.v1',
+    run_id: 'bounded-receipt',
+    phase: 'degraded',
+    status: 'degraded',
+    assignment_count: 8,
+    lanes: Array.from({ length: 8 }, (_, index) => ({
+      assignment_id: `lane-${index}`,
+      task_id: `task-${index}`,
+      provider: 'grok',
+      model: 'grok-4',
+      role: 'implement',
+      access: 'writer',
+      required: true,
+      phase: 'partial_handoff',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      handoff,
+    })),
+    attention: null,
+    telemetry: { noisy: 'z'.repeat(50_000) },
+  };
+  const simpleRuntime = {
+    submitRunRequest: async () => simpleReceipt,
+    inspectRun: async () => simpleReceipt,
+    resumeRun: async () => simpleReceipt,
+    replyRun: async () => simpleReceipt,
+    cancelRun: async () => simpleReceipt,
+    waitRun: async () => simpleReceipt,
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+  const request = {
+    run_request: {
+      run_id: 'bounded-receipt',
+      repo: '/tmp/repo',
+      objective: 'Bound the receipt.',
+      assignments: [{
+        assignment_id: 'lane-one',
+        provider: 'grok',
+        role: 'implement',
+        access: 'write',
+        prompt: 'Implement the bounded slice.',
+        expected_duration_ms: 60_000,
+      }],
+    },
+  };
+  const submitted = await adapter.dispatch('delegate', request);
+  assert.ok(Buffer.byteLength(JSON.stringify(submitted), 'utf8') <= SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX);
+  const status = await adapter.dispatch('status', { run_id: 'bounded-receipt' });
+  assert.ok(Buffer.byteLength(JSON.stringify(status), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
 });
 
 test('eight-lane submit aggregates and a required unresolved lane blocks the candidate', async () => {

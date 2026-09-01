@@ -18,7 +18,10 @@ The user wants one isolated assignment.
 User: Review the auth change with Grok Co-Engineer.
 
 Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-Co-Engineer is running 1 independent assignment.
+Co-Engineer is preparing 1 independent assignment.
+
+After every required lane has authoritative prompt-dispatch evidence, the
+run card may say that Co-Engineer is running 1 independent assignment.
 
 Codex waits once. When the work is complete, Codex inspects it.
 
@@ -35,8 +38,12 @@ The user wants several independent assignments in one run.
 User: Split this into three isolated independent assignments: API
 validation, the operator guide, and a review of both diffs.
 
-Codex: I am delegating this to Co-Engineer. Co-Engineer is running 3
+Codex: I am delegating this to Co-Engineer. Co-Engineer is preparing 3
 independent assignments.
+
+Only after all three required lanes have authoritative prompt-dispatch
+evidence does the run card say that Co-Engineer is running 3 independent
+assignments.
 
 Codex does not start three separate runs and does not poll each
 assignment. One coordinated wait covers the whole run. Independent
@@ -100,7 +107,10 @@ the docs. Keep the review on Cursor Co-Engineer.
 
 Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer.
 Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
-running 3 independent assignments.
+preparing 3 independent assignments.
+
+The card changes to running only after all three required lanes have
+authoritative prompt-dispatch evidence.
 
 Codex does not pick co-engineers by cost, speed, or a hidden router.
 Cursor on this computer and Cursor Cloud both stay Using Cursor
@@ -122,8 +132,11 @@ invent a default router, and does not submit before the choice exists.
 User: Grok for the validator. Muse for the docs.
 
 Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-Using Muse Co-Engineer. Co-Engineer is running 2 independent
+Using Muse Co-Engineer. Co-Engineer is preparing 2 independent
 assignments.
+
+After dispatch evidence is authoritative for both required lanes, the
+card may say that Co-Engineer is running 2 independent assignments.
 
 That is still one submission and one coordinated wait. The ask happens
 before delegation. Afterward, chatting with Co-Engineer can inspect,

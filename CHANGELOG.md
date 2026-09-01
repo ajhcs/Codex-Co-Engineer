@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-09-01
+
+Reliability candidate for bounded Co-Engineer implementation lanes. Preserves
+the five public tools and 3.4.0 compatibility while adding a server-compiled
+`run_request`, atomic pre-prompt admission, truthful dispatch evidence,
+restart-safe session recovery, typed repository-exposure consent,
+capability-aware attention batching, idempotent cancellation, silence-aware
+handoffs, readiness caching, and bounded simple-run responses. See
+[`docs/releases/v3.4.1.md`](docs/releases/v3.4.1.md) and the exact baseline
+ledger in [`docs/releases/v3.4.1-baseline.md`](docs/releases/v3.4.1-baseline.md).
+
+The candidate still requires host consent integration, an official exact-SHA
+local-only `worktree-bootstrap` capability, the Codex Desktop history-bound
+regression, and live provider acceptance before release publication.
+
 ## [3.3.0] - 2026-08-27
 
 R1 bounded-run release on the same five-tool MCP catalog. One run is 1–8

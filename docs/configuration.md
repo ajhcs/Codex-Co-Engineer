@@ -318,7 +318,9 @@ events or emit unsolicited stdio callbacks across assistant turns. See
 ### Bounded runs (additive)
 
 The five-tool catalog does not gain a sixth tool. One run is submitted
-through `delegate.run` with 1–8 lanes. `status`, `task`, `tasks`, and
+through `delegate.run_request` with 1–8 lanes. The legacy full `delegate.run`
+envelope remains accepted for compatibility, but skills do not construct it.
+`status`, `task`, `tasks`, and
 `cancel` accept `run_id` to inspect, wait (`wait_until:
 "decision_or_attention"`), latch attention, reply exactly once
 (`run_reply`), cancel named lanes, or request proof-bound `cleanup`.

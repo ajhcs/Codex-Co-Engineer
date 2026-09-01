@@ -22,6 +22,8 @@ export const PUBLIC_MCP_TOOLS = Object.freeze([
 
 export const EXPERIENCE_PHRASES = Object.freeze({
   delegating: 'I am delegating this to Co-Engineer',
+  preparing_one: 'Co-Engineer is preparing 1 assignment',
+  preparing_template: 'Co-Engineer is preparing N assignments',
   running_one: 'Co-Engineer is running 1 independent assignment',
   running_template: 'Co-Engineer is running N independent assignments',
   attention: 'Co-Engineer needs one decision from you',
@@ -525,6 +527,23 @@ export function runningPhrase(assignmentCount) {
   return null;
 }
 
+export function preparingPhrase(assignmentCount) {
+  if (assignmentCount === 1) return EXPERIENCE_PHRASES.preparing_one;
+  if (Number.isInteger(assignmentCount) && assignmentCount >= 2 && assignmentCount <= EXPERIENCE_MAX_LANES) {
+    return `Co-Engineer is preparing ${assignmentCount} assignments`;
+  }
+  return null;
+}
+
+function simpleRunHasAuthoritativeRequiredDispatch(receipt, lanes) {
+  if (receipt?.schema !== 'codex-co-engineer.run-admission.v1') return true;
+  if (receipt?.authoritative_required_dispatch !== true) return false;
+  const required = lanes.filter((lane) => lane.required !== false);
+  return required.length > 0 && required.every((lane) => (
+    lane.prompt_dispatched === true && lane.dispatch_confidence === 'authoritative'
+  ));
+}
+
 function attentionItems(receipt) {
   const direct = receipt?.attention;
   const fromRecord = Array.isArray(direct?.items) ? direct.items : [];
@@ -717,7 +736,9 @@ function experienceSummaryPhrases(card, receipt, lanes) {
   if (card === 'run') {
     phrases.push(EXPERIENCE_PHRASES.delegating);
     phrases.push(...uniqueProviderPhrases(lanes));
-    const running = runningPhrase(count);
+    const running = simpleRunHasAuthoritativeRequiredDispatch(receipt, lanes)
+      ? runningPhrase(count)
+      : preparingPhrase(count);
     if (running) phrases.push(running);
   } else if (card === 'attention') {
     phrases.push(EXPERIENCE_PHRASES.attention);
@@ -909,9 +930,14 @@ export function projectExperience(receipt) {
     summary: {
       phrases,
       delegating: card === 'run' ? EXPERIENCE_PHRASES.delegating : null,
-      running: card === 'run' ? runningPhrase(
-        Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length,
-      ) : null,
+      running: card === 'run'
+        ? (simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
+          ? runningPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length)
+          : preparingPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length))
+        : null,
+      preparing: card === 'run' && !simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
+        ? preparingPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length)
+        : null,
       attention: card === 'attention' ? EXPERIENCE_PHRASES.attention : null,
       verified_final: card === 'final' && verifiedFinalAllowed(safe, lanes)
         ? EXPERIENCE_PHRASES.verified_final

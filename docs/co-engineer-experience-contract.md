@@ -4,9 +4,9 @@ Give Codex a team of external co-engineers without giving up control.
 
 This is the public-language contract later UX slices consume. It freezes
 terminology, Codex speech, activation, the five-tool catalog, and the
-one-submission coordination shape. It does not change runtime, README,
-skill, manifest, marketplace, asset, version, changelog, or release
-surfaces.
+one-submission coordination shape. The run card now distinguishes preparation
+from execution: it does not claim `running` until every required lane has
+authoritative prompt-dispatch evidence.
 
 Owned files:
 
@@ -51,6 +51,8 @@ Exact Codex speech. Substitute `N` with an integer from 1 through 8.
 Use `assignment` when `N` is 1 and `assignments` when `N` is 2 through 8.
 
 - `I am delegating this to Co-Engineer`
+- `Co-Engineer is preparing N assignments`
+- `Co-Engineer is preparing 1 independent assignment`
 - `Co-Engineer is running N independent assignments`
 - `Co-Engineer is running 1 independent assignment`
 - `Co-Engineer needs one decision from you`

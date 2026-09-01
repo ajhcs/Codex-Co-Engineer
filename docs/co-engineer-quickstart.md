@@ -19,7 +19,10 @@ You:
 Codex:
 
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-> Co-Engineer is running 1 independent assignment.
+> Co-Engineer is preparing 1 independent assignment.
+
+After admission and authoritative prompt dispatch, the run card may change
+that phrase to `Co-Engineer is running 1 independent assignment`.
 
 Codex waits once. When the work is complete, Codex inspects it:
 
@@ -40,8 +43,11 @@ You:
 
 Codex:
 
-> I am delegating this to Co-Engineer. Co-Engineer is running 3
+> I am delegating this to Co-Engineer. Co-Engineer is preparing 3
 > independent assignments.
+
+The first card says `preparing` until every required lane has authoritative
+prompt-dispatch evidence; only then does it say `running`.
 
 Name co-engineers when you care which route takes which assignment:
 
@@ -52,7 +58,7 @@ Codex:
 
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
 > Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
-> running 3 independent assignments.
+> preparing 3 assignments.
 
 ## Ask once when nothing is named
 
@@ -74,8 +80,7 @@ You:
 Codex:
 
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-> Using Muse Co-Engineer. Co-Engineer is running 2 independent
-> assignments.
+> Using Muse Co-Engineer. Co-Engineer is preparing 2 assignments.
 
 ## Chat with existing work
 

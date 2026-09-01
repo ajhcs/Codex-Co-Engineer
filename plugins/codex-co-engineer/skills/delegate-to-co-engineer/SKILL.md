@@ -19,7 +19,9 @@ Give Codex a team of external co-engineers without giving up control. Codex rema
 
 Independent assignments do not share a writer path. The bound is eight. Wait once for `decision_or_attention`. Routine progress does not wake that wait. Keep the same run cursor.
 
-Speak `I am delegating this to Co-Engineer`, then `Co-Engineer is running 1 independent assignment` or `Co-Engineer is running N independent assignments` for N from 2 through 8. When a chosen co-engineer is actually used, also say `Using Grok Co-Engineer`, `Using Cursor Co-Engineer`, or `Using Muse Co-Engineer`. Cursor on this computer and Cursor Cloud both display as Using Cursor Co-Engineer. Never say Using DSH Co-Engineer, Using Ox Co-Engineer, Using Cursor Local Co-Engineer, or Using Cursor Cloud Co-Engineer.
+Submit the semantic `run_request` shape and let the server compile all identities, provider defaults, task IDs, and workspace policy. Skills must not construct the legacy full `run` envelope or any derived provenance.
+
+Speak `I am delegating this to Co-Engineer`, then `Co-Engineer is preparing 1 independent assignment` or `Co-Engineer is preparing N independent assignments` for N from 2 through 8. Say `Co-Engineer is running ...` only after the receipt proves authoritative `prompt_dispatched` evidence for every required lane. When a chosen co-engineer is actually used, also say `Using Grok Co-Engineer`, `Using Cursor Co-Engineer`, or `Using Muse Co-Engineer`. Cursor on this computer and Cursor Cloud both display as Using Cursor Co-Engineer. Never say Using DSH Co-Engineer, Using Ox Co-Engineer, Using Cursor Local Co-Engineer, or Using Cursor Cloud Co-Engineer.
 
 After a complete candidate exists, inspect it, then say `Co-Engineer finished, and I verified the candidate.` That sentence is not a merge, push, or pull-request claim. Failure, cancel, and unresolved work must not use it.
 

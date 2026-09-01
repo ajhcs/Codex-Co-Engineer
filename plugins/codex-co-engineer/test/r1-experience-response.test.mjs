@@ -32,6 +32,7 @@ import {
   readExperienceUiResourceForClient,
   resolveExperienceResultMeta,
   resolveExperienceToolMeta,
+  preparingPhrase,
   runningPhrase,
   sanitizeToolPayload,
 } from '../mcp/v3/response.mjs';
@@ -115,6 +116,34 @@ test('inline run card projects objective, repository SHA, lanes, and Codex autho
   assert.equal(first.summary.phrases.join(' ').includes('R-TRUTH'), false);
   assert.equal(first.summary.phrases.join(' ').includes('AttentionBatch'), false);
   assert.equal(Object.hasOwn(first.run.repository, 'repository_path'), false);
+});
+
+test('simple run cards say preparing until required prompt evidence is authoritative', () => {
+  const receipt = {
+    schema: 'codex-co-engineer.run-admission.v1',
+    run_id: 'simple-card',
+    assignment_count: 2,
+    authoritative_required_dispatch: false,
+    lanes: [
+      { assignment_id: 'one', provider: 'grok', role: 'implement', required: true, phase: 'prepared', prompt_dispatched: false, dispatch_confidence: 'not_sent' },
+      { assignment_id: 'two', provider: 'cursor-local', role: 'review', required: true, phase: 'session_ready', prompt_dispatched: false, dispatch_confidence: 'not_sent' },
+    ],
+  };
+  const preparing = projectExperience(receipt);
+  assert.equal(preparing.summary.running, preparingPhrase(2));
+  assert.equal(preparing.summary.phrases.includes('Co-Engineer is running 2 independent assignments'), false);
+
+  const running = projectExperience({
+    ...receipt,
+    authoritative_required_dispatch: true,
+    lanes: receipt.lanes.map((lane) => ({
+      ...lane,
+      phase: 'prompt_dispatched',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+    })),
+  });
+  assert.equal(running.summary.running, 'Co-Engineer is running 2 independent assignments');
 });
 
 test('grouped attention card collects questions once, marks lanes, and keeps one structured reply', async () => {

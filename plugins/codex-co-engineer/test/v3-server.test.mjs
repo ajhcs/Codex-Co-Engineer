@@ -97,12 +97,12 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.equal(values[0].result.serverInfo.name, 'codex-co-engineer');
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
-  assert.equal(values[0].result.serverInfo.version, '3.3.0');
+  assert.equal(values[0].result.serverInfo.version, '3.4.1');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
   assert.equal(values[1].result.tools.length, 5);
   const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
   assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
-    'detail', 'task_limit', 'include_tasks', 'response_mode', 'run_id',
+    'detail', 'task_limit', 'include_tasks', 'refresh', 'response_mode', 'run_id',
   ]);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
@@ -547,6 +547,37 @@ test('live MCP tool results use structured-first text fallback when response_mod
       JSON.stringify(legacy.result.structuredContent),
       'omitted response_mode must preserve full text duplication',
     );
+  });
+});
+
+test('structured-capable clients receive bounded transport by default', async () => {
+  await withServer(async ({ request }) => {
+    const initialize = await request({
+      jsonrpc: '2.0',
+      id: 58,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-11-25',
+        capabilities: {
+          structuredContent: true,
+          extensions: {
+            'io.modelcontextprotocol/ui': {
+              mimeTypes: ['text/html;profile=mcp-app'],
+            },
+          },
+        },
+      },
+    });
+    assert.equal(initialize.result.protocolVersion, '2025-11-25');
+    const response = await request({
+      jsonrpc: '2.0',
+      id: 59,
+      method: 'tools/call',
+      params: { name: 'status', arguments: {} },
+    });
+    assert.equal(response.result.content[0].type, 'text');
+    assert.notEqual(response.result.content[0].text, JSON.stringify(response.result.structuredContent));
+    assert.equal(JSON.parse(response.result.content[0].text).authoritative, 'structuredContent');
   });
 });
 

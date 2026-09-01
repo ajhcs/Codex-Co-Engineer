@@ -14,7 +14,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.3.0');
+  assert.equal(manifest.version, '3.4.1');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(
@@ -67,7 +67,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.3.0');
+  assert.equal(packageJson.version, '3.4.1');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),
@@ -172,7 +172,8 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.match(readme, /wait_until": "terminal"/u);
   assert.match(readme, /property `repo`/u);
   assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
-  assert.match(readme, /docs\/releases\/v3\.3\.0\.md/u);
+  assert.match(readme, /docs\/releases\/v3\.4\.1\.md/u);
+  assert.match(readme, /historical\s+3\.3\.0\s+notes/u);
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
 });
 
@@ -248,7 +249,7 @@ test('every repository-relative README link resolves from the repository root', 
   }
 });
 
-test('repository marketplace catalogs Codex-Co-Engineer 3.3.0', async () => {
+test('repository marketplace catalogs Codex-Co-Engineer 3.4.1', async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
@@ -256,7 +257,7 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.3.0', async () => {
   assert.equal(marketplace.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(marketplace.plugins.length, 1);
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
-  assert.equal(marketplace.plugins[0].version, '3.3.0');
+  assert.equal(marketplace.plugins[0].version, '3.4.1');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
   assert.equal(
     marketplace.interface.shortDescription,

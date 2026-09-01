@@ -27,8 +27,9 @@ host-specific. The same conversation works headless in Codex CLI. This
 documentation does not claim a Co-Engineer UI on every Codex Desktop
 host.
 
-The stable machine identifier is `codex-co-engineer`. Published package
-notes: [docs/releases/v3.3.0.md](docs/releases/v3.3.0.md).
+The stable machine identifier is `codex-co-engineer`. Current package
+notes: [docs/releases/v3.4.1.md](docs/releases/v3.4.1.md). The historical
+3.3.0 notes remain available.
 
 ## Visual demo
 
@@ -53,10 +54,13 @@ tool payloads.
 Codex:
 
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-> Co-Engineer is running 1 independent assignment.
+> Co-Engineer is preparing 1 independent assignment.
 
-That is the only submission. Codex waits once. When the work is
-complete, Codex inspects it:
+That is the only submission. The server first compiles the semantic
+`run_request`, admits every lane, and prepares isolated workspaces. Codex
+says `running` only after every required lane has authoritative
+`prompt_dispatched` evidence. Codex waits once. When the work is complete,
+Codex inspects it:
 
 > Co-Engineer finished, and I verified the candidate.
 
@@ -75,8 +79,11 @@ If you want several independent assignments in one run:
 
 Codex:
 
-> I am delegating this to Co-Engineer. Co-Engineer is running 3
+> I am delegating this to Co-Engineer. Co-Engineer is preparing 3
 > independent assignments.
+
+The card changes to running only after every required lane has
+authoritative prompt-dispatch evidence.
 
 <!-- README_ART_SLOT: multi-lane-run -->
 
@@ -100,8 +107,10 @@ The bound is eight.
 Codex speech during a run uses these utterances:
 
 - `I am delegating this to Co-Engineer`
-- `Co-Engineer is running N independent assignments` (`assignment` when
-  N is 1)
+- `Co-Engineer is preparing N independent assignments` until dispatch is
+  authoritative (`assignment` when N is 1)
+- `Co-Engineer is running N independent assignments` only after every
+  required lane is authoritatively dispatched
 - `Co-Engineer needs one decision from you`
 - `Co-Engineer finished, and I verified the candidate.`
 
@@ -149,7 +158,7 @@ Codex:
 
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
 > Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
-> running 3 independent assignments.
+> preparing 3 independent assignments.
 
 <!-- README_ART_SLOT: provider-choices -->
 
@@ -383,20 +392,47 @@ This section is for operators and Codex internals. Normal users do not
 construct these payloads.
 
 The catalog remains exactly `status`, `delegate`, `task`, `tasks`, and
-`cancel`. There is no sixth tool. Bounded runs use additive `run`,
-`run_id`, `attention`, `run_reply`, `cleanup`, and
+`cancel`. There is no sixth tool. Bounded runs use additive `run_request`,
+legacy `run`, `run_id`, `attention`, `run_reply`, `cleanup`, and
 `wait_until: "decision_or_attention"` on those tools; omitting them
 keeps exact 3.2.1 single-task behavior.
 
 | Coordination step | Tool | Additive mode |
 | --- | --- | --- |
-| one submission | `delegate` | `run` with 1–8 isolated assignments |
+| one submission | `delegate` | `run_request` with 1–8 isolated assignments (`run` remains legacy-compatible) |
 | inspect | `status` or `task` | `run_id` |
 | one aggregate wait | `task` or `tasks` | `wait_until: "decision_or_attention"` |
 | answer grouped attention | `task` | one reply for the grouped decision |
 | cancel | `cancel` | `run_id` |
 
-The repository argument is the literal MCP property `repo`. Always send
+The preferred 3.4.1 bounded-run body is the small semantic `run_request`:
+
+```json
+{
+  "run_request": {
+    "run_id": "auth-hardening",
+    "repo": "/absolute/path/to/git-worktree",
+    "objective": "Implement and review the auth hardening change.",
+    "assignments": [
+      {
+        "assignment_id": "auth-implementation",
+        "provider": "grok",
+        "role": "implement",
+        "access": "write",
+        "prompt": "Implement the auth hardening slice and commit it.",
+        "expected_duration_ms": 900000
+      }
+    ]
+  }
+}
+```
+
+The server derives Git identity, provider/model selection, task/workspace/
+dispatch identities, and all protected digests. Callers cannot supply those
+fields. The full 3.4.0 `run` envelope remains accepted for compatibility, but
+skills do not construct it.
+
+For legacy single tasks, the repository argument is the literal MCP property `repo`. Always send
 it as `"repo": "/absolute/path/to/git-worktree"`; `git_root`,
 `repository`, and other aliases are unknown properties and fail schema
 validation. Cursor Cloud also requires `repo` for the clean local
@@ -469,11 +505,13 @@ tasks reject it.
 For parallel 3.2.1 tasks, coordinate the result set with one `tasks`
 wait-any call instead of polling every task. Use `status` and `task`
 compact views for routine decisions; open diagnostics pages only when a
-task needs attention or fails. Clients that consume `structuredContent`
-can opt into `response_mode: "structured"`. Text-only clients should
-omit it. The compact single-task projection is capped at 8,192 UTF-8
-bytes by the MCP server. That is a server payload guarantee, not a
-measured or claimed hard limit in the Codex desktop renderer. See the
+task needs attention or fails. Capable clients default to structured-first
+bounded responses; explicit `response_mode: "structured"` remains
+available. Text-only clients may omit it for the compatible full sanitized
+text receipt. Simple-run status is capped at 24 KiB and other simple-run
+receipts at 72 KiB; legacy compact single-task projection remains capped at
+8,192 UTF-8 bytes. These are server payload guarantees, not measured or
+claimed hard limits in the Codex desktop renderer. See the
 [efficient dogfood workflow](docs/efficient-dogfood.md).
 
 Terminal managed tasks retain their worktree and branch for Codex

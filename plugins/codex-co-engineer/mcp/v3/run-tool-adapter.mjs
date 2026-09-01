@@ -80,6 +80,11 @@ import {
   isAssignmentId,
 } from './run-manifest.mjs';
 import {
+  RUN_REQUEST_ALLOWED_KEYS,
+  RUN_REQUEST_DERIVED_KEYS,
+} from './run-request-compiler.mjs';
+import { RUN_ADMISSION_METHODS } from './run-admission.mjs';
+import {
   RUN_RUNTIME_METHODS,
   createRunRuntime,
 } from './run-runtime.mjs';
@@ -113,7 +118,7 @@ export const WAIT_UNTIL_VALUES = capturedFreeze([
 ]);
 
 export const ADDITIVE_STATUS_KEYS = capturedFreeze(['run_id']);
-export const ADDITIVE_DELEGATE_KEYS = capturedFreeze(['run']);
+export const ADDITIVE_DELEGATE_KEYS = capturedFreeze(['run', 'run_request']);
 export const ADDITIVE_TASK_KEYS = capturedFreeze([
   'run_id', 'assignment_id', 'attention', 'run_reply',
 ]);
@@ -141,13 +146,15 @@ export const RUN_ASSIGNMENT_RUNTIME_KEYS = capturedFreeze([
 ]);
 export const ATTENTION_REQUEST_KEYS = capturedFreeze(['expected_revision', 'items']);
 export const RUN_REPLY_KEYS = capturedFreeze([
-  'batch_id', 'expected_revision', 'reply',
+  'approval_ref', 'batch_id', 'expected_revision', 'reply',
 ]);
 export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'audience', 'candidate', 'checks',
   'cleanup', 'complete_candidate_blocked', 'decision_or_attention',
-  'experience', 'lanes', 'mode', 'operation', 'remote_mutated', 'run_id',
-  'schema', 'side_effects', 'status', 'tool', 'version', 'wake',
+  'dispatch_uncertain_assignment_ids', 'dispatched_assignment_ids',
+  'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
+  'remote_mutated', 'run_id', 'schema', 'side_effects', 'status', 'tool',
+  'undispatched_assignment_ids', 'version', 'wake',
 ]);
 
 export const RUN_TOOL_ADAPTER_CHECKS = capturedFreeze([
@@ -185,6 +192,8 @@ export const RUN_TOOL_ADAPTER_ALWAYS_FALSE_SIDE_EFFECTS = capturedFreeze([
   'remote_mutated',
   'sixth_tool_exposed',
 ]);
+export const SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX = 72 * 1024;
+export const SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX = 24 * 1024;
 
 export const MAX_ADAPTER_DIAGNOSTIC_BYTES = 160;
 export const RUN_ID_SCHEMA_PATTERN = RUN_ID_PATTERN.source;
@@ -195,7 +204,8 @@ export const OWNER_ONLY_EVIDENCE_KEYS = capturedFreeze([
 ]);
 export const ACTIONABLE_LANE_STATUSES = capturedFreeze([
   'needs_attention', 'completed', 'failed', 'cancelled', 'unresolved',
-  'timeout', 'transport_lost', 'environment_blocked',
+  'timeout', 'transport_lost', 'environment_blocked', 'failed_pre_prompt',
+  'partial_handoff', 'unrecoverable_post_prompt',
 ]);
 
 const IS_PROXY = utilTypes.isProxy;
@@ -290,6 +300,7 @@ const CONTENT_FREE = capturedFreeze({
   unknown_operation: 'The tool arguments do not map to a frozen run operation.',
   unknown_provider: 'The provider is not an accepted four-slot registry entry.',
   unknown_tool: 'The public catalog remains status, delegate, task, tasks, cancel.',
+  simple_runtime_unavailable: 'The 3.4.1 simple run runtime is unavailable.',
 });
 
 export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
@@ -323,11 +334,12 @@ export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
   'unknown_operation',
   'unknown_provider',
   'unknown_tool',
+  'simple_runtime_unavailable',
 ]);
 
 const ADAPTER_DEPENDENCY_KEYS = capturedFreeze([
   'attention', 'classifyLaneTask', 'projectLaneTask', 'rememberSubmitContext',
-  'runtime',
+  'runtime', 'simpleRuntime',
 ]);
 const RUNTIME_METHODS = RUN_RUNTIME_METHODS;
 const ATTENTION_METHODS = capturedFreeze(['get', 'reply']);
@@ -338,6 +350,10 @@ const RECONSTRUCT_LANE_STATUSES = capturedFreeze([
 ]);
 const pendingRunCatalogSnapshots = new Map();
 const pendingRunExperienceContext = new Map();
+const SIMPLE_RUN_REQUEST_KEYS = capturedFreeze([
+  ...RUN_REQUEST_ALLOWED_KEYS,
+  ...RUN_REQUEST_DERIVED_KEYS,
+]);
 
 function rememberExperienceContext(runId, patch) {
   if (typeof runId !== 'string' || runId.length === 0) return;
@@ -807,6 +823,32 @@ async function parseSubmit(args) {
   if (mixLegacySingleTask('delegate', args)) {
     failAdapter('mixed_tool_mode', 'delegate', CONTENT_FREE.mixed_tool_mode);
   }
+  const simpleRequest = optionalValue(args, 'run_request', 'run_request');
+  if (simpleRequest !== undefined) {
+    if (capturedHasOwn(args, 'run')) {
+      failAdapter('mixed_run_operation', 'delegate', CONTENT_FREE.mixed_run_operation);
+    }
+    const request = quarantineObject(simpleRequest, 'run_request', SIMPLE_RUN_REQUEST_KEYS);
+    const runId = requireString(request, 'run_id', 'run_request.run_id', (value) => {
+      try { assertRunId(value, 'run_request.run_id'); return true; } catch { return false; }
+    });
+    const objective = optionalValue(request, 'objective', 'run_request.objective');
+    return {
+      runId,
+      simpleRequest: request,
+      context: freezeData({
+        run_id: runId,
+        objective: typeof objective === 'string' ? objective : null,
+        profile: null,
+        catalog_digest: null,
+        prompts: {},
+        durations: {},
+        repository_path: typeof request.repo === 'string' ? request.repo : null,
+        base_sha: typeof request.base_sha === 'string' ? request.base_sha : null,
+      }),
+      catalogSnapshot: null,
+    };
+  }
   const run = quarantineObject(optionalValue(args, 'run', 'run') ?? failAdapter('missing_key', 'run', CONTENT_FREE.missing_key),
     'run', RUN_SUBMIT_KEYS);
   for (const key of RUN_SUBMIT_REQUIRED_KEYS) {
@@ -936,11 +978,72 @@ function attentionRecord(receipt) {
   return receipt;
 }
 
+function compactAdmissionHandoff(handoff) {
+  if (handoff === undefined || handoff === null || typeof handoff !== 'object' || Array.isArray(handoff)) return null;
+  return {
+    schema: handoff.schema ?? 'codex-co-engineer.partial-handoff.v1',
+    assignment_id: handoff.assignment_id ?? null,
+    worktree: typeof handoff.worktree === 'string' ? handoff.worktree.slice(0, 512) : null,
+    branch: typeof handoff.branch === 'string' ? handoff.branch.slice(0, 256) : null,
+    starting_sha: handoff.starting_sha ?? null,
+    current_head: handoff.current_head ?? null,
+    clean: typeof handoff.clean === 'boolean' ? handoff.clean : null,
+    changed_files: Array.isArray(handoff.changed_files) ? handoff.changed_files.slice(0, 16) : [],
+    commits: Array.isArray(handoff.commits) ? handoff.commits.slice(0, 16) : [],
+    no_commit: handoff.no_commit === true,
+    partial_diff: handoff.partial_diff === true,
+    last_acknowledged_provider_event: handoff.last_acknowledged_provider_event ?? null,
+    recovery_classification: handoff.recovery_classification ?? null,
+    safe_next_actions: Array.isArray(handoff.safe_next_actions) ? handoff.safe_next_actions.slice(0, 3) : [],
+    diagnostics: 'Use the run-scoped diagnostics/provenance view for full handoff evidence.',
+  };
+}
+
+function compactAdmissionLane(lane) {
+  if (lane === undefined || lane === null || typeof lane !== 'object' || Array.isArray(lane)) return lane;
+  return {
+    assignment_id: lane.assignment_id ?? null,
+    task_id: lane.task_id ?? null,
+    provider: lane.provider ?? null,
+    model: lane.model ?? null,
+    role: lane.role ?? null,
+    access: lane.access ?? null,
+    required: lane.required !== false,
+    phase: lane.phase ?? lane.status ?? null,
+    status: lane.status ?? lane.phase ?? null,
+    prepared: lane.prepared === true,
+    session_ready: lane.session_ready === true,
+    prompt_attempted: lane.prompt_attempted === true,
+    prompt_dispatched: lane.prompt_dispatched === true,
+    dispatch_confidence: lane.dispatch_confidence ?? null,
+    session_id: lane.session_id ?? null,
+    cursor: lane.cursor ?? null,
+    child_identity_digest: lane.child_identity_digest ?? null,
+    dispatch_identity_digest: lane.dispatch_identity_digest ?? null,
+    provider_run_identity_digest: lane.provider_run_identity_digest ?? null,
+    workspace_identity_digest: lane.workspace_identity_digest
+      ?? lane.workspace_identity?.digest
+      ?? null,
+    error: lane.error ?? null,
+    recovery_classification: lane.recovery_classification ?? null,
+    handoff: compactAdmissionHandoff(lane.handoff),
+  };
+}
+
+function byteLength(value) {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
 function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask, wakeRequested = false) {
   const runId = runtimeReceipt?.run_id;
   let lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
     ? runtimeReceipt.lanes.map((lane) => projectLane(lane, projectLaneTask, classifyLaneTask))
     : [];
+  const simpleAdmission = runtimeReceipt?.schema === 'codex-co-engineer.run-admission.v1';
+  const simpleResponseCap = operation === 'status'
+    ? SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX
+    : SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX;
+  if (simpleAdmission) lanes = lanes.map(compactAdmissionLane);
   const unconfirmed = cancellationUnconfirmed(operation, lanes);
   if (unconfirmed === true) {
     lanes = lanes.map((lane) => {
@@ -952,14 +1055,22 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
   }
   const blocked = unconfirmed === true
     || runtimeReceipt?.complete_candidate_blocked === true
+    || ['awaiting_consent', 'degraded', 'failed'].includes(runtimeReceipt?.phase)
     || lanes.some((lane) => lane?.required !== false && (
       lane.status === 'unresolved'
       || lane.status === 'failed'
       || lane.status === 'lifecycle_pending'
       || lane.status === 'transport_lost'
+      || lane.status === 'failed_pre_prompt'
+      || lane.status === 'partial_handoff'
+      || lane.status === 'unrecoverable_post_prompt'
     ));
   const sideEffects = emptySideEffects();
-  if (runtimeReceipt?.side_effects?.task_dispatched === true) sideEffects.provider_dispatched = true;
+  if (runtimeReceipt?.side_effects?.task_dispatched === true
+    || (ARRAY_IS_ARRAY(runtimeReceipt?.dispatched_assignment_ids)
+      && runtimeReceipt.dispatched_assignment_ids.length > 0)) {
+    sideEffects.provider_dispatched = true;
+  }
   const cleanupSource = runtimeReceipt?.cleanup ?? freezeData({
     cleaned: false, proof_bound: true, removed: 0, remaining: null, unresolved: [],
   });
@@ -998,6 +1109,7 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     tool,
     operation,
     status,
+    phase: runtimeReceipt?.phase ?? status,
     run_id: runId,
     assignment_count: runtimeReceipt?.assignment_count ?? lanes.length,
     lanes,
@@ -1011,12 +1123,40 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     }),
     candidate: runId ? projectCandidate(runId) : null,
     complete_candidate_blocked: blocked,
+    consent: sanitizeModelFacing(runtimeReceipt?.consent ?? null),
+    admission: sanitizeModelFacing(runtimeReceipt?.admission ?? null),
+    dispatched_assignment_ids: sanitizeModelFacing(runtimeReceipt?.dispatched_assignment_ids ?? []),
+    undispatched_assignment_ids: sanitizeModelFacing(runtimeReceipt?.undispatched_assignment_ids ?? []),
+    dispatch_uncertain_assignment_ids: sanitizeModelFacing(runtimeReceipt?.dispatch_uncertain_assignment_ids ?? []),
+    authoritative_required_dispatch: runtimeReceipt?.authoritative_required_dispatch === true,
+    already_terminal: runtimeReceipt?.already_terminal === true,
+    error: sanitizeModelFacing(runtimeReceipt?.error ?? null),
+    telemetry: sanitizeModelFacing(runtimeReceipt?.telemetry ?? null),
     checks: emptyChecks(),
     side_effects: sideEffects,
     audience: 'model',
     wake,
     remote_mutated: false,
   };
+  if (simpleAdmission && byteLength(receiptBody) > simpleResponseCap) {
+    receiptBody.attention = receiptBody.attention && {
+      ...receiptBody.attention,
+      items: Array.isArray(receiptBody.attention.items)
+        ? receiptBody.attention.items.map((item) => ({
+          ...item,
+          prompt: typeof item.prompt === 'string' ? item.prompt.slice(0, 512) : item.prompt,
+          options: Array.isArray(item.options) ? item.options.slice(0, 4) : item.options,
+        }))
+        : receiptBody.attention.items,
+    };
+    receiptBody.lanes = receiptBody.lanes.map((lane) => ({
+      ...lane,
+      handoff: lane.handoff ? { ...lane.handoff, changed_files: [], commits: [], safe_next_actions: [] } : null,
+    }));
+  }
+  if (simpleAdmission && byteLength(receiptBody) > simpleResponseCap) {
+    receiptBody.lanes = receiptBody.lanes.map(({ handoff: _handoff, ...lane }) => lane);
+  }
   const experience = projectExperience({
     ...receiptBody,
     objective: ctx.objective ?? runtimeReceipt?.objective ?? null,
@@ -1032,10 +1172,58 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     journal: runtimeReceipt?.journal ?? null,
     evidence: runtimeReceipt?.evidence ?? null,
   });
-  return freezeData({
+  let projected = {
     ...receiptBody,
     experience,
-  });
+  };
+  if (simpleAdmission && byteLength(projected) > simpleResponseCap) {
+    projected = {
+      ...projected,
+      attention: projected.attention && {
+        ...projected.attention,
+        items: Array.isArray(projected.attention.items)
+          ? projected.attention.items.slice(0, 2).map((item) => ({
+            assignment_id: item.assignment_id ?? null,
+            task_id: item.task_id ?? null,
+            provider: item.provider ?? null,
+            question_id: item.question_id ?? null,
+            capability: item.capability ?? null,
+            resource: item.resource ?? null,
+            action: item.action ?? null,
+            prompt: typeof item.prompt === 'string' ? item.prompt.slice(0, 256) : null,
+          }))
+          : projected.attention.items,
+      },
+      lanes: projected.lanes.map(({ handoff: _handoff, ...lane }) => lane),
+      telemetry: projected.telemetry && {
+        admission_duration_ms: projected.telemetry.admission_duration_ms ?? null,
+        dispatch_duration_ms: projected.telemetry.dispatch_duration_ms ?? null,
+        dispatch_confidence: projected.telemetry.dispatch_confidence ?? null,
+        handoff_class: projected.telemetry.handoff_class ?? null,
+      },
+    };
+    if (byteLength(projected) > simpleResponseCap) {
+      projected = {
+        ...projected,
+        lanes: projected.lanes.slice(0, 8).map((lane) => ({
+          assignment_id: lane.assignment_id ?? null,
+          task_id: lane.task_id ?? null,
+          provider: lane.provider ?? null,
+          model: lane.model ?? null,
+          phase: lane.phase ?? null,
+          status: lane.status ?? null,
+          prompt_dispatched: lane.prompt_dispatched === true,
+          dispatch_confidence: lane.dispatch_confidence ?? null,
+        })),
+        experience: projectExperience({
+          ...projected,
+          lanes: [],
+          assignment_count: projected.assignment_count,
+        }),
+      };
+    }
+  }
+  return freezeData(projected);
 }
 
 function assertFunctionMap(value, field, methods) {
@@ -1112,6 +1300,10 @@ export function createRunToolAdapter(dependencies) {
     'dependencies.runtime',
     RUNTIME_METHODS,
   );
+  const simpleRuntime = hasOwn(dependencies, 'simpleRuntime')
+    ? assertFunctionMap(ownDataValue(dependencies, 'simpleRuntime', 'dependencies.simpleRuntime'),
+      'dependencies.simpleRuntime', RUN_ADMISSION_METHODS)
+    : null;
   const attention = hasOwn(dependencies, 'attention')
     ? assertFunctionMap(ownDataValue(dependencies, 'attention', 'dependencies.attention'),
       'dependencies.attention', ATTENTION_METHODS)
@@ -1141,8 +1333,44 @@ export function createRunToolAdapter(dependencies) {
   const counters = {
     submit: 0, inspect: 0, resume: 0, cancel: 0, reply: 0,
   };
+  const simpleRunIds = new Set();
+
+  function isSimpleRun(runId) {
+    if (simpleRunIds.has(runId)) return true;
+    if (simpleRuntime && typeof simpleRuntime.hasRun === 'function') {
+      try {
+        if (simpleRuntime.hasRun(runId) === true) {
+          simpleRunIds.add(runId);
+          return true;
+        }
+      } catch {
+        // A failed lookup must not make a legacy run appear simple.
+      }
+    }
+    return false;
+  }
+
+  async function resolveSimpleRun(runId) {
+    if (isSimpleRun(runId)) return true;
+    if (simpleRuntime && typeof simpleRuntime.hasRunAsync === 'function') {
+      try {
+        if (await simpleRuntime.hasRunAsync(runId)) {
+          simpleRunIds.add(runId);
+          return true;
+        }
+      } catch {
+        // Fall through to the legacy runtime when the simple store cannot
+        // prove ownership of this run id.
+      }
+    }
+    return false;
+  }
 
   async function inspectLive(runId, previous) {
+    if (await resolveSimpleRun(runId)) {
+      counters.inspect += 1;
+      return simpleRuntime.inspectRun({ run_id: runId });
+    }
     const cursors = cursorsFromReceipt(previous);
     if (cursors.length > 0) {
       counters.resume += 1;
@@ -1193,6 +1421,20 @@ export function createRunToolAdapter(dependencies) {
     let runtimeReceipt;
     if (operation === 'submit') {
       const parsed = await parseSubmit(args);
+      if (parsed.simpleRequest !== undefined) {
+        if (simpleRuntime === null) {
+          failAdapter('simple_runtime_unavailable', 'run_request', CONTENT_FREE.simple_runtime_unavailable);
+        }
+        if (rememberSubmitContext) rememberSubmitContext(parsed.context);
+        rememberExperienceContext(parsed.runId, {
+          objective: parsed.context.objective,
+          base_sha: parsed.context.base_sha,
+          digest: null,
+        });
+        counters.submit += 1;
+        runtimeReceipt = await simpleRuntime.submitRunRequest(parsed.simpleRequest, { signal });
+        simpleRunIds.add(parsed.runId);
+      } else {
       if (parsed.catalogSnapshot !== null && parsed.catalogSnapshot !== undefined) {
         pendingRunCatalogSnapshots.set(parsed.runId, parsed.catalogSnapshot);
       }
@@ -1204,6 +1446,7 @@ export function createRunToolAdapter(dependencies) {
       });
       counters.submit += 1;
       runtimeReceipt = await runtime.submitRun(parsed.runtimeRequest);
+      }
     } else if (operation === 'status') {
       const runId = requireRunId(args);
       const assignmentId = optionalValue(args, 'assignment_id', 'assignment_id');
@@ -1211,17 +1454,24 @@ export function createRunToolAdapter(dependencies) {
         failAdapter('invalid_format', 'assignment_id', CONTENT_FREE.invalid_format);
       }
       counters.inspect += 1;
-      runtimeReceipt = await runtime.inspectRun({
+      runtimeReceipt = await ((await resolveSimpleRun(runId)) ? simpleRuntime.inspectRun({ run_id: runId }) : runtime.inspectRun({
         run_id: runId,
         ...(assignmentId !== undefined ? { assignment_id: assignmentId } : {}),
-      });
+      }));
     } else if (operation === 'wait') {
       const runId = requireRunId(args);
       const waitUntil = waitUntilValue(args);
       if (waitUntil !== undefined && !capturedIncludes(WAIT_UNTIL_VALUES, waitUntil)) {
         failAdapter('invalid_format', 'wait_until', CONTENT_FREE.invalid_format);
       }
-      runtimeReceipt = await waitForDecision(runId, args, signal);
+      runtimeReceipt = (await resolveSimpleRun(runId))
+        ? await simpleRuntime.waitRun({
+          run_id: runId,
+          ...(waitUntil !== undefined ? { wait_until: waitUntil } : {}),
+          ...(capturedHasOwn(args, 'wait_ms') ? { wait_ms: optionalValue(args, 'wait_ms', 'wait_ms') } : {}),
+          ...(capturedHasOwn(args, 'cursor') ? { cursor: optionalValue(args, 'cursor', 'cursor') } : {}),
+        }, { signal })
+        : await waitForDecision(runId, args, signal);
     } else if (operation === 'attention') {
       const runId = requireRunId(args);
       const attentionRequest = quarantineObject(
@@ -1236,21 +1486,39 @@ export function createRunToolAdapter(dependencies) {
       validateAttentionItemsV1(items, 'attention.items');
       rememberExperienceContext(runId, { attention_items: items });
       counters.resume += 1;
-      runtimeReceipt = await runtime.resumeRun({
-        run_id: runId,
-        attention_items: items,
-      });
+      runtimeReceipt = (await resolveSimpleRun(runId))
+        ? await simpleRuntime.replyRun({ run_id: runId, attention_reply: { items } })
+        : await runtime.resumeRun({ run_id: runId, attention_items: items });
     } else if (operation === 'reply') {
       const runId = requireRunId(args);
-      if (attention === null) {
-        failAdapter('injected_dependency_invalid', 'attention', CONTENT_FREE.injected_dependency_invalid);
-      }
       const replyRequest = quarantineObject(
         ownDataValue(args, 'run_reply', 'run_reply'),
         'run_reply',
         RUN_REPLY_KEYS,
       );
       counters.reply += 1;
+      if (await resolveSimpleRun(runId)) {
+        runtimeReceipt = await simpleRuntime.replyRun({
+          run_id: runId,
+          ...(capturedHasOwn(replyRequest, 'approval_ref')
+            ? { approval_ref: ownDataValue(replyRequest, 'approval_ref', 'run_reply.approval_ref') }
+            : {}),
+          attention_reply: {
+            ...(capturedHasOwn(replyRequest, 'batch_id')
+              ? { batch_id: ownDataValue(replyRequest, 'batch_id', 'run_reply.batch_id') }
+              : {}),
+            ...(capturedHasOwn(replyRequest, 'expected_revision')
+              ? { expected_revision: optionalValue(replyRequest, 'expected_revision', 'run_reply.expected_revision') }
+              : {}),
+            ...(capturedHasOwn(replyRequest, 'reply')
+              ? { reply: ownDataValue(replyRequest, 'reply', 'run_reply.reply') }
+              : {}),
+          },
+        });
+      } else {
+      if (attention === null) {
+        failAdapter('injected_dependency_invalid', 'attention', CONTENT_FREE.injected_dependency_invalid);
+      }
       const attentionReceipt = await attention.reply({
         run_id: runId,
         batch_id: ownDataValue(replyRequest, 'batch_id', 'run_reply.batch_id'),
@@ -1263,6 +1531,7 @@ export function createRunToolAdapter(dependencies) {
         ...runtimeReceipt,
         attention: attentionRecord(attentionReceipt),
       });
+      }
     } else if (operation === 'cancel' || operation === 'cleanup') {
       const runId = requireRunId(args);
       let assignmentIds = parseAssignmentIds(
@@ -1270,6 +1539,15 @@ export function createRunToolAdapter(dependencies) {
         'assignment_ids',
       );
       if (assignmentIds === undefined) {
+        if (await resolveSimpleRun(runId)) {
+          counters.cancel += 1;
+          runtimeReceipt = await simpleRuntime.cancelRun({ run_id: runId });
+          const projected = projectReceipt(
+            tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
+            operation === 'wait',
+          );
+          return projected;
+        }
         counters.inspect += 1;
         const inspected = await runtime.inspectRun({ run_id: runId });
         assignmentIds = ARRAY_IS_ARRAY(inspected?.lanes)
@@ -1280,11 +1558,11 @@ export function createRunToolAdapter(dependencies) {
         }
       }
       counters.cancel += 1;
-      runtimeReceipt = await runtime.cancelRun({
+      runtimeReceipt = await ((await resolveSimpleRun(runId)) ? simpleRuntime.cancelRun({ run_id: runId }) : runtime.cancelRun({
         run_id: runId,
         assignment_ids: assignmentIds,
         cleanup: operation === 'cleanup',
-      });
+      }));
     } else {
       failAdapter('unknown_operation', 'tool', CONTENT_FREE.unknown_operation);
     }

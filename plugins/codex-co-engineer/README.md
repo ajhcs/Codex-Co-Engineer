@@ -14,8 +14,9 @@ Cursor Co-Engineer`, and `Using Muse Co-Engineer`. Cursor on this
 computer and Cursor Cloud both stay Cursor Co-Engineer in public speech.
 
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-The current published package version is 3.3.0. This README does not
-claim a later package is already published.
+The current source version is 3.4.1. Publication remains subject to the
+exact-tree, host, and live-provider gates in the
+[3.4.1 release note](../../docs/releases/v3.4.1.md).
 
 Any extra Co-Engineer panel is optional, feature-detected, and
 host-specific. Complete headless fallback: the Delegating/Chatting
@@ -209,17 +210,23 @@ The MCP server exposes five tools:
 | `cancel` | Stop one owned local process group, Cursor Cloud run, or run |
 
 The catalog is still those five tools. Bounded runs use additive
-parameters (`run`, `run_id`, `attention`, `run_reply`, `cleanup`, and
+parameters (`run_request`, legacy `run`, `run_id`, `attention`, `run_reply`, `cleanup`, and
 `wait_until: "decision_or_attention"`) on the same tools. Omit them to
 keep exact 3.2.1 single-task behavior. Run wait is a bounded
 `decision_or_attention` wait. See
 [the run tool API](../../docs/run-tool-api.md).
 
-`delegate` requires a stable `task_id`, a provider, an absolute Git
-worktree path in the property named `repo`, a prompt, and
-`expected_duration_ms` or a backwards-compatible `timeout_ms`. Providers
+For a bounded 3.4.1 run, `delegate` accepts the small semantic
+`run_request` body. The server derives the clean Git identity, provider
+model, task/workspace/dispatch identities, prompt and manifest digests, and
+managed-workspace policy. Do not construct the legacy full `run` envelope or
+derived provenance; it remains accepted only for compatibility. Providers
 are `grok`, `cursor-local`, `cursor-cloud`, and `dsh`; roles are
 `review` and `implement`.
+
+Legacy single-task `delegate` still requires a stable `task_id`, a provider,
+an absolute Git worktree path in the property named `repo`, a prompt, and
+`expected_duration_ms` or a backwards-compatible `timeout_ms`.
 DSH defaults to `muse-spark-1.2-contributor`. Set
 `dsh_model: "stealth/ox-alpha"` to select the separate OpenRouter-backed
 Ox Alpha configuration for that task.
@@ -264,10 +271,11 @@ The coordination path keeps the same five tools and the no-argument
   options. Its task snapshots and live event previews are bounded; when
   present, `progress.detail_hint` directs the caller to `task` for the
   target's full live event detail.
-- Add `response_mode: "structured"` when the client reads authoritative
-  `structuredContent`. The text content becomes a bounded fallback. If
-  the property is omitted, `content[0].text` remains the exact full JSON
-  serialization of `structuredContent` for legacy clients.
+- Capable clients default to structured-first bounded responses. Add
+  `response_mode: "structured"` explicitly when the client advertises
+  authoritative `structuredContent`; text-only clients may omit it for the
+  compatible full JSON text receipt. Simple-run status is capped at 24 KiB
+  and other simple-run receipts at 72 KiB.
 
 Terminal provider results are redacted and bounded, including values
 returned as nested objects. When evidence is clipped, the receipt
@@ -335,6 +343,32 @@ Cloud agents are archived after terminal completion where supported;
 their remote branch or PR remains for Codex review.
 
 ### Examples
+
+Preferred bounded-run submission (the server compiles the protected
+identities and provenance):
+
+```json
+{
+  "run_request": {
+    "run_id": "auth-hardening",
+    "repo": "/absolute/path/to/git-worktree",
+    "objective": "Implement and review the auth hardening change.",
+    "assignments": [
+      {
+        "assignment_id": "auth-implementation",
+        "provider": "grok",
+        "role": "implement",
+        "access": "write",
+        "prompt": "Implement the auth hardening slice and commit it.",
+        "expected_duration_ms": 900000
+      }
+    ]
+  }
+}
+```
+
+The following single-task and Cloud examples are legacy compatibility
+examples. New skills and callers should use `run_request` for bounded runs.
 
 Local review:
 

@@ -1,9 +1,10 @@
-# Run tool API (R-CUTOVER)
+# Run tool API (3.4.1)
 
-R-CUTOVER is the additive five-tool wiring of bounded runs onto the
-3.2.1 MCP catalog. It does not add a sixth tool. Submit, status, wait,
-attention, reply, cancel, and cleanup are parameters and modes on
-`status`, `delegate`, `task`, `tasks`, and `cancel`.
+3.4.1 keeps the five-tool MCP catalog. Submit, status, wait, attention,
+reply, cancel, and cleanup are parameters and modes on `status`, `delegate`,
+`task`, `tasks`, and `cancel`. The preferred bounded-run ingress is the small
+server-compiled `run_request`; the 3.4.0 full `run` envelope remains accepted
+for compatibility and is not constructed by the skills.
 
 Owned files:
 
@@ -28,7 +29,7 @@ structured/wait/diagnostic/reply/cancel behavior and response shapes.
 
 | Operation | Tool | Additive parameter or mode |
 | --- | --- | --- |
-| submit | `delegate` | `run` |
+| submit | `delegate` | `run_request` (preferred), `run` (legacy compatibility) |
 | status | `status` or `task` | `run_id` |
 | wait | `task` or `tasks` | `run_id` plus `wait_until: "decision_or_attention"` |
 | attention | `task` | `run_id` plus `attention` |
@@ -41,6 +42,49 @@ run mode is `decision_or_attention`. Routine progress never wakes.
 
 Mixing a run body with 3.2.1 `task_id` / `workspace_mode` / `create_pr` /
 `reply` fields fails closed.
+
+## Simple run request
+
+Call `delegate` with only semantic intent:
+
+```json
+{
+  "run_request": {
+    "run_id": "vale-hardening",
+    "repo": "/absolute/repository/path",
+    "objective": "Implement and review the hardening plan.",
+    "assignments": [
+      {
+        "assignment_id": "social-implementation",
+        "provider": "grok",
+        "role": "implement",
+        "access": "write",
+        "prompt": "Implement the social ingestion slice.",
+        "expected_duration_ms": 900000
+      }
+    ]
+  }
+}
+```
+
+The server observes the clean exact Git identity, resolves the provider model,
+and derives the request idempotency key, manifest/prompt-envelope/lane
+digests, child and task identities, and managed-workspace policy. Callers
+cannot provide those derived fields. A changed objective, assignment,
+provider, SHA, or scope produces a different identity.
+
+Admission has two barriers. The server validates consent, provider and local
+boundary readiness, repository identity, every workspace, and disjoint writer
+scope before sending any prompt. During that period the public experience is
+`preparing`. The run can say `running` only when every required lane has
+authoritative `prompt_dispatched` evidence. A mid-dispatch failure is
+`degraded` with exact dispatched, undispatched, and uncertain lane lists.
+
+Run and lane phases are explicit and receipts are restartable. Prompt-dispatch
+uncertainty is never replayed. Post-prompt unrecoverable work produces a
+bounded partial handoff with the retained worktree, starting/current SHA,
+clean state, changed files, commits, last provider event, recovery class, and
+safe next actions.
 
 ## Bounds and selection
 

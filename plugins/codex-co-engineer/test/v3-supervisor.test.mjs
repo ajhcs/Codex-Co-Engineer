@@ -71,6 +71,58 @@ test('writer workspace parses noisy pretty JSON and requests a bounded large buf
   assert.equal(result.branch, 'codex/parallel-one');
 });
 
+test('exact local SHA workspace creation does not require an upstream or source branch', async () => {
+  const calls = [];
+  const result = await createWriterWorkspace({
+    taskId: 'local-sha',
+    repo: '/repo',
+    baseSha: SHA,
+    execute: async (command, args, options) => {
+      calls.push([command, args, options]);
+      if (command === 'git') {
+        if (args.includes('--show-current')) return { stdout: args[1] === '/repo' ? '\n' : 'codex/local-sha\n' };
+        if (args.includes('--porcelain=v1')) return { stdout: '\n' };
+        if (args.includes('--show-toplevel')) return { stdout: '/worktrees/local-sha\n' };
+        if (args.includes('--verify') || args.includes('HEAD')) return { stdout: `${SHA}\n` };
+        return { stdout: '\n' };
+      }
+      return { stdout: JSON.stringify({
+        task: 'local-sha',
+        branch: 'codex/local-sha',
+        start_sha: SHA,
+        worktree_path: '/worktrees/local-sha',
+        status: 'ready',
+      }) };
+    },
+    checkPath: async () => ({ isDirectory: () => true }),
+  });
+
+  assert.deepEqual(calls.find(([command]) => command === 'worktree-bootstrap')?.[1], [
+    'create', 'local-sha', '--repo', '/repo', '--base', SHA, '--local-only',
+  ]);
+  assert.equal(result.start_sha, SHA);
+  assert.equal(result.branch, 'codex/local-sha');
+});
+
+test('exact local SHA reports an actionable capability error when bootstrap is too old', async () => {
+  await assert.rejects(
+    createWriterWorkspace({
+      taskId: 'local-sha-old-bootstrap',
+      repo: '/repo',
+      baseSha: SHA,
+      execute: async (command, args) => {
+        if (command === 'git') {
+          if (args.includes('--show-current')) return { stdout: '\n' };
+          if (args.includes('--porcelain=v1')) return { stdout: '\n' };
+          if (args.includes('--verify')) return { stdout: `${SHA}\n` };
+        }
+        throw Object.assign(new Error('unknown option --local-only'), { stderr: 'unknown option --local-only' });
+      },
+    }),
+    (error) => error.code === 'worktree_bootstrap_exact_sha_unsupported',
+  );
+});
+
 test('invalid worktree receipt fails before dispatch', async () => {
   const execute = async (command) => command === 'git' ? { stdout: 'feature\n' } : { stdout: '{}' };
   await assert.rejects(

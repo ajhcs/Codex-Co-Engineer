@@ -328,16 +328,16 @@ test('README does not autoplay audio and does not embed a GitHub video player', 
   assert.doesNotMatch(readme, /Optional silent architecture animation/u);
 });
 
-test('package and marketplace stay on 3.3.0 with the five-tool catalog', async () => {
+test('package and marketplace stay on 3.4.1 with the five-tool catalog', async () => {
   const plugin = JSON.parse(await readFile(path.join(ROOT, '.codex-plugin', 'plugin.json'), 'utf8'));
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  assert.equal(plugin.version, '3.3.0');
-  assert.equal(marketplace.plugins[0].version, '3.3.0');
-  assert.equal(packageJson.version, '3.3.0');
+  assert.equal(plugin.version, '3.4.1');
+  assert.equal(marketplace.plugins[0].version, '3.4.1');
+  assert.equal(packageJson.version, '3.4.1');
   assert.match(readme, /The catalog remains exactly `status`, `delegate`, `task`, `tasks`, and\s+`cancel`/u);
   for (const tool of FIVE_TOOLS) {
     assert.match(readme, new RegExp(`\`${tool}\``, 'u'));

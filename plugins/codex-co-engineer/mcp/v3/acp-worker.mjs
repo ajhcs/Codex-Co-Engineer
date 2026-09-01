@@ -950,6 +950,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       started_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, task.id, { type: 'transport', state: 'prompt_dispatched', transport: 'cli', fallback_from: 'acp' });
+    await updateTask(root, task.id, { dispatch_evidence: 'authoritative' });
     stopDeadline = startDeadlineWatch(root, task.id, () => {
       timedOut = true;
       cancel();
@@ -1192,6 +1193,64 @@ async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal
 }
 
 /**
+ * Reattach to an already acknowledged persistent ACP session. This path is
+ * intentionally observation-only: it calls ensureSession with the recorded
+ * session identity and never starts a new turn, so a worker restart cannot
+ * replay the acknowledged prompt.
+ */
+export async function reconnectAcpTask({ root, taskId, signal, runtimeFactory } = {}) {
+  if (typeof root !== 'string' || !path.isAbsolute(root)) fail('invalid_state_dir', 'root must be absolute.');
+  const { task } = await readTask(root, taskId);
+  if (!['grok', 'cursor-local'].includes(task.provider)
+    || task.prompt_dispatched !== true
+    || task.dispatch_evidence !== 'authoritative'
+    || typeof task.acp_session_id !== 'string'
+    || task.acp_session_id.length === 0
+    || ['cancelled', 'cancelling', 'completed', 'failed', 'timeout'].includes(task.status)) {
+    return Object.freeze({ reconnected: false, reason: 'session_resume_not_available' });
+  }
+  if (signal?.aborted) return Object.freeze({ reconnected: false, reason: 'cancelled' });
+  const cwd = requireAbsoluteDirectory(task.cwd);
+  const configuration = providerConfiguration(task);
+  const timeoutMs = taskTimeoutMs(task);
+  const childEnv = providerChildEnvironment(task);
+  const runtime = await (typeof runtimeFactory === 'function'
+    ? runtimeFactory({ root, task, cwd, configuration, timeoutMs, signal, env: childEnv })
+    : makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env: childEnv }));
+  let handle = null;
+  try {
+    handle = await runtime.ensureSession({
+      sessionKey: task.session_key ?? `${task.provider}:${task.id}`,
+      agent: configuration.agent,
+      mode: 'persistent',
+      cwd,
+      resumeSessionId: task.acp_session_id,
+    });
+    // getStatus is deliberately used only to prove that the attached session
+    // is observable. Its provider payload is not copied into the receipt.
+    if (typeof runtime.getStatus === 'function') await runtime.getStatus({ handle });
+    const sessionId = handle.backendSessionId ?? handle.agentSessionId ?? task.acp_session_id;
+    await updateTask(root, taskId, {
+      status: 'running',
+      transport: 'acp',
+      acp_session_id: sessionId,
+      runtime_recovery: 'same_session_reconnected',
+    });
+    await appendTaskEvent(root, taskId, {
+      type: 'transport',
+      state: 'session_reconnected',
+      transport: 'acp',
+      prompt_replayed: false,
+    });
+    return Object.freeze({ reconnected: true, session_id: sessionId, prompt_replayed: false });
+  } catch {
+    return Object.freeze({ reconnected: false, reason: 'session_reconnect_failed' });
+  } finally {
+    try { await runtime.close?.({ handle, discardPersistentState: false }); } catch { /* retain evidence for later reconciliation */ }
+  }
+}
+
+/**
  * Run one task through ACP. The task prompt is read from the owner-only task
  * store, so it never appears in argv or the public task record.
  */
@@ -1267,6 +1326,8 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     // From this point onward the provider may have accepted the prompt. A
     // supervisor must reconcile this task, never replay it through CLI.
     await updateTask(root, taskId, { prompt_dispatched: true });
+    await appendTaskEvent(root, taskId, { type: 'transport', state: 'prompt_dispatched', transport: 'acp' });
+    await updateTask(root, taskId, { dispatch_evidence: 'authoritative' });
     const cancel = () => turn.cancel({ reason: 'signal' }).catch(() => {});
     controller.signal.addEventListener('abort', cancel, { once: true });
     let lastEvent = null;

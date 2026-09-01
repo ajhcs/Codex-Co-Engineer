@@ -84,10 +84,10 @@ function advertisedTools() {
 const RESPONSE_MODE_PROPERTY = {
   type: 'string',
   enum: ['structured'],
-  description: 'Optional presentation control stripped before business logic. Omit or leave unset for the 3.1.1-compatible full sanitized receipt in content[0].text (equals JSON.stringify(structuredContent)). Set to "structured" for a bounded text fallback while structuredContent remains the authoritative receipt.',
+  description: 'Optional presentation control stripped before business logic. Capable clients default to the bounded structured-first transport; legacy clients omit this field for the full sanitized receipt in content[0].text. Set to "structured" explicitly when needed.',
 };
 
-const RESPONSE_MODE_HINT = ' Optional response_mode="structured" opts into bounded content[0].text with authoritative structuredContent; omit for legacy full-text duplication.';
+const RESPONSE_MODE_HINT = ' Capable clients receive structured-first bounded text by default; legacy clients may set response_mode="structured" explicitly or omit it for the full compatible receipt.';
 
 const TOOLS = [
   {
@@ -99,6 +99,7 @@ const TOOLS = [
         detail: { type: 'string', enum: ['full', 'compact'], description: 'full returns full receipts (default). compact returns redacted compact cards.' },
         task_limit: { type: 'integer', minimum: 0, maximum: 20, description: 'Maximum tasks to return (0-20). Default 20. Ignored when include_tasks is false.' },
         include_tasks: { type: 'boolean', description: 'When false, omit recent tasks for readiness-only checks.' },
+        refresh: { type: 'boolean', description: 'Force a fresh provider-readiness probe. Without refresh, readiness is shared for a short local TTL and cold probes are bounded.' },
         response_mode: RESPONSE_MODE_PROPERTY,
         run_id: {
           type: 'string',
@@ -149,6 +150,40 @@ const TOOLS = [
         provider_repo_url: { type: 'string', minLength: 1, maxLength: 4096, description: 'Optional credential-free provider-visible repository URL override for Cursor Cloud. SSH origins are canonicalized to HTTPS without credentials.' },
         provider_repo: { type: 'string', minLength: 1, maxLength: 4096, description: 'Backward-compatible alias for provider_repo_url; Cursor Cloud only.' },
         response_mode: RESPONSE_MODE_PROPERTY,
+        run_request: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['run_id', 'repo', 'objective', 'assignments'],
+          description: '3.4.1 simple run request. The server derives Git identity, provider models, task IDs, workspaces, dispatch identities, and protected telemetry. Do not supply derived provenance fields.',
+          properties: {
+            run_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{2,63}$' },
+            repo: { type: 'string', description: 'Canonical absolute Git worktree path.' },
+            objective: { type: 'string', minLength: 1, maxLength: 4096 },
+            base_sha: { type: 'string', pattern: '^[0-9a-f]{40}$', description: 'Optional exact local base SHA; omitted means the observed clean HEAD.' },
+            assignments: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 8,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['assignment_id', 'provider', 'role', 'access', 'prompt', 'expected_duration_ms'],
+                properties: {
+                  assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
+                  provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
+                  model: { type: 'string', maxLength: 128, description: 'Optional exact model override; otherwise the closed provider default is derived.' },
+                  role: { type: 'string', enum: ['implement', 'review', 'verify'] },
+                  access: { type: 'string', enum: ['write', 'writer', 'read', 'read_only'] },
+                  prompt: { type: 'string', minLength: 1, maxLength: 16384 },
+                  expected_duration_ms: { type: 'integer', minimum: MIN_DURATION_MS, maximum: MAX_EXPECTED_DURATION_MS },
+                  write_scope: { type: 'array', minItems: 0, maxItems: 16, items: { type: 'string' }, description: 'Optional for writers; required explicitly for each writer when more than one writer lane exists. Read-only lanes must use an empty scope.' },
+                  required: { type: 'boolean', default: true },
+                  capabilities: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['read_run_receipts', 'read_provider_logs', 'read_own_worktree'] } },
+                },
+              },
+            },
+          },
+        },
         run: {
           type: 'object',
           additionalProperties: false,
@@ -274,13 +309,17 @@ const TOOLS = [
         run_reply: {
           type: 'object',
           additionalProperties: false,
-          required: ['batch_id', 'reply'],
-          description: 'Exactly-once run attention reply. Do not mix with 3.2.1 task.reply.',
+          description: 'Exactly-once run attention reply, or a typed repository-consent continuation. Do not mix with 3.2.1 task.reply.',
           properties: {
+            approval_ref: { type: 'string', minLength: 1, maxLength: 4096, description: 'Opaque host-minted repository-exposure approval reference. It is bound to this run and never emitted in telemetry.' },
             batch_id: { type: 'string', minLength: 1, maxLength: 128 },
             expected_revision: { type: 'integer', minimum: 0 },
             reply: { type: 'object' },
           },
+          anyOf: [
+            { required: ['batch_id', 'reply'] },
+            { required: ['approval_ref'] },
+          ],
         },
       },
       allOf: [
@@ -464,9 +503,18 @@ function projectWaitAnyEntry(entry) {
 function takePresentationArgs(args = {}) {
   const { response_mode: responseModeRaw, ...businessArgs } = args;
   return {
-    responseMode: normalizeResponseMode(responseModeRaw),
+    responseMode: responseModeRaw === undefined && clientSupportsStructuredResponses()
+      ? 'structured'
+      : normalizeResponseMode(responseModeRaw),
     args: businessArgs,
   };
+}
+
+function clientSupportsStructuredResponses() {
+  if (!clientCapabilities || typeof clientCapabilities !== 'object' || Array.isArray(clientCapabilities)) return false;
+  if (clientCapabilities.structuredContent === true) return true;
+  if (clientCapabilities.experimental?.structuredContent === true) return true;
+  return clientCapabilities.experimental?.['codex-co-engineer']?.structured_content === true;
 }
 
 function result(value, { responseMode } = {}) {
@@ -498,7 +546,7 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
     }
   }
   if (name === 'status') {
-    const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined);
+    const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined || args.refresh !== undefined);
     if (!hasCompact) {
       const value = await supervisorStatus(root);
       return result({ ...value, tasks: value.tasks.map(publicTask) }, { responseMode });
