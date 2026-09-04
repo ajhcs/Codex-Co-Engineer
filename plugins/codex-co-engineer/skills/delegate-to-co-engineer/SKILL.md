@@ -34,9 +34,7 @@ Never ask the user to construct tool payloads.
 
 For one-lane, multi-lane, ask-once, and provider-choice procedures, read [references/runs.md](references/runs.md) only when that case applies.
 
-For a requested model hierarchy, read [model roles](references/model-roles.md).
-Astra can own the chief role, Sol Medium can coordinate complex work, and Luna
-can handle bounded native assignments alongside external workers. Sol High is
-an optional combined chief/coordinator candidate, subject to evaluation.
-Preserve explicit choices and stock defaults; do not create another task or
-change global settings just to launch a Co-Engineer.
+Use the existing task owner; add a coordinator only when the work warrants it.
+Preserve explicit choices and stock defaults. Read [model selection](references/model-roles.md)
+only when choosing models is part of the task. Do not change global settings
+or create another task just to launch a Co-Engineer.

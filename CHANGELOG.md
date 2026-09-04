@@ -23,9 +23,9 @@
 
 ### Changed
 
-- Added evidence-qualified Astra chief / Sol Medium coordinator / bounded Luna
-  worker guidance, with Sol High as an evaluation candidate for ordinary work.
-  Model selection remains optional and host-owned.
+- Added evidence-qualified Luna / Terra / Sol / Astra task-selection guidance.
+  Prefer one owner with bounded workers; an extra coordinator and reasoning
+  effort changes require task-specific justification. Model choice stays host-owned.
 - Made the installed skill path use existing provider choices and semantic
   admission directly, with setup and manager tasks outside routine launch.
   Clarified continuation, typed approvals, dependent reviews, and verification.

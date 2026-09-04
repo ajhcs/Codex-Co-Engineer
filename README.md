@@ -100,12 +100,11 @@ A longer walkthrough lives in
 
 ## Model roles and quick launches
 
-For difficult work, an optional hierarchy is Astra as chief engineer, Sol
-Medium as coordinator, and bounded Luna or external-provider workers. Sol
-High can be evaluated as a combined chief/coordinator for ordinary work.
-These choices belong to Codex's native agent controls; they do not change the
-provider catalog or install global model overrides. See the bundled
-[model roles and evidence](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/model-roles.md).
+Use one task owner and add bounded workers when useful. Luna suits clearly
+specified work, Terra bounded features, Sol subsystem work, and Astra the
+hardest tasks. This is practical guidance, not an official ranking of job
+roles. A separate coordinator is optional. Model and effort choices remain
+host-owned; see [model selection and evidence](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/model-roles.md).
 
 Once installed, Codex submits a semantic `run_request` using your existing
 provider choices. Admission handles readiness and workspace preparation.
