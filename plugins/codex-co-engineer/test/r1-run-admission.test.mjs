@@ -71,6 +71,7 @@ function baseDependencies(overrides = {}) {
       approved_at: '2026-09-01T00:00:00.000Z',
       expires_at: '2026-09-02T00:00:00.000Z',
     }),
+    clock: () => '2026-09-01T12:00:00.000Z',
     providerReady: async () => ({ ready: true }),
     processBoundaryReady: async () => ({ ready: true }),
     verifyRepository: async () => ({ verified: true }),
@@ -151,6 +152,27 @@ test('natural-language approval cannot cross the repository exposure boundary', 
   assert.equal(calls.dispatch.length, 0);
 });
 
+test('a future-dated approval cannot cross the repository exposure boundary', async () => {
+  const { calls, dependencies } = baseDependencies({
+    verifyConsent: async () => ({
+      approved: true,
+      approved_at: '2026-09-02T00:00:00.000Z',
+      expires_at: '2026-09-03T00:00:00.000Z',
+    }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  await runtime.submitRunRequest(request({ run_id: 'future-consent' }));
+
+  const blocked = await runtime.replyRun({
+    run_id: 'future-consent',
+    approval_ref: 'future-dated-approval',
+  });
+  assert.equal(blocked.phase, 'awaiting_consent');
+  assert.equal(blocked.error.code, 'approval_ref_invalid_or_expired');
+  assert.equal(calls.prepare.length, 0);
+  assert.equal(calls.dispatch.length, 0);
+});
+
 test('one workspace admission failure dispatches zero prompts', async () => {
   const { calls, dependencies } = baseDependencies({
     prepareWorkspace: async ({ assignment }) => {
@@ -167,6 +189,62 @@ test('one workspace admission failure dispatches zero prompts', async () => {
   assert.deepEqual(calls.dispatch, []);
   assert.equal(receipt.lanes.every((lane) => lane.phase === 'failed_pre_prompt'), true);
   assert.equal(receipt.lanes.every((lane) => lane.handoff !== null), true);
+});
+
+test('an all-Cursor Cloud run does not require the local process boundary', async () => {
+  let boundaryChecks = 0;
+  const { calls, dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    processBoundaryReady: async () => {
+      boundaryChecks += 1;
+      return { ready: false, reason: 'systemd_user_manager_unavailable' };
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const receipt = await runtime.submitRunRequest(request({
+    run_id: 'cloud-only-admission',
+    assignments: [{
+      assignment_id: 'cloud-review',
+      provider: 'cursor-cloud',
+      role: 'review',
+      access: 'read',
+      prompt: 'Review the candidate in Cursor Cloud.',
+      expected_duration_ms: 60_000,
+    }],
+  }));
+
+  assert.equal(boundaryChecks, 0);
+  assert.equal(receipt.phase, 'running');
+  assert.deepEqual(calls.dispatch, ['cloud-review']);
+});
+
+test('a mixed Cloud and local run still requires the local process boundary', async () => {
+  let boundaryChecks = 0;
+  const { calls, dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    processBoundaryReady: async () => {
+      boundaryChecks += 1;
+      return { ready: false, reason: 'systemd_user_manager_unavailable' };
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const receipt = await runtime.submitRunRequest(request({
+    run_id: 'mixed-boundary-admission',
+    assignments: [
+      {
+        assignment_id: 'cloud-review', provider: 'cursor-cloud', role: 'review', access: 'read',
+        prompt: 'Review in Cursor Cloud.', expected_duration_ms: 60_000,
+      },
+      {
+        assignment_id: 'local-review', provider: 'grok', role: 'review', access: 'read',
+        prompt: 'Review locally.', expected_duration_ms: 60_000,
+      },
+    ],
+  }));
+
+  assert.equal(boundaryChecks, 1);
+  assert.equal(receipt.phase, 'failed');
+  assert.deepEqual(calls.dispatch, []);
 });
 
 test('mid-dispatch failure identifies sent and unsent lanes and never says running', async () => {

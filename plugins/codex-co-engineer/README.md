@@ -16,28 +16,35 @@ computer and Cursor Cloud both stay Cursor Co-Engineer in public speech.
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
 The current source version is 3.4.1. Publication remains subject to the
 exact-tree, host, and live-provider gates in the
-[3.4.1 release note](../../docs/releases/v3.4.1.md).
+[3.4.1 release note](docs/releases/v3.4.1.md).
 
 Any extra Co-Engineer panel is optional, feature-detected, and
 host-specific. Complete headless fallback: the Delegating/Chatting
 conversation in Codex CLI is enough. This package does not claim a
 Co-Engineer UI on every Codex Desktop host.
 
-Visitor install, first-run speech, and safety live in the
-[repository README](../../README.md). Concise guides:
+This README contains the installation, authentication, first-run, and safety
+guidance needed after the package is installed. Concise guides:
 
-- [Quickstart](../../docs/co-engineer-quickstart.md)
-- [Troubleshooting](../../docs/co-engineer-troubleshooting.md)
-- [3.2.1 migration](../../docs/co-engineer-migration-3.2.1.md)
-- [Configuration](../../docs/configuration.md)
+- [Quickstart](docs/co-engineer-quickstart.md)
+- [Troubleshooting](docs/co-engineer-troubleshooting.md)
+- [3.2.1 migration](docs/co-engineer-migration-3.2.1.md)
+- [Configuration](docs/configuration.md)
+- [Run tool API](docs/run-tool-api.md)
+- [Efficient dogfood workflow](docs/efficient-dogfood.md)
+- [3.4.1 release and compatibility notes](docs/releases/v3.4.1.md)
 
 Normal users speak ordinary language. They do not write tool payloads.
+
+For optional Astra/Sol/Luna coordination, see the bundled
+[model roles and evidence](skills/delegate-to-co-engineer/references/model-roles.md).
+Normal launches use existing provider choices and server admission; they do
+not require a separate manager task or configuration workflow.
 
 ## Install and authentication
 
 Fresh-visitor install (clone, then Codex plugin, then setup) is
-documented in the [repository README](../../README.md). The commands
-below are the package-local scripts from this directory.
+documented below. The commands are package-local scripts from this directory.
 
 Requirements:
 
@@ -50,6 +57,15 @@ Requirements:
 - a Cursor Cloud API key
 - a Muse/Meta model API key for default DSH use
 - an OpenRouter API key when selecting DSH Ox Alpha
+
+For a local repository clone, register the marketplace and add the plugin:
+
+```bash
+git clone https://github.com/ajhcs/Codex-Co-Engineer.git
+cd Codex-Co-Engineer
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer
+```
 
 From this package directory—the directory containing `package.json` and
 `bin/setup.mjs`:
@@ -162,8 +178,13 @@ are visible to that process.
 **Where should I run setup?**
 From this package directory (`plugins/codex-co-engineer` in a clone), or
 with `npm --prefix plugins/codex-co-engineer run setup` from the
-repository root. See the repository README for the copy/paste Codex
-plugin install.
+repository root. The copy/paste plugin registration from the repository root
+is:
+
+```bash
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer
+```
 
 **A managed worktree appeared without a receipt.**
 Do not guess or delete it. Inspect `git worktree list` and
@@ -183,7 +204,7 @@ must not appear in MCP arguments, prompts, receipts, fixtures, or Git.
 Use the headless Delegating/Chatting conversation. Missing UI is not a
 failed package install.
 
-More cases: [troubleshooting](../../docs/co-engineer-troubleshooting.md).
+More cases: [troubleshooting](docs/co-engineer-troubleshooting.md).
 
 ## Data handling
 
@@ -214,7 +235,7 @@ parameters (`run_request`, legacy `run`, `run_id`, `attention`, `run_reply`, `cl
 `wait_until: "decision_or_attention"`) on the same tools. Omit them to
 keep exact 3.2.1 single-task behavior. Run wait is a bounded
 `decision_or_attention` wait. See
-[the run tool API](../../docs/run-tool-api.md).
+[the run tool API](docs/run-tool-api.md).
 
 For a bounded 3.4.1 run, `delegate` accepts the small semantic
 `run_request` body. The server derives the clean Git identity, provider
@@ -286,7 +307,7 @@ is enforced by the MCP server and is not a measured hard limit of the
 Codex desktop renderer.
 
 For an end-to-end pattern, see the repository's
-[efficient dogfood guide](../../docs/efficient-dogfood.md).
+[efficient dogfood guide](docs/efficient-dogfood.md).
 
 ### Provider matrix
 

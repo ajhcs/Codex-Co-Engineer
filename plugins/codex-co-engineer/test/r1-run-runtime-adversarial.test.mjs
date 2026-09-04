@@ -3,7 +3,6 @@
 // receipts, and denied remote mutation.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { types as utilTypes } from 'node:util';
 
@@ -205,16 +204,37 @@ test('injected objects missing required methods fail at factory time', () => {
   }), (error) => error.code === 'injected_dependency_invalid');
 });
 
-test('remote git mutation stays denied after a successful submit', async () => {
+test('remote mutation requests stay denied after submit without redispatch or state drift', async () => {
   const harness = createRuntime();
-  const receipt = await harness.runtime.submitRun(makeSubmitRequest());
+  const request = makeSubmitRequest();
+  const receipt = await harness.runtime.submitRun(request);
   assert.equal(receipt.remote_mutated, false);
   assert.equal(receipt.side_effects.remote_mutated, false);
-  const gitPush = spawnSync('git', ['push', '--dry-run'], {
-    encoding: 'utf8',
-    timeout: 5000,
-  });
-  assert.notEqual(gitPush.status, 0);
+  const before = structuredClone(await harness.runStore.getByRunId(request.run_id));
+  const dispatchBefore = {
+    submit: harness.scheduler.calls.submit,
+    delegate: [...harness.scheduler.calls.delegate],
+    resume: harness.scheduler.calls.resume,
+  };
+
+  const pushError = await errorOf(() => harness.runtime.inspectRun({
+    run_id: request.run_id,
+    push: true,
+  }));
+  assert.equal(pushError.code, 'merge_authority_denied');
+  assertContentFree(pushError);
+
+  const remoteError = await errorOf(() => harness.runtime.resumeRun({
+    run_id: request.run_id,
+    remote: { operation: 'push', repository: 'forged' },
+  }));
+  assert.equal(remoteError.code, 'remote_mutation_denied');
+  assertContentFree(remoteError);
+
+  assert.deepEqual(await harness.runStore.getByRunId(request.run_id), before);
+  assert.equal(harness.scheduler.calls.submit, dispatchBefore.submit);
+  assert.deepEqual(harness.scheduler.calls.delegate, dispatchBefore.delegate);
+  assert.equal(harness.scheduler.calls.resume, dispatchBefore.resume);
 });
 
 test('forged inspect receipts cannot broaden path or candidate authority', async () => {

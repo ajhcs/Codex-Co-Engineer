@@ -11,6 +11,7 @@ import {
   THREAT_MODEL_RELATIVE,
   assertR1FirstReleaseContract,
 } from './r1-first-release-contract.mjs';
+import { validatePackageDocs } from './validate-package-docs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
@@ -48,7 +49,8 @@ const required = [
   `${PLUGIN}/skills/control-codex-co-engineer-agents/SKILL.md`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/agents/openai.yaml`,
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/r1-first-release-contract.mjs',
-  'scripts/inspector-preflight.mjs', `${PLUGIN}/test/r1-first-release-non-goals.test.mjs`,
+  'scripts/inspector-preflight.mjs', 'scripts/validate-package-docs.mjs',
+  `${PLUGIN}/test/r1-first-release-non-goals.test.mjs`,
   'scripts/process-boundary-preflight.mjs', 'scripts/mcp-environment-preflight.mjs',
   'tools/acpx-vendor/package.json', 'tools/acpx-vendor/package-lock.json',
 ];
@@ -99,8 +101,10 @@ if (!serverText.includes('Required property named repo')
 }
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') fail('Unexpected test script.');
 if (JSON.stringify(packageJson.files) !== JSON.stringify([
-  '.codex-plugin', '.mcp.json', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
+  '.codex-plugin', '.mcp.json', 'README.md', 'docs', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
 ])) fail('Co-Engineer package roots changed.');
+
+await validatePackageDocs(ROOT);
 
 const server = mcp.mcpServers?.['codex-co-engineer'];
 if (server?.command !== 'node'

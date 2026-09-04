@@ -947,6 +947,52 @@ test('exports identity-bound local lifecycle settlement without rewriting stored
   }
 });
 
+for (const [label, cleanup, expectedDrain] of [
+  ['grants the first grace after worker cleanup', { status: 'pending', acp_close: 'closed', wtb_handoff: 'recorded' }, 123],
+  ['skips repeated grace after supervisor cleanup', { status: 'unknown', boundary: 'unknown', lock: 'not_applicable' }, 0],
+]) {
+test(`reconciliation ${label}`, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-repeat-drain-'));
+  const boundary = {
+    version: 1,
+    boundary: 'systemd-user-service-cgroup',
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+    description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    invocation_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    control_group: '/user.slice/user-1000.slice/user@1000.service/app.slice/codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+  };
+  let slept = 0;
+  try {
+    await createTask({
+      root,
+      prompt: 'reconcile retained receipt',
+      record: {
+        id: 'repeat-drain',
+        status: 'completed',
+        provider: 'grok',
+        cwd: root,
+        workspace_kind: 'direct',
+        cleanup,
+      },
+    });
+    const task = (await readTask(root, 'repeat-drain')).task;
+    const settled = await settleLocalTaskLifecycle(root, task, {
+      process_boundary: boundary,
+    }, {
+      drainGraceMs: 123,
+      sleep: async (milliseconds) => { slept += milliseconds; },
+      inspectBoundary: async () => ({ state: 'inactive_empty', empty: true, stop_allowed: false }),
+    });
+
+    assert.equal(slept, expectedDrain);
+    assert.equal(settled.final, true);
+    assert.equal(settled.boundary, 'inactive_empty');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+}
+
 test('default run seams are durable P33/P34 authorities and cancel confirms', async () => {
   const source = await readFile(new URL('../mcp/v3/supervisor.mjs', import.meta.url), 'utf8');
   assert.match(source, /createDurableRunSeams/u);

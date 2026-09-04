@@ -16,9 +16,9 @@ Wait once. When the work is complete, inspect it, then say `Co-Engineer finished
 
 ## Multi-lane
 
-User: Split this into three isolated independent assignments: API validation, the operator guide, and a review of both diffs.
+User: Split this into three isolated independent assignments: API validation, the operator guide, and a review of the existing authentication code.
 
-Keep all three in this one run. Do not start three runs and do not poll each assignment. Independent means the assignments do not share a writer path. Refuse a ninth assignment.
+Keep all three in this one run. A review of the two new diffs must follow their completion; it cannot run independently against a base that does not contain them. Do not start three runs and do not poll each assignment. Independent means the assignments do not share a writer path. Refuse a ninth assignment.
 
 Codex: I am delegating this to Co-Engineer. Co-Engineer is preparing 3 independent assignments.
 
@@ -38,7 +38,7 @@ Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer. Using Muse C
 
 User: Give Codex a team of external co-engineers without giving up control. Split the validator and the docs.
 
-Ask once which co-engineers should take the independent assignments: Grok, Cursor, or Muse. Do not keep asking, invent a default router, or submit before the choice exists.
+If this task has no existing provider choice, ask once which co-engineers should take the independent assignments: Grok, Cursor, or Muse. Do not keep asking, invent a default router, or submit before the choice exists.
 
 After the user answers, for example Grok for the validator and Muse for the docs:
 

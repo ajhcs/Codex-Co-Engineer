@@ -12,6 +12,7 @@
     ".codex-plugin",
     ".mcp.json",
     "README.md",
+    "docs",
     "assets",
     "bin",
     "mcp",

@@ -259,7 +259,10 @@ function normalizeAssignment(value, index, baseSha) {
   if (typeof role !== 'string' || !isKnownRole(role)) {
     compilerError('unknown_role', `${field}.role`, 'role must be implement, review, or verify.');
   }
-  const access = normalizeAccess(readRequired(value, 'access', `${field}.access`), `${field}.access`);
+  const requestedAccess = readOptional(value, 'access', `${field}.access`);
+  const access = requestedAccess === undefined
+    ? requiredAccessForRole(role)
+    : normalizeAccess(requestedAccess, `${field}.access`);
   if (access !== requiredAccessForRole(role)) {
     compilerError('role_access_mismatch', `${field}.access`, 'The selected role and access do not match.');
   }
@@ -339,28 +342,6 @@ function manifestAssignment(assignment) {
     required_evidence: defaultEvidence(assignment.role),
     ...(assignment.starting_ref !== undefined ? { starting_ref: assignment.starting_ref } : {}),
   };
-}
-
-function assertWriterScopes(assignments) {
-  // parseRunManifestV1 performs the authoritative conservative overlap check;
-  // this preflight provides a stable simple-request error if an injected or
-  // future manifest composer ever bypasses that parser.
-  const writers = assignments.filter((assignment) => assignment.access === 'writer');
-  for (let left = 0; left < writers.length; left += 1) {
-    for (let right = left + 1; right < writers.length; right += 1) {
-      const a = writers[left].write_scope;
-      const b = writers[right].write_scope;
-      if (a.some((leftPattern) => b.some((rightPattern) => {
-        if (leftPattern === '**' || rightPattern === '**') return true;
-        const leftPrefix = leftPattern.split('/').find((segment) => /[*?[]/u.test(segment)) ?? leftPattern;
-        const rightPrefix = rightPattern.split('/').find((segment) => /[*?[]/u.test(segment)) ?? rightPattern;
-        return leftPrefix === rightPrefix;
-      }))) {
-        compilerError('overlapping_writer_scope', 'run_request.assignments',
-          'Writer scopes must be disjoint before provider dispatch.');
-      }
-    }
-  }
 }
 
 async function runGit(execute, repository, args) {
@@ -565,7 +546,10 @@ export async function compileRunRequestV1(request, options = {}) {
     normalized.push(assignment);
   }
   const assignments = assignWriterScopes(normalized);
-  assertWriterScopes(assignments);
+  // makeManifest -> parseRunManifestV1 performs the authoritative
+  // conservative overlap check. Keep one implementation of the glob-prefix
+  // rule so disjoint scopes such as src/api/** and src/ui/** are not rejected
+  // by a divergent preflight parser.
   const manifest = makeManifest({ run_id: runId, repo, objective }, assignments, git.base_sha);
   const manifestDigestDescriptor = runManifestDigestV1(manifest);
   const manifestDigest = manifestDigestDescriptor.digest;

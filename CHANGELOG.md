@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject future-dated repository-exposure approvals and make consent-window
+  fixtures independent of today's date. Remove ambient Git/network and
+  fixed-sleep dependencies from affected regression tests.
+
+- Semantic `run_request` launches now satisfy the advertised MCP JSON Schema
+  without legacy single-task fields; ambiguous dual envelopes are rejected.
+- Valid disjoint writer globs use the authoritative overlap validator instead
+  of a duplicate check that rejected separate directories.
+- Repeated status checks no longer repeat terminal cleanup grace periods for
+  previously reconciled receipts; ownership inspection remains active.
+- All-Cursor Cloud runs skip the irrelevant local systemd/cgroup prerequisite;
+  mixed and local runs still enforce it.
+- Assignment access can be derived from its explicit role, eliminating a
+  redundant launch field while rejecting explicit role/access conflicts.
+
+### Changed
+
+- Added evidence-qualified Astra chief / Sol Medium coordinator / bounded Luna
+  worker guidance, with Sol High as an evaluation candidate for ordinary work.
+  Model selection remains optional and host-owned.
+- Made the installed skill path use existing provider choices and semantic
+  admission directly, with setup and manager tasks outside routine launch.
+  Clarified continuation, typed approvals, dependent reviews, and verification.
+
 ## [3.4.1] - 2026-09-01
 
 Reliability candidate for bounded Co-Engineer implementation lanes. Preserves

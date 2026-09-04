@@ -7,6 +7,12 @@ description: Operate Codex-Co-Engineer through the five MCP tools for raw status
 
 This is the raw MCP lifecycle skill, not the natural-language Co-Engineer experience. For ordinary outcomes use `$delegate-to-co-engineer`, `$chat-with-co-engineer`, `$use-grok-co-engineer`, `$use-cursor-co-engineer`, or `$use-muse-co-engineer`. Load this skill when the user asks to debug status, payloads, cursors, deadlines, worktrees, or other control-plane internals.
 
+For ordinary launch friction, first inspect the existing receipt and connected
+catalog. Do not repair an unselected provider, create a profile, or rewrite
+host configuration merely because a delegation skill was invoked. Prefer the
+advertised `run_request` path; a catalog mismatch is a version issue, not a
+reason to construct protected identities by hand.
+
 Use the five MCP tools for delegation and lifecycle control.
 
 1. Call `status` when provider or supervisor readiness is unknown. Prefer

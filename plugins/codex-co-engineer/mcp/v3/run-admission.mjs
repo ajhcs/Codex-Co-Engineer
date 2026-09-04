@@ -730,7 +730,8 @@ function validConsentWindow(consent, clock) {
   const expiresAt = Date.parse(consent.expires_at);
   const now = Date.parse(nowIso(clock));
   if (!Number.isFinite(approvedAt) || !Number.isFinite(expiresAt)) return false;
-  return expiresAt > (Number.isFinite(now) ? now : Date.now()) && expiresAt > approvedAt;
+  const current = Number.isFinite(now) ? now : Date.now();
+  return approvedAt <= current && expiresAt > current && expiresAt > approvedAt;
 }
 
 function createDefaultDependencies(overrides) {
@@ -973,7 +974,14 @@ export function createRunAdmissionRuntime(overrides = {}) {
         });
         return result?.ready === true;
       }));
-      const boundary = await injected.processBoundaryReady({ run_id: record.run_id });
+      // Cursor Cloud owns its remote process boundary. Requiring the local
+      // systemd/cgroup boundary for an all-Cloud run incorrectly blocks a
+      // valid dispatch on hosts where only the Cloud provider is available.
+      // Mixed and local-only runs still fail closed on the local boundary.
+      const needsLocalBoundary = record.lanes.some((lane) => lane.provider !== 'cursor-cloud');
+      const boundary = needsLocalBoundary
+        ? await injected.processBoundaryReady({ run_id: record.run_id })
+        : { ready: true };
       const repository = await injected.verifyRepository({
         run_id: record.run_id,
         git: record.compiled.git,

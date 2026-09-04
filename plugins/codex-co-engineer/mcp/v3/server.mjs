@@ -167,13 +167,13 @@ const TOOLS = [
               items: {
                 type: 'object',
                 additionalProperties: false,
-                required: ['assignment_id', 'provider', 'role', 'access', 'prompt', 'expected_duration_ms'],
+                required: ['assignment_id', 'provider', 'role', 'prompt', 'expected_duration_ms'],
                 properties: {
                   assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
                   provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
                   model: { type: 'string', maxLength: 128, description: 'Optional exact model override; otherwise the closed provider default is derived.' },
                   role: { type: 'string', enum: ['implement', 'review', 'verify'] },
-                  access: { type: 'string', enum: ['write', 'writer', 'read', 'read_only'] },
+                  access: { type: 'string', enum: ['write', 'writer', 'read', 'read_only'], description: 'Optional explicit access. Omitted access is derived from role: implement means writer; review and verify mean read_only.' },
                   prompt: { type: 'string', minLength: 1, maxLength: 16384 },
                   expected_duration_ms: { type: 'integer', minimum: MIN_DURATION_MS, maximum: MAX_EXPECTED_DURATION_MS },
                   write_scope: { type: 'array', minItems: 0, maxItems: 16, items: { type: 'string' }, description: 'Optional for writers; required explicitly for each writer when more than one writer lane exists. Read-only lanes must use an empty scope.' },
@@ -209,8 +209,8 @@ const TOOLS = [
       },
       allOf: [
         {
-          if: { required: ['run'] },
-          then: { required: ['run'] },
+          if: { anyOf: [{ required: ['run'] }, { required: ['run_request'] }] },
+          then: { oneOf: [{ required: ['run'] }, { required: ['run_request'] }] },
           else: {
             required: ['task_id', 'provider', 'repo', 'prompt'],
             anyOf: [

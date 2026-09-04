@@ -9,12 +9,17 @@ Start exactly one new bounded run. That is the only submission.
 
 Give Codex a team of external co-engineers without giving up control. Codex remains chief engineer, reviewer, and merge authority. The substantiated shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.
 
+Use the [installed launch path](references/launch.md): submit the semantic request with
+existing choices and let admission perform preflight. Setup, manual worktree
+creation, and a separate coordinator are not routine launch steps. Read this
+short reference once when launching; reuse it across provider skills.
+
 ## Route first
 
 - Inspecting, continuing, answering grouped attention, or cancelling existing work uses `$chat-with-co-engineer`. Do not submit again.
 - Exactly one named Grok, Cursor, or Muse Co-Engineer uses `$use-grok-co-engineer`, `$use-cursor-co-engineer`, or `$use-muse-co-engineer`.
 - Several named co-engineers stay in this one run. Do not rank, predict cost, or substitute a different co-engineer.
-- No named co-engineer and no named profile means ask once among Grok, Cursor, or Muse. Do not submit before that choice exists.
+- Reuse provider/profile choices already authorized in this task. If none exists, ask once among Grok, Cursor, or Muse before submission.
 - Raw MCP, payload, cursor, or control-plane debugging uses `$control-codex-co-engineer-agents`.
 
 Independent assignments do not share a writer path. The bound is eight. Wait once for `decision_or_attention`. Routine progress does not wake that wait. Keep the same run cursor.
@@ -28,3 +33,10 @@ After a complete candidate exists, inspect it, then say `Co-Engineer finished, a
 Never ask the user to construct tool payloads.
 
 For one-lane, multi-lane, ask-once, and provider-choice procedures, read [references/runs.md](references/runs.md) only when that case applies.
+
+For a requested model hierarchy, read [model roles](references/model-roles.md).
+Astra can own the chief role, Sol Medium can coordinate complex work, and Luna
+can handle bounded native assignments alongside external workers. Sol High is
+an optional combined chief/coordinator candidate, subject to evaluation.
+Preserve explicit choices and stock defaults; do not create another task or
+change global settings just to launch a Co-Engineer.

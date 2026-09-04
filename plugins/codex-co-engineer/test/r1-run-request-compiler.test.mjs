@@ -67,6 +67,30 @@ test('compiles a small request into server-owned identities and bounded lane dat
   assert.equal(compiled.public_summary.assignments[0].prompt, undefined);
 });
 
+test('derives access from role when omitted and still rejects an explicit mismatch', async () => {
+  const withoutAccess = request({
+    assignments: [{
+      assignment_id: 'auth-review',
+      provider: 'grok',
+      role: 'review',
+      prompt: 'Review the current auth changes.',
+      expected_duration_ms: 300_000,
+    }],
+  });
+  const compiled = await compileRunRequestV1(withoutAccess, { observeGit });
+  assert.equal(compiled.assignments[0].access, 'read_only');
+  assert.deepEqual(compiled.assignments[0].write_scope, []);
+  assert.equal(compiled.manifest.assignments[0].access, 'read_only');
+
+  await assert.rejects(
+    compileRunRequestV1({
+      ...withoutAccess,
+      assignments: [{ ...withoutAccess.assignments[0], access: 'writer' }],
+    }, { observeGit }),
+    (error) => error.code === 'role_access_mismatch',
+  );
+});
+
 test('semantic request identities are stable across object key order', async () => {
   const first = await compileRunRequestV1(request(), { observeGit });
   const second = await compileRunRequestV1({
@@ -142,4 +166,32 @@ test('cloud lanes receive an exact server-derived starting ref', async () => {
   assert.equal(compiled.assignments[0].starting_ref, HEAD_SHA);
   assert.equal(compiled.manifest.assignments[0].starting_ref, HEAD_SHA);
   assert.deepEqual(compiled.manifest.assignments[0].write_scope, []);
+});
+
+test('multiple writers accept disjoint static scope prefixes and reject overlapping ones', async () => {
+  const writer = (assignmentId, writeScope) => ({
+    assignment_id: assignmentId,
+    provider: 'grok',
+    role: 'implement',
+    access: 'write',
+    prompt: `Implement ${assignmentId}.`,
+    expected_duration_ms: 60_000,
+    write_scope: [writeScope],
+  });
+  const disjoint = await compileRunRequestV1(request({
+    run_id: 'disjoint-writers',
+    assignments: [writer('api-writer', 'src/api/**'), writer('ui-writer', 'src/ui/**')],
+  }), { observeGit });
+  assert.deepEqual(disjoint.assignments.map((entry) => entry.write_scope), [
+    ['src/api/**'],
+    ['src/ui/**'],
+  ]);
+
+  await assert.rejects(
+    compileRunRequestV1(request({
+      run_id: 'overlapping-writers',
+      assignments: [writer('src-writer', 'src/**'), writer('api-writer', 'src/api/**')],
+    }), { observeGit }),
+    (error) => error.code === 'overlapping_writer_scope',
+  );
 });

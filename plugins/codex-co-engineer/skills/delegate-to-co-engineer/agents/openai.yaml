@@ -1,7 +1,7 @@
 interface:
   display_name: "Delegating to Co-Engineer"
   short_description: "Start one bounded Co-Engineer run"
-  default_prompt: "Use $delegate-to-co-engineer to start one bounded run of isolated independent assignments."
+  default_prompt: "Use $delegate-to-co-engineer to launch the requested work with existing provider choices, one semantic submission, and one coordinated wait."
 dependencies:
   tools:
     - type: "mcp"

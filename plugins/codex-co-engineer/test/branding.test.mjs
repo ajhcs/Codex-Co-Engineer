@@ -227,25 +227,30 @@ test('README information architecture maps safe final-art slots and keeps explic
   assert.doesNotMatch(readme, /placeholder/iu);
 });
 
-test('every repository-relative README link resolves from the repository root', async () => {
-  const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  const targets = new Set();
-  for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
-    const target = match[1];
-    if (/^(?:https?:|mailto:|#)/iu.test(target)) continue;
-    targets.add(decodeURIComponent(target.split('#', 1)[0]));
-  }
-  for (const target of targets) {
-    if (target.startsWith('docs/assets/co-engineer-3.4.0/final/')) {
-      assert.match(target, /^docs\/assets\/co-engineer-3\.4\.0\/final\/[A-Za-z0-9./_-]+$/u);
-      try {
-        await access(path.resolve(REPO, target));
-      } catch (error) {
-        assert.equal(error?.code, 'ENOENT', target);
-      }
-      continue;
+test('every repository-relative README link resolves from its README location', async () => {
+  const readmes = [
+    path.join(REPO, 'README.md'),
+    path.join(ROOT, 'README.md'),
+  ];
+  for (const readmePath of readmes) {
+    const readme = await readFile(readmePath, 'utf8');
+    const readmeDirectory = path.dirname(readmePath);
+    const targets = new Set();
+    for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
+      const target = match[1];
+      if (/^(?:https?:|mailto:)/iu.test(target)) continue;
+      targets.add(decodeURIComponent(target.split('#', 1)[0]));
     }
-    await access(path.resolve(REPO, target));
+    for (const target of targets) {
+      const resolved = path.resolve(readmeDirectory, target);
+      const relative = path.relative(readmeDirectory, resolved);
+      assert.equal(
+        relative.startsWith('..') || path.isAbsolute(relative),
+        false,
+        `${readmePath}: ${target}`,
+      );
+      await access(resolved);
+    }
   }
 });
 

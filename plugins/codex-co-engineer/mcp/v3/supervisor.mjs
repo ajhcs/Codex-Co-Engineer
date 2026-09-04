@@ -1296,9 +1296,18 @@ export async function settleLocalTaskLifecycle(root, task, runtime, dependencies
   }
 
   const sleep = dependencies.sleep ?? wait;
-  const drainMs = Number.isFinite(dependencies.drainGraceMs)
-    ? dependencies.drainGraceMs
-    : PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.natural_boundary_and_lock_drain;
+  // Grant the natural worker/lock drain once, on the first terminal
+  // reconciliation. Only supervisor boundary/lock evidence proves that a
+  // prior reconciliation already waited; worker ACP/handoff cleanup does not. Repeating the grace on every
+  // readiness/status call made retained unknown receipts add two seconds
+  // apiece before any fresh inspection.
+  const reconciled = Object.hasOwn(current.cleanup ?? {}, 'boundary')
+    && Object.hasOwn(current.cleanup ?? {}, 'lock');
+  const drainMs = reconciled
+    ? 0
+    : Number.isFinite(dependencies.drainGraceMs)
+      ? dependencies.drainGraceMs
+      : PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.natural_boundary_and_lock_drain;
   if (drainMs > 0) await sleep(drainMs);
 
   let inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);

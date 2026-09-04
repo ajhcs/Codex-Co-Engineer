@@ -98,6 +98,21 @@ router.
 A longer walkthrough lives in
 [docs/co-engineer-quickstart.md](docs/co-engineer-quickstart.md).
 
+## Model roles and quick launches
+
+For difficult work, an optional hierarchy is Astra as chief engineer, Sol
+Medium as coordinator, and bounded Luna or external-provider workers. Sol
+High can be evaluated as a combined chief/coordinator for ordinary work.
+These choices belong to Codex's native agent controls; they do not change the
+provider catalog or install global model overrides. See the bundled
+[model roles and evidence](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/model-roles.md).
+
+Once installed, Codex submits a semantic `run_request` using your existing
+provider choices. Admission handles readiness and workspace preparation.
+Creating a profile, configuring another provider, or starting a separate
+manager task is not required for an ordinary launch. Actual prerequisite or
+repository-exposure decisions remain visible in the receipt.
+
 ## How a run works
 
 A run is one submission, one coordinated wait, and one verified

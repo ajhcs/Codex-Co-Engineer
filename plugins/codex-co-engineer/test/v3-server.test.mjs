@@ -127,6 +127,12 @@ test('advertises only the thin public tool surface', async () => {
   }
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.match(delegateTool.description, /property named repo/u);
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].if.anyOf, [
+    { required: ['run'] }, { required: ['run_request'] },
+  ]);
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].then.oneOf, [
+    { required: ['run'] }, { required: ['run_request'] },
+  ]);
   assert.deepEqual(delegateTool.inputSchema.allOf[0].else.required, ['task_id', 'provider', 'repo', 'prompt']);
   assert.match(delegateTool.inputSchema.properties.repo.description, /Required property named repo/u);
   assert.match(delegateTool.inputSchema.properties.repo.description, /\/absolute\/path\/to\/git-worktree/u);
@@ -149,6 +155,10 @@ test('advertises only the thin public tool surface', async () => {
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'run'));
   assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.minItems, 1);
   assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.maxItems, 8);
+  const runRequestAssignment = delegateTool.inputSchema.properties.run_request.properties.assignments.items;
+  assert.equal(runRequestAssignment.required.includes('role'), true);
+  assert.equal(runRequestAssignment.required.includes('access'), false);
+  assert.match(runRequestAssignment.properties.access.description, /derived from role/u);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
   assert.match(taskTool.description, /view=compact/u);

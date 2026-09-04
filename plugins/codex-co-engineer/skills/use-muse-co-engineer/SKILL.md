@@ -7,6 +7,11 @@ description: Delegate isolated Co-Engineer work specifically to Muse. Use when t
 
 This is one new bounded run with Muse as the chosen co-engineer. Codex remains reviewer and merge authority.
 
+Use the [installed launch path](../delegate-to-co-engineer/references/launch.md): submit the semantic request with
+existing choices and let admission perform preflight. Setup, manual worktree
+creation, and a separate coordinator are not routine launch steps. Read this
+short reference once when launching; reuse it across provider skills.
+
 If the user also named Grok or Cursor, use `$delegate-to-co-engineer` and keep every named co-engineer in that one run. Inspecting, continuing, answering, or cancelling existing work uses `$chat-with-co-engineer`. Raw MCP or control-plane debugging uses `$control-codex-co-engineer-agents`. Internal DSH or Ox slot names are not this skill.
 
 Do not rank, predict cost, or substitute Grok or Cursor. Bounded submissions
