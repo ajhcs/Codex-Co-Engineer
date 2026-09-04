@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-09-04
+
 ### Fixed
 
 - Reject future-dated repository-exposure approvals and make consent-window

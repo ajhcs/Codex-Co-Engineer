@@ -28,7 +28,7 @@ documentation does not claim a Co-Engineer UI on every Codex Desktop
 host.
 
 The stable machine identifier is `codex-co-engineer`. Current package
-notes: [docs/releases/v3.4.1.md](docs/releases/v3.4.1.md). The historical
+notes: [docs/releases/v3.4.2.md](docs/releases/v3.4.2.md). The historical
 3.3.0 notes remain available.
 
 ## Visual demo
@@ -420,7 +420,7 @@ keeps exact 3.2.1 single-task behavior.
 | answer grouped attention | `task` | one reply for the grouped decision |
 | cancel | `cancel` | `run_id` |
 
-The preferred 3.4.1 bounded-run body is the small semantic `run_request`:
+The preferred 3.4.2 bounded-run body is the small semantic `run_request`:
 
 ```json
 {

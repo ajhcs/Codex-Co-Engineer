@@ -14,9 +14,9 @@ Cursor Co-Engineer`, and `Using Muse Co-Engineer`. Cursor on this
 computer and Cursor Cloud both stay Cursor Co-Engineer in public speech.
 
 The package, plugin, and MCP server identifier is `codex-co-engineer`.
-The current source version is 3.4.1. Publication remains subject to the
+The current source version is 3.4.2. Publication remains subject to the
 exact-tree, host, and live-provider gates in the
-[3.4.1 release note](docs/releases/v3.4.1.md).
+[3.4.2 release note](docs/releases/v3.4.2.md).
 
 Any extra Co-Engineer panel is optional, feature-detected, and
 host-specific. Complete headless fallback: the Delegating/Chatting
@@ -32,7 +32,7 @@ guidance needed after the package is installed. Concise guides:
 - [Configuration](docs/configuration.md)
 - [Run tool API](docs/run-tool-api.md)
 - [Efficient dogfood workflow](docs/efficient-dogfood.md)
-- [3.4.1 release and compatibility notes](docs/releases/v3.4.1.md)
+- [3.4.2 release and compatibility notes](docs/releases/v3.4.2.md)
 
 Normal users speak ordinary language. They do not write tool payloads.
 
@@ -237,7 +237,7 @@ keep exact 3.2.1 single-task behavior. Run wait is a bounded
 `decision_or_attention` wait. See
 [the run tool API](docs/run-tool-api.md).
 
-For a bounded 3.4.1 run, `delegate` accepts the small semantic
+For a bounded 3.4.2 run, `delegate` accepts the small semantic
 `run_request` body. The server derives the clean Git identity, provider
 model, task/workspace/dispatch identities, prompt and manifest digests, and
 managed-workspace policy. Do not construct the legacy full `run` envelope or

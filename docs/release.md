@@ -5,7 +5,7 @@ The authoritative gate runs once against one exact clean local candidate:
 ```sh
 release-gate plan --repo "$PWD"
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.1-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.4.2-release-gate.json
 ```
 
 The package supports Node.js 24 and newer. The release gate is intentionally
@@ -90,8 +90,8 @@ opened. Never create an empty PR.
 
 ## GitHub Release notes
 
-The 3.4.1 GitHub Release body is
-[releases/v3.4.1.md](releases/v3.4.1.md). Keep historical
+The 3.4.2 GitHub Release body is
+[releases/v3.4.2.md](releases/v3.4.2.md). Keep historical
 [releases/v3.3.0.md](releases/v3.3.0.md),
 [releases/v3.2.1.md](releases/v3.2.1.md),
 [releases/v3.2.0.md](releases/v3.2.0.md),
@@ -104,10 +104,10 @@ Capture the exact-tree gate receipt before any later publication:
 
 ```sh
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.1-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.4.2-release-gate.json
 ```
 
 When a maintainer later publishes against an exact reviewed `main` SHA,
-use the placeholder form in [releases/v3.4.1.md](releases/v3.4.1.md)
+use the placeholder form in [releases/v3.4.2.md](releases/v3.4.2.md)
 (`EXACT_REVIEWED_MAIN_SHA`). Do not invent a tag or remote mutation from
 documentation work.

@@ -154,7 +154,7 @@ const TOOLS = [
           type: 'object',
           additionalProperties: false,
           required: ['run_id', 'repo', 'objective', 'assignments'],
-          description: '3.4.1 simple run request. The server derives Git identity, provider models, task IDs, workspaces, dispatch identities, and protected telemetry. Do not supply derived provenance fields.',
+          description: '3.4.2 simple run request. The server derives Git identity, provider models, task IDs, workspaces, dispatch identities, and protected telemetry. Do not supply derived provenance fields.',
           properties: {
             run_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{2,63}$' },
             repo: { type: 'string', description: 'Canonical absolute Git worktree path.' },

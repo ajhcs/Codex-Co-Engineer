@@ -300,7 +300,7 @@ const CONTENT_FREE = capturedFreeze({
   unknown_operation: 'The tool arguments do not map to a frozen run operation.',
   unknown_provider: 'The provider is not an accepted four-slot registry entry.',
   unknown_tool: 'The public catalog remains status, delegate, task, tasks, cancel.',
-  simple_runtime_unavailable: 'The 3.4.1 simple run runtime is unavailable.',
+  simple_runtime_unavailable: 'The 3.4.2 simple run runtime is unavailable.',
 });
 
 export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([

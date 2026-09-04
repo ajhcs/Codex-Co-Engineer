@@ -14,7 +14,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.4.1');
+  assert.equal(manifest.version, '3.4.2');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(
@@ -67,7 +67,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.4.1');
+  assert.equal(packageJson.version, '3.4.2');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),
@@ -254,7 +254,7 @@ test('every repository-relative README link resolves from its README location', 
   }
 });
 
-test('repository marketplace catalogs Codex-Co-Engineer 3.4.1', async () => {
+test('repository marketplace catalogs Codex-Co-Engineer 3.4.2', async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
@@ -262,7 +262,7 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.4.1', async () => {
   assert.equal(marketplace.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(marketplace.plugins.length, 1);
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
-  assert.equal(marketplace.plugins[0].version, '3.4.1');
+  assert.equal(marketplace.plugins[0].version, '3.4.2');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
   assert.equal(
     marketplace.interface.shortDescription,
