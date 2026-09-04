@@ -77,9 +77,23 @@ digests, child and task identities, and managed-workspace policy. Callers
 cannot provide those derived fields. A changed objective, assignment,
 provider, SHA, or scope produces a different identity.
 
+The stdio server requests repository exposure through the host's native MCP
+form. The form names the repository/base, run, and selected providers and asks
+for explicit approval to share the full repository and history for this run.
+Only the host's accepted confirmation permits admission; a model-authored
+boolean or prose reply does not. Hosts without form elicitation return an
+explicit capability blocker before any workspace or prompt dispatch.
+
+A dismissed or interrupted approval remains inspectable. To request the
+native form again for a pending run, call `task` with the same `run_id` and
+`run_reply: { "request_consent": true }`. This requests a decision; it is not
+approval. Ordinary status and wait calls never reopen the form. The existing
+opaque `approval_ref` continuation remains available to embedding hosts with
+a trusted verifier; ordinary stdio clients do not construct these references.
+
 Admission has two barriers. The server validates consent, provider and local
 boundary readiness, repository identity, every workspace, and disjoint writer
-scope before sending any prompt. During that period the public experience is
+scope before sending any prompt. Pending consent is shown as attention; workspace admission is
 `preparing`. The run can say `running` only when every required lane has
 authoritative `prompt_dispatched` evidence. A mid-dispatch failure is
 `degraded` with exact dispatched, undispatched, and uncertain lane lists.

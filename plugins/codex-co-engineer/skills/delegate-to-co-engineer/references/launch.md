@@ -21,10 +21,12 @@ semantic submission and one coordinated wait.
    `wait_until: "decision_or_attention"`, and the returned cursor. On host
    timeout, reconnect to that same run. Never submit a replacement because
    a response was slow, partial, or disconnected.
-4. If admission needs a typed approval, present the actual repository/provider
-   exposure decision and use the approval flow named by the receipt. Do not
-   fabricate an `approval_ref` or treat a provider login as approval for every
-   repository. Continue unaffected work while waiting for required input.
+4. Repository exposure uses the host's native approval form. The user accepts
+   or declines the actual repository/provider scope there. If the host cannot
+   show the form, report the capability blocker. To reopen an interrupted
+   decision, use the same run with `run_reply: { "request_consent": true }`;
+   do not resubmit or invent an `approval_ref`. Inspecting or waiting does not
+   request approval again. Continue unaffected work while input is pending.
 5. Inspect the combined diff and relevant checks before accepting the result.
    Required lanes that failed or remain unresolved prevent a verified result.
 

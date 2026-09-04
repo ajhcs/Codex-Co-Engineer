@@ -11,6 +11,10 @@ If no run exists, say chatting needs existing work and offer `$delegate-to-co-en
 
 Keep the same run cursor and the same wait. The run stays on its one aggregate `decision_or_attention` wait. Answering grouped attention is one user decision, not a second delegation and not a debate loop. Unaffected assignments keep working. When that grouped decision is required, say `Co-Engineer needs one decision from you`.
 
+For interrupted repository consent, request the host form again with the same
+`run_id` and `run_reply: { "request_consent": true }`. This only reopens the
+decision; it never supplies approval. Ordinary inspection does not re-ask.
+
 A correction or side question continues the existing objective unless the user
 changes it. Keep completed evidence and pending run IDs. Route updates only
 through a supported same-session or grouped-attention capability; if live

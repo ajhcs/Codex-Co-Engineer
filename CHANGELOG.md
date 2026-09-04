@@ -6,6 +6,10 @@
 
 ### Fixed
 
+- Wire semantic launch consent to native MCP forms, with explicit unsupported
+  host handling and same-run consent retry. Preserve pending/terminal receipts
+  and cursors; distinguish planned review work from completed evidence.
+
 - Reject future-dated repository-exposure approvals and make consent-window
   fixtures independent of today's date. Remove ambient Git/network and
   fixed-sleep dependencies from affected regression tests.
