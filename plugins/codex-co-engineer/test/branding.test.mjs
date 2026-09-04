@@ -172,7 +172,7 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.match(readme, /wait_until": "terminal"/u);
   assert.match(readme, /property `repo`/u);
   assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
-  assert.match(readme, /docs\/releases\/v3\.4\.1\.md/u);
+  assert.match(readme, /docs\/releases\/v3\.4\.2\.md/u);
   assert.match(readme, /historical\s+3\.3\.0\s+notes/u);
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
 });
