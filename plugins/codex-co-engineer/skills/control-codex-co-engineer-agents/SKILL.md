@@ -26,7 +26,7 @@ Use the five MCP tools for delegation and lifecycle control.
    CLI/worktree dependencies; `status`, dispatch preflight, and release/live
    acceptance validate the boundary from their actual MCP environment.
 3. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh`.
-4. For a new 3.4.1 bounded run, call `delegate` with the small semantic
+4. For a new bounded run, call `delegate` with the small semantic
    `run_request` body. The server derives the exact Git identity, manifest and
    prompt digests, provider model, child/workspace/dispatch identities, task
    IDs, and default managed-workspace policy. The argument shape is:
@@ -54,6 +54,14 @@ Use the five MCP tools for delegation and lifecycle control.
    Do not supply derived fields, hand-constructed digests, child IDs, or a
    manually assembled full `run` envelope. The full 3.4.0 `run` envelope
    remains accepted for compatibility, but skills do not construct it.
+
+   Repository exposure uses the host's native MCP form. Only the user's
+   accepted approval permits admission. If the receipt remains
+   `awaiting_consent` after dismissal or interruption, continue the same run
+   with `task` and `run_reply: {"request_consent": true}` to reopen the form.
+   This requests a decision; it does not grant consent. Status and waits never
+   reopen the form. Surface `consent_host_unavailable` as a host capability
+   blocker; do not invent an `approval_ref` or switch launch paths to bypass it.
 
    Call `delegate` with a stable task ID for a legacy single task, the
    absolute Git worktree path in the property named `repo`, a clear prompt,
@@ -94,7 +102,7 @@ Use the five MCP tools for delegation and lifecycle control.
    reachability before retrying.
 8. Set `create_pr` only for Cursor Cloud. Local tasks reject it; Codex
    decides whether local commits justify a PR after inspecting the handoff.
-9. Coordinate without polling. For a 3.4.1 run use one run-scoped wait:
+9. Coordinate without polling. For a bounded run use one run-scoped wait:
    `task` or `tasks` with `run_id`, `wait_until: "decision_or_attention"`,
    and the opaque run `cursor`. The adapter keeps legacy single-task and
    wait-any behavior available, but skills should use the run path for a
