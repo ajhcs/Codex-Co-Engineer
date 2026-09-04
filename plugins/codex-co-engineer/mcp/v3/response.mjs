@@ -956,7 +956,7 @@ function bucketLanes(lanes, statuses) {
 function laneHasObservedOutcome(lane) {
   const status = laneStatus(lane);
   if (status === 'planned' || status === 'prepared' || status === 'session_ready') return false;
-  if (status === 'failed_pre_prompt' && lane.prompt_dispatched !== true) return false;
+  if (lane.prompt_dispatched === false || status === 'failed_pre_prompt') return false;
   return TERMINAL_LANE_STATUSES.includes(status) || lane.prompt_dispatched === true;
 }
 
@@ -1020,26 +1020,15 @@ function projectFinalCard(receipt, lanes) {
   };
 }
 
-function observedCoordination(receipt, verified) {
+function projectCoordination(receipt, verified) {
   const hasRun = typeof receipt?.run_id === 'string' && receipt.run_id !== '';
   const operation = typeof receipt?.operation === 'string' ? receipt.operation : null;
   return {
+    aggregate_wait: EXPERIENCE_COORDINATION.aggregate_wait,
     submissions: operation === 'submit' || hasRun ? 1 : 0,
     aggregate_wait_count: operation === 'wait' ? 1 : 0,
     verified_final_decisions: verified === true ? 1 : 0,
     grouped_reply: operation === 'reply' ? 1 : 0,
-  };
-}
-
-function projectCoordination(receipt, verified) {
-  const actual = observedCoordination(receipt, verified);
-  return {
-    ...EXPERIENCE_COORDINATION,
-    submissions: actual.submissions,
-    aggregate_wait_count: actual.aggregate_wait_count,
-    verified_final_decisions: actual.verified_final_decisions,
-    grouped_reply: actual.grouped_reply,
-    actual,
   };
 }
 

@@ -79,7 +79,6 @@ test('pending repository consent stays attention and exposes a host-owned reques
   assert.equal(projected.attention.reply, null);
   assert.deepEqual(projected.attention.affected_lanes, ['review', 'writer']);
   assert.equal(projected.coordination.verified_final_decisions, 0);
-  assert.equal(projected.coordination.actual.verified_final_decisions, 0);
   assert.equal(EXPERIENCE_COORDINATION.verified_final_decisions, 1);
 });
 
@@ -126,7 +125,6 @@ test('planned tests and reviews remain absent until an observed outcome exists',
   assert.deepEqual(completed.final.tests.lanes, ['completed-tests']);
   assert.equal(completed.summary.verified_final, EXPERIENCE_PHRASES.verified_final);
   assert.equal(completed.coordination.verified_final_decisions, 1);
-  assert.equal(completed.coordination.actual.verified_final_decisions, 1);
 });
 
 test('display-only consent rendering has no reply or approval controls', async () => {
@@ -159,4 +157,13 @@ test('display-only consent rendering has no reply or approval controls', async (
   assert.equal(session.paint(projected), true);
   assert.equal(session.outbound.length, 0);
   assert.ok(Buffer.byteLength(JSON.stringify(projected), 'utf8') <= EXPERIENCE_MAX_BYTES);
+});
+
+test('cancellation before dispatch does not report a review or test result', () => {
+  const projected = projectExperience(receipt({ phase: 'cancelled', status: 'cancelled', lanes: [
+    { assignment_id: 'review', role: 'review', status: 'cancelled', prompt_dispatched: false },
+    { assignment_id: 'tests', role: 'verify', status: 'cancelled', prompt_dispatched: false },
+  ] }));
+  assert.equal(projected.final.reviews.present, false);
+  assert.equal(projected.final.tests.present, false);
 });
