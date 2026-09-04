@@ -110,7 +110,8 @@ function noDispatch(receipt) {
 
 for (const [action, approved] of [['decline', false], ['cancel', false], ['accept', false], ['accept', 'true']]) {
   test(`stdio native form ${action}/${approved} never approves repository exposure`, async () => {
-    await withClient({ elicitation: { form: {} } }, { action, content: { approved } }, async ({ repo, forms, call }) => {
+    const result = action === 'accept' ? { action, content: { approved } } : { action };
+    await withClient({ elicitation: { form: {} } }, result, async ({ repo, forms, call }) => {
       const receipt = await call('delegate', submission(repo));
       assert.equal(forms.length, 1);
       assert.notEqual(receipt.consent.status, 'approved');
