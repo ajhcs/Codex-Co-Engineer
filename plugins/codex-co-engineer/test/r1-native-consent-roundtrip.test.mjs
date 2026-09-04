@@ -48,7 +48,8 @@ async function withClient(capabilities, formResult, exercise) {
     const message = JSON.parse(line);
     if (message.method === 'elicitation/create') {
       forms.push(message);
-      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: formResult })}\n`);
+      const result = typeof formResult === 'function' ? formResult(forms.length) : formResult;
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);
       return;
     }
     const item = pending.get(message.id);
@@ -149,5 +150,24 @@ test('stdio host without form capability gives an explicit blocker without elici
     assert.equal(receipt.error.code, 'consent_host_unavailable');
     assert.equal(receipt.complete_candidate_blocked, true);
     noDispatch(receipt);
+  });
+});
+
+test('a dismissed form can be reopened explicitly on the same run', async () => {
+  const response = (attempt) => attempt === 1
+    ? { action: 'cancel' }
+    : { action: 'accept', content: { approved: true } };
+  await withClient({ elicitation: { form: {} } }, response, async ({ repo, forms, call }) => {
+    const pending = await call('delegate', submission(repo));
+    assert.equal(pending.phase, 'awaiting_consent');
+    noDispatch(pending);
+    const resumed = await call('task', {
+      run_id: pending.run_id, run_reply: { request_consent: true },
+    });
+    assert.equal(forms.length, 2);
+    assert.equal(resumed.run_id, pending.run_id);
+    assert.equal(resumed.consent.status, 'approved');
+    assert.equal(resumed.telemetry.admission_failure_stage, 'readiness');
+    noDispatch(resumed);
   });
 });
