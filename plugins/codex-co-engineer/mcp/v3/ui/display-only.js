@@ -28,8 +28,9 @@
     worktree_path: true,
     agent_argv: true,
     cli_argv: true,
+    approval_ref: true,
   };
-  var INLINE_CARDS = { run: true, final: true };
+  var INLINE_CARDS = { run: true, attention: true, final: true };
   var KNOWN_EVIDENCE_KINDS = {
     acceptance_results: true,
     artifact_integrity: true,
@@ -51,6 +52,8 @@
   var NOT_AVAILABLE = 'Not available';
   var OBJECTIVE_MAX = 512;
   var QUESTION_MAX = 320;
+  var CONSENT_MESSAGE =
+    'This run needs your approval to share the full repository with the selected co-engineers for this run.';
 
   function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, function (ch) {
@@ -289,6 +292,60 @@
     return value === true ? 'yes' : 'no';
   }
 
+  function consentRecord(experience) {
+    var attention = experience && experience.attention && typeof experience.attention === 'object'
+      ? experience.attention
+      : null;
+    var consent = attention && attention.consent && typeof attention.consent === 'object'
+      ? attention.consent
+      : null;
+    var request = consent && consent.request && typeof consent.request === 'object'
+      ? consent.request
+      : {};
+    if (!consent) return null;
+    return { consent: consent, request: request };
+  }
+
+  function consentProviderLine(providers) {
+    if (!Array.isArray(providers) || providers.length === 0) return NOT_AVAILABLE;
+    return providers.slice(0, 8).map(function (provider) {
+      return displayString(provider, 'Provider not named');
+    }).join(', ');
+  }
+
+  function renderConsentCardHtml(experience) {
+    var entry = consentRecord(experience) || { consent: {}, request: {} };
+    var consent = entry.consent;
+    var request = entry.request;
+    var status = displayString(consent.status, 'required');
+    var pending = status === 'pending' || status === 'required';
+    var message = pending ? CONSENT_MESSAGE : 'The host did not approve repository exposure for this run.';
+    return [
+      '<main>',
+      '<article class="cce-card cce-card-consent" data-cce-card="attention" data-cce-display-only="true" aria-labelledby="cce-consent-title">',
+      '<header>',
+      '<h1 id="cce-consent-title">Co-Engineer repository access</h1>',
+      '<p class="cce-phrase">Co-Engineer needs one decision from you</p>',
+      '<p class="cce-authority">' + escapeHtml(CODEX_AUTHORITY_SENTENCE) + '</p>',
+      '</header>',
+      '<section aria-labelledby="cce-consent-request-heading">',
+      '<h2 id="cce-consent-request-heading">Host-owned decision</h2>',
+      '<p data-field="consent_message">' + escapeHtml(message) + '</p>',
+      '<dl>',
+      '<div><dt>Status</dt><dd data-field="consent_status">' + escapeHtml(status) + '</dd></div>',
+      '<div><dt>Providers</dt><dd data-field="consent_providers">' + escapeHtml(consentProviderLine(request.provider_phrases || request.providers)) + '</dd></div>',
+      '<div><dt>Scope</dt><dd data-field="consent_scope">' + escapeHtml(displayString(request.scope)) + '</dd></div>',
+      '<div><dt>Duration</dt><dd data-field="consent_duration">' + escapeHtml(displayString(request.duration)) + '</dd></div>',
+      '<div><dt>Remote mutation</dt><dd data-field="consent_remote_mutation">' + escapeHtml(request.remote_mutation === false ? 'no' : NOT_AVAILABLE) + '</dd></div>',
+      '<div><dt>Repository identity</dt><dd data-field="consent_repository_identity">' + escapeHtml(displayString(request.repository_identity)) + '</dd></div>',
+      '</dl>',
+      '</section>',
+      '<p class="cce-note">Review this request in the host. This display-only card cannot send a model reply or approve repository exposure.</p>',
+      '</article>',
+      '</main>',
+    ].join('');
+  }
+
   function renderFinalCardHtml(experience) {
     var finalCard = experience && experience.final && typeof experience.final === 'object' ? experience.final : {};
     var git = finalCard.git && typeof finalCard.git === 'object' ? finalCard.git : {};
@@ -371,6 +428,7 @@
   function renderInlineCardHtml(card, experience) {
     var safe = stripOwnerOnly(experience) || {};
     if (card === 'run') return renderRunCardHtml(safe);
+    if (card === 'attention' && consentRecord(safe)) return renderConsentCardHtml(safe);
     if (card === 'final') return renderFinalCardHtml(safe);
     return '';
   }
@@ -442,6 +500,22 @@
         evidence_facts: String(Number.isInteger(evidence.fact_count) ? evidence.fact_count : 0),
         evidence_claims: String(Number.isInteger(evidence.claim_count) ? evidence.claim_count : 0),
         evidence_kinds: kinds.length > 0 ? kinds.join(', ') : NOT_AVAILABLE,
+      };
+    }
+    if (card === 'attention' && consentRecord(safe)) {
+      var consentEntry = consentRecord(safe);
+      var consent = consentEntry.consent;
+      var consentRequest = consentEntry.request;
+      return {
+        consent_message: consent.status === 'pending' || consent.status === 'required'
+          ? CONSENT_MESSAGE
+          : 'The host did not approve repository exposure for this run.',
+        consent_status: displayString(consent.status, 'required'),
+        consent_providers: consentProviderLine(consentRequest.provider_phrases || consentRequest.providers),
+        consent_scope: displayString(consentRequest.scope),
+        consent_duration: displayString(consentRequest.duration),
+        consent_remote_mutation: consentRequest.remote_mutation === false ? 'no' : NOT_AVAILABLE,
+        consent_repository_identity: displayString(consentRequest.repository_identity),
       };
     }
     return {};
@@ -618,6 +692,7 @@
     function paint(experience) {
       var safe = stripOwnerOnly(experience);
       if (!safe || safe.card !== card) return false;
+      if (card === 'attention' && !consentRecord(safe)) return false;
       painted.push(safe.card);
       if (typeof opts.applyHtml === 'function') opts.applyHtml(renderInlineCardHtml(card, safe));
       if (opts.root && opts.document) paintDom(opts.document, opts.root, card, safe);
@@ -719,6 +794,7 @@
     redactDisplay: redactDisplay,
     renderFinalCardHtml: renderFinalCardHtml,
     renderInlineCardHtml: renderInlineCardHtml,
+    renderConsentCardHtml: renderConsentCardHtml,
     renderRunCardHtml: renderRunCardHtml,
     stripOwnerOnly: stripOwnerOnly,
     unwrapExperience: unwrapExperience,
