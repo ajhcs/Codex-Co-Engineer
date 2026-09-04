@@ -49,7 +49,9 @@ async function withClient(capabilities, formResult, exercise) {
     if (message.method === 'elicitation/create') {
       forms.push(message);
       const result = typeof formResult === 'function' ? formResult(forms.length) : formResult;
-      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);
+      if (result !== undefined) {
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);
+      }
       return;
     }
     const item = pending.get(message.id);
@@ -170,5 +172,23 @@ test('a dismissed form can be reopened explicitly on the same run', async () => 
     assert.equal(resumed.consent.status, 'approved');
     assert.equal(resumed.telemetry.admission_failure_stage, 'readiness');
     noDispatch(resumed);
+  });
+});
+
+test('status and cancellation remain usable while a native form is open', async () => {
+  let formOpened;
+  const opened = new Promise((resolve) => { formOpened = resolve; });
+  await withClient({ elicitation: { form: {} } }, () => { formOpened(); }, async ({ repo, call }) => {
+    const submissionResult = call('delegate', submission(repo));
+    await opened;
+    const pending = await call('status', { run_id: 'native-consent-roundtrip' });
+    assert.equal(pending.phase, 'awaiting_consent');
+    noDispatch(pending);
+    const cancelled = await call('cancel', { run_id: pending.run_id });
+    assert.equal(cancelled.phase, 'cancelled');
+    noDispatch(cancelled);
+    noDispatch(await submissionResult);
+    const terminal = await call('status', { run_id: pending.run_id });
+    assert.equal(terminal.phase, 'cancelled');
   });
 });

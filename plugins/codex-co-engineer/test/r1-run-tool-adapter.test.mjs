@@ -697,3 +697,143 @@ test('durable restart fallback keeps unconfirmed cancel unresolved/unsafe', asyn
     await rm(first.root, { recursive: true, force: true });
   }
 });
+
+
+test('simple receipts preserve cursor/revision and wait metadata through the bounded adapter', async () => {
+  const runId = 'adapter-continuity';
+  const makeReceipt = ({
+    status = 'running',
+    phase = status,
+    revision = 11,
+    cursor = '11',
+    wait_until,
+    waited_ms,
+  } = {}) => ({
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: runId,
+    phase,
+    status,
+    revision,
+    cursor,
+    assignment_count: 1,
+    lanes: [{
+      assignment_id: 'adapter-lane',
+      task_id: 'adapter-task',
+      provider: 'grok',
+      model: 'grok-4',
+      role: 'implement',
+      access: 'write',
+      required: true,
+      phase,
+      status,
+      prompt_dispatched: true,
+    }],
+    complete_candidate_blocked: false,
+    attention: null,
+    consent: null,
+    admission: null,
+    dispatched_assignment_ids: ['adapter-lane'],
+    undispatched_assignment_ids: [],
+    dispatch_uncertain_assignment_ids: [],
+    authoritative_required_dispatch: true,
+    ...(wait_until === undefined ? {} : { wait_until }),
+    ...(waited_ms === undefined ? {} : { waited_ms }),
+  });
+  const replyCalls = [];
+  const legacy = createAdapter();
+  const simpleRuntime = {
+    hasRun: (value) => value === runId,
+    submitRunRequest: async () => makeReceipt(),
+    inspectRun: async () => makeReceipt(),
+    resumeRun: async () => makeReceipt(),
+    replyRun: async (value, options) => {
+      replyCalls.push({ value, options });
+      return makeReceipt();
+    },
+    cancelRun: async () => makeReceipt({ status: 'cancelled', phase: 'cancelled' }),
+    waitRun: async (value) => makeReceipt({
+      wait_until: value.wait_until,
+      waited_ms: 17,
+    }),
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+
+  const status = await adapter.dispatch('status', { run_id: runId });
+  assert.equal(status.revision, 11);
+  assert.equal(status.cursor, '11');
+  assert.equal(status.complete_candidate_blocked, false);
+
+  const waited = await adapter.dispatch('task', {
+    run_id: runId,
+    cursor: '10',
+    wait_until: 'terminal',
+    wait_ms: 0,
+  });
+  assert.equal(waited.revision, 11);
+  assert.equal(waited.cursor, '11');
+  assert.equal(waited.wait_until, 'terminal');
+  assert.equal(waited.waited_ms, 17);
+
+  const controller = new AbortController();
+  await adapter.dispatch('task', {
+    run_id: runId,
+    run_reply: { request_consent: true },
+  }, { signal: controller.signal });
+  assert.deepEqual(replyCalls[0].value, {
+    run_id: runId,
+    request_consent: true,
+  });
+  assert.equal(replyCalls[0].options.signal, controller.signal);
+
+  const invalid = await errorOf(() => adapter.dispatch('task', {
+    run_id: runId,
+    run_reply: { request_consent: false },
+  }));
+  assert.equal(invalid.code, 'invalid_format');
+
+  const mixed = await errorOf(() => adapter.dispatch('task', {
+    run_id: runId,
+    run_reply: { request_consent: true, approval_ref: 'ambiguous' },
+  }));
+  assert.equal(mixed.code, 'mixed_run_operation');
+});
+
+test('undefined simple runtime receipts fail closed as blocked unresolved output', async () => {
+  const runId = 'malformed-runtime-receipt';
+  const legacy = createAdapter();
+  const simpleRuntime = {
+    hasRun: (value) => value === runId,
+    submitRunRequest: async () => undefined,
+    inspectRun: async () => undefined,
+    resumeRun: async () => undefined,
+    replyRun: async () => undefined,
+    cancelRun: async () => undefined,
+    waitRun: async () => undefined,
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+  const submitted = await adapter.dispatch('delegate', {
+    run_request: {
+      run_id: runId,
+      repo: '/tmp/repo',
+      objective: 'Defend malformed receipts.',
+      assignments: [{
+        assignment_id: 'malformed-lane',
+        provider: 'grok',
+        role: 'implement',
+        access: 'read',
+        prompt: 'Synthetic only.',
+      }],
+    },
+  });
+  const inspected = await adapter.dispatch('status', { run_id: runId });
+
+  for (const receipt of [submitted, inspected]) {
+    assert.equal(receipt.run_id, runId);
+    assert.equal(receipt.status, 'unresolved');
+    assert.equal(receipt.phase, 'unresolved');
+    assert.equal(receipt.complete_candidate_blocked, true);
+    assert.equal(receipt.error.code, 'durable_state_mismatch');
+    assert.deepEqual(receipt.lanes, []);
+  }
+});

@@ -333,6 +333,10 @@ test('cancellation before consent or prompt dispatch is provider-free', async ()
   assert.equal(cancelled.cancel_requested, true);
   assert.deepEqual(calls.cancel, []);
   assert.equal(cancelled.lanes.every((lane) => lane.phase === 'cancelled'), true);
+  assert.equal(cancelled.lanes.every((lane) => lane.handoff?.worktree === null), true);
+  assert.deepEqual(cancelled.lanes[0].handoff.safe_next_actions, [
+    'Review the run receipt and provider outcome.',
+  ]);
 });
 
 test('pre-authorized receipt access is satisfied without user attention and without replay', async () => {
@@ -446,4 +450,163 @@ test('deadline reconciliation returns an evidence-bearing partial handoff', asyn
   assert.equal(lane.handoff.commits[0], 'd'.repeat(40));
   assert.equal(lane.handoff.recovery_classification, 'timed_out_with_partial_work');
   assert.match(lane.handoff.safe_next_actions.join(' '), /review/i);
+});
+
+
+test('consent-pending inspect and wait preserve the authoritative cursor and revision', async () => {
+  const { dependencies } = baseDependencies();
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const pending = await runtime.submitRunRequest(request({ run_id: 'pending-receipt' }));
+
+  assert.equal(pending.phase, 'awaiting_consent');
+  assert.equal(pending.consent.status, 'required');
+  assert.equal(typeof pending.cursor, 'string');
+  assert.equal(Number.isSafeInteger(pending.revision), true);
+
+  const inspected = await runtime.inspectRun({ run_id: 'pending-receipt' });
+  assert.equal(inspected.phase, 'awaiting_consent');
+  assert.equal(inspected.cursor, pending.cursor);
+  assert.equal(inspected.revision, pending.revision);
+
+  const omitted = await runtime.waitRun({ run_id: 'pending-receipt', wait_ms: 0 });
+  assert.equal(omitted.phase, 'awaiting_consent');
+  assert.equal(omitted.cursor, pending.cursor);
+  assert.equal(omitted.revision, pending.revision);
+  assert.equal(omitted.wait_until, 'decision_or_attention');
+  assert.equal(omitted.waited_ms, 0);
+
+  const provided = await runtime.waitRun({
+    run_id: 'pending-receipt',
+    cursor: pending.cursor,
+    wait_until: 'terminal',
+    wait_ms: 0,
+  });
+  assert.equal(provided.phase, 'awaiting_consent');
+  assert.equal(provided.cursor, pending.cursor);
+  assert.equal(provided.revision, pending.revision);
+  assert.equal(provided.wait_until, 'terminal');
+  assert.equal(provided.waited_ms, 0);
+});
+
+test('terminal inspect and wait remain stable across repeated reads', async () => {
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    inspectLane: async () => ({ status: 'completed', cursor: 'terminal-1' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  await runtime.submitRunRequest(request({ run_id: 'terminal-receipt' }));
+
+  const first = await runtime.inspectRun({ run_id: 'terminal-receipt' });
+  const second = await runtime.inspectRun({ run_id: 'terminal-receipt' });
+  const waited = await runtime.waitRun({
+    run_id: 'terminal-receipt',
+    cursor: first.cursor,
+    wait_until: 'terminal',
+    wait_ms: 0,
+  });
+
+  assert.equal(first.phase, 'completed');
+  assert.equal(second.phase, 'completed');
+  assert.equal(second.cursor, first.cursor);
+  assert.equal(second.revision, first.revision);
+  assert.equal(waited.phase, 'completed');
+  assert.equal(waited.cursor, first.cursor);
+  assert.equal(waited.revision, first.revision);
+  assert.equal(waited.wait_until, 'terminal');
+  assert.equal(waited.waited_ms, 0);
+});
+
+test('native consent continuation carries the signal and admits only after callback approval', async () => {
+  const callbackOptions = [];
+  const { dependencies } = baseDependencies({
+    requestConsent: async (_compiled, options) => {
+      callbackOptions.push(options);
+      return callbackOptions.length === 1
+        ? { status: 'blocked', code: 'consent_cancelled' }
+        : { status: 'approved' };
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const pending = await runtime.submitRunRequest(request({ run_id: 'consent-continuation' }));
+  const controller = new AbortController();
+  const resumed = await runtime.replyRun(
+    { run_id: 'consent-continuation', request_consent: true },
+    { signal: controller.signal },
+  );
+
+  assert.equal(pending.phase, 'awaiting_consent');
+  assert.equal(pending.consent.status, 'blocked');
+  assert.equal(pending.error.code, 'consent_cancelled');
+  assert.equal(resumed.phase, 'running');
+  assert.equal(callbackOptions.length, 2);
+  assert.equal(callbackOptions[1].signal, controller.signal);
+});
+
+test('consent approval resolving after abort never admits or dispatches', async () => {
+  const controller = new AbortController();
+  const { calls, dependencies } = baseDependencies({
+    requestConsent: async (_compiled, options) => {
+      assert.equal(options.signal, controller.signal);
+      controller.abort();
+      return { status: 'approved' };
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const receipt = await runtime.submitRunRequest(
+    request({ run_id: 'aborted-consent' }),
+    { signal: controller.signal },
+  );
+
+  assert.equal(receipt.phase, 'awaiting_consent');
+  assert.equal(receipt.consent.status, 'blocked');
+  assert.equal(receipt.error.code, 'consent_request_aborted');
+  assert.deepEqual(calls.prepare, []);
+  assert.deepEqual(calls.dispatch, []);
+});
+
+test('blocked native consent preserves its exact allowlisted reason code', async () => {
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'blocked', code: 'consent_declined' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const receipt = await runtime.submitRunRequest(request({ run_id: 'declined-consent' }));
+
+  assert.equal(receipt.phase, 'failed');
+  assert.equal(receipt.consent.status, 'blocked');
+  assert.equal(receipt.error.code, 'consent_declined');
+});
+
+
+test('pending consent remains inspectable while the native callback is still open', async () => {
+  let callbackStarted;
+  const callbackStartedPromise = new Promise((resolve) => {
+    callbackStarted = resolve;
+  });
+  let resolveCallback;
+  const callbackResult = new Promise((resolve) => {
+    resolveCallback = resolve;
+  });
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => {
+      callbackStarted();
+      return callbackResult;
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitting = runtime.submitRunRequest(request({ run_id: 'deferred-consent' }));
+  await callbackStartedPromise;
+
+  const inspected = await Promise.race([
+    runtime.inspectRun({ run_id: 'deferred-consent' }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('inspect remained queued')), 100)),
+  ]);
+  const waited = await runtime.waitRun({ run_id: 'deferred-consent', wait_ms: 0 });
+  assert.equal(inspected.phase, 'awaiting_consent');
+  assert.equal(waited.phase, 'awaiting_consent');
+  assert.equal(inspected.cursor, waited.cursor);
+  assert.equal(inspected.revision, waited.revision);
+
+  resolveCallback({ status: 'required' });
+  const submitted = await submitting;
+  assert.equal(submitted.phase, 'awaiting_consent');
 });

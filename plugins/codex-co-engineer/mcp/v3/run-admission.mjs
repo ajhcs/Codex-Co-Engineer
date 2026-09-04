@@ -130,6 +130,19 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const CURSOR_PATTERN = /^\d{1,16}$/u;
 const MAX_WAIT_MS = 14_400_000;
 const POLL_MS = 50;
+const SAFE_CONSENT_ERROR_CODES = capturedFreeze([
+  'consent_host_unavailable',
+  'consent_declined',
+  'consent_cancelled',
+  'consent_timed_out',
+  'consent_response_invalid',
+  'consent_request_aborted',
+]);
+const RETRYABLE_CONSENT_ERROR_CODES = capturedFreeze([
+  'consent_cancelled',
+  'consent_timed_out',
+  'consent_request_aborted',
+]);
 const SAFE_ATTENTION_CAPABILITIES = capturedFreeze([
   'read_run_receipts', 'read_provider_logs', 'read_own_worktree',
 ]);
@@ -591,10 +604,16 @@ function commitList(value) {
 }
 
 function handoffFallback(record, lane, workspace = null, inspection = null) {
+  const worktree = workspace?.worktree_path
+    ?? workspace?.path
+    ?? inspection?.worktree_path
+    ?? inspection?.worktree
+    ?? null;
+  const retainedWorktree = typeof worktree === 'string' && worktree.length > 0;
   return {
     schema: 'codex-co-engineer.partial-handoff.v1',
     assignment_id: lane.assignment_id,
-    worktree: workspace?.worktree_path ?? workspace?.path ?? null,
+    worktree: retainedWorktree ? worktree : null,
     branch: workspace?.branch ?? null,
     starting_sha: workspace?.start_sha ?? workspace?.starting_sha ?? record.compiled.git?.base_sha ?? null,
     current_head: inspection?.current_head ?? inspection?.head_sha ?? workspace?.current_head ?? null,
@@ -605,12 +624,16 @@ function handoffFallback(record, lane, workspace = null, inspection = null) {
     partial_diff: inspection?.partial_diff === true || changedFiles(inspection?.changed_files).length > 0,
     last_acknowledged_provider_event: inspection?.last_acknowledged_provider_event ?? null,
     recovery_classification: lane.recovery_classification ?? 'no_recovery_needed',
-    safe_next_actions: ['Review the retained worktree and handoff evidence.'],
+    safe_next_actions: retainedWorktree
+      ? ['Review the retained worktree and handoff evidence.']
+      : ['Review the run receipt and provider outcome.'],
   };
 }
 
 function boundedHandoff(value, fallback) {
   const candidate = value && typeof value === 'object' ? { ...fallback, ...value } : fallback;
+  const retainedWorktree = typeof fallback?.worktree === 'string' && fallback.worktree.length > 0;
+  if (!retainedWorktree) candidate.worktree = null;
   candidate.changed_files = changedFiles(candidate.changed_files);
   candidate.commits = commitList(candidate.commits);
   candidate.no_commit = candidate.no_commit === true || candidate.commits.length === 0;
@@ -618,6 +641,11 @@ function boundedHandoff(value, fallback) {
   candidate.safe_next_actions = capturedIsArray(candidate.safe_next_actions)
     ? candidate.safe_next_actions.filter((entry) => typeof entry === 'string').slice(0, RUN_ADMISSION_CAPS.max_next_actions)
     : fallback.safe_next_actions;
+  if (!retainedWorktree) {
+    // The fallback is the only authoritative description of what remains
+    // when admission stopped before a workspace was retained.
+    candidate.safe_next_actions = fallback.safe_next_actions;
+  }
   const text = JSON.stringify(candidate);
   if (Buffer.byteLength(text, 'utf8') <= RUN_ADMISSION_CAPS.max_handoff_bytes) return freezeData(candidate);
   candidate.changed_files = candidate.changed_files.slice(0, 16);
@@ -720,6 +748,41 @@ function serializeConsentResponse(value) {
     expires_at: typeof value.expires_at === 'string' ? value.expires_at : null,
     approved_at: typeof value.approved_at === 'string' ? value.approved_at : null,
   };
+}
+
+function consentErrorCode(value, fallback = 'consent_response_invalid') {
+  const candidates = [
+    value?.code,
+    value?.reason,
+    value?.error?.code,
+    value?.error?.reason,
+  ];
+  for (const candidate of candidates) {
+    if (SAFE_CONSENT_ERROR_CODES.includes(candidate)) return candidate;
+  }
+  return fallback;
+}
+
+function consentRequestValue(compiled, value) {
+  if (value === undefined || value === null) return publicConsentRequest(compiled);
+  try {
+    assertNotProxy(value, 'consent.request');
+    assertPlainObject(value, 'invalid_type', 'consent.request', 'Consent request');
+    assertDirectJsonClosure(value, 'consent.request');
+    return freezeData(value);
+  } catch {
+    return publicConsentRequest(compiled);
+  }
+}
+
+function isConsentApproved(value) {
+  return value?.approved === true || value?.status === 'approved';
+}
+
+function isConsentPending(value) {
+  return value?.status === 'required'
+    || value?.status === 'pending'
+    || value?.status === 'awaiting_consent';
 }
 
 function validConsentWindow(consent, clock) {
@@ -933,31 +996,85 @@ export function createRunAdmissionRuntime(overrides = {}) {
     return receipt(record);
   }
 
-  async function requestConsent(record) {
-    try {
-      const response = await injected.requestConsent(record.compiled);
-      if (response?.status === 'approved' || response?.approved === true) {
-        record.consent_status = 'approved';
-        return true;
-      }
-      if (response?.status === 'blocked') {
-        record.consent_status = 'blocked';
-        record.error = cloneError({ code: 'repository_exposure_consent_blocked' });
-        await failAdmission(record, 'consent', { code: 'repository_exposure_consent_blocked' });
-        return false;
-      }
-      record.consent_request = response?.request ?? publicConsentRequest(record.compiled);
-      record.consent_status = 'required';
-      record.phase = 'awaiting_consent';
-      bump(record);
-      return false;
-    } catch (error) {
+  async function requestConsent(record, options = {}) {
+    const signal = options?.signal;
+    // Establish the pending state before entering a host callback. Native
+    // form callbacks may wait for a user decision or outlive this MCP call;
+    // the durable record must therefore expose the exact request first.
+    record.consent_request = publicConsentRequest(record.compiled);
+    record.consent_status = 'required';
+    record.phase = 'awaiting_consent';
+    record.error = null;
+    bump(record);
+    await persist(record);
+
+    if (signal?.aborted) {
       record.consent_status = 'blocked';
-      record.error = cloneError({ code: 'consent_host_unavailable' });
-      record.phase = 'awaiting_consent';
+      record.error = cloneError({ code: 'consent_request_aborted' });
       bump(record);
+      await persist(record);
       return false;
     }
+
+    let response;
+    try {
+      response = await injected.requestConsent(record.compiled, { signal });
+    } catch (error) {
+      const code = signal?.aborted
+        ? 'consent_request_aborted'
+        : consentErrorCode(error, 'consent_host_unavailable');
+      record.consent_status = 'blocked';
+      record.error = cloneError({ code });
+      // A transport/host failure leaves the run reopenable. An abort is also
+      // request scoped, so both retain the pending consent request.
+      bump(record);
+      await persist(record);
+      return false;
+    }
+
+    // A callback can resolve with approval after its owning MCP request was
+    // cancelled. Never cross the admission barrier after that cancellation.
+    if (signal?.aborted) {
+      record.consent_status = 'blocked';
+      record.error = cloneError({ code: 'consent_request_aborted' });
+      bump(record);
+      await persist(record);
+      return false;
+    }
+
+    if (isConsentApproved(response)) {
+      record.consent_status = 'approved';
+      record.consent_request = null;
+      record.error = null;
+      return true;
+    }
+    if (isConsentPending(response)) {
+      record.consent_request = consentRequestValue(record.compiled, response?.request);
+      record.consent_status = 'required';
+      record.phase = 'awaiting_consent';
+      const code = consentErrorCode(response, null);
+      record.error = code === null ? null : cloneError({ code });
+      bump(record);
+      await persist(record);
+      return false;
+    }
+
+    const code = consentErrorCode(response);
+    record.consent_status = 'blocked';
+    record.error = cloneError({ code });
+    if (RETRYABLE_CONSENT_ERROR_CODES.includes(code)) {
+      // Dismissal, timeout, and request-scoped abort leave the same run
+      // reopenable. Preserve the blocked reason while retaining the pending
+      // public request for an explicit native retry.
+      record.phase = 'awaiting_consent';
+      bump(record);
+      await persist(record);
+      return false;
+    }
+    // Explicit decline/host responses are terminal admission failures. Keep
+    // their safe reason code on the authoritative receipt.
+    await failAdmission(record, 'consent', { code });
+    return false;
   }
 
   async function admit(record) {
@@ -1201,7 +1318,11 @@ export function createRunAdmissionRuntime(overrides = {}) {
   }
 
   async function reconcile(record) {
-    if (isTerminalRun(record) || record.phase === 'awaiting_consent') return;
+    // Inspection is a read operation and must always return the authoritative
+    // snapshot, including durable terminal and consent-pending records. An
+    // undefined result here makes waiters lose their cursor/phase and lets the
+    // adapter manufacture an empty success receipt.
+    if (isTerminalRun(record) || record.phase === 'awaiting_consent') return receipt(record);
     const active = record.lanes.filter((lane) => lane.prompt_dispatched === true && !isTerminalLane(lane));
     for (const lane of active) {
       try {
@@ -1363,7 +1484,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
       records.set(runId, record);
       bump(record);
       await persist(record);
-      const consented = await requestConsent(record);
+      const consented = await requestConsent(record, options);
       await persist(record);
       if (!consented) return receipt(record);
       return admit(record);
@@ -1376,6 +1497,10 @@ export function createRunAdmissionRuntime(overrides = {}) {
     const runId = requiredString(parsed, 'run_id', 'run_id', (value) => RUN_ID_PATTERN.test(value));
     const record = await loadRecord(runId);
     if (!record) admissionError('run_not_found', 'run_id', 'The requested run is not known to this server.');
+    // A native consent callback may keep submitRunRequest queued while the
+    // durable record is already awaiting a decision. Read snapshots directly
+    // so status/wait remain usable during that host interaction.
+    if (isTerminalRun(record) || record.phase === 'awaiting_consent') return receipt(record);
     return enqueue(runId, async () => reconcile(record));
   }
 
@@ -1392,16 +1517,29 @@ export function createRunAdmissionRuntime(overrides = {}) {
     });
   }
 
-  async function replyRun(request) {
+  async function replyRun(request, options = {}) {
     const parsed = ownObject(request, 'request');
-    assertKeys(parsed, ['run_id', 'approval_ref', 'attention_reply'], 'request');
+    assertKeys(parsed, ['run_id', 'approval_ref', 'attention_reply', 'request_consent'], 'request');
     const runId = requiredString(parsed, 'run_id', 'run_id', (value) => RUN_ID_PATTERN.test(value));
     const record = await loadRecord(runId);
     if (!record) admissionError('run_not_found', 'run_id', 'The requested run is not known to this server.');
     return enqueue(runId, async () => {
+      const requestConsentAgain = capturedHasOwn(parsed, 'request_consent');
+      if (requestConsentAgain && parsed.request_consent !== true) {
+        admissionError('invalid_format', 'request_consent', 'A consent continuation must be exactly true.');
+      }
+      if (requestConsentAgain && (capturedHasOwn(parsed, 'approval_ref')
+        || capturedHasOwn(parsed, 'attention_reply'))) {
+        admissionError('mixed_run_operation', 'request', 'Consent continuation cannot be combined with another reply.');
+      }
       if (record.cancel_requested || record.phase === 'cancelled') return receipt(record);
       const approvalRef = optionalString(parsed, 'approval_ref', 'approval_ref');
       if (record.phase === 'awaiting_consent') {
+        if (requestConsentAgain) {
+          const consented = await requestConsent(record, options);
+          if (!consented) return receipt(record);
+          return admit(record);
+        }
         if (!approvalRef) {
           record.error = cloneError({ code: 'approval_ref_required' });
           bump(record);
@@ -1433,6 +1571,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
         record.error = null;
         return admit(record);
       }
+      if (requestConsentAgain) return receipt(record);
       if (capturedHasOwn(parsed, 'attention_reply')) {
         let delivered = false;
         try {

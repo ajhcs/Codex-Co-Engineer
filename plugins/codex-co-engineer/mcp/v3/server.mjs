@@ -47,6 +47,7 @@ import {
 import {
   classifyRunToolCall,
 } from './run-tool-adapter.mjs';
+import { createNativeConsentTransport } from './consent.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
@@ -309,16 +310,28 @@ const TOOLS = [
         run_reply: {
           type: 'object',
           additionalProperties: false,
-          description: 'Exactly-once run attention reply, or a typed repository-consent continuation. Do not mix with 3.2.1 task.reply.',
+          description: 'Exactly-once run attention reply, a host approval reference, or a typed repository-consent continuation. Do not mix alternatives or 3.2.1 task.reply.',
           properties: {
             approval_ref: { type: 'string', minLength: 1, maxLength: 4096, description: 'Opaque host-minted repository-exposure approval reference. It is bound to this run and never emitted in telemetry.' },
             batch_id: { type: 'string', minLength: 1, maxLength: 128 },
             expected_revision: { type: 'integer', minimum: 0 },
             reply: { type: 'object' },
+            request_consent: { type: 'boolean', const: true, description: 'Ask the host to reopen the native repository-access form for this run.' },
           },
-          anyOf: [
-            { required: ['batch_id', 'reply'] },
-            { required: ['approval_ref'] },
+          oneOf: [
+            {
+              required: ['batch_id', 'reply'],
+              not: { anyOf: [{ required: ['approval_ref'] }, { required: ['request_consent'] }] },
+            },
+            {
+              required: ['approval_ref'],
+              not: { anyOf: [{ required: ['batch_id'] }, { required: ['expected_revision'] }, { required: ['reply'] }, { required: ['request_consent'] }] },
+            },
+            {
+              required: ['request_consent'],
+              properties: { request_consent: { const: true } },
+              not: { anyOf: [{ required: ['approval_ref'] }, { required: ['batch_id'] }, { required: ['expected_revision'] }, { required: ['reply'] }] },
+            },
           ],
         },
       },
@@ -538,7 +551,13 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
   const root = stateRoot();
   const classified = classifyRunToolCall(name, args);
   if (classified.mode === 'run') {
-    const value = await invokeRunTool(root, name, args, { signal });
+    if (name === 'cancel' && typeof args?.run_id === 'string') {
+      nativeConsent.cancelRun(args.run_id);
+    }
+    const value = await invokeRunTool(root, name, args, {
+      signal,
+      requestConsent: nativeConsent.requestConsent,
+    });
     if (value?.mode === 'legacy') {
       // Fall through only when classification and dispatch disagree; omission stays 3.2.1.
     } else {
@@ -623,11 +642,19 @@ function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+const nativeConsent = createNativeConsentTransport({
+  send,
+  getCapabilities: () => clientCapabilities,
+  getProtocolVersion: () => negotiated,
+});
+
 async function handle(message) {
   if (!message || message.jsonrpc !== '2.0') return;
+  if (nativeConsent.handleMessage(message)) return;
   if (message.method === 'notifications/initialized') return;
   if (message.method === 'notifications/cancelled') {
     const requestId = message.params?.requestId ?? message.params?.id;
+    nativeConsent.cancelRequest(requestId);
     inflight.get(requestId)?.abort();
     return;
   }
@@ -725,4 +752,7 @@ input.on('line', (line) => {
   handle(message).catch((error) => {
     if (message?.id !== undefined) send({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: error?.message ?? 'Internal error' } });
   });
+});
+input.on('close', () => {
+  nativeConsent.close('disconnect');
 });

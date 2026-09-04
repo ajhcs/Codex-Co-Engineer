@@ -146,15 +146,16 @@ export const RUN_ASSIGNMENT_RUNTIME_KEYS = capturedFreeze([
 ]);
 export const ATTENTION_REQUEST_KEYS = capturedFreeze(['expected_revision', 'items']);
 export const RUN_REPLY_KEYS = capturedFreeze([
-  'approval_ref', 'batch_id', 'expected_revision', 'reply',
+  'approval_ref', 'batch_id', 'expected_revision', 'reply', 'request_consent',
 ]);
 export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'audience', 'candidate', 'checks',
   'cleanup', 'complete_candidate_blocked', 'decision_or_attention',
   'dispatch_uncertain_assignment_ids', 'dispatched_assignment_ids',
-  'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
+  'consent', 'cursor', 'error', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
+  'revision',
   'remote_mutated', 'run_id', 'schema', 'side_effects', 'status', 'tool',
-  'undispatched_assignment_ids', 'version', 'wake',
+  'undispatched_assignment_ids', 'version', 'wait_until', 'waited_ms', 'wake',
 ]);
 
 export const RUN_TOOL_ADAPTER_CHECKS = capturedFreeze([
@@ -1034,7 +1035,77 @@ function byteLength(value) {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask, wakeRequested = false) {
+function malformedRuntimeReceipt(runId) {
+  return {
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: typeof runId === 'string' ? runId : null,
+    phase: 'unresolved',
+    status: 'unresolved',
+    revision: null,
+    cursor: null,
+    assignment_count: 0,
+    lanes: [],
+    complete_candidate_blocked: true,
+    error: {
+      code: 'durable_state_mismatch',
+      message: CONTENT_FREE.durable_state_mismatch,
+    },
+    attention: null,
+    consent: null,
+    admission: null,
+    dispatched_assignment_ids: [],
+    undispatched_assignment_ids: [],
+    dispatch_uncertain_assignment_ids: [],
+    authoritative_required_dispatch: false,
+    already_terminal: false,
+    telemetry: null,
+    cleanup: null,
+  };
+}
+
+function isRuntimeReceipt(value, expectedRunId) {
+  if (value === undefined || value === null || typeof value !== 'object'
+    || ARRAY_IS_ARRAY(value) || IS_PROXY(value)) return false;
+  if (typeof value.run_id !== 'string'
+    || (typeof expectedRunId === 'string' && value.run_id !== expectedRunId)) return false;
+  if (!ARRAY_IS_ARRAY(value.lanes)
+    || value.lanes.length < MIN_ASSIGNMENTS
+    || value.lanes.length > MAX_ASSIGNMENTS) return false;
+  for (const lane of value.lanes) {
+    if (lane === null || typeof lane !== 'object'
+      || ARRAY_IS_ARRAY(lane) || IS_PROXY(lane)
+      || typeof lane.assignment_id !== 'string'
+      || lane.assignment_id.length === 0
+      || typeof lane.task_id !== 'string'
+      || lane.task_id.length === 0
+      || (lane.status !== undefined && typeof lane.status !== 'string')
+      || (lane.phase !== undefined && typeof lane.phase !== 'string')
+      || (lane.status === undefined && lane.phase === undefined)) return false;
+  }
+  if (value.assignment_count !== undefined
+    && (!Number.isSafeInteger(value.assignment_count)
+      || value.assignment_count < 0
+      || value.assignment_count !== value.lanes.length)) return false;
+  if (value.status !== undefined && (typeof value.status !== 'string' || value.status.length === 0)) return false;
+  if (value.phase !== undefined && (typeof value.phase !== 'string' || value.phase.length === 0)) return false;
+  if (value.status === undefined && value.phase === undefined) return false;
+  if (value.revision !== undefined && value.revision !== null
+    && (!Number.isSafeInteger(value.revision) || value.revision < 0)) return false;
+  if (value.cursor !== undefined && value.cursor !== null
+    && typeof value.cursor !== 'string'
+    && (typeof value.cursor !== 'object' || ARRAY_IS_ARRAY(value.cursor) || IS_PROXY(value.cursor))) return false;
+  if (value.schema === 'codex-co-engineer.run-admission.v1'
+    && typeof value.cursor === 'string'
+    && !/^\d{1,16}$/u.test(value.cursor)) return false;
+  return true;
+}
+
+function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
+  wakeRequested = false, expectedRunId = null) {
+  if (!isRuntimeReceipt(runtimeReceipt, expectedRunId)) {
+    runtimeReceipt = malformedRuntimeReceipt(expectedRunId);
+  }
   const runId = runtimeReceipt?.run_id;
   let lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
     ? runtimeReceipt.lanes.map((lane) => projectLane(lane, projectLaneTask, classifyLaneTask))
@@ -1055,7 +1126,10 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
   }
   const blocked = unconfirmed === true
     || runtimeReceipt?.complete_candidate_blocked === true
-    || ['awaiting_consent', 'degraded', 'failed'].includes(runtimeReceipt?.phase)
+    || [
+      'awaiting_consent', 'degraded', 'failed', 'cancelled', 'needs_attention',
+      'validating', 'preparing_workspaces', 'dispatching', 'verifying', 'unresolved',
+    ].includes(runtimeReceipt?.phase)
     || lanes.some((lane) => lane?.required !== false && (
       lane.status === 'unresolved'
       || lane.status === 'failed'
@@ -1101,7 +1175,8 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
   const wake = wakeRequested === true && actionable === true;
   const status = unconfirmed === true
     ? 'unresolved'
-    : (runtimeReceipt?.status ?? 'inspected');
+    : (runtimeReceipt?.status ?? runtimeReceipt?.phase ?? 'inspected');
+  const phase = runtimeReceipt?.phase ?? status;
   const receiptBody = {
     schema: RUN_TOOL_ADAPTER_RECEIPT_SCHEMA_ID,
     version: RUN_TOOL_ADAPTER_VERSION,
@@ -1109,9 +1184,11 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     tool,
     operation,
     status,
-    phase: runtimeReceipt?.phase ?? status,
+    phase,
     run_id: runId,
     assignment_count: runtimeReceipt?.assignment_count ?? lanes.length,
+    revision: Number.isSafeInteger(runtimeReceipt?.revision) ? runtimeReceipt.revision : null,
+    cursor: typeof runtimeReceipt?.cursor === 'string' ? runtimeReceipt.cursor : null,
     lanes,
     attention,
     cleanup: sanitizeModelFacing(cleanup),
@@ -1132,6 +1209,14 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     already_terminal: runtimeReceipt?.already_terminal === true,
     error: sanitizeModelFacing(runtimeReceipt?.error ?? null),
     telemetry: sanitizeModelFacing(runtimeReceipt?.telemetry ?? null),
+    ...(operation === 'wait' ? {
+      wait_until: capturedIncludes(WAIT_UNTIL_VALUES, runtimeReceipt?.wait_until)
+        ? runtimeReceipt.wait_until
+        : ADDITIVE_WAIT_UNTIL,
+      ...(Number.isSafeInteger(runtimeReceipt?.waited_ms) && runtimeReceipt.waited_ms >= 0
+        ? { waited_ms: runtimeReceipt.waited_ms }
+        : {}),
+    } : {}),
     checks: emptyChecks(),
     side_effects: sideEffects,
     audience: 'model',
@@ -1419,8 +1504,10 @@ export function createRunToolAdapter(dependencies) {
 
     const signal = options && typeof options === 'object' ? options.signal : undefined;
     let runtimeReceipt;
+    let requestedRunId = null;
     if (operation === 'submit') {
       const parsed = await parseSubmit(args);
+      requestedRunId = parsed.runId;
       if (parsed.simpleRequest !== undefined) {
         if (simpleRuntime === null) {
           failAdapter('simple_runtime_unavailable', 'run_request', CONTENT_FREE.simple_runtime_unavailable);
@@ -1449,6 +1536,7 @@ export function createRunToolAdapter(dependencies) {
       }
     } else if (operation === 'status') {
       const runId = requireRunId(args);
+      requestedRunId = runId;
       const assignmentId = optionalValue(args, 'assignment_id', 'assignment_id');
       if (assignmentId !== undefined && !isAssignmentId(assignmentId)) {
         failAdapter('invalid_format', 'assignment_id', CONTENT_FREE.invalid_format);
@@ -1460,6 +1548,7 @@ export function createRunToolAdapter(dependencies) {
       }));
     } else if (operation === 'wait') {
       const runId = requireRunId(args);
+      requestedRunId = runId;
       const waitUntil = waitUntilValue(args);
       if (waitUntil !== undefined && !capturedIncludes(WAIT_UNTIL_VALUES, waitUntil)) {
         failAdapter('invalid_format', 'wait_until', CONTENT_FREE.invalid_format);
@@ -1474,6 +1563,7 @@ export function createRunToolAdapter(dependencies) {
         : await waitForDecision(runId, args, signal);
     } else if (operation === 'attention') {
       const runId = requireRunId(args);
+      requestedRunId = runId;
       const attentionRequest = quarantineObject(
         ownDataValue(args, 'attention', 'attention'),
         'attention',
@@ -1487,23 +1577,41 @@ export function createRunToolAdapter(dependencies) {
       rememberExperienceContext(runId, { attention_items: items });
       counters.resume += 1;
       runtimeReceipt = (await resolveSimpleRun(runId))
-        ? await simpleRuntime.replyRun({ run_id: runId, attention_reply: { items } })
+        ? await simpleRuntime.replyRun({ run_id: runId, attention_reply: { items } }, { signal })
         : await runtime.resumeRun({ run_id: runId, attention_items: items });
     } else if (operation === 'reply') {
       const runId = requireRunId(args);
+      requestedRunId = runId;
       const replyRequest = quarantineObject(
         ownDataValue(args, 'run_reply', 'run_reply'),
         'run_reply',
         RUN_REPLY_KEYS,
       );
+      const requestConsentAgain = capturedHasOwn(replyRequest, 'request_consent');
+      if (requestConsentAgain && ownDataValue(replyRequest, 'request_consent', 'run_reply.request_consent') !== true) {
+        failAdapter('invalid_format', 'run_reply.request_consent', CONTENT_FREE.invalid_format);
+      }
+      if (requestConsentAgain && (
+        capturedHasOwn(replyRequest, 'approval_ref')
+        || capturedHasOwn(replyRequest, 'batch_id')
+        || capturedHasOwn(replyRequest, 'expected_revision')
+        || capturedHasOwn(replyRequest, 'reply')
+      )) {
+        failAdapter('mixed_run_operation', 'run_reply', CONTENT_FREE.mixed_run_operation);
+      }
       counters.reply += 1;
       if (await resolveSimpleRun(runId)) {
-        runtimeReceipt = await simpleRuntime.replyRun({
-          run_id: runId,
-          ...(capturedHasOwn(replyRequest, 'approval_ref')
-            ? { approval_ref: ownDataValue(replyRequest, 'approval_ref', 'run_reply.approval_ref') }
-            : {}),
-          attention_reply: {
+        const simpleReply = { run_id: runId };
+        if (capturedHasOwn(replyRequest, 'approval_ref')) {
+          simpleReply.approval_ref = ownDataValue(replyRequest, 'approval_ref', 'run_reply.approval_ref');
+        }
+        if (requestConsentAgain) {
+          simpleReply.request_consent = true;
+        } else if (!capturedHasOwn(replyRequest, 'approval_ref')
+          || capturedHasOwn(replyRequest, 'batch_id')
+          || capturedHasOwn(replyRequest, 'expected_revision')
+          || capturedHasOwn(replyRequest, 'reply')) {
+          simpleReply.attention_reply = {
             ...(capturedHasOwn(replyRequest, 'batch_id')
               ? { batch_id: ownDataValue(replyRequest, 'batch_id', 'run_reply.batch_id') }
               : {}),
@@ -1513,9 +1621,13 @@ export function createRunToolAdapter(dependencies) {
             ...(capturedHasOwn(replyRequest, 'reply')
               ? { reply: ownDataValue(replyRequest, 'reply', 'run_reply.reply') }
               : {}),
-          },
-        });
+          };
+        }
+        runtimeReceipt = await simpleRuntime.replyRun(simpleReply, { signal });
       } else {
+      if (requestConsentAgain) {
+        failAdapter('simple_runtime_unavailable', 'run_reply.request_consent', CONTENT_FREE.simple_runtime_unavailable);
+      }
       if (attention === null) {
         failAdapter('injected_dependency_invalid', 'attention', CONTENT_FREE.injected_dependency_invalid);
       }
@@ -1534,6 +1646,7 @@ export function createRunToolAdapter(dependencies) {
       }
     } else if (operation === 'cancel' || operation === 'cleanup') {
       const runId = requireRunId(args);
+      requestedRunId = runId;
       let assignmentIds = parseAssignmentIds(
         optionalValue(args, 'assignment_ids', 'assignment_ids'),
         'assignment_ids',
@@ -1545,6 +1658,7 @@ export function createRunToolAdapter(dependencies) {
           const projected = projectReceipt(
             tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
             operation === 'wait',
+            runId,
           );
           return projected;
         }
@@ -1570,6 +1684,7 @@ export function createRunToolAdapter(dependencies) {
     const projected = projectReceipt(
       tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
       operation === 'wait',
+      requestedRunId,
     );
     return projected;
   }
