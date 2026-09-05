@@ -53,6 +53,17 @@ test('uses stable Cursor agent/run idempotency and records returned PR', async (
         observed.send = { prompt, options: options2 };
         return { id: 'run-one', wait: async () => ({
           id: 'run-one', status: 'finished', result: 'done',
+          durationMs: 1_234,
+          model: { id: 'claude-sonnet-4-5', params: [{ name: 'reasoning', value: 'high' }] },
+          usage: {
+            inputTokens: 11,
+            outputTokens: 7,
+            cacheReadTokens: 3,
+            cacheWriteTokens: 2,
+            totalTokens: 23,
+            reasoningTokens: 4,
+          },
+          benignMetadata: { trace: 'future-sdk-field' },
           git: { branches: [{ repoUrl: 'https://github.com/example/repo.git', branch: 'cursor/work', prUrl: 'https://github.com/example/repo/pull/1' }] },
         }) };
       },
@@ -726,7 +737,14 @@ test('reconciliation records a truthful archive result', async () => {
     taskId: 'cloud-reconcile-archive',
     sdk: { Agent: {
       getRun: async () => ({ id: 'run-finished', status: 'finished', wait: async () => ({
-        id: 'run-finished', status: 'finished', result: 'done', git: { branches: [] },
+        id: 'run-finished', status: 'finished', result: 'done',
+        requestId: undefined,
+        error: undefined,
+        git: undefined,
+        durationMs: 987,
+        model: { id: 'claude-sonnet-4-5' },
+        usage: undefined,
+        benignMetadata: { trace: 'future-sdk-field' },
       }) }),
       archive: async () => { throw Object.assign(new Error('archive unavailable'), { code: 'network_error' }); },
     } },

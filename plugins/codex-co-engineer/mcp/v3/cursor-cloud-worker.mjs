@@ -19,6 +19,7 @@ import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, up
 import { boundedProviderResult, boundedProviderValue } from './provider-result.mjs';
 import {
   assertCursorCloudResultCorrelationV1,
+  adaptCursorCloudSdkResultV1,
   contentFreeCloudResultSourceFailureV1,
   cursorCloudResultSourceIdentityFromTaskV1,
   isCursorCloudResultIdentityMismatchV1,
@@ -837,21 +838,21 @@ function assertTerminalResultSources(task, run, agentId, result) {
   return sources;
 }
 
-async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, result }) {
-  if (result?.id !== undefined && result.id !== run.id) {
+async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, adaptedResult }) {
+  if (adaptedResult.id !== undefined && adaptedResult.id !== run.id) {
     fail('cursor_run_identity_mismatch', 'Cursor Cloud returned a different run identity at completion.');
   }
   const { task: current } = await readTask(root, taskId);
-  const sources = assertTerminalResultSources(current, run, agentId, result);
-  const status = result.status === 'finished' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
+  const sources = assertTerminalResultSources(current, run, agentId, adaptedResult);
+  const status = adaptedResult.status === 'finished' ? 'completed' : adaptedResult.status === 'cancelled' ? 'cancelled' : 'failed';
   const providerSecrets = [key, prompt];
-  const sanitizedBranches = sanitizeProviderValue(result.git?.branches ?? [], providerSecrets);
+  const sanitizedBranches = sanitizeProviderValue(adaptedResult.git?.branches ?? [], providerSecrets);
   const branches = Array.isArray(sanitizedBranches) ? sanitizedBranches : [];
-  const bounded = typeof result.result === 'string'
-    ? boundedProviderResult(result.result, { sanitize: (text) => redactProviderText(text, providerSecrets) })
-    : boundedProviderValue(result.result ?? null, { sanitize: (text) => redactProviderText(text, providerSecrets) });
+  const bounded = typeof adaptedResult.result === 'string'
+    ? boundedProviderResult(adaptedResult.result, { sanitize: (text) => redactProviderText(text, providerSecrets) })
+    : boundedProviderValue(adaptedResult.result ?? null, { sanitize: (text) => redactProviderText(text, providerSecrets) });
   const providerResult = bounded.value;
-  const providerError = sanitizeProviderValue(result.error ?? null, providerSecrets);
+  const providerError = sanitizeProviderValue(adaptedResult.error ?? null, providerSecrets);
   let archived = false;
   try {
     archived = await archiveAgent(client, agentId, key);
@@ -863,7 +864,7 @@ async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, 
   }
   const terminal = await updateTask(root, taskId, {
     status,
-    provider_run_id: result.id,
+    provider_run_id: adaptedResult.id,
     result: providerResult,
     ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
     provider_error: providerError,
@@ -872,7 +873,7 @@ async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, 
     provider_agent_archived: archived,
     finished_at: new Date().toISOString(),
   });
-  await appendTaskEvent(root, taskId, { type: 'terminal', status, run_id: result.id });
+  await appendTaskEvent(root, taskId, { type: 'terminal', status, run_id: adaptedResult.id });
   return attachCursorCloudResultSource(root, terminal, sources);
 }
 
@@ -1060,7 +1061,10 @@ export async function runCursorCloudTask({
       watch,
       refreshMs: deadlineRefreshMs,
     });
-    return persistTerminalRun({ root, taskId, client, key, prompt, agentId, run, result });
+    return persistTerminalRun({
+      root, taskId, client, key, prompt, agentId, run,
+      adaptedResult: adaptCursorCloudSdkResultV1(result),
+    });
   } catch (error) {
     timedOut ||= error?.code === 'timeout';
     let current = (await readTask(root, taskId)).task;
@@ -1339,7 +1343,8 @@ export async function reconcileCursorCloudTask({ root, taskId, sdk, apiKey, load
         error: publicError(Object.assign(new Error('Cursor Cloud run completion could not be reconciled.', { cause: error }), { code: 'cursor_reconcile_failed' }), [key, prompt]),
       });
     }
-    if (result?.id !== undefined && result.id !== run.id) {
+    const adaptedResult = adaptCursorCloudSdkResultV1(result);
+    if (adaptedResult.id !== undefined && adaptedResult.id !== run.id) {
       return updateTask(root, taskId, {
         status: 'transport_lost',
         error: { code: 'cursor_run_identity_mismatch', message: 'Cursor Cloud returned a different run identity at reconciliation completion.' },
@@ -1347,7 +1352,7 @@ export async function reconcileCursorCloudTask({ root, taskId, sdk, apiKey, load
     }
     return persistTerminalRun({
       root, taskId, client, key, prompt,
-      agentId: task.provider_agent_id, run, result,
+      agentId: task.provider_agent_id, run, adaptedResult,
     });
   } finally {
     try { recoveryAgent?.close?.(); } catch {}

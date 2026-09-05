@@ -18,6 +18,7 @@ import {
   CURSOR_CLOUD_RESULT_SOURCE_SCHEMA_ID,
   CURSOR_CLOUD_RESULT_SOURCE_SLOT_KEYS,
   CURSOR_CLOUD_RESULT_SOURCE_VERSION,
+  adaptCursorCloudSdkResultV1,
   cursorCloudGitEvidencePathV1,
   cursorCloudProviderReportPathV1,
   materializeCursorCloudResultSourceV1,
@@ -224,6 +225,58 @@ test('the SDK projector never copies provider output into Git evidence', () => {
   assert.equal(JSON.stringify(projected.git_evidence).includes(HOSTILE_BRANCH), false);
   assert.equal(projected.provider_report.status, 'finished');
   assert.equal(projected.provider_report.output.git.head_sha, HOSTILE_SHA);
+});
+
+test('the SDK adapter consumes RunResult metadata before the strict receipt projector', async () => {
+  const sdkResult = sdkResultFor({
+    durationMs: 1_234,
+    model: { id: MODEL, params: [{ name: 'reasoning', value: 'high' }] },
+    usage: {
+      inputTokens: 11,
+      outputTokens: 7,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 2,
+      totalTokens: 23,
+      reasoningTokens: 4,
+    },
+    benignMetadata: { trace: 'future-sdk-field' },
+  });
+  const adapted = adaptCursorCloudSdkResultV1(sdkResult);
+  assert.equal(Object.isFrozen(adapted), true);
+  assert.equal(Object.hasOwn(adapted, 'durationMs'), false);
+  assert.equal(Object.hasOwn(adapted, 'model'), false);
+  assert.equal(Object.hasOwn(adapted, 'usage'), false);
+  assert.equal(Object.hasOwn(adapted, 'benignMetadata'), false);
+  assert.equal(Object.isFrozen(sdkResult), false);
+  assert.equal(Object.isFrozen(sdkResult.git), false);
+
+  const projected = projectCursorCloudResultSourcesV1(adapted);
+  assert.equal(projected.observed.provider_run_id, PROVIDER_RUN_ID);
+  assert.equal(projected.provider_report.status, 'finished');
+  assert.equal(projected.git_evidence.branch, BRANCH);
+  await errorOfAsync(
+    () => projectCursorCloudResultSourcesV1(sdkResult),
+    'unknown_key',
+    'result.durationMs',
+  );
+});
+
+test('the SDK adapter normalizes own undefined optional RunResult fields to omission', () => {
+  const sdkResult = sdkResultFor({
+    requestId: undefined,
+    error: undefined,
+    git: undefined,
+    durationMs: undefined,
+    model: undefined,
+    usage: undefined,
+  });
+  const adapted = adaptCursorCloudSdkResultV1(sdkResult);
+  for (const key of ['requestId', 'error', 'git', 'durationMs', 'model', 'usage']) {
+    assert.equal(Object.hasOwn(adapted, key), false, `expected ${key} to be omitted`);
+  }
+  const projected = projectCursorCloudResultSourcesV1(adapted);
+  assert.equal(projected.observed.provider_run_id, PROVIDER_RUN_ID);
+  assert.equal(projected.git_evidence, null);
 });
 
 test('provider text cannot be supplied as Git evidence', async () => {

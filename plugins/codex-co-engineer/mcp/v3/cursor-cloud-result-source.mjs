@@ -170,6 +170,17 @@ export const CURSOR_CLOUD_SDK_RESULT_KEYS = capturedFreeze([
   ...CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS,
 ]);
 
+// @cursor/sdk's RunResult carries transport metadata that is intentionally
+// absent from the strict result-source receipt. Keep this list separate from
+// CURSOR_CLOUD_SDK_RESULT_KEYS: the latter is the closed internal projector
+// vocabulary, while this list documents the SDK fields consumed and discarded
+// at the adapter boundary.
+export const CURSOR_CLOUD_SDK_RESULT_METADATA_KEYS = capturedFreeze([
+  'durationMs',
+  'model',
+  'usage',
+]);
+
 export const CURSOR_CLOUD_RESULT_CORRELATION_KEYS = capturedFreeze([
   'recorded',
   'observed',
@@ -1578,6 +1589,68 @@ export function projectCursorCloudProviderReportV1(result) {
   return freezeData(projected);
 }
 
+/**
+ * Adapt one installed @cursor/sdk RunResult into the narrow internal shape
+ * consumed by the result-source projector. The SDK has added benign terminal
+ * metadata (durationMs, model, and usage) that is useful to its callers but
+ * is not part of the provider-report/Git-evidence receipt contract. Read
+ * those known fields through own data descriptors so accessors and proxies
+ * cannot execute, then discard them. Unknown SDK metadata is likewise ignored
+ * at this boundary; only the explicitly copied fields reach the strict
+ * projector below.
+ */
+export function adaptCursorCloudSdkResultV1(result) {
+  assertNotProxySurface(
+    result,
+    'result',
+    'A Cursor Cloud SDK result must be a plain result object.',
+  );
+  assertPlainObject(
+    result,
+    'malformed_result',
+    'result',
+    'A Cursor Cloud SDK result must be a plain result object.',
+  );
+
+  // Consume the official SDK metadata without allowing it to widen the
+  // internal receipt vocabulary. Nested metadata is intentionally opaque: it
+  // is neither trusted nor persisted by this adapter.
+  for (let index = 0; index < CURSOR_CLOUD_SDK_RESULT_METADATA_KEYS.length; index += 1) {
+    const key = CURSOR_CLOUD_SDK_RESULT_METADATA_KEYS[index];
+    if (!hasOwn(result, key)) continue;
+    const value = optionalOwnDataValue(result, key, `result.${key}`);
+    if (value === undefined) continue;
+    if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+      assertNotProxy(value, `result.${key}`);
+    }
+  }
+
+  const adapted = {};
+  for (let index = 0; index < CURSOR_CLOUD_SDK_RESULT_KEYS.length; index += 1) {
+    const key = CURSOR_CLOUD_SDK_RESULT_KEYS[index];
+    if (!hasOwn(result, key)) continue;
+    const value = optionalOwnDataValue(result, key, `result.${key}`);
+    if (value !== undefined) adapted[key] = value;
+  }
+  // Freeze only the detached top-level shape. Nested SDK values are projected
+  // and cloned by projectCursorCloudResultSourcesV1; recursively freezing here
+  // would freeze caller-owned result, error, or Git graphs.
+  return capturedFreeze(adapted);
+}
+
+function optionalOwnDataValue(value, key, path) {
+  const descriptor = ownDescriptor(value, key);
+  if (descriptor === undefined || !descriptor.enumerable) {
+    fail('non_enumerable_property_denied', path,
+      `${path} could not be described as an own enumerable data property.`);
+  }
+  if (descriptor.get !== undefined || descriptor.set !== undefined) {
+    fail('accessor_property_denied', path,
+      `${path} is an accessor property; resolver data must be direct JSON values and getters are never invoked.`);
+  }
+  return descriptor.value;
+}
+
 function ownedProviderReportInput(result) {
   const projected = {};
   for (let index = 0; index < CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS.length; index += 1) {
@@ -1807,6 +1880,7 @@ capturedFreeze(openCursorCloudResultArtifactStoreV1);
 capturedFreeze(projectCursorCloudResultSourcesV1);
 capturedFreeze(projectCursorCloudProviderReportV1);
 capturedFreeze(projectCursorCloudGitEvidenceV1);
+capturedFreeze(adaptCursorCloudSdkResultV1);
 capturedFreeze(assertCursorCloudResultCorrelationV1);
 capturedFreeze(contentFreeCloudResultSourceFailureV1);
 capturedFreeze(cursorCloudResultSourceIdentityFromTaskV1);
@@ -1827,6 +1901,7 @@ capturedFreeze(CURSOR_CLOUD_GIT_EVIDENCE_INPUT_KEYS);
 capturedFreeze(CURSOR_CLOUD_RESULT_SOURCE_OBSERVED_KEYS);
 capturedFreeze(CURSOR_CLOUD_SDK_PROVIDER_REPORT_KEYS);
 capturedFreeze(CURSOR_CLOUD_SDK_RESULT_KEYS);
+capturedFreeze(CURSOR_CLOUD_SDK_RESULT_METADATA_KEYS);
 capturedFreeze(CURSOR_CLOUD_RESULT_CORRELATION_KEYS);
 capturedFreeze(CURSOR_CLOUD_TASK_IDENTITY_KEYS);
 capturedFreeze(CURSOR_CLOUD_RECORDED_IDENTITY_KEYS);
