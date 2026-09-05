@@ -377,7 +377,7 @@ test('DSH Ox Alpha fails closed instead of using a model-blind pre-spawn CLI fal
 test('DSH Muse still allows pre-spawn CLI fallback when ACPX cannot start', async () => {
   const value = await fixture({
     provider: 'dsh',
-    dshModel: 'muse-spark-1.2-contributor',
+    dshModel: 'meta/muse-spark-1.3-contributor',
     id: 'dsh-muse-pre-spawn-fallback',
     cliArgv: [process.execPath, '-e', 'process.stdout.write("MUSE_CLI_FALLBACK_OK")'],
   });
@@ -394,7 +394,7 @@ test('DSH Muse still allows pre-spawn CLI fallback when ACPX cannot start', asyn
   const { task } = await readTask(value.root, value.taskId);
   assert.equal(task.status, 'completed');
   assert.equal(task.transport, 'cli');
-  assert.equal(task.dsh_model, 'muse-spark-1.2-contributor');
+  assert.equal(task.dsh_model, 'meta/muse-spark-1.3-contributor');
   assert.equal(task.fallback_from, 'acp');
   assert.equal(task.prompt_dispatched, true);
   assert.equal(task.fallback_safe, false);

@@ -75,9 +75,7 @@ must not appear in MCP arguments, prompts, receipts, fixtures, or Git.
 
 - Grok: `grok login`
 - Cursor Local: `cursor-agent login`
-- Muse: `MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or
-  `~/.config/codex-co-engineer/model-api-key`
-- Optional Ox Alpha: `OPENROUTER_API_KEY`,
+- Muse and optional Ox Alpha: `OPENROUTER_API_KEY`,
   `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or
   `~/.config/codex-co-engineer/openrouter-api-key`
 - Cursor Cloud: `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or

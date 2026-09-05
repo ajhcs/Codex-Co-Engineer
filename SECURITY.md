@@ -93,10 +93,9 @@ Provider authentication is normal, persistent user authentication:
 
 - Grok and Cursor Local use their CLI-managed login/session state.
 - Cursor Cloud uses `CURSOR_API_KEY` or its owner-only key file.
-- DSH Muse uses `MODEL_API_KEY` or the owner-only model-key file created by
-  `bin/set-model-api-key`. The optional Ox Alpha route uses the separate
-  `OPENROUTER_API_KEY` or owner-only OpenRouter key file; selecting one route
-  never substitutes the other route's credential.
+- DSH Muse and the optional Ox Alpha route use `OPENROUTER_API_KEY` or the
+  owner-only OpenRouter key file created by `bin/set-model-api-key`; their
+  ACP configuration and model selection remain separate.
 
 Credentials are not MCP arguments, prompts, task records, or committed files.
 The supervisor may inherit the user's normal provider environment because

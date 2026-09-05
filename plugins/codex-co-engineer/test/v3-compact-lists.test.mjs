@@ -408,9 +408,9 @@ test('projectCompactStatus preserves model identity and clamps host-variable she
       installed: true,
       ready: false,
       transport: 'acpx',
-      default_model: 'muse-spark-1.2-contributor',
+      default_model: 'meta/muse-spark-1.3-contributor',
       model_options: {
-        'muse-spark-1.2-contributor': { ready: false, reason: 'ENOENT' },
+        'meta/muse-spark-1.3-contributor': { ready: false, reason: 'ENOENT' },
         'stealth/ox-alpha': { ready: false, reason: 'ENOENT' },
       },
       reason: 'ENOENT',
@@ -455,9 +455,9 @@ test('projectCompactStatus preserves model identity and clamps host-variable she
     limit: 20,
     tasks,
   });
-  assert.equal(projected.readiness.dsh.default_model, 'muse-spark-1.2-contributor');
+  assert.equal(projected.readiness.dsh.default_model, 'meta/muse-spark-1.3-contributor');
   assert.deepEqual(Object.keys(projected.readiness.dsh.model_options).sort(), [
-    'muse-spark-1.2-contributor',
+    'meta/muse-spark-1.3-contributor',
     'stealth/ox-alpha',
   ].sort());
   assert.equal(projected.readiness.dsh.model_options['stealth/ox-alpha'].ready, false);
@@ -480,7 +480,7 @@ test('byte targets under worst valid values: readiness <=8192, compact status 20
       const readiness = await request({ jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'status', arguments:{detail:'compact', include_tasks:false}}});
       const readinessBytes = jsonRpcBytes(readiness.result.structuredContent);
       assert.ok(readinessBytes <= 8192, `readiness ${readinessBytes} exceeds 8192`);
-      assert.equal(readiness.result.structuredContent.readiness.dsh.default_model, 'muse-spark-1.2-contributor');
+      assert.equal(readiness.result.structuredContent.readiness.dsh.default_model, 'meta/muse-spark-1.3-contributor');
       assert.ok(readiness.result.structuredContent.readiness.dsh.model_options['stealth/ox-alpha']);
       assert.equal(Object.hasOwn(readiness.result.structuredContent.mcp_pending_call, 'notes'), false);
       for (let i=0;i<20;i++) {

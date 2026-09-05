@@ -5,7 +5,7 @@
 // module owns ONLY the DSH-specific wiring; every request/result shape,
 // capability posture, transition rule, and denial code is inherited from the
 // accepted contract (no parallel envelope or capability schema):
-//   - hard binding: provider `dsh` plus exactly `muse-spark-1.2-contributor`
+//   - hard binding: provider `dsh` plus exactly `meta/muse-spark-1.3-contributor`
 //     or `stealth/ox-alpha`; every other provider/model pairing fails closed;
 //   - the four lifecycle operations (preflight, launch, reconcile, cancel)
 //     are driven through an INJECTED BOUNDED ACPX ONE-SHOT TRANSPORT PORT.
@@ -90,7 +90,7 @@ export const DSH_ACPX_DRIVER_VERSION = 1;
 export const DSH_PROVIDER = 'dsh';
 
 export const DSH_ALLOWED_MODELS = capturedFreeze([
-  'muse-spark-1.2-contributor',
+  'meta/muse-spark-1.3-contributor',
   'stealth/ox-alpha',
 ]);
 
@@ -98,11 +98,11 @@ export const DSH_ALLOWED_MODELS = capturedFreeze([
 // The injected port resolves real paths and credentials; this map never
 // touches the filesystem and confers no authority by itself.
 export const DSH_MODEL_IDENTITIES = capturedFreeze({
-  'muse-spark-1.2-contributor': capturedFreeze({
+  'meta/muse-spark-1.3-contributor': capturedFreeze({
     config_file: 'dsh-acp.yml',
-    credential_env: 'MODEL_API_KEY',
-    credential_file_env: 'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
-    credential_file: 'model-api-key',
+    credential_env: 'OPENROUTER_API_KEY',
+    credential_file_env: 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+    credential_file: 'openrouter-api-key',
   }),
   'stealth/ox-alpha': capturedFreeze({
     config_file: 'dsh-acp-ox-alpha.yml',
@@ -250,7 +250,7 @@ function buildDshAcpDeclarationV1() {
       dispatch_certainty: 'uncertain_after_spawn',
       exact_model_selection: 'exact_and_attested',
       merge_authority: 'none_codex_only_integration',
-      notes: 'DSH ACPX one-shot flow for Muse Spark 1.2 Contributor or Ox Alpha. '
+      notes: 'DSH ACPX one-shot flow for Muse Spark 1.3 Contributor or Ox Alpha. '
         + 'ACPX gives no authoritative prompt-sent acknowledgement, so launches stay '
         + 'uncertain after spawn and are never replayed. Same-session reply is '
         + 'unsupported; attention surfaces unresolved instead of starting a '

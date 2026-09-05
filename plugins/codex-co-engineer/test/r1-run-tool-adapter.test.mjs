@@ -367,7 +367,7 @@ test('unsupported same-session providers cancel only the affected lane', async (
     assignmentId: 'dsh-lane',
     taskId: 'task-dsh',
     provider: 'dsh',
-    model: 'muse-spark-1.2-contributor',
+    model: 'meta/muse-spark-1.3-contributor',
     writeScope: ['docs/**'],
   });
   const writer = makeAssignment();
@@ -453,7 +453,7 @@ test('explicit provider/model plus a conflicting named profile fails closed', as
     const definition = {
       schema: PROFILE_SCHEMA,
       provider: 'dsh',
-      model: 'muse-spark-1.2-contributor',
+      model: 'meta/muse-spark-1.3-contributor',
     };
     const name = 'writer-profile';
     const catalog = {
@@ -662,7 +662,7 @@ test('named profile snapshot is bound once and survives catalog mutation after s
       [name]: {
         schema: PROFILE_SCHEMA,
         provider: 'dsh',
-        model: 'muse-spark-1.2-contributor',
+        model: 'meta/muse-spark-1.3-contributor',
       },
     }));
     const inspected = await adapter.dispatch('status', { run_id: RUN_ID });

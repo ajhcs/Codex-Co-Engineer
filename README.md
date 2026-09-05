@@ -333,13 +333,12 @@ plugins/codex-co-engineer/bin/set-model-api-key
 ```
 
 Cursor Cloud uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the
-owner-only `~/.config/cursor-cloud-control/api-key`. DSH uses
-`MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or
-`~/.config/codex-co-engineer/model-api-key` for Muse. The optional Ox
-Alpha route uses `OPENROUTER_API_KEY`,
-`CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or
-`~/.config/codex-co-engineer/openrouter-api-key`. Never put credentials
-in MCP arguments or prompts.
+owner-only `~/.config/cursor-cloud-control/api-key`. DSH Muse and the
+optional Ox Alpha route use `OPENROUTER_API_KEY`,
+`CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or the owner-only
+`~/.config/codex-co-engineer/openrouter-api-key`; their ACP configuration
+and model selection remain separate. Never put credentials in MCP arguments
+or prompts.
 
 Host variables, profiles, and package-local setup live in
 [docs/configuration.md](docs/configuration.md) and the

@@ -23,7 +23,7 @@ test('readiness snapshots persist bounded content-free setup results', async () 
         reason: 'credentials_missing',
         transport: 'acpx',
         model_options: {
-          'muse-spark-1.2-contributor': { ready: false },
+          'meta/muse-spark-1.3-contributor': { ready: false },
           'stealth/ox-alpha': { ready: false },
         },
       },

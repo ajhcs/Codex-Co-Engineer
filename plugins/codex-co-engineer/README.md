@@ -55,8 +55,7 @@ Requirements:
 - the official Grok Build CLI
 - `cursor-agent`
 - a Cursor Cloud API key
-- a Muse/Meta model API key for default DSH use
-- an OpenRouter API key when selecting DSH Ox Alpha
+- an OpenRouter API key for default DSH Muse or optional Ox Alpha
 
 For a local repository clone, register the marketplace and add the plugin:
 
@@ -104,11 +103,10 @@ cursor-agent login
 bin/set-model-api-key
 ```
 
-DSH Muse uses `MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`,
-or the default owner-only `~/.config/codex-co-engineer/model-api-key`.
-DSH Ox Alpha uses `OPENROUTER_API_KEY`,
-`CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or
-`~/.config/codex-co-engineer/openrouter-api-key`. Cursor Cloud uses
+DSH Muse and DSH Ox Alpha use `OPENROUTER_API_KEY`,
+`CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or the owner-only
+`~/.config/codex-co-engineer/openrouter-api-key`; their ACP configuration
+and model selection remain separate. Cursor Cloud uses
 `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the existing owner-only
 `~/.config/cursor-cloud-control/api-key`. Credentials are never MCP
 arguments or task receipts.
@@ -248,7 +246,7 @@ are `grok`, `cursor-local`, `cursor-cloud`, and `dsh`; roles are
 Legacy single-task `delegate` still requires a stable `task_id`, a provider,
 an absolute Git worktree path in the property named `repo`, a prompt, and
 `expected_duration_ms` or a backwards-compatible `timeout_ms`.
-DSH defaults to `muse-spark-1.2-contributor`. Set
+DSH defaults to `meta/muse-spark-1.3-contributor` with xhigh reasoning. Set
 `dsh_model: "stealth/ox-alpha"` to select the separate OpenRouter-backed
 Ox Alpha configuration for that task.
 
@@ -327,8 +325,7 @@ acknowledgement.
 | Variable | Purpose |
 | --- | --- |
 | `CODEX_CO_ENGINEER_STATE_DIR` | Owner-only task-state root. |
-| `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Owner-only DSH/Muse key file. |
-| `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE` | Owner-only OpenRouter key file for DSH Ox Alpha. |
+| `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE` | Owner-only OpenRouter key file for DSH Muse and Ox Alpha. |
 | `CODEX_CO_ENGINEER_DSH_ACP_CONFIG` | Absolute DSH ACP YAML path. |
 | `CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG` | Absolute Ox Alpha DSH ACP YAML path. |
 | `CURSOR_API_KEY_FILE` | Owner-only Cursor Cloud key file. |

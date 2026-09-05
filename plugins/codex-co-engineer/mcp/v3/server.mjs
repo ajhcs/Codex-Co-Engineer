@@ -165,8 +165,8 @@ const TOOLS = [
         provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
         dsh_model: {
           type: 'string',
-          enum: ['muse-spark-1.2-contributor', 'stealth/ox-alpha'],
-          description: 'DSH only. Defaults to Muse Spark 1.2 Contributor; select stealth/ox-alpha for the OpenRouter-backed Ox Alpha route.',
+          enum: ['meta/muse-spark-1.3-contributor', 'stealth/ox-alpha'],
+          description: 'DSH only. Defaults to Muse Spark 1.3 Contributor; select stealth/ox-alpha for the OpenRouter-backed Ox Alpha route.',
         },
         repo: { type: 'string', description: 'Required property named repo: absolute path to the Git worktree (for example, /absolute/path/to/git-worktree). Do not rename this property to git_root or repository.' },
         prompt: { type: 'string', minLength: 1, maxLength: 262144 },

@@ -440,7 +440,7 @@ test('DSH omission keeps the Muse config and credential as the stored default', 
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-dsh-muse-'));
   const repo = path.join(root, 'repo');
   const museConfig = path.join(root, 'dsh-acp.yml');
-  const museKey = path.join(root, 'model-api-key');
+  const museKey = path.join(root, 'openrouter-api-key');
   let launched;
   try {
     await mkdir(repo);
@@ -463,7 +463,7 @@ test('DSH omission keeps the Muse config and credential as the stored default', 
       root,
       env: {
         CODEX_CO_ENGINEER_DSH_ACP_CONFIG: museConfig,
-        CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: museKey,
+        CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE: museKey,
       },
       execute,
       probeBoundary: readyBoundary,
@@ -472,10 +472,10 @@ test('DSH omission keeps the Muse config and credential as the stored default', 
         return { pid: 9003, process_group: 9003, process_start_ticks: '3' };
       },
     });
-    assert.equal(value.task.dsh_model, 'muse-spark-1.2-contributor');
+    assert.equal(value.task.dsh_model, 'meta/muse-spark-1.3-contributor');
     assert.deepEqual(value.task.agent_argv, ['dsh-acp-demo', '--config', museConfig]);
-    assert.equal(launched.env.MODEL_API_KEY, 'test-muse-value');
-    assert.equal(launched.env.OPENROUTER_API_KEY, undefined);
+    assert.equal(launched.env.OPENROUTER_API_KEY, 'test-muse-value');
+    assert.equal(launched.env.MODEL_API_KEY, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -516,9 +516,9 @@ test('status makes boundary health explicit and fails only local providers close
       installed: true,
       ready: true,
       transport: 'acpx',
-      default_model: 'muse-spark-1.2-contributor',
+      default_model: 'meta/muse-spark-1.3-contributor',
       model_options: {
-        'muse-spark-1.2-contributor': { ready: true },
+        'meta/muse-spark-1.3-contributor': { ready: true },
         'stealth/ox-alpha': { ready: true },
       },
     },

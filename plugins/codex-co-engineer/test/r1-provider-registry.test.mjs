@@ -284,7 +284,7 @@ test('resolveRegistrySelectionV1 maps exact pairs deterministically without cons
     provider: 'dsh', model: 'not-a-dsh-model',
   }), 'unknown_model', 'closed dsh model list is enforced against the accepted constant');
   expectCode(() => resolveRegistrySelectionV1({
-    provider: 'dsh', model: 'muse-spark-1.2-contributor ',
+    provider: 'dsh', model: 'meta/muse-spark-1.3-contributor ',
   }), 'unknown_model');
   expectCode(() => resolveRegistrySelectionV1({ provider: 'dsh' }), 'missing_key');
   expectCode(() => resolveRegistrySelectionV1({ model: 'm' }), 'missing_key');

@@ -37,7 +37,7 @@ export const REDACTION_FRAGMENT_BYTES = 32;
 export const REDACTION_FRAGMENT_STRIDE = 16;
 export const REDACTED = '[REDACTED]';
 export const HANDOFF_ENV_KEY = 'CODEX_CO_ENGINEER_CREDENTIAL_HANDOFF';
-export const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
+export const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
 export const DSH_OX_MODEL = 'stealth/ox-alpha';
 
 export const OPERATIONAL_ENV_KEYS = capturedFreeze([
@@ -95,9 +95,9 @@ export const PROVIDER_COMMAND_KEYS = capturedFreeze([
 
 export const DSH_ROUTE = capturedFreeze({
   [DEFAULT_DSH_MODEL]: capturedFreeze({
-    credentialEnv: 'MODEL_API_KEY',
-    credentialFileEnv: 'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
-    credentialFile: 'model-api-key',
+    credentialEnv: 'OPENROUTER_API_KEY',
+    credentialFileEnv: 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+    credentialFile: 'openrouter-api-key',
     configEnv: 'CODEX_CO_ENGINEER_DSH_ACP_CONFIG',
   }),
   [DSH_OX_MODEL]: capturedFreeze({

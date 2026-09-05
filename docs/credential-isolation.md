@@ -41,7 +41,7 @@ platform's push/credential-helper environment.
 | --- | --- | --- |
 | Grok | `XAI_API_KEY` when present, Grok command, operational keys | Muse/Ox/Cursor keys, Git/SSH/hosting, key-file paths |
 | Cursor Local | Cursor command, operational keys (CLI session under `HOME`) | `CURSOR_API_KEY`, Muse/Ox/Grok keys |
-| DSH Muse | `MODEL_API_KEY`, Muse config path, DSH/ACPX commands | `OPENROUTER_API_KEY`, Grok/Cursor keys |
+| DSH Muse | `OPENROUTER_API_KEY`, Muse config path, DSH/ACPX commands | `MODEL_API_KEY`, Grok/Cursor keys |
 | DSH Ox | `OPENROUTER_API_KEY`, Ox config path, DSH/ACPX commands | `MODEL_API_KEY`, Grok/Cursor keys |
 | Cursor Cloud local SDK | `CURSOR_API_KEY` plus bounded repository/ref/prompt data | Other provider keys, Git/SSH/hosting, key-file paths |
 | Cursor Cloud remote | Credential-free origin URL, pinned SHA, prompt, optional `create_pr` flag | Local credentials, SSH agent, hosting tokens, key files |
@@ -133,5 +133,6 @@ P23 `provider-registry.mjs` remains the only composition authority for the
 four accepted adapters. P29 does not add a fifth slot, a wrapper factory,
 or ambient discovery. P28 `git-authority.mjs` remains policy at the
 authority seam; P29 consults its denied-operation vocabulary without
-mutating Git. 3.2.1 Muse/Ox credential routing (one route never substitutes
-the other) is preserved.
+mutating Git. The Muse and Ox routes use the same OpenRouter credential while
+keeping separate model/config selections; neither route accepts the retired
+`MODEL_API_KEY` credential.

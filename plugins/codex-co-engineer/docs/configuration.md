@@ -40,17 +40,16 @@ Visitor first-run speech lives in the
 | `CODEX_CO_ENGINEER_DSH_ACP_COMMAND` | DSH ACP adapter executable. Defaults to `dsh-acp-demo`. |
 | `CODEX_CO_ENGINEER_DSH_ACP_CONFIG` | Absolute DSH ACP YAML path. |
 | `CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG` | Absolute Ox Alpha DSH ACP YAML path. |
-| `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE` | Owner-only Muse/DSH model key file. |
-| `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE` | Owner-only OpenRouter key file for Ox Alpha. |
+| `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE` | Owner-only OpenRouter key file for DSH Muse and Ox Alpha. |
 | `CURSOR_API_KEY_FILE` | Owner-only Cursor Cloud API key file. |
-| `MODEL_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` | Optional process-level provider credentials. |
+| `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` | Optional process-level provider credentials. |
 
 The default DSH configuration is
-`~/.config/codex-co-engineer/dsh-acp.yml`; its model key defaults to
-`~/.config/codex-co-engineer/model-api-key`. Setup also creates the
+`~/.config/codex-co-engineer/dsh-acp.yml`; its OpenRouter key defaults to
+`~/.config/codex-co-engineer/openrouter-api-key`. Setup also creates the
 optional Ox Alpha configuration at
-`~/.config/codex-co-engineer/dsh-acp-ox-alpha.yml`; its OpenRouter key
-defaults to `~/.config/codex-co-engineer/openrouter-api-key`. Cursor
+`~/.config/codex-co-engineer/dsh-acp-ox-alpha.yml`, using that same
+OpenRouter key while keeping a separate model/config route. Cursor
 Cloud also recognizes the existing owner-only
 `~/.config/cursor-cloud-control/api-key`.
 
@@ -189,9 +188,9 @@ Muse. Codex does not invent a default router.
 
 ## Authentication
 
-Authenticate Grok and Cursor Local with their normal CLIs. DSH Muse uses
-the owner-only model key, DSH Ox Alpha uses the separate owner-only
-OpenRouter key, and Cursor Cloud uses its normal API key. Credentials
+Authenticate Grok and Cursor Local with their normal CLIs. DSH Muse and DSH
+Ox Alpha use the owner-only OpenRouter key, and Cursor Cloud uses its normal
+API key. Credentials
 must not be placed in MCP arguments, prompts, receipts, fixtures, or
 Git. Provider login state persists in the provider's normal user
 configuration between Codex tasks.
@@ -269,7 +268,8 @@ properties. Pass `expected_duration_ms` or a backwards-compatible
 `ceil(expected_duration_ms * 1.20)` unless an explicit `timeout_ms` of
 at least that margin is supplied.
 
-DSH uses Muse Spark 1.2 Contributor when `dsh_model` is omitted. To
+DSH uses `meta/muse-spark-1.3-contributor` with xhigh reasoning when
+`dsh_model` is omitted. To
 select Ox Alpha for one task, keep `provider: "dsh"` and add
 `dsh_model: "stealth/ox-alpha"`. The field is rejected for other
 providers and unknown model values fail before workspace creation or

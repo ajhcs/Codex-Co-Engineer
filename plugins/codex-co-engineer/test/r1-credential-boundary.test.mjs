@@ -103,8 +103,8 @@ test('Muse Ox Grok and Cursor Cloud routes do not share credentials', async () =
   const local = await materializeProviderEnvironment({
     provider: 'cursor-local', source: HOSTILE_ENV, operation: 'lane',
   });
-  assert.equal(muse.MODEL_API_KEY, HOSTILE_ENV.MODEL_API_KEY);
-  assert.equal(muse.OPENROUTER_API_KEY, undefined);
+  assert.equal(muse.OPENROUTER_API_KEY, HOSTILE_ENV.OPENROUTER_API_KEY);
+  assert.equal(muse.MODEL_API_KEY, undefined);
   assert.equal(ox.OPENROUTER_API_KEY, HOSTILE_ENV.OPENROUTER_API_KEY);
   assert.equal(ox.MODEL_API_KEY, undefined);
   assert.equal(grok.XAI_API_KEY, HOSTILE_ENV.XAI_API_KEY);

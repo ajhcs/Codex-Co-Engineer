@@ -64,6 +64,10 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   const environment = mcp.mcpServers['codex-co-engineer'].env_vars;
   assert.ok(environment.includes('XDG_RUNTIME_DIR'));
   assert.ok(environment.includes('DBUS_SESSION_BUS_ADDRESS'));
+  assert.ok(environment.includes('OPENROUTER_API_KEY'));
+  assert.ok(environment.includes('CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE'));
+  assert.equal(environment.includes('MODEL_API_KEY'), false);
+  assert.equal(environment.includes('CODEX_CO_ENGINEER_MODEL_API_KEY_FILE'), false);
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');

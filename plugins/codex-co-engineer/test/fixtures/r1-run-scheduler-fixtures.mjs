@@ -103,7 +103,7 @@ export function mixedLaneRequest(overrides = {}) {
         taskId: TASK_B,
         writeScope: ['src/beta/**'],
         provider: 'dsh',
-        model: 'muse-spark-1.2-contributor',
+        model: 'meta/muse-spark-1.3-contributor',
       }),
       verifierAssignment(),
     ],

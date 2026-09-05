@@ -84,14 +84,14 @@ const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-work
 const CLOUD_WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cursor-cloud-worker.mjs');
 const ACTIVE = new Set(ACTIVE_STATUSES);
 const PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
-const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
+const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
 const DSH_MODELS = Object.freeze({
   [DEFAULT_DSH_MODEL]: Object.freeze({
     configEnv: 'CODEX_CO_ENGINEER_DSH_ACP_CONFIG',
     configFile: 'dsh-acp.yml',
-    credentialEnv: 'MODEL_API_KEY',
-    credentialFileEnv: 'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
-    credentialFile: 'model-api-key',
+    credentialEnv: 'OPENROUTER_API_KEY',
+    credentialFileEnv: 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+    credentialFile: 'openrouter-api-key',
   }),
   'stealth/ox-alpha': Object.freeze({
     configEnv: 'CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG',

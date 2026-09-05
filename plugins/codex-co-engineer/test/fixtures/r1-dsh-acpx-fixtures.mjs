@@ -13,7 +13,7 @@ export const DSH_BASE_SHA = 'c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2';
 export const DSH_REPOSITORY_PATH = '/opt/codex-co-engineer-dsh-driver/smoke';
 export const DSH_RUN_ID = 'dsh-acpx-smoke';
 
-export const MUSE_MODEL = 'muse-spark-1.2-contributor';
+export const MUSE_MODEL = 'meta/muse-spark-1.3-contributor';
 export const OX_MODEL = 'stealth/ox-alpha';
 
 // Marker used to prove prompt/question content never reaches driver outputs.

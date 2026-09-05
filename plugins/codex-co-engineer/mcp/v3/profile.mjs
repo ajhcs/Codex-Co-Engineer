@@ -134,7 +134,7 @@ const MODEL_SCAN_EXEMPT_PATHS = new SetCtor(['profile.model']);
  * resolver concerns.
  * @deprecated Informational compatibility data only; not an authorization list.
  */
-export const PROFILE_DSH_MODELS = objectFreeze(['muse-spark-1.2-contributor', 'stealth/ox-alpha']);
+export const PROFILE_DSH_MODELS = objectFreeze(['meta/muse-spark-1.3-contributor', 'stealth/ox-alpha']);
 export const MIN_PROFILE_EXPECTED_DURATION_MS = MIN_DURATION_MS;
 export const MAX_PROFILE_EXPECTED_DURATION_MS = MAX_EXPECTED_DURATION_MS;
 

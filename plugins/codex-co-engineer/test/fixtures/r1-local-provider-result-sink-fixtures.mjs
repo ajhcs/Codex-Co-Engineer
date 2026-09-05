@@ -20,7 +20,7 @@ export const CHILD_C = 'lane-gamma';
 
 export const GROK_MODEL = 'grok-code';
 export const CURSOR_MODEL = 'auto';
-export const DSH_MODEL = 'muse-spark-1.2-contributor';
+export const DSH_MODEL = 'meta/muse-spark-1.3-contributor';
 
 export const SECRET = 'sk-live-secret-1234567890';
 export const SPLIT_SECRET = 'sk-split-token-1234567890';

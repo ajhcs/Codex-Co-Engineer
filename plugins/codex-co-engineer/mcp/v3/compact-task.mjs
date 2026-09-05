@@ -286,7 +286,7 @@ function essentialCompactEnvelope(payload) {
     task_id: boundedString(payload.task_id, COMPACT_ID_BYTES) ?? utf8Head('unknown', COMPACT_ID_BYTES),
     provider: boundedString(payload.provider, COMPACT_SCALAR_BYTES),
     ...(payload.provider === 'dsh' ? {
-      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'muse-spark-1.2-contributor',
+      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'meta/muse-spark-1.3-contributor',
     } : {}),
     role: payload.role === 'review' || payload.role === 'implement' ? payload.role : null,
     status: boundedString(payload.status, COMPACT_SCALAR_BYTES),
@@ -333,7 +333,7 @@ function lastResortEnvelope(payload) {
     task_id: boundedString(payload.task_id, COMPACT_ID_BYTES) ?? utf8Head('unknown', COMPACT_ID_BYTES),
     provider: payload.provider === 'dsh' ? 'dsh' : null,
     ...(payload.provider === 'dsh' ? {
-      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'muse-spark-1.2-contributor',
+      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'meta/muse-spark-1.3-contributor',
     } : {}),
     role: payload.role === 'review' || payload.role === 'implement' ? payload.role : null,
     status: boundedString(payload.status, COMPACT_SCALAR_BYTES),
@@ -531,7 +531,7 @@ export function projectCompactTask({ task, progress = null, runtime = null, extr
     task_id: typeof task.id === 'string' ? task.id : 'unknown',
     provider: typeof task.provider === 'string' ? task.provider : null,
     ...(task.provider === 'dsh' ? {
-      dsh_model: typeof task.dsh_model === 'string' ? task.dsh_model : 'muse-spark-1.2-contributor',
+      dsh_model: typeof task.dsh_model === 'string' ? task.dsh_model : 'meta/muse-spark-1.3-contributor',
     } : {}),
     role: task.role === 'review' || task.role === 'implement' ? task.role : null,
     status: typeof task.status === 'string' ? task.status : null,

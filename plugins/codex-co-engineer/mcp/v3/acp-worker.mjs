@@ -45,7 +45,7 @@ const MAX_EVENT_DEPTH = 6;
 const MAX_EVENT_KEYS = 64;
 const MAX_EVENT_ITEMS = 64;
 const MAX_CLI_OUTPUT = 1024 * 1024;
-const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
+const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
 
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;

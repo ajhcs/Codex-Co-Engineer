@@ -86,7 +86,7 @@ Use the five MCP tools for delegation and lifecycle control.
    `extend_expected_duration_ms` and `extend_reason` before expiry, and only
    when the new deadline is strictly later.
 5. Use `role: "review"` for analysis and `role: "implement"` for changes.
-   DSH defaults to Muse Spark 1.2 Contributor. For the optional OpenRouter Ox
+   DSH defaults to Muse Spark 1.3 Contributor. For the optional OpenRouter Ox
    Alpha route, keep `provider: "dsh"` and add
    `dsh_model: "stealth/ox-alpha"`. Never send its API key in the task.
 6. For local tasks, use `workspace_mode: "managed"` by default. Use

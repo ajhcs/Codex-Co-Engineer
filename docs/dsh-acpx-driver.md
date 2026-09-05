@@ -14,10 +14,11 @@ capability schema.
 
 - Provider slot: `dsh` exactly. Every other provider fails closed with
   `provider_slot_mismatch`.
-- Models: `muse-spark-1.2-contributor` or `stealth/ox-alpha` exactly. Any other
-  model fails closed with `dsh_model_denied`. The informational identity map
-  mirrors the shipped supervisor routing (`dsh-acp.yml` + `MODEL_API_KEY` /
-  `model-api-key`; `dsh-acp-ox-alpha.yml` + `OPENROUTER_API_KEY` /
+- Models: `meta/muse-spark-1.3-contributor` or `stealth/ox-alpha` exactly. Any
+  other model fails closed with `dsh_model_denied`. The Muse model uses
+  xhigh reasoning. The informational identity map mirrors the shipped
+  supervisor routing (`dsh-acp.yml` + `OPENROUTER_API_KEY` /
+  `openrouter-api-key`; `dsh-acp-ox-alpha.yml` + `OPENROUTER_API_KEY` /
   `openrouter-api-key`) but resolves nothing by itself.
 - Workspace: `workspace_mode: "managed"` at construction (required, no hidden
   default), local managed worktree semantics anchored at the immutable run base

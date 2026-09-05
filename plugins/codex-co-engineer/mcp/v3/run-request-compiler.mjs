@@ -92,7 +92,7 @@ export const RUN_REQUEST_DEFAULT_MODELS = capturedFreeze({
   grok: 'grok-4',
   'cursor-local': 'composer-1',
   'cursor-cloud': 'claude-sonnet-4-5',
-  dsh: 'muse-spark-1.2-contributor',
+  dsh: 'meta/muse-spark-1.3-contributor',
 });
 export const RUN_REQUEST_RUN_POLICY = capturedFreeze({
   max_concurrency: MAX_ASSIGNMENTS,

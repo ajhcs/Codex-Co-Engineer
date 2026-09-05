@@ -98,7 +98,7 @@ test('readiness children spawned through projection cannot observe stripped secr
   const env = projectProviderEnvironment({
     provider: 'dsh',
     source: HOSTILE_ENV,
-    dshModel: 'muse-spark-1.2-contributor',
+    dshModel: 'meta/muse-spark-1.3-contributor',
     operation: 'readiness_probe',
   });
   assert.equal(env.MODEL_API_KEY, undefined);
@@ -128,45 +128,46 @@ test('push URL objects and insteadOf maps are denied', async () => {
 
 test('materialize does not copy key-file paths into the child environment', async () => {
   await withTempDir('cce-p29-mat-', async (root) => {
-    const keyFile = await writeOwnerFile(path.join(root, 'model-api-key'), 'loaded-muse-secret\n');
+    const keyFile = await writeOwnerFile(path.join(root, 'openrouter-api-key'), 'loaded-muse-secret\n');
     const env = await materializeProviderEnvironment({
       provider: 'dsh',
-      dshModel: 'muse-spark-1.2-contributor',
+      dshModel: 'meta/muse-spark-1.3-contributor',
       operation: 'lane',
       source: {
         PATH: '/usr/bin:/bin',
         HOME: root,
-        CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: keyFile,
+        CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE: keyFile,
       },
     });
-    assert.equal(env.MODEL_API_KEY, 'loaded-muse-secret');
-    assert.equal(env.CODEX_CO_ENGINEER_MODEL_API_KEY_FILE, undefined);
+    assert.equal(env.OPENROUTER_API_KEY, 'loaded-muse-secret');
+    assert.equal(env.MODEL_API_KEY, undefined);
+    assert.equal(env.CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE, undefined);
     assert.equal(JSON.stringify(env).includes(keyFile), false);
   });
 });
 
 test('credential-file overrides reject relative non-normalized and double-separator paths before resolve', async () => {
   await withTempDir('cce-p29-override-', async (root) => {
-    const keyFile = await writeOwnerFile(path.join(root, 'model-api-key'), 'muse-from-override\n');
+    const keyFile = await writeOwnerFile(path.join(root, 'openrouter-api-key'), 'muse-from-override\n');
     const loaded = await loadProviderCredential({
       provider: 'dsh',
-      dshModel: 'muse-spark-1.2-contributor',
-      source: { HOME: root, CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: keyFile },
+      dshModel: 'meta/muse-spark-1.3-contributor',
+      source: { HOME: root, CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE: keyFile },
     });
     assert.equal(loaded.value, 'muse-from-override');
 
     const overrides = [
       'relative-key',
-      `${root}/../${path.basename(root)}/model-api-key`,
-      `${root}/./model-api-key`,
-      `${root}//model-api-key`,
+      `${root}/../${path.basename(root)}/openrouter-api-key`,
+      `${root}/./openrouter-api-key`,
+      `${root}//openrouter-api-key`,
       `${keyFile}/`,
     ];
     for (const override of overrides) {
       const error = await errorOf(() => loadProviderCredential({
         provider: 'dsh',
-        dshModel: 'muse-spark-1.2-contributor',
-        source: { HOME: root, CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: override },
+        dshModel: 'meta/muse-spark-1.3-contributor',
+        source: { HOME: root, CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE: override },
       }));
       assert.equal(error.code, 'invalid_credential_path', override);
       assert.equal(error.message.includes(override), false, override);

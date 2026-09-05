@@ -155,9 +155,9 @@ fi
     "- id: acp-agent",
     "  name: '@deepseek-ai/dsh-acp-demo'",
     '  config:',
-    '    provider: meta',
-    '    model: muse-spark-1.2-contributor',
-    '    apiKeyEnv: MODEL_API_KEY',
+    '    provider: openrouter',
+    '    model: meta/muse-spark-1.3-contributor',
+    '    apiKeyEnv: OPENROUTER_API_KEY',
     '',
   ].join('\n'), { encoding: 'utf8', mode: configMode });
   await chmod(configFile, configMode);
@@ -335,10 +335,13 @@ test('setup install pins the exact DSH rc.7 composition', async () => {
     }
     assert.ok(args.at(-1)?.endsWith('fake.tgz'));
     const museConfig = await readFile(value.configFile, 'utf8');
-    assert.match(museConfig, /provider: meta/u);
-    assert.match(museConfig, /model: muse-spark-1\.2-contributor/u);
-    assert.match(museConfig, /apiKeyEnv: MODEL_API_KEY/u);
-    assert.doesNotMatch(museConfig, /openrouter|OPENROUTER_API_KEY|stealth\/ox-alpha/u);
+    assert.match(museConfig, /provider: openrouter/u);
+    assert.match(museConfig, /model: meta\/muse-spark-1\.3-contributor/u);
+    assert.match(museConfig, /apiKeyEnv: OPENROUTER_API_KEY/u);
+    assert.match(museConfig, /baseURL: https:\/\/openrouter\.ai\/api\/v1/u);
+    assert.match(museConfig, /reasoning: xhigh/u);
+    assert.match(museConfig, /reasoningEfforts:\n\s+xhigh: xhigh/u);
+    assert.doesNotMatch(museConfig, /api\.meta\.ai|MODEL_API_KEY|stealth\/ox-alpha/u);
     const oxConfig = await readFile(value.oxConfigFile, 'utf8');
     assert.match(oxConfig, /provider: openrouter/u);
     assert.match(oxConfig, /model: stealth\/ox-alpha/u);
@@ -346,7 +349,7 @@ test('setup install pins the exact DSH rc.7 composition', async () => {
     assert.match(oxConfig, /baseURL: https:\/\/openrouter\.ai\/api\/v1/u);
     assert.match(oxConfig, /reasoning: max/u);
     assert.match(oxConfig, /reasoningEfforts:\n\s+low: low\n\s+high: high\n\s+max: max/u);
-    assert.doesNotMatch(oxConfig, /api\.meta\.ai|MODEL_API_KEY|muse-spark-1\.2-contributor/u);
+    assert.doesNotMatch(oxConfig, /api\.meta\.ai|MODEL_API_KEY|muse-spark-1\.2-contributor|meta\/muse-spark-1\.3-contributor/u);
     const setupOutput = child.stdout?.trim() ? child.stdout : await readFile(value.setupOutputFile, 'utf8');
     assert.match(setupOutput, /Installed Co-Engineer agent dependencies/u);
   } finally {

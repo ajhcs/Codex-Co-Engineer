@@ -27,7 +27,7 @@ managed-worktree/run-base semantics, and no merge/PR authority. Launch
 confirms only after an authoritative ACP acknowledgement; post-spawn
 loss is `dispatch_uncertain` and is never replayed. The P20 DSH adapter
 (`DshApxDriverV1`) drives the contract over an injected bounded ACPX
-one-shot transport port for Muse Spark 1.2 Contributor and Ox Alpha,
+one-shot transport port for Muse Spark 1.3 Contributor and Ox Alpha,
 with honest post-spawn uncertainty, unsupported same-session reply,
 bounded recorded-evidence reconcile/restart/cancel behavior, and
 fail-closed identity/correlation drift denials. Neither adapter's

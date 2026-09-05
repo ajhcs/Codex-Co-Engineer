@@ -140,7 +140,7 @@ test('advertises only the thin public tool surface', async () => {
   assert.match(delegateTool.inputSchema.properties.starting_ref.description, /Cursor Cloud only/u);
   assert.match(delegateTool.inputSchema.properties.starting_ref.description, /does not replace the required repo/u);
   assert.deepEqual(delegateTool.inputSchema.properties.dsh_model.enum, [
-    'muse-spark-1.2-contributor',
+    'meta/muse-spark-1.3-contributor',
     'stealth/ox-alpha',
   ]);
   assert.match(delegateTool.inputSchema.properties.dsh_model.description, /DSH only/u);

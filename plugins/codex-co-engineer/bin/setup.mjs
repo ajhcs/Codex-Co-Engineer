@@ -44,7 +44,7 @@ const commands = Object.freeze({
   worktreeBootstrap: 'worktree-bootstrap',
 });
 const DSH_RC7 = '0.1.0-rc.7';
-const MUSE_MODEL = 'muse-spark-1.2-contributor';
+const MUSE_MODEL = 'meta/muse-spark-1.3-contributor';
 const OX_MODEL = 'stealth/ox-alpha';
 const vendorPackage = JSON.parse(await readFile(path.join(VENDOR, 'package.json'), 'utf8'));
 
@@ -176,7 +176,7 @@ async function check() {
     results.packages = { ok: false, output: error?.message ?? String(error) };
   }
   results.config = {
-    ok: await validConfig(configFile, { provider: 'meta', model: MUSE_MODEL, apiKeyEnv: 'MODEL_API_KEY' }),
+    ok: await validConfig(configFile, { provider: 'openrouter', model: MUSE_MODEL, apiKeyEnv: 'OPENROUTER_API_KEY' }),
     path: configFile,
     model: MUSE_MODEL,
   };
@@ -229,17 +229,20 @@ async function install() {
   await chmod(persistenceRoot, 0o700);
   const museProviders = [
     '    providers:',
-    '      meta:',
-    '        displayName: Meta Model API',
-    '        apiKeyEnv: MODEL_API_KEY',
+    '      openrouter:',
+    '        displayName: OpenRouter',
+    '        apiKeyEnv: OPENROUTER_API_KEY',
     '        api: openai-completions',
-    '        baseURL: https://api.meta.ai/v1',
+    '        baseURL: https://openrouter.ai/api/v1',
+    '        reasoning: xhigh',
     '        models:',
     `          - id: ${MUSE_MODEL}`,
-    '            name: Muse Spark 1.2 Contributor',
+    '            name: Muse Spark 1.3 Contributor',
     '            contextWindow: 1048576',
     '            maxTokens: 131072',
     '            input: [text, image]',
+    '            reasoningEfforts:',
+    '              xhigh: xhigh',
   ];
   const oxProviders = [
     '    providers:',
@@ -286,10 +289,10 @@ async function install() {
   if (!await exists(configFile)) {
     await writeFile(
       configFile,
-      configYaml({ provider: 'meta', model: MUSE_MODEL, providers: museProviders }),
+      configYaml({ provider: 'openrouter', model: MUSE_MODEL, providers: museProviders }),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' },
     );
-  } else if (!await validConfig(configFile, { provider: 'meta', model: MUSE_MODEL, apiKeyEnv: 'MODEL_API_KEY' })) {
+  } else if (!await validConfig(configFile, { provider: 'openrouter', model: MUSE_MODEL, apiKeyEnv: 'OPENROUTER_API_KEY' })) {
     throw new Error(`Existing DSH ACP config is incompatible or not owner-only: ${configFile}`);
   }
   if (!await exists(oxConfigFile)) {
