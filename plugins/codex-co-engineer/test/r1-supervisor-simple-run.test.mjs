@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createSupervisorRunToolAdapter, submitTask } from '../mcp/v3/supervisor.mjs';
+import { createTask } from '../mcp/v3/task-store.mjs';
 import { parseChildEnvelopeV1 } from '../mcp/v3/prompt-compiler.mjs';
 import {
   compileRunRequestV1,
@@ -182,6 +183,51 @@ test('supervisor wires run_request through admission while preserving bounded re
     const cancelled = await adapter.dispatch('cancel', { run_id: 'simple-supervisor' });
     assert.equal(cancelled.phase, 'cancelled');
     assert.equal(cancelled.lanes[0].status, 'cancelled');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('production supervisor observation carries a safe provider failure into the native run receipt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-provider-error-'));
+  let dispatches = 0;
+  try {
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      inProcess: true,
+      compile: (value) => compileRunRequestV1(value, { observeGit: async () => OBSERVED }),
+      requestConsent: async () => ({ approved: true }),
+      providerReady: async () => ({ ready: true }),
+      processBoundaryReady: async () => ({ ready: true }),
+      verifyRepository: async () => ({ verified: true }),
+      prepareWorkspace: async ({ assignment }) => ({
+        prepared: true,
+        workspace: { task: assignment.task_id, worktree_path: root, branch: 'codex/provider-error', start_sha: BASE_SHA },
+      }),
+      createSession: async () => ({ ready: true, session_id: 'provider-error-session' }),
+      dispatchPrompt: async ({ assignment }) => {
+        dispatches += 1;
+        await createTask({
+          root,
+          prompt: 'PRIVATE_PROMPT',
+          record: {
+            id: assignment.task_id, provider: 'dsh', status: 'failed', cwd: root,
+            workspace_kind: 'direct', prompt_dispatched: true,
+            error: { code: 'provider_billing_required', message: 'PRIVATE_CREDENTIAL' },
+          },
+        });
+        return { dispatched: true, confidence: 'authoritative', cursor: '0' };
+      },
+      inspectWorkspace: async () => ({ current_head: BASE_SHA, clean: true, changed_files: [], commits: [] }),
+    });
+    await adapter.dispatch('delegate', { run_request: request() });
+    const receipt = await adapter.dispatch('task', { run_id: 'simple-supervisor' });
+    assert.equal(receipt.phase, 'degraded');
+    assert.equal(receipt.lanes[0].error.code, 'provider_billing_required');
+    assert.match(receipt.lanes[0].error.message, /billing/);
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_PROMPT|PRIVATE_CREDENTIAL/);
+    await adapter.dispatch('task', { run_id: 'simple-supervisor' });
+    assert.equal(dispatches, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

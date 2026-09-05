@@ -225,6 +225,19 @@ function cloneError(error) {
   }) : null;
 }
 
+const PROVIDER_FAILURE_MESSAGES = Object.freeze({
+  provider_billing_required: 'The provider requires billing setup or available credit.',
+  authentication_required: 'The provider requires valid authentication.',
+  provider_rate_limited: 'The provider rate limit was reached. Retry later.',
+});
+
+function terminalLaneError(response, fallbackCode) {
+  const code = response.error?.code;
+  return cloneError(typeof code === 'string' && capturedHasOwn(PROVIDER_FAILURE_MESSAGES, code)
+    ? { code, message: PROVIDER_FAILURE_MESSAGES[code] }
+    : { code: fallbackCode });
+}
+
 function normalizeAttention(value) {
   if (value === null || value === undefined) return null;
   try {
@@ -1537,7 +1550,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
         } else if (status === 'failed' || status === 'timeout' || status === 'timed_out') {
           lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
           lane.recovery_classification = 'post_prompt_failure_no_replay';
-          lane.error = cloneError({ code: status === 'timed_out' ? 'timeout' : status });
+          lane.error = terminalLaneError(response, status === 'timed_out' ? 'timeout' : status);
           record.telemetry.recovery_path = 'post_prompt_failure_no_replay';
           await finishLane(record, lane, response.workspace_inspection ?? null);
         } else if (lane.phase === 'prompt_dispatched') {

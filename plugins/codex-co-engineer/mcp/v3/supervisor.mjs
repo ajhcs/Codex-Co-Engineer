@@ -2258,7 +2258,7 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
       if (status === 'timeout' || status === 'timed_out') return { ...observed, status: 'timeout' };
       if (status === 'transport_lost') return { ...observed, status: 'transport_lost' };
       if (status === 'environment_blocked') return { ...observed, status: 'environment_blocked' };
-      if (status === 'failed') return { ...observed, status: 'failed' };
+      if (status === 'failed') return { ...observed, status: 'failed', error: { code: task.error?.code } };
       if (status === 'running' || status === 'starting' || status === 'accepted' || status === 'cancelling') return { ...observed, status: 'running' };
       throw Object.assign(new Error('Supervisor task observation has an unknown status.'), { code: 'task_observation_invalid' });
     }),

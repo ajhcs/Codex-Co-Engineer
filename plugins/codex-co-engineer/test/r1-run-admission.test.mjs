@@ -715,3 +715,24 @@ test('an uncertain dispatch remains cancellable even without authoritative promp
   assert.deepEqual(calls.cancel, ['lane-one']);
   assert.equal(cancelled.lanes[0].phase, 'cancelled');
 });
+
+for (const code of ['provider_billing_required', 'authentication_required', 'provider_rate_limited', 'unknown_private_error']) {
+  test(`terminal lane failure preserves safe category ${code} without provider text or replay`, async () => {
+    const { dependencies, calls } = baseDependencies({
+      requestConsent: async () => ({ status: 'approved' }),
+      inspectLane: async () => ({
+        status: 'failed',
+        error: { code, message: 'PRIVATE_PROMPT api-key=PRIVATE_CREDENTIAL' },
+      }),
+    });
+    const runtime = createRunAdmissionRuntime(dependencies);
+    await runtime.submitRunRequest(request({ run_id: `failure-${code.replaceAll("_", "-")}` }));
+    const receipt = await runtime.inspectRun({ run_id: `failure-${code.replaceAll("_", "-")}` });
+    assert.equal(receipt.phase, 'degraded');
+    assert.equal(receipt.lanes[0].phase, 'partial_handoff');
+    assert.equal(receipt.lanes[0].error.code, code === 'unknown_private_error' ? 'failed' : code);
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_PROMPT|PRIVATE_CREDENTIAL/);
+    await runtime.inspectRun({ run_id: `failure-${code.replaceAll("_", "-")}` });
+    assert.equal(calls.dispatch.length, 2, 'each original lane is dispatched only once');
+  });
+}
