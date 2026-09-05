@@ -126,11 +126,11 @@ A real-transport qualification harness must supply a production port that:
 
 1. resolves the exact config file and credential per model (env first, then the
    owner-only file), returning their sha256 digests and never the secret bytes;
-2. spawns `acpx flow run <single-turn>` one-shot with the exact envelope text as
-   the bounded input payload, returning a stable bounded `session_ref`;
-3. projects recorded ACPX flow output (session records, NDJSON traces, exit
-   status) into the closed evidence/page/cancel receipts above, including
-   needs-attention detection with a bounded question ref;
+2. spawns `acpx exec --file -` with JSON output and the exact envelope on
+   stdin, returning a stable bounded `session_ref`;
+3. correlates JSON-RPC responses and session updates, projecting only bounded
+   received output into the closed evidence/page/cancel receipts above;
+   outgoing prompt frames must never become receipt content;
 4. performs tree-scoped cancellation and reports `confirmed` only after the
    process group is observed stopped;
 5. keeps every receipt free of provider-authored content beyond the closed
