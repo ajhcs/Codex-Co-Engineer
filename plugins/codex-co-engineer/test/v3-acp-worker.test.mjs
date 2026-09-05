@@ -284,7 +284,7 @@ test('provider failure after dispatch is never marked safe to replay', async () 
   assert.equal(workerSeamIncident(task), false);
 });
 
-test('DSH scopes ACPX artifacts to the task and removes them after persistence', async () => {
+test('DSH uses bounded ACPX exec stdin and scopes artifacts to the task', async () => {
   const value = await fixture({ provider: 'dsh', id: 'dsh-flow' });
   await updateTask(value.root, value.taskId, {
     error: { code: 'worker_boundary_uncertain', message: 'stale reconciliation marker' },
@@ -297,8 +297,14 @@ test('DSH scopes ACPX artifacts to the task and removes them after persistence',
     assert.equal(terminal.result, 'DSH_FAKE_OK');
     assert.equal(terminal.error, null);
     assert.equal(terminal.acp_session_id, 'dsh-fake-session');
-    assert.equal(terminal.dispatch_uncertain, true);
-    assert.equal(terminal.prompt_dispatched, undefined);
+    assert.equal(terminal.dispatch_uncertain, false);
+    assert.equal(terminal.prompt_dispatched, true);
+    assert.equal(terminal.dispatch_evidence, 'authoritative');
+    const observed = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-observed.json'), 'utf8'));
+    assert.ok(observed.argv.includes('exec'));
+    assert.ok(observed.argv.includes('--file'));
+    assert.ok(observed.argv.includes('-'));
+    assert.equal(observed.argv.includes('review this repository'), false);
     await access(artifactMarker);
     const entries = await readdir(path.join(value.root, 'tasks', value.taskId));
     assert.equal(entries.some((entry) => entry.startsWith('flow-input-')), false);
@@ -322,6 +328,141 @@ test('DSH ACPX preserves bounded nested output values', async () => {
   assert.match(terminal.result.nested.final, /VERDICT: DSH OBJECT PASS$/u);
   assert.equal(terminal.result_truncated, true);
   assert.equal(terminal.result_original_chars, 10_025);
+});
+
+test('DSH exposes a correlated provider billing failure without replay or prompt leakage', async () => {
+  const cliMarker = path.join((await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-dsh-billing-'))), 'cli-ran');
+  const prompt = 'private billing prompt';
+  const value = await fixture({
+    provider: 'dsh',
+    id: 'dsh-provider-billing',
+    prompt,
+    cliArgv: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(cliMarker)}, 'ran')`],
+  });
+  await assert.rejects(
+    withFakeAcpx('provider-error', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'provider_billing_required',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.error.code, 'provider_billing_required');
+  assert.equal(task.error.message, 'The provider billing configuration is unavailable.');
+  assert.equal(task.prompt_dispatched, true);
+  assert.equal(task.dispatch_evidence, 'authoritative');
+  assert.equal(task.dispatch_uncertain, false);
+  assert.equal(task.fallback_safe, false);
+  await assert.rejects(access(cliMarker));
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.doesNotMatch(events, new RegExp(prompt, 'u'));
+});
+
+test('DSH keeps an ACP authentication rejection pre-dispatch and does not fall back', async () => {
+  const cliMarker = path.join((await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-dsh-auth-'))), 'cli-ran');
+  const value = await fixture({
+    provider: 'dsh',
+    id: 'dsh-provider-auth',
+    cliArgv: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(cliMarker)}, 'ran')`],
+  });
+  await assert.rejects(
+    withFakeAcpx('auth-error', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'authentication_required',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.error.code, 'authentication_required');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.fallback_safe, false);
+  await assert.rejects(access(cliMarker));
+});
+
+test('DSH rejects an uncorrelated or incomplete ACP prompt result', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-invalid-result' });
+  await assert.rejects(
+    withFakeAcpx('invalid-result', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_invalid_result',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.dispatch_uncertain, true);
+  assert.equal(task.fallback_safe, false);
+});
+
+test('DSH rejects an unmatched terminal response instead of manufacturing success', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-unmatched-result' });
+  await assert.rejects(
+    withFakeAcpx('unmatched-result', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_invalid_result',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+  assert.equal(task.dispatch_uncertain, true);
+  assert.equal(task.fallback_safe, false);
+});
+
+test('DSH treats thought updates as dispatch evidence without persisting thought text', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-thought-first' });
+  const terminal = await withFakeAcpx('thought-first', () => runAcpTask({ root: value.root, taskId: value.taskId }));
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.result, 'THOUGHT_RESULT');
+  assert.equal(terminal.dispatch_evidence, 'authoritative');
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.doesNotMatch(events, /PRIVATE_THOUGHT_SHOULD_NOT_BE_STORED/u);
+});
+
+test('DSH preserves split UTF-8 ACPX output while parsing correlated frames', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-utf8-output' });
+  const terminal = await withFakeAcpx('utf8', () => runAcpTask({ root: value.root, taskId: value.taskId }));
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.result, 'UTF8_OK 😀 café');
+});
+
+test('DSH fails closed on malformed ACPX JSON output', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-malformed-output' });
+  await assert.rejects(
+    withFakeAcpx('malformed', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_protocol_invalid',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+  assert.equal(task.fallback_safe, false);
+});
+
+test('DSH rejects a prompt request whose session differs from session/new', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-wrong-prompt-session' });
+  await assert.rejects(
+    withFakeAcpx('wrong-session', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_protocol_invalid',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.dispatch_uncertain, true);
+});
+
+test('DSH rejects duplicate outstanding ACPX request ids', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-duplicate-request-id' });
+  await assert.rejects(
+    withFakeAcpx('duplicate-id', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_protocol_invalid',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+});
+
+test('DSH rejects a terminal response with a mismatched session id', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-wrong-result-session' });
+  await assert.rejects(
+    withFakeAcpx('wrong-result-session', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_invalid_result',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+  assert.equal(task.dispatch_uncertain, true);
 });
 
 test('DSH does not fall back after ACPX has spawned without an acknowledgement', async () => {

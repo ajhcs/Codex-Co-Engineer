@@ -38,7 +38,7 @@ const required = [
   `${PLUGIN}/mcp/v3/task-store.mjs`, `${PLUGIN}/mcp/v3/acp-worker.mjs`,
   `${PLUGIN}/mcp/v3/contract.mjs`, `${PLUGIN}/mcp/v3/deadline.mjs`,
   `${PLUGIN}/mcp/v3/diagnostics.mjs`, `${PLUGIN}/mcp/v3/mailbox.mjs`,
-  `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`, `${PLUGIN}/mcp/v3/single-turn.flow.mjs`,
+  `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`,
   `${PLUGIN}/mcp/v3/process-boundary.mjs`,
   `${PLUGIN}/mcp/v3/compact-task.mjs`, `${PLUGIN}/mcp/v3/provider-result.mjs`,
   `${PLUGIN}/mcp/v3/response.mjs`,
