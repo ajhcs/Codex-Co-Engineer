@@ -38,6 +38,7 @@ import {
   identityBoundDigest,
 } from './selection-json.mjs';
 import { IDENTITY_LABELS } from './identity.mjs';
+import { boundProviderResult } from './compact-task.mjs';
 import {
   validateChildIdentityV1,
   validateDispatchAttemptV1,
@@ -92,8 +93,10 @@ export const RUN_ADMISSION_DEPENDENCIES = capturedFreeze([
   'verifyRepository', 'prepareWorkspace', 'cleanupWorkspace', 'createSession',
   'dispatchPrompt', 'inspectLane', 'reconnectLane', 'replyAttention', 'cancelLane',
   'inspectWorkspace', 'buildHandoff', 'verifyRun', 'clock', 'sleep', 'compile',
-  'loadRecord', 'persistRecord',
+  'loadRecord', 'persistRecord', 'waitForProgress',
 ]);
+const MAX_PROVIDER_RESULT_BYTES = 8 * 1024;
+
 export const RUN_ADMISSION_CAPS = capturedFreeze({
   max_lanes: MAX_ASSIGNMENTS,
   max_handoff_bytes: 16_384,
@@ -101,6 +104,7 @@ export const RUN_ADMISSION_CAPS = capturedFreeze({
   max_changed_files: 64,
   max_commits: 64,
   max_next_actions: 8,
+  max_provider_result_bytes: MAX_PROVIDER_RESULT_BYTES,
 });
 
 const TELEMETRY_DEFAULTS = Object.freeze({
@@ -129,7 +133,13 @@ const RUN_ID_PATTERN = /^[a-z][a-z0-9-]{2,63}$/u;
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const CURSOR_PATTERN = /^\d{1,16}$/u;
 const MAX_WAIT_MS = 14_400_000;
-const POLL_MS = 50;
+const OBSERVATION_BACKOFF_MS = 1_000;
+const OBSERVATION_RECOVERY_CLASSIFICATION = 'post_prompt_inspection_failed_no_replay';
+const KNOWN_LANE_OBSERVATION_STATUSES = capturedFreeze([
+  'running', 'starting', 'accepted', 'cancelling', 'needs_attention',
+  'completed', 'succeeded', 'cancelled', 'transport_lost',
+  'environment_blocked', 'failed', 'timeout', 'timed_out',
+]);
 const SAFE_CONSENT_ERROR_CODES = capturedFreeze([
   'consent_host_unavailable',
   'consent_declined',
@@ -500,6 +510,15 @@ function validatePersistedRecord(record, runId) {
       admissionError('durable_state_mismatch', `persisted_run.lanes[${index}]`,
         'Persisted dispatch evidence violates the no-replay boundary.');
     }
+    if (lane.result_truncated !== undefined && typeof lane.result_truncated !== 'boolean') {
+      admissionError('durable_state_mismatch', `persisted_run.lanes[${index}].result_truncated`,
+        'Persisted result truncation state is invalid.');
+    }
+    if (lane.cancel_confirmed !== undefined && lane.cancel_confirmed !== null
+      && typeof lane.cancel_confirmed !== 'boolean') {
+      admissionError('durable_state_mismatch', `persisted_run.lanes[${index}].cancel_confirmed`,
+        'Persisted cancellation state is invalid.');
+    }
     if (!capturedIsArray(lane.attention_satisfied_keys)) {
       admissionError('durable_state_mismatch', `persisted_run.lanes[${index}].attention_satisfied_keys`,
         'Persisted attention state is invalid.');
@@ -568,6 +587,10 @@ function laneStatus(phase) {
 }
 
 function isTerminalLane(lane) {
+  if (lane.phase === 'partial_handoff' || lane.phase === 'unrecoverable_post_prompt') {
+    return ['post_prompt_failure_no_replay', 'post_prompt_environment_blocked_no_replay',
+      'timed_out_with_partial_work', 'timed_out_no_changes'].includes(lane.recovery_classification);
+  }
   return capturedIncludes(LANE_TERMINAL_PHASES, lane.phase);
 }
 
@@ -581,10 +604,19 @@ function authoritativeRequiredDispatch(record) {
     .every((lane) => lane.prompt_dispatched === true && lane.dispatch_confidence === 'authoritative');
 }
 
-function allRequiredTerminal(record) {
-  return record.lanes
-    .filter((lane) => lane.required !== false)
-    .every(isTerminalLane);
+
+function allLanesTerminal(record) {
+  return record.lanes.length > 0 && record.lanes.every(isTerminalLane);
+}
+
+function laneNeedsObservation(lane) {
+  return lane.prompt_attempted === true && !isTerminalLane(lane);
+}
+
+function completeCandidateBlocked(record) {
+  return record.phase !== 'completed'
+    || record.lanes.some((lane) => !isTerminalLane(lane)
+      || (lane.required !== false && lane.phase !== 'completed'));
 }
 
 function hasPromptEvidence(record) {
@@ -601,6 +633,15 @@ function changedFiles(value) {
 function commitList(value) {
   if (!capturedIsArray(value)) return [];
   return value.filter((entry) => typeof entry === 'string').slice(0, RUN_ADMISSION_CAPS.max_commits);
+}
+
+function observedResult(response) {
+  if (response === null || typeof response !== 'object' || capturedIsArray(response)) {
+    return { present: false, value: null };
+  }
+  if (capturedHasOwn(response, 'result')) return { present: true, value: response.result };
+  if (capturedHasOwn(response, 'provider_result')) return { present: true, value: response.provider_result };
+  return { present: false, value: null };
 }
 
 function handoffFallback(record, lane, workspace = null, inspection = null) {
@@ -672,6 +713,11 @@ function laneReceipt(lane) {
     dispatch_confidence: lane.dispatch_confidence,
     session_id: lane.session_id ?? null,
     cursor: lane.cursor ?? null,
+    last_event: lane.last_event ?? null,
+    result: lane.result ?? null,
+    result_truncated: lane.result_truncated === true,
+    cancel_confirmed: lane.cancel_confirmed ?? null,
+    task_final: isTerminalLane(lane),
     child_identity_digest: lane.child_identity?.digest ?? null,
     dispatch_identity_digest: lane.dispatch_identity?.digest ?? null,
     provider_run_identity_digest: lane.provider_run_identity?.digest ?? null,
@@ -718,6 +764,7 @@ function receipt(record, extras = {}) {
     error: record.error ?? null,
     attention: record.attention ?? null,
     handoff: record.handoff ?? null,
+    complete_candidate_blocked: completeCandidateBlocked(record),
     // Never hand the mutable internal telemetry object to freezeData: receipts
     // are immutable snapshots, while later cancellation/reconciliation still
     // needs to update the record's counters.
@@ -817,6 +864,7 @@ function createDefaultDependencies(overrides) {
     verifyRun: async () => ({ verified: true }),
     clock: () => new Date().toISOString(),
     sleep: defaultSleep,
+    waitForProgress: async ({ wait_ms, signal }) => defaultSleep(wait_ms, signal),
     compile: compileRunRequestV1,
     loadRecord: async () => null,
     persistRecord: async () => {},
@@ -930,12 +978,16 @@ export function createRunAdmissionRuntime(overrides = {}) {
         workspace_identity: null,
         last_event: null,
         attention_satisfied_keys: [],
+        result: null,
+        result_truncated: false,
+        cancel_confirmed: null,
       })),
     };
   }
 
   async function finishLane(record, lane, inspection = null) {
-    if (!isTerminalLane(lane)) return;
+    // A handoff may describe partial work while provider termination is still unknown.
+    if (!capturedIncludes(LANE_TERMINAL_PHASES, lane.phase)) return;
     let workspaceInspection = inspection;
     if (workspaceInspection === null) {
       try {
@@ -1318,19 +1370,40 @@ export function createRunAdmissionRuntime(overrides = {}) {
   }
 
   async function reconcile(record) {
+    const before = JSON.stringify(record);
     // Inspection is a read operation and must always return the authoritative
     // snapshot, including durable terminal and consent-pending records. An
     // undefined result here makes waiters lose their cursor/phase and lets the
     // adapter manufacture an empty success receipt.
     if (isTerminalRun(record) || record.phase === 'awaiting_consent') return receipt(record);
-    const active = record.lanes.filter((lane) => lane.prompt_dispatched === true && !isTerminalLane(lane));
+    const active = record.lanes.filter(laneNeedsObservation);
     for (const lane of active) {
       try {
         const assignment = record.compiled.assignments.find((entry) => entry.assignment_id === lane.assignment_id);
-        const response = await injected.inspectLane({ run_id: record.run_id, assignment, lane });
+        const response = await injected.inspectLane({
+          run_id: record.run_id,
+          assignment_id: lane.assignment_id,
+          task_id: lane.task_id,
+          assignment,
+          lane,
+        });
         const status = response?.status ?? response?.phase;
+        if (!KNOWN_LANE_OBSERVATION_STATUSES.includes(status)) {
+          throw Object.assign(new Error('Supervisor returned an invalid lane observation.'), {
+            code: 'lane_observation_invalid',
+          });
+        }
+        const previousLastEvent = lane.last_event;
+        const recoveringObservation = lane.recovery_classification === OBSERVATION_RECOVERY_CLASSIFICATION;
+        if (recoveringObservation && !['failed', 'timeout', 'environment_blocked'].includes(status)) {
+          lane.phase = lane.phase === 'partial_handoff' ? 'running' : lane.phase;
+          lane.recovery_classification = null;
+          lane.error = null;
+        }
+        const eventChanged = typeof response?.last_event === 'string'
+          && response.last_event !== previousLastEvent;
         if (typeof response?.cursor === 'string' && CURSOR_PATTERN.test(response.cursor)) lane.cursor = response.cursor;
-        if (typeof response?.last_event === 'string') {
+        if (typeof response?.last_event === 'string' && eventChanged) {
           lane.last_event = response.last_event;
           if (record.telemetry.time_to_first_event_ms === null) {
             const createdAt = Date.parse(record.created_at);
@@ -1338,8 +1411,17 @@ export function createRunAdmissionRuntime(overrides = {}) {
           }
           record.telemetry.last_meaningful_activity_at = nowIso(injected.clock);
         }
-        if (Number.isSafeInteger(response?.silence_duration_ms) && response.silence_duration_ms >= 0) {
+        if (Number.isSafeInteger(response?.silence_duration_ms) && response.silence_duration_ms >= 0
+          && (eventChanged || status === 'needs_attention'
+            || ['completed', 'succeeded', 'cancelled', 'failed', 'timeout'].includes(status))) {
           record.telemetry.silence_duration_ms = response.silence_duration_ms;
+        }
+        const result = observedResult(response);
+        if (result.present) {
+          const bounded = boundProviderResult(result.value, MAX_PROVIDER_RESULT_BYTES);
+          lane.result = bounded.value;
+          lane.result_truncated = bounded.truncated;
+          record.telemetry.response_truncated = record.telemetry.response_truncated || bounded.truncated;
         }
         if (status === 'needs_attention') {
           const attention = normalizeAttention(response.attention);
@@ -1353,6 +1435,18 @@ export function createRunAdmissionRuntime(overrides = {}) {
           }
           const key = capabilityQuestionKey(attention);
           const dedupKey = attentionDedupKey(attention);
+          const targetKey = JSON.stringify(attentionTarget(lane, attention));
+          const alreadyOpen = record.attention?.status === 'open'
+            && record.attention_questions.some((entry) => entry.attention_key === dedupKey
+              && entry.targets?.some((target) => JSON.stringify(target) === targetKey));
+          if (alreadyOpen) {
+            lane.phase = 'needs_attention';
+            continue;
+          }
+          if (attentionWasSatisfied(lane, key)) {
+            lane.phase = 'running';
+            continue;
+          }
           record.telemetry.attention_count += 1;
           if (dedupKey && record.attention_questions.some((entry) => entry.attention_key === dedupKey)) {
             record.telemetry.attention_deduplicated_count += 1;
@@ -1403,12 +1497,17 @@ export function createRunAdmissionRuntime(overrides = {}) {
           await finishLane(record, lane, response.workspace_inspection ?? null);
         } else if (status === 'cancelled') {
           lane.phase = 'cancelled';
+          lane.cancel_confirmed = true;
+          lane.error = null;
+          lane.recovery_classification = null;
           await finishLane(record, lane, response.workspace_inspection ?? null);
         } else if (status === 'transport_lost') {
           let reconnected = null;
           try {
             reconnected = await injected.reconnectLane({
               run_id: record.run_id,
+              assignment_id: lane.assignment_id,
+              task_id: lane.task_id,
               assignment,
               lane,
               response,
@@ -1419,43 +1518,63 @@ export function createRunAdmissionRuntime(overrides = {}) {
           if (reconnected?.reconnected === true) {
             lane.phase = 'running';
             lane.recovery_classification = 'post_prompt_session_reconnected';
+            lane.error = null;
             if (typeof reconnected.session_id === 'string') lane.session_id = reconnected.session_id;
             if (typeof reconnected.cursor === 'string' && CURSOR_PATTERN.test(reconnected.cursor)) lane.cursor = reconnected.cursor;
             lane.last_event = 'session_reconnected';
             record.telemetry.recovery_path = 'post_prompt_session_reconnected';
           } else {
-            lane.phase = 'partial_handoff';
+            lane.phase = 'running';
             lane.recovery_classification = 'post_prompt_session_reconnect_required';
             lane.error = cloneError({ code: 'transport_lost' });
-            await finishLane(record, lane, response.workspace_inspection ?? null);
+            record.telemetry.recovery_path = 'post_prompt_session_reconnect_required';
           }
-        } else if (status === 'failed' || status === 'timeout') {
+        } else if (status === 'environment_blocked') {
+          lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
+          lane.recovery_classification = 'post_prompt_environment_blocked_no_replay';
+          lane.error = cloneError({ code: 'environment_blocked' });
+          await finishLane(record, lane, response.workspace_inspection ?? null);
+        } else if (status === 'failed' || status === 'timeout' || status === 'timed_out') {
           lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
           lane.recovery_classification = 'post_prompt_failure_no_replay';
-          lane.error = cloneError({ code: status });
+          lane.error = cloneError({ code: status === 'timed_out' ? 'timeout' : status });
           record.telemetry.recovery_path = 'post_prompt_failure_no_replay';
           await finishLane(record, lane, response.workspace_inspection ?? null);
         } else if (lane.phase === 'prompt_dispatched') {
           lane.phase = 'running';
         }
       } catch (error) {
-        lane.phase = 'partial_handoff';
-        lane.recovery_classification = 'post_prompt_inspection_failed_no_replay';
-        lane.error = cloneError(errorSummary(error, 'lane_inspection_failed'));
-        await finishLane(record, lane);
+        // A failed read is not proof that the provider stopped. Keep the
+        // canonical task ID and retry on a later inspect/wait/cancel request.
+        if (!isTerminalLane(lane) || lane.recovery_classification === OBSERVATION_RECOVERY_CLASSIFICATION) {
+          if (lane.recovery_classification === OBSERVATION_RECOVERY_CLASSIFICATION) {
+            // A legacy partial handoff is only terminal because its old
+            // inspection failed. Make it active again before retrying.
+            lane.phase = 'running';
+          } else {
+            lane.phase = lane.phase === 'prompt_dispatched' ? 'running' : lane.phase;
+          }
+          lane.recovery_classification = OBSERVATION_RECOVERY_CLASSIFICATION;
+          lane.error = cloneError(errorSummary(error, 'lane_observation_unavailable'));
+        }
       }
     }
     if (record.cancel_requested && record.lanes.every((lane) => lane.phase === 'cancelled' || isTerminalLane(lane))) {
       record.phase = 'cancelled';
+      record.telemetry.cancel_confirmed = record.lanes.every((lane) => lane.phase === 'cancelled' || lane.phase === 'completed');
     } else if (record.lanes.some((lane) => lane.phase === 'needs_attention')) {
       record.phase = 'needs_attention';
-    } else if (record.lanes.some((lane) => lane.phase === 'partial_handoff' || lane.phase === 'unrecoverable_post_prompt')) {
+    } else if (record.lanes.some((lane) => lane.phase === 'partial_handoff' || lane.phase === 'unrecoverable_post_prompt'
+      || (laneNeedsObservation(lane) && lane.error !== null))) {
       record.phase = 'degraded';
-    } else if (allRequiredTerminal(record)) {
+    } else if (allLanesTerminal(record)) {
       record.phase = 'verifying';
       try {
         const verification = await injected.verifyRun({ run_id: record.run_id, compiled: record.compiled, lanes: record.lanes });
-        record.phase = verification?.verified === true ? 'completed' : 'failed';
+        record.phase = verification?.verified === true
+          && authoritativeRequiredDispatch(record)
+          && record.lanes.filter((lane) => lane.required !== false).every((lane) => lane.phase === 'completed')
+          ? 'completed' : 'failed';
         if (record.phase === 'failed') record.error = cloneError({ code: 'verification_failed' });
       } catch (error) {
         record.phase = 'failed';
@@ -1464,8 +1583,11 @@ export function createRunAdmissionRuntime(overrides = {}) {
     } else if (authoritativeRequiredDispatch(record)) {
       record.phase = 'running';
     }
-    bump(record);
-    await persist(record);
+    const after = JSON.stringify(record);
+    if (after !== before) {
+      bump(record);
+      await persist(record);
+    }
     return receipt(record);
   }
 
@@ -1614,8 +1736,9 @@ export function createRunAdmissionRuntime(overrides = {}) {
       const noPromptHasBeenAttempted = record.lanes.every((lane) => lane.prompt_attempted !== true);
       if (record.phase === 'awaiting_consent' || noPromptHasBeenAttempted) {
         for (const lane of record.lanes) {
-          if (isTerminalLane(lane)) continue;
+          if (isTerminalLane(lane) && lane.recovery_classification !== OBSERVATION_RECOVERY_CLASSIFICATION) continue;
           lane.phase = 'cancelled';
+          lane.cancel_confirmed = true;
           lane.error = cloneError({ code: 'cancel_requested' });
           await finishLane(record, lane);
         }
@@ -1626,7 +1749,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
         return receipt(record);
       }
       for (const lane of record.lanes) {
-        if (isTerminalLane(lane)) continue;
+        if (isTerminalLane(lane) && lane.recovery_classification !== OBSERVATION_RECOVERY_CLASSIFICATION) continue;
         try {
           const result = await injected.cancelLane({
             run_id: runId,
@@ -1636,14 +1759,18 @@ export function createRunAdmissionRuntime(overrides = {}) {
           });
           if (result?.confirmed === true || result?.cancelled === true) {
             lane.phase = 'cancelled';
+            lane.cancel_confirmed = true;
+            lane.error = null;
           } else {
-            lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
+            lane.phase = lane.prompt_attempted ? 'running' : 'failed_pre_prompt';
             lane.recovery_classification = 'cancel_unconfirmed';
+            lane.cancel_confirmed = false;
             lane.error = cloneError({ code: 'cancel_unconfirmed' });
           }
         } catch (error) {
-          lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
+          lane.phase = lane.prompt_attempted ? 'running' : 'failed_pre_prompt';
           lane.recovery_classification = 'cancel_unconfirmed';
+          lane.cancel_confirmed = false;
           lane.error = cloneError(errorSummary(error, 'cancel_unconfirmed'));
         }
         await finishLane(record, lane);
@@ -1673,10 +1800,37 @@ export function createRunAdmissionRuntime(overrides = {}) {
     if (actionable(current) || waitMs === 0) return freezeData({ ...current, wait_until: waitUntil, waited_ms: 0 });
     while (Date.now() - started < waitMs) {
       if (options.signal?.aborted) break;
-      await injected.sleep(Math.min(POLL_MS, waitMs - (Date.now() - started)), options.signal);
+      const remaining = Math.max(0, waitMs - (Date.now() - started));
+      const taskLanes = current.lanes.filter(laneNeedsObservation);
+      const taskIds = taskLanes.map((lane) => lane.task_id);
+      const cursors = Object.fromEntries(taskLanes
+        .filter((lane) => typeof lane.cursor === 'string' && CURSOR_PATTERN.test(lane.cursor))
+        .map((lane) => [lane.task_id, lane.cursor]));
+      try {
+        await injected.waitForProgress({
+          run_id: runId,
+          task_ids: taskIds,
+          cursors,
+          wait_ms: remaining,
+          wait_until: waitUntil === 'terminal' ? 'terminal' : 'progress',
+          signal: options.signal,
+        });
+      } catch {
+        // A wait provider failure is an observation uncertainty, so use a
+        // bounded backoff before retrying the authoritative read.
+        await injected.sleep(Math.min(250, remaining), options.signal);
+      }
       if (options.signal?.aborted) break;
+      const previousCursor = current.cursor;
       current = await inspectRun({ run_id: runId });
       if (actionable(current)) break;
+      // Task-store waits can wake immediately for a terminal task whose
+      // cleanup boundary is still unfinal, or for a temporarily missing task.
+      // If admission made no progress, avoid turning that wake into a hot loop.
+      const remainingAfterWait = Math.max(0, waitMs - (Date.now() - started));
+      if (remainingAfterWait > 0 && current.cursor === previousCursor) {
+        await injected.sleep(Math.min(OBSERVATION_BACKOFF_MS, remainingAfterWait), options.signal);
+      }
     }
     return freezeData({ ...current, wait_until: waitUntil, waited_ms: Date.now() - started });
   }

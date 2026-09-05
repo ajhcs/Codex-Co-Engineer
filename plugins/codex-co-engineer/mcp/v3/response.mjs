@@ -26,6 +26,7 @@ export const EXPERIENCE_PHRASES = Object.freeze({
   preparing_template: 'Co-Engineer is preparing N assignments',
   running_one: 'Co-Engineer is running 1 independent assignment',
   running_template: 'Co-Engineer is running N independent assignments',
+  reconciling: 'Co-Engineer is reconciling an uncertain assignment',
   attention: 'Co-Engineer needs one decision from you',
   verified_final: 'Co-Engineer finished, and I verified the candidate.',
 });
@@ -88,12 +89,26 @@ const ACCEPTED_LANE_STATUSES = Object.freeze(['completed']);
 const FAILED_LANE_STATUSES = Object.freeze([
   'failed', 'timeout', 'transport_lost', 'environment_blocked',
 ]);
-const UNRESOLVED_LANE_STATUSES = Object.freeze(['unresolved']);
+const UNRESOLVED_LANE_STATUSES = Object.freeze([
+  'unresolved', 'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
+]);
+const RECONCILIATION_LANE_STATUSES = Object.freeze([
+  'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
+]);
+const ACTIVE_LANE_STATUSES = Object.freeze([
+  'accepted', 'starting', 'running', 'cancelling', 'dispatched',
+  'prompt_dispatched', 'needs_attention', 'session_ready',
+]);
+const RECONCILIATION_PHASES = Object.freeze([
+  'degraded', 'unresolved', 'partial_handoff', 'unrecoverable_post_prompt',
+  'lifecycle_pending',
+]);
 const ATTENTION_OPEN_STATUSES = Object.freeze(['open', 'needs_attention']);
 const RUN_LIFECYCLE_PHASES = Object.freeze([
   'validating', 'awaiting_consent', 'preparing_workspaces', 'dispatching',
-  'running', 'needs_attention', 'degraded', 'verifying', 'completed',
-  'failed', 'cancelled',
+  'running', 'needs_attention', 'degraded', 'unresolved', 'verifying', 'completed',
+  'failed', 'cancelled', 'partial_handoff', 'unrecoverable_post_prompt',
+  'lifecycle_pending',
 ]);
 const RUN_NONTERMINAL_PHASES = Object.freeze([
   'validating', 'preparing_workspaces', 'dispatching', 'running', 'verifying',
@@ -581,19 +596,39 @@ function isOpenAttention(receipt, lanes, items) {
 }
 
 function isTerminalLane(lane) {
+  if (typeof lane?.task_final === 'boolean') return lane.task_final;
   return TERMINAL_LANE_STATUSES.includes(laneStatus(lane));
 }
 
+function laneNeedsReconciliation(lane) {
+  if (lane?.task_final === true) return false;
+  const status = laneStatus(lane);
+  if (RECONCILIATION_LANE_STATUSES.includes(status)) return true;
+  return status === 'unresolved' && lane?.prompt_dispatched === true;
+}
+
+function laneBlocksTerminal(lane) {
+  if (lane?.task_final === false) return true;
+  if (lane?.task_final === true) return false;
+  const status = laneStatus(lane);
+  if (laneNeedsReconciliation(lane)) return true;
+  if (ACTIVE_LANE_STATUSES.includes(status)) return true;
+  return lane?.prompt_dispatched === true && !isTerminalLane(lane);
+}
+
+function receiptNeedsReconciliation(receipt, lanes) {
+  const phase = typeof receipt?.phase === 'string'
+    ? receipt.phase
+    : (typeof receipt?.status === 'string' ? receipt.status : null);
+  return RECONCILIATION_PHASES.includes(phase) || lanes.some(laneNeedsReconciliation);
+}
+
 function isFinalRun(receipt, lanes) {
+  if (lanes.some(laneBlocksTerminal)) return false;
   if (receipt?.journal?.terminal === true) return true;
   if (lanes.length === 0) return false;
   if (lanes.every(isTerminalLane)) return true;
-  if (receipt?.complete_candidate_blocked === true && !lanes.some((lane) => {
-    const status = laneStatus(lane);
-    return status === 'running' || status === 'needs_attention' || status === 'dispatched'
-      || status === 'starting' || status === 'accepted'
-      || status === 'planned' || status === 'prepared' || status === 'session_ready';
-  })) {
+  if (receipt?.complete_candidate_blocked === true && !lanes.some(laneBlocksTerminal)) {
     return true;
   }
   return false;
@@ -605,13 +640,15 @@ function explicitRunLifecycleCard(receipt, lanes, items) {
     : (typeof receipt?.status === 'string' ? receipt.status : null);
   if (!RUN_LIFECYCLE_PHASES.includes(phase)) return null;
   if (phase === 'awaiting_consent' || phase === 'needs_attention') return 'attention';
-  if (phase === 'completed' || phase === 'failed' || phase === 'cancelled') return 'final';
-  if (phase === 'degraded') {
+  if (phase === 'completed' || phase === 'failed' || phase === 'cancelled') {
+    return lanes.some(laneBlocksTerminal) ? 'run' : 'final';
+  }
+  if (phase === 'degraded' || phase === 'unresolved') {
     if (isOpenAttention(receipt, lanes, items)) return 'attention';
-    if (lanes.some((lane) => !isTerminalLane(lane))) return 'run';
+    if (lanes.length === 0 || lanes.some(laneBlocksTerminal)) return 'run';
     return 'final';
   }
-  if (RUN_NONTERMINAL_PHASES.includes(phase)) return 'run';
+  if (RECONCILIATION_PHASES.includes(phase) || RUN_NONTERMINAL_PHASES.includes(phase)) return 'run';
   return null;
 }
 
@@ -838,10 +875,14 @@ function experienceSummaryPhrases(card, receipt, lanes) {
   if (card === 'run') {
     phrases.push(EXPERIENCE_PHRASES.delegating);
     phrases.push(...uniqueProviderPhrases(lanes));
-    const running = simpleRunHasAuthoritativeRequiredDispatch(receipt, lanes)
-      ? runningPhrase(count)
-      : preparingPhrase(count);
-    if (running) phrases.push(running);
+    if (receiptNeedsReconciliation(receipt, lanes)) {
+      phrases.push(EXPERIENCE_PHRASES.reconciling);
+    } else {
+      const running = simpleRunHasAuthoritativeRequiredDispatch(receipt, lanes)
+        ? runningPhrase(count)
+        : preparingPhrase(count);
+      if (running) phrases.push(running);
+    }
   } else if (card === 'attention') {
     phrases.push(EXPERIENCE_PHRASES.attention);
   } else if (card === 'final' && verifiedFinalAllowed(receipt, lanes)) {
@@ -1082,13 +1123,17 @@ export function projectExperience(receipt) {
     summary: {
       phrases,
       delegating: card === 'run' ? EXPERIENCE_PHRASES.delegating : null,
-      running: card === 'run'
+      running: card === 'run' && !receiptNeedsReconciliation(safe, lanes)
         ? (simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
           ? runningPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length)
           : preparingPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length))
         : null,
-      preparing: card === 'run' && !simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
+      preparing: card === 'run' && !receiptNeedsReconciliation(safe, lanes)
+        && !simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
         ? preparingPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length)
+        : null,
+      reconciling: card === 'run' && receiptNeedsReconciliation(safe, lanes)
+        ? EXPERIENCE_PHRASES.reconciling
         : null,
       attention: card === 'attention' ? EXPERIENCE_PHRASES.attention : null,
       verified_final: verifiedFinal

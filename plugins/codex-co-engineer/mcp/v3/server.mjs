@@ -90,10 +90,51 @@ const RESPONSE_MODE_PROPERTY = {
 
 const RESPONSE_MODE_HINT = ' Capable clients receive structured-first bounded text by default; legacy clients may set response_mode="structured" explicitly or omit it for the full compatible receipt.';
 
+const SERVER_INSTRUCTIONS = 'Use delegate.run_request for one bounded run, then task.run_id with the returned cursor for status or waits; use task.run_reply for one same-session decision, tasks.run_id for aggregate waits, and cancel.run_id to cancel. Use task_id for expanded task diagnostics or legacy single-task calls.';
+
+const RUN_TOOL_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    schema: { type: 'string' },
+    version: { type: ['integer', 'string'] },
+    mode: { type: 'string', enum: ['run', 'legacy'] },
+    operation: { type: 'string' },
+    tool: { type: 'string', enum: ['status', 'delegate', 'task', 'tasks', 'cancel'] },
+    status: { type: 'string' },
+    phase: { type: 'string' },
+    run_id: { type: ['string', 'null'] },
+    assignment_count: { type: 'integer' },
+    revision: { type: ['integer', 'null'] },
+    cursor: { type: ['string', 'object', 'null'] },
+    wait_until: { type: 'string' },
+    waited_ms: { type: 'integer' },
+    lanes: { type: 'array', items: { type: 'object' } },
+    task: { type: 'object' },
+    tasks: { type: 'array', items: { type: 'object' } },
+    result: {},
+    candidate: { type: ['object', 'null'] },
+    complete_candidate_blocked: { type: 'boolean' },
+    error: { type: ['object', 'null'] },
+    experience: { type: ['object', 'null'] },
+  },
+  additionalProperties: true,
+};
+
+const TOOL_METADATA = {
+  status: { title: 'Inspect a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+  delegate: { title: 'Start a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } },
+  task: { title: 'Inspect or wait for a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } },
+  tasks: { title: 'Wait for Co-Engineer tasks', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+  cancel: { title: 'Cancel a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } },
+};
+
 const TOOLS = [
   {
     name: 'status',
-    description: `Show the local Co-Engineer supervisor, provider capabilities, advertised MCP pending-call budget, and recent task state.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.status.title,
+    annotations: TOOL_METADATA.status.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Inspect one bounded native Co-Engineer run by run_id, including lifecycle state, cursor, attention, and bounded result. Omit run_id to show the compatible 3.2.1 supervisor snapshot, provider capabilities, advertised MCP pending-call budget, and recent task state.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -113,7 +154,10 @@ const TOOLS = [
   },
   {
     name: 'delegate',
-    description: `Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.delegate.title,
+    annotations: TOOL_METADATA.delegate.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Start one bounded native Co-Engineer run with run_request for a review or implementation task. The compatible single-task path remains available for Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -226,7 +270,10 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: `Inspect one task. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.task.title,
+    annotations: TOOL_METADATA.task.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Inspect or wait on one bounded native run using run_id and its returned cursor; task_id remains the compatible 3.2.1 path. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -341,13 +388,17 @@ const TOOLS = [
           then: { required: ['run_id'] },
           else: { required: ['task_id'] },
         },
+        { not: { required: ['run_id', 'task_id'] } },
       ],
       additionalProperties: false,
     },
   },
   {
     name: 'tasks',
-    description: `List recent task receipts with optional compact keyset pagination and filters. With task_ids, wait concurrently for the first of 1-8 exact tasks to reach progress or terminal (including needs_attention), using optional per-task cursors and one bounded wait; a timeout returns compact current snapshots for every target. Wait-any task snapshots and live event previews are individually bounded; call task with a target ID for full event detail. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.tasks.title,
+    annotations: TOOL_METADATA.tasks.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Wait on a bounded native run aggregate with run_id and its returned cursor, or use task_ids for the compatible 3.2.1 wait-any path. List recent task receipts with optional compact keyset pagination and filters when no wait options are supplied. A timeout returns bounded current snapshots; call task with a target ID for full event detail. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -443,7 +494,10 @@ const TOOLS = [
   },
   {
     name: 'cancel',
-    description: `Cancel one owned local process group or Cursor Cloud run.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.cancel.title,
+    annotations: TOOL_METADATA.cancel.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Cancel one owned bounded native Co-Engineer run with run_id; task_id remains the compatible 3.2.1 path. Cancellation preserves durable evidence and does not claim provider termination until observed.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -473,6 +527,7 @@ const TOOLS = [
           then: { required: ['run_id'] },
           else: { required: ['task_id'] },
         },
+        { not: { required: ['run_id', 'task_id'] } },
       ],
       additionalProperties: false,
     },
@@ -668,6 +723,7 @@ async function handle(message) {
       result: {
         protocolVersion: negotiated,
         capabilities: serverCapabilities(),
+        instructions: SERVER_INSTRUCTIONS,
         serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: VERSION },
       },
     });

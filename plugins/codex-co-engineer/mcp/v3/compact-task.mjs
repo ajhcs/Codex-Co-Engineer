@@ -74,6 +74,27 @@ export function utf8Head(value, maxBytes) {
   return `${buffer.subarray(0, end).toString('utf8')}${ELLIPSIS}`;
 }
 
+// Shared by durable run storage and public result projection.
+export function boundProviderResult(value, maxBytes = 8_192) {
+  if (value === undefined || value === null) return { value: null, truncated: false };
+  let safe;
+  let encoded;
+  try {
+    safe = sanitizePublicReceipt(value);
+    encoded = JSON.stringify(safe);
+  } catch {
+    return { value: null, truncated: false };
+  }
+  if (encoded === undefined) return { value: null, truncated: false };
+  if (Buffer.byteLength(encoded, 'utf8') <= maxBytes) return { value: safe, truncated: false };
+  let preview = utf8Head(typeof safe === 'string' ? safe : encoded, maxBytes - 2);
+  // Escaped quotes/control characters also count toward the JSON byte cap.
+  while (byteLength(preview) > maxBytes) {
+    preview = utf8Head(preview, Math.floor(Buffer.byteLength(preview, 'utf8') / 2));
+  }
+  return { value: preview, truncated: true };
+}
+
 function boundedString(value, maxBytes, { tail = false } = {}) {
   if (typeof value !== 'string') return null;
   return tail ? tailText(value, maxBytes) : utf8Head(value, maxBytes);

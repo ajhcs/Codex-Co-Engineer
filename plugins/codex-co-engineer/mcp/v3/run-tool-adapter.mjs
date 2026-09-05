@@ -90,6 +90,7 @@ import {
 } from './run-runtime.mjs';
 import { createRunScheduler } from './run-scheduler.mjs';
 import { openRunStore } from './run-store.mjs';
+import { boundProviderResult, utf8Head } from './compact-task.mjs';
 import { projectExperience } from './response.mjs';
 import {
   assertDirectJsonClosure,
@@ -156,6 +157,7 @@ export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'revision',
   'remote_mutated', 'run_id', 'schema', 'side_effects', 'status', 'tool',
   'undispatched_assignment_ids', 'version', 'wait_until', 'waited_ms', 'wake',
+  'result',
 ]);
 
 export const RUN_TOOL_ADAPTER_CHECKS = capturedFreeze([
@@ -379,10 +381,32 @@ function emptySideEffects() {
   return sideEffects;
 }
 
-function emptyChecks() {
+function emptyChecks(observed) {
   const checks = {};
-  for (const name of RUN_TOOL_ADAPTER_CHECKS) checks[name] = true;
+  for (const name of RUN_TOOL_ADAPTER_CHECKS) checks[name] = null;
+  if (observed && typeof observed === 'object' && !capturedIsArray(observed)) {
+    for (const name of RUN_TOOL_ADAPTER_CHECKS) {
+      if (capturedHasOwn(observed, name) && typeof observed[name] === 'boolean') {
+        checks[name] = observed[name];
+      }
+    }
+  }
   return checks;
+}
+
+function providerResultFor(value) {
+  if (value === undefined || value === null || typeof value !== 'object') return undefined;
+  if (capturedHasOwn(value, 'result')) return value.result;
+  if (capturedHasOwn(value, 'provider_result')) return value.provider_result;
+  if (value.task && typeof value.task === 'object') {
+    if (capturedHasOwn(value.task, 'result')) return value.task.result;
+    if (capturedHasOwn(value.task, 'provider_result')) return value.task.provider_result;
+  }
+  return undefined;
+}
+
+function boundedProviderResult(raw) {
+  return raw === undefined ? undefined : boundProviderResult(raw).value;
 }
 
 function ownKeySet(value, field) {
@@ -929,15 +953,25 @@ function parseAssignmentIds(value, field) {
   return ids;
 }
 
-function projectCandidate(runId) {
-  const ref = expectedCandidateRefV1({ run_id: runId });
+function projectCandidate(runId, runtimeCandidate) {
+  const expectedRef = expectedCandidateRefV1({ run_id: runId });
+  const actual = runtimeCandidate && typeof runtimeCandidate === 'object'
+    && !capturedIsArray(runtimeCandidate)
+    ? runtimeCandidate
+    : null;
+  const ref = actual && typeof actual.ref === 'string'
+    && isRunOwnedCandidateRefV1(actual.ref, runId)
+    ? actual.ref
+    : expectedRef;
+  const authoritative = actual?.authority === 'p35';
   return freezeData({
     ref,
-    composed: false,
-    ready_for_codex_review: false,
+    composed: actual?.composed === true,
+    ready_for_codex_review: actual?.ready_for_codex_review === true,
     authority: 'p35',
     namespace: CANDIDATE_REF_NAMESPACE,
-    accepted: isRunOwnedCandidateRefV1(ref, runId),
+    accepted: authoritative && actual?.accepted === true
+      && isRunOwnedCandidateRefV1(ref, runId),
   });
 }
 
@@ -954,6 +988,11 @@ function projectLane(lane, projectLaneTask, classifyLaneTask) {
   }
   if (copy.artifacts && typeof copy.artifacts === 'object') {
     copy.artifacts = sanitizeModelFacing(copy.artifacts);
+  }
+  const result = boundedProviderResult(providerResultFor(copy));
+  if (result !== undefined) {
+    copy.result = result;
+    if (capturedHasOwn(copy, 'provider_result')) delete copy.provider_result;
   }
   return sanitizeModelFacing(copy);
 }
@@ -1002,6 +1041,7 @@ function compactAdmissionHandoff(handoff) {
 
 function compactAdmissionLane(lane) {
   if (lane === undefined || lane === null || typeof lane !== 'object' || Array.isArray(lane)) return lane;
+  const result = boundedProviderResult(providerResultFor(lane));
   return {
     assignment_id: lane.assignment_id ?? null,
     task_id: lane.task_id ?? null,
@@ -1027,12 +1067,31 @@ function compactAdmissionLane(lane) {
       ?? null,
     error: lane.error ?? null,
     recovery_classification: lane.recovery_classification ?? null,
+    cancel_confirmed: lane.cancel_confirmed ?? null,
+    task_final: lane.task_final ?? null,
+    result_truncated: lane.result_truncated === true,
     handoff: compactAdmissionHandoff(lane.handoff),
+    ...(result !== undefined ? { result } : {}),
   };
 }
 
 function byteLength(value) {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+function compactProviderResult(result, taskId) {
+  if (result === undefined) return undefined;
+  let serialized;
+  try {
+    serialized = JSON.stringify(result);
+  } catch {
+    serialized = null;
+  }
+  return {
+    truncated: true,
+    detail_task_id: typeof taskId === 'string' ? taskId : null,
+    preview: utf8Head(serialized ?? '', 768),
+  };
 }
 
 function malformedRuntimeReceipt(runId) {
@@ -1129,6 +1188,7 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     || [
       'awaiting_consent', 'degraded', 'failed', 'cancelled', 'needs_attention',
       'validating', 'preparing_workspaces', 'dispatching', 'verifying', 'unresolved',
+      'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
     ].includes(runtimeReceipt?.phase)
     || lanes.some((lane) => lane?.required !== false && (
       lane.status === 'unresolved'
@@ -1177,6 +1237,7 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     ? 'unresolved'
     : (runtimeReceipt?.status ?? runtimeReceipt?.phase ?? 'inspected');
   const phase = runtimeReceipt?.phase ?? status;
+  const result = boundedProviderResult(providerResultFor(runtimeReceipt));
   const receiptBody = {
     schema: RUN_TOOL_ADAPTER_RECEIPT_SCHEMA_ID,
     version: RUN_TOOL_ADAPTER_VERSION,
@@ -1198,7 +1259,7 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
       unresolved_required_blocks: blocked,
       exactly_once_reply: attention?.status === 'reply_committed' || attention?.status === 'resolved',
     }),
-    candidate: runId ? projectCandidate(runId) : null,
+    candidate: runId ? projectCandidate(runId, runtimeReceipt?.candidate) : null,
     complete_candidate_blocked: blocked,
     consent: sanitizeModelFacing(runtimeReceipt?.consent ?? null),
     admission: sanitizeModelFacing(runtimeReceipt?.admission ?? null),
@@ -1217,7 +1278,8 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
         ? { waited_ms: runtimeReceipt.waited_ms }
         : {}),
     } : {}),
-    checks: emptyChecks(),
+    checks: emptyChecks(runtimeReceipt?.checks),
+    ...(result !== undefined ? { result } : {}),
     side_effects: sideEffects,
     audience: 'model',
     wake,
@@ -1290,16 +1352,21 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     if (byteLength(projected) > simpleResponseCap) {
       projected = {
         ...projected,
-        lanes: projected.lanes.slice(0, 8).map((lane) => ({
-          assignment_id: lane.assignment_id ?? null,
-          task_id: lane.task_id ?? null,
-          provider: lane.provider ?? null,
-          model: lane.model ?? null,
-          phase: lane.phase ?? null,
-          status: lane.status ?? null,
-          prompt_dispatched: lane.prompt_dispatched === true,
-          dispatch_confidence: lane.dispatch_confidence ?? null,
-        })),
+        lanes: projected.lanes.slice(0, 8).map((lane) => {
+          const result = compactProviderResult(lane.result, lane.task_id);
+          return {
+            assignment_id: lane.assignment_id ?? null,
+            task_id: lane.task_id ?? null,
+            provider: lane.provider ?? null,
+            model: lane.model ?? null,
+            phase: lane.phase ?? null,
+            status: lane.status ?? null,
+            prompt_dispatched: lane.prompt_dispatched === true,
+            dispatch_confidence: lane.dispatch_confidence ?? null,
+            task_final: lane.task_final ?? null,
+            ...(result !== undefined ? { result } : {}),
+          };
+        }),
         experience: projectExperience({
           ...projected,
           lanes: [],

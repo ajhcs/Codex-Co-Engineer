@@ -42,6 +42,7 @@ import {
   stateRoot,
   taskPaths,
   updateTask,
+  waitForAnyTaskProgress,
   waitForTaskProgress,
   writeRuntimeRecord,
 } from './task-store.mjs';
@@ -71,7 +72,10 @@ import {
 } from './run-tool-adapter.mjs';
 import { createRunAdmissionRuntime } from './run-admission.mjs';
 import { createRunAdmissionStore } from './run-admission-store.mjs';
-import { compileRunRequestV1 } from './run-request-compiler.mjs';
+import {
+  compileRunRequestV1,
+  RUN_REQUEST_DEFAULT_MODELS,
+} from './run-request-compiler.mjs';
 import { loadReadinessSnapshot, saveReadinessSnapshot } from './readiness-snapshot.mjs';
 import { buildGitIdentityV1, buildWorkspaceIdentityV1 } from './protected-identity.mjs';
 
@@ -144,6 +148,8 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   cgroup_not_empty: 'Owned systemd process boundary still has descendants after exact unit stop.',
   cancelled: 'The task was cancelled before worker startup.',
   provider_startup_failed: 'Provider startup could not be prepared.',
+  model_unattested: 'The configured provider route cannot select the requested model.',
+  prompt_envelope_missing: 'The compiled child prompt envelope is missing.',
   task_launch_busy: 'Another worker already owns this task launch.',
   local_boundary_unavailable: 'The local systemd/cgroup process boundary is unavailable.',
   systemd_user_manager_unavailable: 'The local systemd user manager is unavailable.',
@@ -210,6 +216,34 @@ function resolveDshModel(value) {
   if (!Object.hasOwn(DSH_MODELS, model)) {
     fail('invalid_dsh_model', `dsh_model must be one of ${Object.keys(DSH_MODELS).join(', ')}.`);
   }
+  return model;
+}
+
+// The live Grok, Cursor Local, and Cursor Cloud transports currently expose
+// only their configured provider defaults. Keep semantic model overrides from
+// being presented as effective selections until a provider-specific control
+// can select and attest them. DSH is routed through its existing config
+// selection below.
+function assertProviderModelDispatchable(provider, model) {
+  if (provider === 'dsh') {
+    resolveDshModel(model);
+    return;
+  }
+  if (model !== RUN_REQUEST_DEFAULT_MODELS[provider]) {
+    fail('model_unattested', 'The configured provider route cannot select the requested model.');
+  }
+}
+
+function resolveTaskModel(provider, model, dshModel) {
+  if (model === undefined) return undefined;
+  if (provider === 'dsh') {
+    const resolved = resolveDshModel(model);
+    if (dshModel !== undefined && dshModel !== resolved) {
+      fail('invalid_dsh_model', 'The DSH model selections do not agree.');
+    }
+    return resolved;
+  }
+  assertProviderModelDispatchable(provider, model);
   return model;
 }
 
@@ -738,6 +772,7 @@ export async function submitTask(input, dependencies = {}) {
     fail('invalid_dsh_model', 'dsh_model is supported only for DSH tasks.');
   }
   const dshModel = input.provider === 'dsh' ? resolveDshModel(input.dsh_model) : undefined;
+  const taskModel = resolveTaskModel(input.provider, input.model, dshModel);
   if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) fail('invalid_prompt', 'prompt must be non-empty text.');
   const role = input.role ?? 'implement';
   if (!['review', 'implement'].includes(role)) fail('invalid_role', 'role must be review or implement.');
@@ -844,6 +879,15 @@ export async function submitTask(input, dependencies = {}) {
         status: 'accepted',
         provider: input.provider,
         ...(dshModel ? { dsh_model: dshModel } : {}),
+        ...(taskModel ? { model: taskModel } : {}),
+        ...(typeof input.run_id === 'string' ? { run_id: input.run_id } : {}),
+        ...(typeof input.assignment_id === 'string' ? { assignment_id: input.assignment_id } : {}),
+        ...(typeof input.access === 'string' ? { access: input.access } : {}),
+        ...(Array.isArray(input.write_scope) ? { write_scope: [...input.write_scope] } : {}),
+        ...(Array.isArray(input.capabilities) ? { capabilities: [...input.capabilities] } : {}),
+        ...(typeof input.child_envelope_digest === 'string'
+          ? { child_envelope_digest: input.child_envelope_digest }
+          : {}),
         role,
         source_repo: input.repo,
         cwd: workspace.worktree_path,
@@ -1957,6 +2001,14 @@ async function waitForSimpleDispatchEvidence(root, taskId, {
   }
 }
 
+function childEnvelopePrompt(assignment) {
+  const envelopeText = assignment?.child_envelope?.envelope_text;
+  if (typeof envelopeText !== 'string' || envelopeText.length === 0) {
+    fail('prompt_envelope_missing', 'The compiled child prompt envelope is missing.');
+  }
+  return envelopeText;
+}
+
 function stalledTaskAttention(task) {
   const sessionId = task?.acp_session_id ?? task?.provider_run_id ?? task?.provider_agent_id ?? `local-${task?.id}`;
   return {
@@ -1968,12 +2020,47 @@ function stalledTaskAttention(task) {
   };
 }
 
+async function waitForSupervisorRunProgress(root, { task_ids, cursors, wait_ms, wait_until, signal } = {}) {
+  if (!Array.isArray(task_ids) || task_ids.length === 0) {
+    const delayMs = Number.isFinite(wait_ms) && wait_ms > 0 ? wait_ms : 0;
+    await new Promise((resolve) => {
+      let timer = null;
+      const finish = () => {
+        if (timer !== null) clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      if (signal?.aborted || delayMs === 0) {
+        finish();
+        return;
+      }
+      timer = setTimeout(finish, delayMs);
+      signal?.addEventListener('abort', finish, { once: true });
+    });
+    return { wait_reason: signal?.aborted ? 'disconnected' : 'timeout' };
+  }
+  try {
+    return await waitForAnyTaskProgress(root, {
+      task_ids,
+      cursors,
+      wait_ms,
+      wait_until: wait_until === 'terminal' ? 'terminal' : 'progress',
+      signal,
+    });
+  } catch (error) {
+    return { wait_reason: 'observation_uncertain', error: { code: error?.code ?? 'task_observation_unavailable' } };
+  }
+}
+
 async function inspectSupervisorLane(root, taskId) {
-  const result = await inspectTask(root, { task_id: taskId, view: 'compact', wait_ms: 0 });
+  // The run bridge needs the authoritative task result and lifecycle overlay.
+  // Compact task projection intentionally omits legacy `completed` results.
+  const result = await inspectTask(root, { task_id: taskId, view: 'summary', wait_ms: 0 });
   let task = result.task ?? result;
   const waitReason = result.progress?.wait_reason;
   if (waitReason === 'silence' && task.status !== 'needs_attention'
-    && !['completed', 'succeeded', 'failed', 'timeout', 'cancelled'].includes(task.status)) {
+    && !['completed', 'succeeded', 'failed', 'timeout', 'timed_out', 'cancelled',
+      'transport_lost', 'environment_blocked', 'cancelling'].includes(task.status)) {
     const attention = stalledTaskAttention(task);
     task = await updateTask(root, taskId, { status: 'needs_attention', attention });
     await appendTaskEvent(root, taskId, {
@@ -1996,11 +2083,14 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
   const env = options.env ?? process.env;
   const checkPath = options.checkPath ?? stat;
   const admissionStore = options.admissionStore ?? createRunAdmissionStore(root);
+  const submitTaskFn = options.submitTask ?? submitTask;
+  const waitForDispatchEvidence = options.waitForDispatchEvidence ?? waitForSimpleDispatchEvidence;
   const simpleDeps = {
     compile: options.compile ?? compileRunRequestV1,
     ...(options.requestConsent ? { requestConsent: options.requestConsent } : {}),
     ...(options.verifyConsent ? { verifyConsent: options.verifyConsent } : {}),
     providerReady: options.providerReady ?? (async ({ assignment }) => {
+      assertProviderModelDispatchable(assignment.provider, assignment.model);
       try {
         await workerEnvironment(assignment.provider, env, assignment.provider === 'dsh' ? assignment.model : undefined);
         return { ready: true };
@@ -2010,13 +2100,13 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     }),
     processBoundaryReady: options.processBoundaryReady ?? (() => localBoundaryReadiness(options.probeBoundary)),
     verifyRepository: options.verifyRepository ?? ((request) => verifySimpleRunRepository({ ...request, execute })),
-    prepareWorkspace: options.prepareWorkspace ?? (async ({ assignment, git, managed_workspace_policy: policy }) => {
+    prepareWorkspace: options.prepareWorkspace ?? (async ({ assignment, git }) => {
       try {
         const repository = git.repository_path;
         if (assignment.provider === 'cursor-cloud') {
           return { prepared: true, workspace: await readerWorkspace(repository, execute) };
         }
-        const baseSha = policy?.base_sha_explicit === true || !git.branch ? git.base_sha : undefined;
+        const baseSha = git.base_sha;
         const workspace = await createWriterWorkspace({
           taskId: assignment.task_id,
           repo: repository,
@@ -2039,29 +2129,36 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     // then replaces the placeholder with the worker's session identity once
     // authoritative prompt evidence is durable.
     createSession: options.createSession ?? (async () => ({ ready: true, session_id: null })),
-    dispatchPrompt: options.dispatchPrompt ?? (async ({ run_id: runId, assignment, workspace, git, managed_workspace_policy: policy }) => {
+    dispatchPrompt: options.dispatchPrompt ?? (async ({ run_id: runId, assignment, workspace, git }) => {
       const input = {
         task_id: assignment.task_id,
+        run_id: runId,
+        assignment_id: assignment.assignment_id,
         provider: assignment.provider,
+        model: assignment.model,
         repo: git.repository_path,
-        prompt: assignment.prompt,
+        prompt: childEnvelopePrompt(assignment),
         role: assignment.role === 'verify' ? 'review' : assignment.role,
+        access: assignment.access,
+        write_scope: [...assignment.write_scope],
+        capabilities: [...assignment.capabilities],
+        child_envelope_digest: assignment.prompt_envelope_digest,
         expected_duration_ms: assignment.expected_duration_ms,
         silence_timeout_ms: simpleSilenceTimeout(assignment.role),
         workspace_mode: assignment.provider === 'cursor-cloud' ? 'direct' : 'managed',
       };
+      assertProviderModelDispatchable(assignment.provider, assignment.model);
       if (assignment.provider === 'dsh') input.dsh_model = assignment.model;
       if (assignment.provider === 'cursor-cloud' && assignment.starting_ref) input.starting_ref = assignment.starting_ref;
-      const submitted = await submitTask(input, {
+      const submitted = await submitTaskFn(input, {
         root,
         env,
         execute,
         checkPath,
         preparedWorkspace: workspace,
-        ...(assignment.provider !== 'cursor-cloud' && (policy?.base_sha_explicit === true || !git.branch)
-          ? { baseSha: git.base_sha } : {}),
+        ...(assignment.provider !== 'cursor-cloud' ? { baseSha: git.base_sha } : {}),
       });
-      const evidence = await waitForSimpleDispatchEvidence(root, submitted.task.id);
+      const evidence = await waitForDispatchEvidence(root, submitted.task.id);
       const workspaceIdentity = await buildSimpleWorkspaceIdentity({
         run_id: runId,
         assignment,
@@ -2132,17 +2229,38 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
       ), 0);
       return { delivered: expected > 0 && delivered === expected };
     }),
+    waitForProgress: options.waitForProgress ?? ((request) => waitForSupervisorRunProgress(root, request)),
     inspectLane: options.inspectLane ?? (async ({ task_id: taskId }) => {
       const inspected = await inspectSupervisorLane(root, taskId);
       const { result, task } = inspected;
-      const status = task.status;
-      if (status === 'completed' || status === 'succeeded') return { status: 'completed', cursor: result.progress?.event_cursor ?? '0' };
-      if (status === 'needs_attention') return { status: 'needs_attention', attention: inspected.attention, cursor: result.progress?.event_cursor ?? '0' };
-      if (status === 'cancelled') return { status: 'cancelled', cursor: result.progress?.event_cursor ?? '0' };
-      if (status === 'timeout') return { status: 'timeout', cursor: result.progress?.event_cursor ?? '0' };
-      if (status === 'transport_lost') return { status: 'transport_lost', cursor: result.progress?.event_cursor ?? '0' };
-      if (status === 'failed') return { status: 'failed', cursor: result.progress?.event_cursor ?? '0' };
-      return { status: 'running', cursor: result.progress?.event_cursor ?? '0' };
+      const status = task?.status;
+      if (typeof status !== 'string') {
+        throw Object.assign(new Error('Supervisor task observation is malformed.'), { code: 'task_observation_invalid' });
+      }
+      const cursor = typeof result?.progress?.event_cursor === 'string'
+        ? result.progress.event_cursor : '0';
+      const observedTaskId = task.id ?? task.task_id;
+      if (observedTaskId !== undefined && observedTaskId !== taskId) {
+        throw Object.assign(new Error('Supervisor task observation identity did not match the requested task.'), {
+          code: 'task_observation_identity_mismatch',
+        });
+      }
+      const observed = {
+        task_id: observedTaskId ?? taskId,
+        cursor,
+        ...(typeof task.last_event === 'string' ? { last_event: task.last_event } : {}),
+        ...(task.result !== undefined && task.result !== null
+          ? { result: task.result } : {}),
+      };
+      if (status === 'completed' || status === 'succeeded') return { ...observed, status: 'completed' };
+      if (status === 'needs_attention') return { ...observed, status: 'needs_attention', attention: inspected.attention };
+      if (status === 'cancelled') return { ...observed, status: 'cancelled' };
+      if (status === 'timeout' || status === 'timed_out') return { ...observed, status: 'timeout' };
+      if (status === 'transport_lost') return { ...observed, status: 'transport_lost' };
+      if (status === 'environment_blocked') return { ...observed, status: 'environment_blocked' };
+      if (status === 'failed') return { ...observed, status: 'failed' };
+      if (status === 'running' || status === 'starting' || status === 'accepted' || status === 'cancelling') return { ...observed, status: 'running' };
+      throw Object.assign(new Error('Supervisor task observation has an unknown status.'), { code: 'task_observation_invalid' });
     }),
     reconnectLane: options.reconnectLane ?? (async ({ task_id: taskId }) => {
       const { task } = await readTask(root, taskId);
@@ -2174,7 +2292,9 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     inspectWorkspace: options.inspectWorkspace ?? ((request) => inspectSimpleWorkspace({ ...request, execute })),
     buildHandoff: options.buildHandoff ?? (async ({ fallback }) => fallback),
     verifyRun: options.verifyRun ?? (async ({ lanes }) => ({
-      verified: lanes.every((lane) => lane.phase === 'completed' || lane.phase === 'cancelled' || lane.handoff !== null),
+      verified: Array.isArray(lanes) && lanes.length > 0
+        && lanes.every((lane) => lane.phase === 'completed' || lane.phase === 'cancelled')
+        && lanes.filter((lane) => lane.required !== false).every((lane) => lane.phase === 'completed'),
     })),
     loadRecord: options.loadRecord ?? admissionStore.load,
     persistRecord: options.persistRecord ?? admissionStore.save,
@@ -2593,6 +2713,9 @@ function liveTaskFns(root, contextByRun) {
       const input = {
         task_id: plan.task_id,
         provider: plan.provider,
+        model: plan.model,
+        run_id: plan.run_id,
+        assignment_id: plan.assignment_id,
         repo: ctx.repository_path,
         prompt,
         role,
@@ -2608,7 +2731,7 @@ function liveTaskFns(root, contextByRun) {
       if (plan.provider === 'cursor-cloud' && typeof plan.starting_ref === 'string') {
         input.starting_ref = plan.starting_ref;
       }
-      const result = await submitTask(input, { root });
+      const result = await submitTask(input, { root, ...(ctx.base_sha ? { baseSha: ctx.base_sha } : {}) });
       return {
         task_id: result.task.id,
         status: result.task.status,
@@ -2707,10 +2830,13 @@ export async function createSupervisorRunToolAdapter(options = {}) {
       inspectWorkspace: options.inspectWorkspace,
       buildHandoff: options.buildHandoff,
       verifyRun: options.verifyRun,
+      submitTask: options.submitTask,
+      waitForDispatchEvidence: options.waitForDispatchEvidence,
       compile: options.compile,
       admissionStore: options.admissionStore,
       loadRecord: options.loadRecord,
       persistRecord: options.persistRecord,
+      waitForProgress: options.waitForProgress,
     });
   return createRunToolAdapter({
     runtime: seams.runtime,

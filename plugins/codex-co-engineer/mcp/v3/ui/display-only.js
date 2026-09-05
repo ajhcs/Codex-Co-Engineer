@@ -256,7 +256,9 @@
     var phrase = typeof experience?.summary?.delegating === 'string'
       ? experience.summary.delegating
       : (phrases[0] || 'I am delegating this to Co-Engineer');
-    var running = typeof experience?.summary?.running === 'string' ? experience.summary.running : '';
+    var running = typeof experience?.summary?.reconciling === 'string'
+      ? experience.summary.reconciling
+      : (typeof experience?.summary?.running === 'string' ? experience.summary.running : '');
     var baseSha = sha40(repository.base_sha);
     var digest = digestValue(repository.digest);
     return [
@@ -458,7 +460,9 @@
       var phrase = typeof safe.summary?.delegating === 'string'
         ? safe.summary.delegating
         : (phrases[0] || 'I am delegating this to Co-Engineer');
-      var running = typeof safe.summary?.running === 'string' ? safe.summary.running : '';
+      var running = typeof safe.summary?.reconciling === 'string'
+        ? safe.summary.reconciling
+        : (typeof safe.summary?.running === 'string' ? safe.summary.running : '');
       return {
         phrase: joinRunPhrases(phrase, running),
         objective: displayString(run.objective),

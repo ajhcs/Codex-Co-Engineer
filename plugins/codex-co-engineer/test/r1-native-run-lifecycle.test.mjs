@@ -97,6 +97,8 @@ for (const status of ['cancelled', 'failed', 'environment_blocked']) {
       assert.notEqual(result.phase, 'completed');
       assert.equal(result.complete_candidate_blocked, true);
       assert.notEqual(result.candidate?.accepted, true);
+      assert.equal(result.lanes[0].task_final, true);
+      assert.equal(result.experience.card, 'final');
       assert.equal(dispatches(), 1);
     }, { status, result: null, stop_reason: status });
   });

@@ -146,6 +146,13 @@ Provider and model are explicit, chosen by you, or filled from one named
 profile. Missing selection is one ask, not a router. Codex never ranks,
 predicts cost, or substitutes a different co-engineer.
 
+For native runs, Grok and Cursor use their configured provider default;
+unsupported model overrides fail before launch. Muse/DSH retains its
+configured model choices. A receipt's model field records the requested
+or default selection; it is not an attestation of the provider's actual
+model. Assignment roles and write scopes are instructions to the trusted
+provider, not filesystem sandbox restrictions.
+
 | You say | Codex says |
 | --- | --- |
 | Grok Co-Engineer | Using Grok Co-Engineer |

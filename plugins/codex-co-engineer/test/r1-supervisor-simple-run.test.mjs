@@ -4,8 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createSupervisorRunToolAdapter } from '../mcp/v3/supervisor.mjs';
-import { compileRunRequestV1 } from '../mcp/v3/run-request-compiler.mjs';
+import { createSupervisorRunToolAdapter, submitTask } from '../mcp/v3/supervisor.mjs';
+import { parseChildEnvelopeV1 } from '../mcp/v3/prompt-compiler.mjs';
+import {
+  compileRunRequestV1,
+  RUN_REQUEST_DEFAULT_CAPABILITIES,
+} from '../mcp/v3/run-request-compiler.mjs';
 
 const BASE_SHA = 'a'.repeat(40);
 const OBSERVED = Object.freeze({
@@ -33,6 +37,84 @@ function request() {
     }],
   };
 }
+
+
+test('default simple dispatch sends the compiled envelope and pins its workspace base', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-simple-dispatch-contract-'));
+  const calls = [];
+  try {
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      inProcess: true,
+      execute: async () => ({ stdout: '' }),
+      compile: (value) => compileRunRequestV1(value, { observeGit: async () => OBSERVED }),
+      requestConsent: async () => ({ approved: true }),
+      providerReady: async () => ({ ready: true }),
+      processBoundaryReady: async () => ({ ready: true }),
+      verifyRepository: async () => ({ verified: true }),
+      prepareWorkspace: async ({ assignment }) => ({
+        prepared: true,
+        workspace: {
+          task: assignment.task_id,
+          status: 'ready',
+          worktree_path: '/tmp/' + assignment.task_id,
+          branch: 'codex/' + assignment.assignment_id,
+          start_sha: BASE_SHA,
+        },
+      }),
+      submitTask: async (input, dependencies) => {
+        calls.push({ input, dependencies });
+        return { task: { id: input.task_id } };
+      },
+      waitForDispatchEvidence: async (_stateRoot, taskId) => ({
+        dispatched: true,
+        prompt_dispatched: true,
+        confidence: 'authoritative',
+        session_ready: true,
+        session_id: taskId + '-session',
+        cursor: '0',
+      }),
+    });
+
+    const submitted = await adapter.dispatch('delegate', { run_request: request() });
+    assert.equal(submitted.phase, 'running');
+    assert.equal(calls.length, 1);
+
+    const compiled = await compileRunRequestV1(request(), { observeGit: async () => OBSERVED });
+    const call = calls[0];
+    const envelope = parseChildEnvelopeV1(call.input.prompt);
+    assert.equal(call.input.run_id, 'simple-supervisor');
+    assert.equal(call.input.assignment_id, 'implementation');
+    assert.equal(call.input.provider, 'grok');
+    assert.equal(call.input.model, 'grok-4');
+    assert.equal(call.input.access, 'writer');
+    assert.deepEqual(call.input.write_scope, ['**']);
+    assert.deepEqual(call.input.capabilities, [...RUN_REQUEST_DEFAULT_CAPABILITIES]);
+    assert.equal(call.input.child_envelope_digest, compiled.assignments[0].prompt_envelope_digest);
+    assert.equal(call.input.prompt, compiled.assignments[0].child_envelope.envelope_text);
+    assert.equal(envelope.execution.provider, 'grok');
+    assert.equal(envelope.execution.model, 'grok-4');
+    assert.equal(envelope.role, 'implement');
+    assert.equal(envelope.access, 'writer');
+    assert.deepEqual(envelope.write_scope, ['**']);
+    assert.equal(call.dependencies.baseSha, BASE_SHA);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('unsupported live model overrides fail before task submission', async () => {
+  await assert.rejects(
+    submitTask({
+      task_id: 'unsupported-model',
+      provider: 'grok',
+      model: 'grok/custom',
+      repo: '/repo',
+      prompt: 'must not dispatch',
+    }),
+    (error) => error.code === 'model_unattested',
+  );
+});
 
 test('supervisor wires run_request through admission while preserving bounded receipts', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-simple-run-'));

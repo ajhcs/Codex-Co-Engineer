@@ -396,6 +396,9 @@ test('new equivalent attention questions are grouped once across lanes', async (
   assert.equal(receipt.attention.items.length, 1);
   assert.equal(receipt.attention.items[0].question_id, 'permission-read');
   assert.equal(receipt.attention.items[0].targets.length, 2);
+  const repeated = await runtime.inspectRun({ run_id: 'grouped-attention' });
+  assert.equal(repeated.cursor, receipt.cursor);
+  assert.deepEqual(repeated.attention, receipt.attention);
 });
 
 test('hostile nested attention evidence fails closed with a partial handoff', async () => {
@@ -609,4 +612,106 @@ test('pending consent remains inspectable while the native callback is still ope
   resolveCallback({ status: 'required' });
   const submitted = await submitting;
   assert.equal(submitted.phase, 'awaiting_consent');
+});
+
+test('unchanged running observations preserve cursor and avoid persistence', async () => {
+  let writes = 0;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    persistRecord: async () => { writes += 1; },
+    inspectLane: async () => ({ status: 'running', cursor: '2', last_event: 'text_delta' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  await runtime.submitRunRequest(request());
+  const first = await runtime.inspectRun({ run_id: 'admission-test' });
+  const baseline = writes;
+  const second = await runtime.inspectRun({ run_id: 'admission-test' });
+  assert.equal(second.cursor, first.cursor);
+  assert.equal(writes, baseline);
+});
+
+test('an optional active assignment remains owned and cancellable after required completion', async () => {
+  const { calls, dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    inspectLane: async ({ assignment_id }) => ({ status: assignment_id === 'lane-one' ? 'completed' : 'running', cursor: '2' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const assignments = request().assignments.map((assignment, index) => ({ ...assignment, required: index === 0 }));
+  await runtime.submitRunRequest(request({ assignments }));
+  const current = await runtime.inspectRun({ run_id: 'admission-test' });
+  assert.notEqual(current.phase, 'completed');
+  assert.equal(current.complete_candidate_blocked, true);
+  const cancelled = await runtime.cancelRun({ run_id: 'admission-test' });
+  assert.equal(cancelled.phase, 'cancelled');
+  assert.deepEqual(calls.cancel, ['lane-two']);
+});
+
+test('observation errors retain cancellation ownership and an unconfirmed cancel can be retried', async () => {
+  let confirm = false;
+  const targets = [];
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    inspectLane: async () => { throw Object.assign(new Error('unavailable'), { code: 'ENOENT' }); },
+    cancelLane: async ({ task_id }) => { targets.push(task_id); return { confirmed: confirm }; },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request());
+  const uncertain = await runtime.inspectRun({ run_id: submitted.run_id });
+  assert.equal(uncertain.phase, 'degraded');
+  const first = await runtime.cancelRun({ run_id: submitted.run_id });
+  assert.equal(first.phase, 'degraded');
+  assert.equal(first.telemetry.cancel_confirmed, false);
+  confirm = true;
+  const final = await runtime.cancelRun({ run_id: submitted.run_id });
+  assert.equal(final.phase, 'cancelled');
+  assert.equal(final.telemetry.cancel_confirmed, true);
+  assert.deepEqual(targets, [...submitted.lanes, ...submitted.lanes].map(lane => lane.task_id));
+});
+
+test('run waits use task events and reread the same assignments on progress', async () => {
+  let completed = false;
+  let waits = 0;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    inspectLane: async () => ({ status: completed ? 'completed' : 'running', cursor: completed ? '3' : '2' }),
+    waitForProgress: async ({ task_ids, cursors }) => {
+      waits += 1;
+      assert.equal(task_ids.length, 2);
+      assert.deepEqual(Object.values(cursors), ['2', '2']);
+      completed = true;
+      return { wait_reason: 'progress' };
+    },
+    sleep: async () => { assert.fail('healthy event wait must not poll'); },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  await runtime.submitRunRequest(request());
+  const result = await runtime.waitRun({ run_id: 'admission-test', wait_until: 'terminal', wait_ms: 500 });
+  assert.equal(result.phase, 'completed');
+  assert.equal(waits, 1);
+});
+
+test('a terminal task wake without settled run progress uses bounded backoff', async () => {
+  let waits = 0;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    waitForProgress: async () => { waits += 1; return { wait_reason: 'terminal' }; },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  await runtime.submitRunRequest(request());
+  const result = await runtime.waitRun({ run_id: 'admission-test', wait_until: 'terminal', wait_ms: 35 });
+  assert.equal(result.phase, 'running');
+  assert.ok(waits <= 2, `unexpected hot loop: ${waits} waits`);
+});
+
+test('an uncertain dispatch remains cancellable even without authoritative prompt acknowledgement', async () => {
+  const { calls, dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    dispatchPrompt: async () => ({ sent: true, dispatched: false, confidence: 'uncertain' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request());
+  assert.equal(submitted.lanes[0].task_final, false);
+  const cancelled = await runtime.cancelRun({ run_id: submitted.run_id });
+  assert.deepEqual(calls.cancel, ['lane-one']);
+  assert.equal(cancelled.lanes[0].phase, 'cancelled');
 });

@@ -1,6 +1,6 @@
 # Native run lifecycle design
 
-Status: implementation design for 3.4.2, following live post-dispatch failure.
+Status: implemented for 3.4.2; fresh Desktop acceptance follows installation.
 
 ## Evidence
 
@@ -12,7 +12,7 @@ The task supervisor owns provider process/session identity, execution state, dea
 
 Keep the established task runtime and the compatibility full-run path. Correct the semantic run boundary coherently rather than replace the provider implementations or introduce another scheduler.
 
-## Required changes
+## Decisions
 
 1. Give every task-facing lifecycle operation one explicit identity context. Inspect, reconnect, reply, cancel, and result retrieval must reference the same bound task. Test the production bridge using task-store fixtures, not overridden inspect/reconnect/cancel callbacks.
 2. Observation failure is uncertainty, not proof of provider termination. Preserve the ability to inspect and cancel that task; reconcile on a later request without replaying its prompt. Never report a terminal run while an owned optional or required provider task is still active or unconfirmed.
@@ -20,6 +20,11 @@ Keep the established task runtime and the compatibility full-run path. Correct t
 4. Reuse task-store event waits. Do not write or increment run revisions for unchanged observations. Status remains immediate; waits wake for the requested progress, decision, terminal state, deadline, or caller cancellation.
 5. Separate completed work from accepted or verified work. Required cancellation/failure blocks success. A partial handoff is evidence for review, not proof of successful verification. Presentation uses the same lifecycle meanings as admission, including unresolved observations.
 6. Make tool metadata explain the native run workflow first; retain supported legacy inputs. Include useful titles, honest annotations, structured output schemas, and short cross-tool server instructions. Skills describe the workflow; the server owns execution and authorization.
+
+The production bridge also sends the existing compiled child envelope and pins
+managed workspaces to its recorded commit. Unsupported model overrides fail
+before launch; configured provider defaults are not represented as model
+attestation. No new scheduler, dependency, or permission framework is added.
 
 ## Acceptance
 

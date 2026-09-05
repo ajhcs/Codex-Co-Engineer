@@ -6,6 +6,10 @@
 
 ### Fixed
 
+- Deliver the compiled assignment instructions and pin local workspaces to
+  the recorded commit; reject unsupported provider model overrides instead
+  of silently launching another model.
+
 - Align semantic runs with the authoritative provider task lifecycle, including
   result delivery, recoverable observation failures, cancellation, and restart.
   Reuse event-driven task waits and keep unchanged run receipts stable.

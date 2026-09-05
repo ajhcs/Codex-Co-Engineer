@@ -837,3 +837,30 @@ test('undefined simple runtime receipts fail closed as blocked unresolved output
     assert.deepEqual(receipt.lanes, []);
   }
 });
+
+test('large multi-assignment results retain bounded useful previews without inventing acceptance', async () => {
+  const runId = 'bounded-answer-results';
+  const lanes = Array.from({ length: 8 }, (_, index) => ({
+    assignment_id: `lane-${index}`, task_id: `task-${index}`, provider: 'grok',
+    phase: 'completed', status: 'completed', required: true, prompt_dispatched: true,
+    dispatch_confidence: 'authoritative', result: `Answer ${index}: ` + '🙂'.repeat(5000),
+  }));
+  const receipt = { schema: 'codex-co-engineer.run-admission.v1', run_id: runId,
+    phase: 'completed', status: 'completed', lanes, assignment_count: 8, cursor: '9', revision: 9 };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => receipt;
+  }
+  const { runtime } = createAdapter();
+  const adapter = createRunToolAdapter({ runtime, simpleRuntime });
+  for (const [tool, cap] of [['status', SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX], ['task', SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX]]) {
+    const result = await adapter.dispatch(tool, { run_id: runId, wait_ms: 0 });
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= cap);
+    assert.equal(result.lanes.length, 8);
+    for (let index = 0; index < 8; index += 1) {
+      assert.ok(JSON.stringify(result.lanes[index].result).includes(`Answer ${index}`));
+    }
+    assert.equal(result.candidate.accepted, false);
+    assert.ok(Object.values(result.checks).every(value => value === null));
+  }
+});

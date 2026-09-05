@@ -83,8 +83,8 @@ async function withClient(capabilities, formResult, exercise) {
     return response.result.structuredContent;
   };
   try {
-    await request('initialize', { protocolVersion: '2025-11-25', capabilities, clientInfo: { name: 'fixture', version: '1' } });
-    await exercise({ repo, sha, forms, call });
+    const initialized = await request('initialize', { protocolVersion: '2025-11-25', capabilities, clientInfo: { name: 'fixture', version: '1' } });
+    await exercise({ repo, sha, forms, call, request, initialized: initialized.result });
   } finally {
     for (const item of pending.values()) clearTimeout(item.timer);
     pending.clear();
@@ -190,5 +190,38 @@ test('status and cancellation remain usable while a native form is open', async 
     noDispatch(await submissionResult);
     const terminal = await call('status', { run_id: pending.run_id });
     assert.equal(terminal.phase, 'cancelled');
+  });
+});
+
+test('native discovery metadata describes the workflow and accepts real receipt field types', async () => {
+  await withClient({ elicitation: { form: {} } }, { action: 'decline' }, async ({ repo, request, call, initialized }) => {
+    assert.ok(initialized.instructions.length <= 512);
+    assert.match(initialized.instructions, /run_request/);
+    const { result: { tools } } = await request('tools/list', {});
+    assert.equal(tools.length, 5);
+    const byName = new Map(tools.map(tool => [tool.name, tool]));
+    for (const tool of tools) {
+      assert.ok(tool.title);
+      assert.equal(tool.outputSchema.type, 'object');
+      assert.equal(typeof tool.annotations.readOnlyHint, 'boolean');
+    }
+    const cases = [
+      ['status', { detail: 'compact', include_tasks: false }],
+      ['delegate', submission(repo)],
+      ['task', { run_id: 'native-consent-roundtrip', wait_ms: 0 }],
+      ['cancel', { run_id: 'native-consent-roundtrip' }],
+    ];
+    for (const [name, args] of cases) {
+      const receipt = await call(name, args);
+      for (const [field, rule] of Object.entries(byName.get(name).outputSchema.properties)) {
+        if (!(field in receipt) || !rule.type) continue;
+        const value = receipt[field];
+        const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+        const allowed = Array.isArray(rule.type) ? rule.type : [rule.type];
+        assert.ok(allowed.includes(actual) || (allowed.includes('integer') && Number.isInteger(value)),
+          `${name}.${field}: advertised ${allowed}, received ${actual}`);
+        if (rule.enum) assert.ok(rule.enum.includes(value), `${name}.${field}: unexpected enum value`);
+      }
+    }
   });
 });
