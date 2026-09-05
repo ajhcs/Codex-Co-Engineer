@@ -134,3 +134,18 @@ When a maintainer later publishes against an exact reviewed `main` SHA,
 use the placeholder form in [releases/v3.4.2.md](releases/v3.4.2.md)
 (`EXACT_REVIEWED_MAIN_SHA`). Do not invent a tag or remote mutation from
 documentation work.
+
+## Provider boundary regressions
+
+Before live acceptance, exercise the installed ACPX CLI against local fake ACP
+agents for success and model/API rejection. A nonzero exit must retain a useful
+sanitized cause; raw outgoing requests and prompts must not enter public logs.
+Test fragmented and oversized output, cancellation, deadlines, and cleanup.
+
+Feed the Cursor adapter realistic SDK completion objects, including duration,
+model, and usage metadata. Keep provider metadata separate from verified Git
+and identity facts. A passing mock with a reduced response shape is insufficient.
+
+Native consent checks cover timeout and same-run recovery. Host presentation
+latency requires actual host observations; a protocol test does not establish
+when the user saw the form.

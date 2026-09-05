@@ -6,6 +6,11 @@
 
 ### Fixed
 
+- Adapt Cursor Cloud SDK results before internal validation so documented
+  timing, model, and usage metadata does not prevent terminal result delivery.
+- Use ACPX's one-shot command for DSH, preserving bounded provider errors and
+  results without a nested flow or replaying a submitted prompt.
+
 - Deliver the compiled assignment instructions and pin local workspaces to
   the recorded commit; reject unsupported provider model overrides instead
   of silently launching another model.
@@ -34,6 +39,11 @@
   redundant launch field while rejecting explicit role/access conflicts.
 
 ### Changed
+
+- Default Muse to `meta/muse-spark-1.3-contributor` through OpenRouter with
+  XHigh reasoning, using only the OpenRouter credential for that route.
+- Release checks honor the operator's configured npm cache and temporary
+  storage instead of forcing a machine-specific cache path.
 
 - Added evidence-qualified Luna / Terra / Sol / Astra task-selection guidance.
   Prefer one owner with bounded workers; an extra coordinator and reasoning
