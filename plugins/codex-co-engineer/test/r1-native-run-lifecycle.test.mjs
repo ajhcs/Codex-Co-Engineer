@@ -9,7 +9,7 @@ import { createTask, taskPaths } from '../mcp/v3/task-store.mjs';
 
 const REVIEW = 'Fixture review completed: the documented launch flow is clear.';
 
-async function fixture(exercise) {
+async function fixture(exercise, taskFields = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cce-native-lifecycle-'));
   const repo = path.join(directory, 'repository');
   const root = path.join(directory, 'state');
@@ -40,6 +40,7 @@ async function fixture(exercise) {
         status: 'completed', prompt_dispatched: true, dispatch_evidence: 'authoritative',
         stop_reason: 'end_turn', finished_at: new Date().toISOString(),
         result: REVIEW, repo, start_sha: base, worktree_path: repo,
+        ...taskFields,
       } });
       return { dispatched: true, confidence: 'authoritative', session_id: 'fixture-session' };
     },
@@ -88,3 +89,15 @@ test('an observation failure can recover the same task without another dispatch'
     assert.equal(dispatches(), 1);
   });
 });
+
+for (const status of ['cancelled', 'failed', 'environment_blocked']) {
+  test(`a required ${status} task cannot become a successful run`, async () => {
+    await fixture(async ({ adapter, submitted, dispatches }) => {
+      const result = await adapter.dispatch('status', { run_id: submitted.run_id });
+      assert.notEqual(result.phase, 'completed');
+      assert.equal(result.complete_candidate_blocked, true);
+      assert.notEqual(result.candidate?.accepted, true);
+      assert.equal(dispatches(), 1);
+    }, { status, result: null, stop_reason: status });
+  });
+}
