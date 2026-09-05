@@ -64,6 +64,29 @@ After the provider-free gate passes:
    4-hour `tool_timeout_sec` as a measured Desktop limit until those probes
    have been run on the shipping host.
 
+## Native run acceptance
+
+Qualify the normal semantic `run_request` path as a complete user workflow.
+A successful handshake, accepted consent form, or provider prompt dispatch is
+an intermediate result. Acceptance requires the same run ID to deliver the
+provider result, accurate terminal state, and retained handoff without asking
+the operator to discover a hidden task ID or repair configuration.
+
+Exercise the production task bridge with synthetic task-store fixtures in CI.
+Only provider/process boundaries should be replaced for these contract tests;
+replacing inspection, cancellation, and result projection would hide the very
+interfaces being qualified. Cover completion, transient observation failure,
+restart, cancellation, optional active assignments, unchanged cursors, and
+bounded results. Verify that idle waits use event notifications and do not
+continually rewrite run state.
+
+After the exact-candidate gate, repeat one authorized host run through native
+consent and normal run completion. A result recovered through a legacy task
+fallback is useful diagnostic evidence, but it does not pass this acceptance.
+Record the tested commit and whether other provider routes were exercised.
+The lifecycle ownership decision is
+[ADR 0002](adr/0002-native-run-lifecycle.md).
+
 ## Handoff and cleanup
 
 Codex reviews and merges. Managed local worktrees remain until their result is

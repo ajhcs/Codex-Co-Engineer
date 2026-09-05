@@ -6,6 +6,10 @@
 
 ### Fixed
 
+- Align semantic runs with the authoritative provider task lifecycle, including
+  result delivery, recoverable observation failures, cancellation, and restart.
+  Reuse event-driven task waits and keep unchanged run receipts stable.
+
 - Wire semantic launch consent to native MCP forms, with explicit unsupported
   host handling and same-run consent retry. Preserve pending/terminal receipts
   and cursors; distinguish planned review work from completed evidence.
