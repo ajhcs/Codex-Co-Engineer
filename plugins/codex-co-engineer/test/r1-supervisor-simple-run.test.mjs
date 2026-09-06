@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createSupervisorRunToolAdapter, submitTask } from '../mcp/v3/supervisor.mjs';
-import { createTask } from '../mcp/v3/task-store.mjs';
+import { createTask, updateTask } from '../mcp/v3/task-store.mjs';
 import { parseChildEnvelopeV1 } from '../mcp/v3/prompt-compiler.mjs';
 import {
   compileRunRequestV1,
@@ -228,6 +228,86 @@ test('production supervisor observation carries a safe provider failure into the
     assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_PROMPT|PRIVATE_CREDENTIAL/);
     await adapter.dispatch('task', { run_id: 'simple-supervisor' });
     assert.equal(dispatches, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('production dispatch wait keeps a delayed acknowledgement active and reconciles late success without replay', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-delayed-dispatch-'));
+  let now = 0;
+  let dispatches = 0;
+  let taskId;
+  try {
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      inProcess: true,
+      execute: async () => ({ stdout: '' }),
+      compile: (value) => compileRunRequestV1(value, { observeGit: async () => OBSERVED }),
+      requestConsent: async () => ({ approved: true }),
+      providerReady: async () => ({ ready: true }),
+      processBoundaryReady: async () => ({ ready: true }),
+      verifyRepository: async () => ({ verified: true }),
+      prepareWorkspace: async ({ assignment }) => ({
+        prepared: true,
+        workspace: {
+          task: assignment.task_id,
+          status: 'ready',
+          worktree_path: root,
+          branch: 'codex/delayed-dispatch',
+          start_sha: BASE_SHA,
+        },
+      }),
+      submitTask: async (input) => {
+        dispatches += 1;
+        taskId = input.task_id;
+        return createTask({
+          root,
+          prompt: 'PRIVATE_PROMPT',
+          record: {
+            id: input.task_id,
+            provider: 'dsh',
+            status: 'running',
+            cwd: root,
+            workspace_kind: 'direct',
+            dispatch_intent: true,
+            dispatch_uncertain: true,
+            prompt_dispatched: false,
+            provider_run_id: 'delayed-session',
+          },
+        });
+      },
+      dispatchEvidenceTimeoutMs: 5_000,
+      dispatchEvidenceNow: () => now,
+      dispatchEvidenceSleep: async (milliseconds) => { now += milliseconds; },
+      inspectWorkspace: async () => ({
+        current_head: BASE_SHA,
+        clean: true,
+        changed_files: [],
+        commits: [],
+      }),
+    });
+
+    const pending = await adapter.dispatch('delegate', { run_request: request() });
+    assert.equal(now, 5_000, 'the bounded wait elapsed without terminating the lane');
+    assert.equal(pending.phase, 'dispatching');
+    assert.equal(pending.lanes[0].status, 'session_ready');
+    assert.equal(pending.lanes[0].prompt_dispatched, false);
+    assert.equal(pending.lanes[0].dispatch_confidence, 'uncertain');
+    assert.equal(dispatches, 1);
+
+    await updateTask(root, taskId, {
+      status: 'completed',
+      prompt_dispatched: true,
+      dispatch_evidence: 'authoritative',
+      dispatch_uncertain: false,
+      result: { summary: 'late success' },
+    });
+    const completed = await adapter.dispatch('task', { run_id: 'simple-supervisor' });
+    assert.equal(completed.phase, 'completed');
+    assert.equal(completed.lanes[0].prompt_dispatched, true);
+    assert.deepEqual(completed.lanes[0].result, { summary: 'late success' });
+    assert.equal(dispatches, 1, 'late success must reconcile the original task without replay');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

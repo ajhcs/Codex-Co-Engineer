@@ -602,7 +602,8 @@ function laneStatus(phase) {
 function isTerminalLane(lane) {
   if (lane.phase === 'partial_handoff' || lane.phase === 'unrecoverable_post_prompt') {
     return ['post_prompt_failure_no_replay', 'post_prompt_environment_blocked_no_replay',
-      'timed_out_with_partial_work', 'timed_out_no_changes'].includes(lane.recovery_classification);
+      'timed_out_with_partial_work', 'timed_out_no_changes',
+      'terminal_dispatch_uncertain_no_replay'].includes(lane.recovery_classification);
   }
   return capturedIncludes(LANE_TERMINAL_PHASES, lane.phase);
 }
@@ -624,6 +625,15 @@ function allLanesTerminal(record) {
 
 function laneNeedsObservation(lane) {
   return lane.prompt_attempted === true && !isTerminalLane(lane);
+}
+
+function laneHasPendingDispatchEvidence(lane) {
+  return lane.prompt_attempted === true
+    && lane.prompt_dispatched !== true
+    && lane.dispatch_confidence === 'uncertain'
+    && ['session_ready', 'running'].includes(lane.phase)
+    && ['dispatch_pending_no_replay', 'post_prompt_session_reconnected'].includes(lane.recovery_classification)
+    && !isTerminalLane(lane);
 }
 
 function completeCandidateBlocked(record) {
@@ -1296,14 +1306,18 @@ export function createRunAdmissionRuntime(overrides = {}) {
         }
         if (result?.dispatched !== true && result?.prompt_dispatched !== true) {
           if (confidence === 'uncertain' || result?.sent === true) {
+            const pending = result?.dispatch_pending === true && result?.terminal !== true;
             lane.prompt_attempted = true;
             lane.dispatch_confidence = 'uncertain';
-            lane.phase = 'unrecoverable_post_prompt';
-            lane.recovery_classification = 'dispatch_uncertain_no_replay';
-            lane.error = cloneError({ code: 'dispatch_uncertain' });
-            await finishLane(record, lane);
-            record.phase = 'degraded';
+            lane.phase = pending ? 'session_ready' : 'unrecoverable_post_prompt';
+            lane.recovery_classification = result?.terminal === true
+              ? 'terminal_dispatch_uncertain_no_replay'
+              : pending ? 'dispatch_pending_no_replay' : 'dispatch_uncertain_no_replay';
+            lane.error = pending ? null : terminalLaneError(result, 'dispatch_uncertain');
+            if (!pending) await finishLane(record, lane);
             await persist(record);
+            if (pending) continue;
+            record.phase = 'degraded';
             break;
           }
           lane.phase = 'failed_pre_prompt';
@@ -1314,17 +1328,21 @@ export function createRunAdmissionRuntime(overrides = {}) {
           break;
         }
         if (confidence === 'uncertain') {
-          // A provider may have accepted the request even when the transport
-          // cannot prove it. Treat that boundary as terminal and never turn
-          // it into a normally running lane or a replayable retry.
+          // The provider may have accepted the prompt before its durable
+          // acknowledgement became observable. Keep observing this same task;
+          // never convert the bounded acknowledgement wait into a replay.
+          const pending = result?.dispatch_pending === true && result?.terminal !== true;
           lane.prompt_attempted = true;
           lane.dispatch_confidence = 'uncertain';
-          lane.phase = 'unrecoverable_post_prompt';
-          lane.recovery_classification = 'dispatch_uncertain_no_replay';
-          lane.error = cloneError({ code: 'dispatch_uncertain' });
-          await finishLane(record, lane);
-          record.phase = 'degraded';
+          lane.phase = pending ? 'session_ready' : 'unrecoverable_post_prompt';
+          lane.recovery_classification = result?.terminal === true
+            ? 'terminal_dispatch_uncertain_no_replay'
+            : pending ? 'dispatch_pending_no_replay' : 'dispatch_uncertain_no_replay';
+          lane.error = pending ? null : terminalLaneError(result, 'dispatch_uncertain');
+          if (!pending) await finishLane(record, lane);
           await persist(record);
+          if (pending) continue;
+          record.phase = 'degraded';
           break;
         }
         lane.prompt_attempted = true;
@@ -1345,7 +1363,9 @@ export function createRunAdmissionRuntime(overrides = {}) {
           lane.prompt_attempted = true;
           lane.dispatch_confidence = 'uncertain';
           lane.phase = 'unrecoverable_post_prompt';
-          lane.recovery_classification = 'dispatch_uncertain_no_replay';
+          lane.recovery_classification = error?.terminal === true
+            ? 'terminal_dispatch_uncertain_no_replay'
+            : 'dispatch_uncertain_no_replay';
           lane.error = cloneError({ code: 'dispatch_uncertain' });
         } else {
           lane.phase = 'failed_pre_prompt';
@@ -1375,7 +1395,11 @@ export function createRunAdmissionRuntime(overrides = {}) {
     const recovery = record.lanes.map((lane) => lane.recovery_classification).find(Boolean);
     if (recovery) record.telemetry.recovery_path = recovery;
     if (record.phase === 'dispatching') {
-      record.phase = authoritativeRequiredDispatch(record) ? 'running' : (hasPromptEvidence(record) ? 'degraded' : 'failed');
+      record.phase = authoritativeRequiredDispatch(record)
+        ? 'running'
+        : record.lanes.some(laneHasPendingDispatchEvidence)
+          ? 'dispatching'
+          : (hasPromptEvidence(record) ? 'degraded' : 'failed');
     }
     bump(record);
     await persist(record);
@@ -1405,6 +1429,30 @@ export function createRunAdmissionRuntime(overrides = {}) {
           throw Object.assign(new Error('Supervisor returned an invalid lane observation.'), {
             code: 'lane_observation_invalid',
           });
+        }
+        if (response?.task_id !== undefined && response.task_id !== lane.task_id) {
+          throw Object.assign(new Error('Supervisor lane observation identity did not match the requested task.'), {
+            code: 'lane_observation_identity_mismatch',
+          });
+        }
+        const authoritativeDispatchEvidence = response?.dispatch_evidence === 'authoritative'
+          && response?.prompt_dispatched === true;
+        if (authoritativeDispatchEvidence && lane.prompt_dispatched !== true) {
+          lane.prompt_attempted = true;
+          lane.prompt_dispatched = true;
+          lane.dispatch_confidence = 'authoritative';
+          if (typeof response.session_id === 'string') lane.session_id = response.session_id;
+          if (['dispatch_pending_no_replay', 'dispatch_uncertain_no_replay'].includes(lane.recovery_classification)) {
+            lane.recovery_classification = null;
+            if (lane.error?.code === 'dispatch_uncertain') lane.error = null;
+          }
+          if (lane.phase === 'session_ready' || lane.phase === 'unrecoverable_post_prompt') {
+            lane.phase = 'prompt_dispatched';
+          }
+          if (record.telemetry.time_to_prompt_dispatch_ms === null) {
+            const createdAt = Date.parse(record.created_at);
+            if (Number.isFinite(createdAt)) record.telemetry.time_to_prompt_dispatch_ms = Math.max(0, Date.now() - createdAt);
+          }
         }
         const previousLastEvent = lane.last_event;
         const recoveringObservation = lane.recovery_classification === OBSERVATION_RECOVERY_CLASSIFICATION;
@@ -1506,7 +1554,13 @@ export function createRunAdmissionRuntime(overrides = {}) {
           record.phase = 'needs_attention';
           record.attention = mergeAttention(record, lane, assignment, attention);
         } else if (status === 'completed' || status === 'succeeded') {
-          lane.phase = 'completed';
+          if (lane.prompt_dispatched === true && lane.dispatch_confidence === 'authoritative') {
+            lane.phase = 'completed';
+          } else {
+            lane.phase = 'unrecoverable_post_prompt';
+            lane.recovery_classification = 'terminal_dispatch_uncertain_no_replay';
+            lane.error = cloneError({ code: 'dispatch_uncertain' });
+          }
           await finishLane(record, lane, response.workspace_inspection ?? null);
         } else if (status === 'cancelled') {
           lane.phase = 'cancelled';
@@ -1543,11 +1597,25 @@ export function createRunAdmissionRuntime(overrides = {}) {
             record.telemetry.recovery_path = 'post_prompt_session_reconnect_required';
           }
         } else if (status === 'environment_blocked') {
+          if (laneHasPendingDispatchEvidence(lane)) {
+            lane.phase = 'unrecoverable_post_prompt';
+            lane.recovery_classification = 'terminal_dispatch_uncertain_no_replay';
+            lane.error = terminalLaneError(response, 'environment_blocked');
+            await finishLane(record, lane, response.workspace_inspection ?? null);
+            continue;
+          }
           lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
           lane.recovery_classification = 'post_prompt_environment_blocked_no_replay';
           lane.error = cloneError({ code: 'environment_blocked' });
           await finishLane(record, lane, response.workspace_inspection ?? null);
         } else if (status === 'failed' || status === 'timeout' || status === 'timed_out') {
+          if (laneHasPendingDispatchEvidence(lane)) {
+            lane.phase = 'unrecoverable_post_prompt';
+            lane.recovery_classification = 'terminal_dispatch_uncertain_no_replay';
+            lane.error = terminalLaneError(response, status === 'timed_out' ? 'timeout' : status);
+            await finishLane(record, lane, response.workspace_inspection ?? null);
+            continue;
+          }
           lane.phase = lane.prompt_dispatched ? 'partial_handoff' : 'failed_pre_prompt';
           lane.recovery_classification = 'post_prompt_failure_no_replay';
           lane.error = terminalLaneError(response, status === 'timed_out' ? 'timeout' : status);
@@ -1572,6 +1640,13 @@ export function createRunAdmissionRuntime(overrides = {}) {
         }
       }
     }
+    record.telemetry.dispatch_confidence = record.lanes.some(laneHasPendingDispatchEvidence)
+      ? 'uncertain'
+      : authoritativeRequiredDispatch(record)
+        ? 'authoritative'
+        : record.lanes.some((lane) => lane.prompt_dispatched === true)
+          ? 'partially_authoritative'
+          : 'not_dispatched';
     if (record.cancel_requested && record.lanes.every((lane) => lane.phase === 'cancelled' || isTerminalLane(lane))) {
       record.phase = 'cancelled';
       record.telemetry.cancel_confirmed = record.lanes.every((lane) => lane.phase === 'cancelled' || lane.phase === 'completed');
@@ -1595,6 +1670,8 @@ export function createRunAdmissionRuntime(overrides = {}) {
       }
     } else if (authoritativeRequiredDispatch(record)) {
       record.phase = 'running';
+    } else if (record.lanes.some(laneHasPendingDispatchEvidence)) {
+      record.phase = 'dispatching';
     }
     const after = JSON.stringify(record);
     if (after !== before) {

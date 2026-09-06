@@ -282,13 +282,18 @@ test('mid-dispatch failure identifies sent and unsent lanes and never says runni
   assert.equal(receipt.lanes[2].phase, 'failed_pre_prompt');
 });
 
-test('uncertain dispatch is never replayed and keeps evidence-bearing handoff', async () => {
+test('pending dispatch stays active, launches independent lanes, and is never replayed', async () => {
   let dispatchCount = 0;
   const { dependencies } = baseDependencies({
     requestConsent: async () => ({ status: 'approved' }),
     dispatchPrompt: async () => {
       dispatchCount += 1;
-      return { dispatched: false, dispatch_uncertain: true, confidence: 'uncertain' };
+      return {
+        dispatched: false,
+        dispatch_pending: true,
+        dispatch_uncertain: true,
+        confidence: 'uncertain',
+      };
     },
     inspectLane: async () => ({ status: 'transport_lost' }),
   });
@@ -296,12 +301,95 @@ test('uncertain dispatch is never replayed and keeps evidence-bearing handoff', 
   const first = await runtime.submitRunRequest(request({ run_id: 'uncertain-dispatch' }));
   const second = await runtime.resumeRun({ run_id: 'uncertain-dispatch' });
 
-  assert.equal(first.phase, 'degraded');
-  assert.equal(first.lanes[0].phase, 'unrecoverable_post_prompt');
-  assert.equal(first.lanes[0].recovery_classification, 'dispatch_uncertain_no_replay');
-  assert.equal(first.lanes[0].handoff !== null, true);
-  assert.equal(second.phase, 'degraded');
-  assert.equal(dispatchCount, 1);
+  assert.equal(first.phase, 'dispatching');
+  assert.equal(first.lanes.every((lane) => lane.phase === 'session_ready'), true);
+  assert.equal(first.lanes.every((lane) => lane.task_final === false), true);
+  assert.equal(first.lanes.every((lane) => lane.recovery_classification === 'dispatch_pending_no_replay'), true);
+  assert.equal(second.phase, 'dispatching');
+  assert.equal(dispatchCount, 2);
+});
+
+test('generic and thrown uncertain dispatches stay unresolved without falsely active lanes', async () => {
+  for (const mode of ['returned', 'thrown']) {
+    let dispatchCount = 0;
+    const { dependencies } = baseDependencies({
+      requestConsent: async () => ({ status: 'approved' }),
+      dispatchPrompt: async () => {
+        dispatchCount += 1;
+        if (mode === 'thrown') {
+          throw Object.assign(new Error('unknown dispatch outcome'), { code: 'dispatch_uncertain', sent: true });
+        }
+        return { sent: true, dispatched: false, confidence: 'uncertain' };
+      },
+    });
+    const runtime = createRunAdmissionRuntime(dependencies);
+    const receipt = await runtime.submitRunRequest(request({ run_id: `uncertain-${mode}` }));
+    const reconciled = await runtime.inspectRun({ run_id: receipt.run_id });
+
+    assert.equal(receipt.phase, 'degraded');
+    assert.equal(receipt.lanes[0].phase, 'unrecoverable_post_prompt');
+    assert.equal(receipt.lanes[0].recovery_classification, 'dispatch_uncertain_no_replay');
+    assert.equal(receipt.lanes[1].phase, 'failed_pre_prompt');
+    assert.equal(reconciled.phase, 'degraded');
+    assert.equal(reconciled.lanes[0].phase, 'unrecoverable_post_prompt');
+    assert.equal(dispatchCount, 1);
+  }
+});
+
+test('authoritative task-bound evidence promotes pending dispatch and clears only its uncertainty', async () => {
+  let completed = false;
+  let dispatchCount = 0;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    dispatchPrompt: async () => {
+      dispatchCount += 1;
+      return { sent: true, dispatched: false, dispatch_pending: true, confidence: 'uncertain' };
+    },
+    inspectLane: async ({ task_id }) => completed
+      ? {
+        task_id,
+        status: 'completed',
+        cursor: '2',
+        prompt_dispatched: true,
+        dispatch_evidence: 'authoritative',
+        session_id: `${task_id}-session`,
+      }
+      : { task_id, status: 'running', cursor: '1', dispatch_uncertain: true },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const pending = await runtime.submitRunRequest(request({ run_id: 'late-dispatch-evidence' }));
+  const stillPending = await runtime.inspectRun({ run_id: pending.run_id });
+  completed = true;
+  const final = await runtime.inspectRun({ run_id: pending.run_id });
+
+  assert.equal(stillPending.phase, 'dispatching');
+  assert.equal(final.phase, 'completed');
+  assert.equal(final.lanes.every((lane) => lane.prompt_dispatched), true);
+  assert.equal(final.lanes.every((lane) => lane.dispatch_confidence === 'authoritative'), true);
+  assert.equal(final.lanes.every((lane) => lane.error === null), true);
+  assert.equal(dispatchCount, 2, 'late acknowledgement must observe existing tasks without replay');
+});
+
+test('terminal completion without authoritative dispatch evidence remains an honest ambiguity', async () => {
+  let dispatchCount = 0;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    dispatchPrompt: async () => {
+      dispatchCount += 1;
+      return { sent: true, dispatched: false, dispatch_pending: true, confidence: 'uncertain' };
+    },
+    inspectLane: async ({ task_id }) => ({ task_id, status: 'completed', cursor: '2' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request({ run_id: 'terminal-dispatch-ambiguity' }));
+  const final = await runtime.inspectRun({ run_id: submitted.run_id });
+
+  assert.equal(final.phase, 'degraded');
+  assert.equal(final.complete_candidate_blocked, true);
+  assert.equal(final.lanes.every((lane) => lane.task_final), true);
+  assert.equal(final.lanes.every((lane) => lane.phase === 'unrecoverable_post_prompt'), true);
+  assert.equal(final.lanes.every((lane) => lane.error.code === 'dispatch_uncertain'), true);
+  assert.equal(dispatchCount, 2);
 });
 
 test('cancellation is idempotent and does not resume a cancelled run', async () => {
@@ -703,17 +791,72 @@ test('a terminal task wake without settled run progress uses bounded backoff', a
   assert.ok(waits <= 2, `unexpected hot loop: ${waits} waits`);
 });
 
-test('an uncertain dispatch remains cancellable even without authoritative prompt acknowledgement', async () => {
+test('a pending dispatch remains cancellable even without authoritative prompt acknowledgement', async () => {
   const { calls, dependencies } = baseDependencies({
     requestConsent: async () => ({ approved: true }),
-    dispatchPrompt: async () => ({ sent: true, dispatched: false, confidence: 'uncertain' }),
+    dispatchPrompt: async () => ({
+      sent: true,
+      dispatched: false,
+      dispatch_pending: true,
+      confidence: 'uncertain',
+    }),
   });
   const runtime = createRunAdmissionRuntime(dependencies);
   const submitted = await runtime.submitRunRequest(request());
   assert.equal(submitted.lanes[0].task_final, false);
   const cancelled = await runtime.cancelRun({ run_id: submitted.run_id });
-  assert.deepEqual(calls.cancel, ['lane-one']);
-  assert.equal(cancelled.lanes[0].phase, 'cancelled');
+  assert.deepEqual(calls.cancel, ['lane-one', 'lane-two']);
+  assert.equal(cancelled.lanes.every((lane) => lane.phase === 'cancelled'), true);
+});
+
+test('terminal pending failure preserves an allowlisted provider cause', async () => {
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+    dispatchPrompt: async () => ({
+      sent: true,
+      dispatched: false,
+      dispatch_pending: true,
+      confidence: 'uncertain',
+    }),
+    inspectLane: async ({ task_id }) => ({
+      task_id,
+      status: 'failed',
+      error: { code: 'provider_billing_required', message: 'PRIVATE_CREDENTIAL' },
+    }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request({ run_id: 'pending-billing-failure' }));
+  const final = await runtime.inspectRun({ run_id: submitted.run_id });
+
+  assert.equal(final.phase, 'degraded');
+  assert.equal(final.lanes.every((lane) => lane.task_final), true);
+  assert.equal(final.lanes.every((lane) => lane.error.code === 'provider_billing_required'), true);
+  assert.doesNotMatch(JSON.stringify(final), /PRIVATE_CREDENTIAL/);
+});
+
+test('pending dispatch reconnect observes the same task and never replays it', async () => {
+  let dispatchCount = 0;
+  let reconnectCount = 0;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    dispatchPrompt: async () => {
+      dispatchCount += 1;
+      return { sent: true, dispatched: false, dispatch_pending: true, confidence: 'uncertain' };
+    },
+    inspectLane: async ({ task_id }) => ({ task_id, status: 'transport_lost', cursor: '1' }),
+    reconnectLane: async ({ task_id }) => {
+      reconnectCount += 1;
+      return { reconnected: true, session_id: `${task_id}-session`, cursor: '1' };
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request({ run_id: 'pending-reconnect' }));
+  const reconnected = await runtime.inspectRun({ run_id: submitted.run_id });
+
+  assert.equal(reconnected.phase, 'dispatching');
+  assert.equal(reconnected.lanes.every((lane) => lane.task_final === false), true);
+  assert.equal(dispatchCount, 2);
+  assert.equal(reconnectCount, 2);
 });
 
 for (const code of ['provider_billing_required', 'authentication_required', 'provider_rate_limited', 'unknown_private_error']) {

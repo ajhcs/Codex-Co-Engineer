@@ -1953,8 +1953,9 @@ async function buildSimpleWorkspaceIdentity({ run_id: runId, assignment, git, wo
 async function waitForSimpleDispatchEvidence(root, taskId, {
   timeoutMs = SIMPLE_DISPATCH_EVIDENCE_TIMEOUT_MS,
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now = Date.now,
 } = {}) {
-  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const deadline = now() + Math.max(0, timeoutMs);
   let current = null;
   while (true) {
     current = (await readTask(root, taskId)).task;
@@ -1969,16 +1970,6 @@ async function waitForSimpleDispatchEvidence(root, taskId, {
         cursor: '0',
       };
     }
-    if (current.dispatch_uncertain === true) {
-      return {
-        dispatched: false,
-        dispatch_uncertain: true,
-        confidence: 'uncertain',
-        sent: true,
-        session_ready: Boolean(sessionId),
-        session_id: typeof sessionId === 'string' ? sessionId : null,
-      };
-    }
     if (['failed', 'timeout', 'cancelled', 'transport_lost'].includes(current.status)
       && current.dispatch_intent !== true && current.prompt_dispatched !== true) {
       return {
@@ -1987,9 +1978,23 @@ async function waitForSimpleDispatchEvidence(root, taskId, {
         error: current.error ?? { code: 'provider_start_failed' },
       };
     }
-    if (Date.now() >= deadline) {
+    if (['completed', 'succeeded', 'failed', 'timeout', 'cancelled', 'transport_lost'].includes(current.status)) {
       return {
         dispatched: false,
+        dispatch_uncertain: true,
+        terminal: true,
+        confidence: 'uncertain',
+        sent: current.dispatch_intent === true || current.prompt_dispatched === true,
+        session_ready: Boolean(sessionId),
+        session_id: typeof sessionId === 'string' ? sessionId : null,
+        ...(typeof current.error?.code === 'string' ? { error: { code: current.error.code } } : {}),
+      };
+    }
+    if (now() >= deadline) {
+      const active = ['running', 'starting', 'accepted', 'needs_attention'].includes(current.status);
+      return {
+        dispatched: false,
+        ...(active ? { dispatch_pending: true } : { terminal: true }),
         dispatch_uncertain: true,
         confidence: 'uncertain',
         sent: current.dispatch_intent === true || current.prompt_dispatched === true,
@@ -1997,7 +2002,7 @@ async function waitForSimpleDispatchEvidence(root, taskId, {
         session_id: typeof sessionId === 'string' ? sessionId : null,
       };
     }
-    await sleep(Math.min(SIMPLE_DISPATCH_EVIDENCE_POLL_MS, Math.max(1, deadline - Date.now())));
+    await sleep(Math.min(SIMPLE_DISPATCH_EVIDENCE_POLL_MS, Math.max(1, deadline - now())));
   }
 }
 
@@ -2084,7 +2089,13 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
   const checkPath = options.checkPath ?? stat;
   const admissionStore = options.admissionStore ?? createRunAdmissionStore(root);
   const submitTaskFn = options.submitTask ?? submitTask;
-  const waitForDispatchEvidence = options.waitForDispatchEvidence ?? waitForSimpleDispatchEvidence;
+  const waitForDispatchEvidence = options.waitForDispatchEvidence
+    ?? ((stateRootValue, taskId) => waitForSimpleDispatchEvidence(stateRootValue, taskId, {
+      ...(options.dispatchEvidenceTimeoutMs !== undefined
+        ? { timeoutMs: options.dispatchEvidenceTimeoutMs } : {}),
+      ...(options.dispatchEvidenceSleep ? { sleep: options.dispatchEvidenceSleep } : {}),
+      ...(options.dispatchEvidenceNow ? { now: options.dispatchEvidenceNow } : {}),
+    }));
   const simpleDeps = {
     compile: options.compile ?? compileRunRequestV1,
     ...(options.requestConsent ? { requestConsent: options.requestConsent } : {}),
@@ -2248,6 +2259,12 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
       const observed = {
         task_id: observedTaskId ?? taskId,
         cursor,
+        ...(task.dispatch_evidence === 'authoritative'
+          ? { dispatch_evidence: 'authoritative' } : {}),
+        ...(task.prompt_dispatched === true ? { prompt_dispatched: true } : {}),
+        ...(task.dispatch_uncertain === true ? { dispatch_uncertain: true } : {}),
+        ...((task.acp_session_id ?? task.provider_run_id ?? task.provider_agent_id) !== undefined
+          ? { session_id: task.acp_session_id ?? task.provider_run_id ?? task.provider_agent_id } : {}),
         ...(typeof task.last_event === 'string' ? { last_event: task.last_event } : {}),
         ...(task.result !== undefined && task.result !== null
           ? { result: task.result } : {}),
@@ -2832,6 +2849,9 @@ export async function createSupervisorRunToolAdapter(options = {}) {
       verifyRun: options.verifyRun,
       submitTask: options.submitTask,
       waitForDispatchEvidence: options.waitForDispatchEvidence,
+      dispatchEvidenceTimeoutMs: options.dispatchEvidenceTimeoutMs,
+      dispatchEvidenceSleep: options.dispatchEvidenceSleep,
+      dispatchEvidenceNow: options.dispatchEvidenceNow,
       compile: options.compile,
       admissionStore: options.admissionStore,
       loadRecord: options.loadRecord,
