@@ -118,7 +118,7 @@ A run is one submission, one coordinated wait, and one verified
 decision. Independent means the assignments do not share a writer path.
 The bound is eight.
 
-Codex speech during a run uses these utterances:
+Examples of concise updates during a run (no fixed narration sequence is required):
 
 - `I am delegating this to Co-Engineer`
 - `Co-Engineer is preparing N independent assignments` until dispatch is

@@ -1,52 +1,29 @@
 # Launch an installed Co-Engineer
 
-Use this path for a new assignment. Installation, provider authentication, and
-host configuration are separate setup tasks. A ready deployment needs one
-semantic submission and one coordinated wait.
+Submit `delegate.run_request` once: a stable `run_id`, absolute Git `repo`,
+`objective`, and one to eight `assignments`. Each assignment needs an
+`assignment_id`, chosen `provider`, `role`, `prompt`, and `expected_duration_ms`.
+State the outcome, allowed changes and acceptance checks in the prompt.
+Reuse existing provider/model choices. Model overrides are optional.
+The server derives identities, defaults and isolated workspaces; do not construct
+the legacy full `run` envelope. Multiple writers need disjoint `write_scope` paths.
+Dependent review starts after its input exists.
 
-1. Reuse the provider, model override, profile choice, and Cursor location
-   already given in this task. Ask once only when a consequential choice is
-   still missing. Do not ask again because another skill became active.
-2. Submit `delegate` with `run_request`: `run_id`, absolute `repo`, `objective`,
-   and one to eight `assignments`. Each assignment needs `assignment_id`,
-   `provider`, `role`, `prompt`, and `expected_duration_ms`. Access is derived
-   from role: `review` and `verify` are read-only; `implement` is a writer.
-   Multiple writers each need an explicit disjoint `write_scope`; use the
-   task's bounded scope for a single writer too. The server supplies model
-   defaults when `model` is omitted and derives identities, digests, task IDs,
-   and workspace policy. Do not create a profile, manually bootstrap a
-   worktree, or generate the legacy `run` envelope to fill those defaults.
-3. Follow the admission receipt. A preparing or validating run is already
-   accepted work: retain its `run_id`. Wait through `task` with that `run_id`,
-   `wait_until: "decision_or_attention"`, and the returned cursor. On host
-   timeout, reconnect to that same run. Never submit a replacement because
-   a response was slow, partial, or disconnected.
-4. Repository exposure uses the host's native approval form. The user accepts
-   or declines the actual repository/provider scope there. If the host cannot
-   show the form, report the capability blocker. To reopen an interrupted
-   decision, use the same run with `run_reply: { "request_consent": true }`;
-   do not resubmit or invent an `approval_ref`. Inspecting or waiting does not
-   request approval again. Continue unaffected work while input is pending.
-5. Inspect the combined diff and relevant checks before accepting the result.
-   Required lanes that failed or remain unresolved prevent a verified result.
+Keep the returned run ID and same run cursor. Wait through `task` with
+`wait_until` set to `decision_or_attention`. Preparation and pending acknowledgement
+are active work. On timeout or disconnect, reconnect to the same run; never replay
+or submit a replacement. Routine progress stays internal.
 
-Check `status` with `detail: "compact", include_tasks: false` only when
-readiness is unknown and needed to choose a path, or when dispatch reports a
-readiness failure. Successful admission already performs its own checks.
-A known ready provider does not need repeated readiness probes. An unavailable
-unselected provider is not a reason to configure the whole installation.
+Repository exposure uses the host's actual consent form. If interrupted, reopen
+it with `task.run_reply.request_consent` on the same run. Never invent approval.
+Answer actionable input through the returned reply identity. Unaffected work continues.
 
-For a real setup failure, identify the selected provider and exact failed
-prerequisite. Reuse existing configuration. Do not reinstall dependencies,
-rewrite MCP settings, create credentials, or run release qualification as a
-routine launch step. If the required `run_request` capability is missing from
-the connected catalog, report the version mismatch; do not reverse-engineer
-private modules or fabricate protected metadata. Broader repair belongs to an
-explicit setup/debugging request.
+Inspect results, changes and checks before accepting them. Required failures,
+uncertainty or unfinished cleanup block a verified result. Retrieve diagnostics
+only for a concrete gap; use artifact references for omitted detail.
 
-State the outcome, relevant base/files, allowed edits, and acceptance checks
-in each prompt. Workers can choose their implementation steps. Keep one owner
-for dependent integration; a review of newly produced diffs starts after
-those diffs exist. Parallel review can inspect the existing base instead.
-Do not assign one writer path twice or duplicate work through native agents.
-A coordinator or pinned sidebar task is optional and never a launch prerequisite.
+Admission checks readiness. Run compact `status` only to resolve an actual
+readiness question. Setup, manual worktrees, extra coordinators, configuration
+changes and repeated status checks are not launch prerequisites. Report a missing
+capability or selected-provider prerequisite directly; do not reconfigure other
+providers. Broader repair belongs to an explicit setup/debugging task.

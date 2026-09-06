@@ -5,27 +5,21 @@ description: Act on an existing Co-Engineer run by inspecting, continuing, answe
 
 # Chatting with Co-Engineer
 
-Never start a run. Codex remains chief engineer, reviewer, and merge authority. Act on the existing run in exactly one of these ways: inspect, continue, answer grouped attention, or cancel.
+Never start a run. Codex remains reviewer and merge authority. Use the existing
+run to inspect, continue, answer grouped attention, or cancel. If no run exists,
+offer `$delegate-to-co-engineer`.
 
-If no run exists, say chatting needs existing work and offer `$delegate-to-co-engineer`. Do not silently submit.
+Wait through `task` with the run ID, `decision_or_attention`, and the same run
+cursor. Routine progress needs no polling. On host timeout, reconnect to the same
+run. Answer with `run_reply`; cancel with `cancel.run_id`. A side question does
+not create a replacement assignment.
 
-Keep the same run cursor and the same wait. The run stays on its one aggregate `decision_or_attention` wait. Answering grouped attention is one user decision, not a second delegation and not a debate loop. Unaffected assignments keep working. When that grouped decision is required, say `Co-Engineer needs one decision from you`.
+For interrupted repository consent, reopen the actual host form on the same run
+with `run_reply.request_consent` set to true; this does not grant approval.
+Group actionable questions. For example: `Co-Engineer needs one decision from you`.
+Unaffected assignments continue. Inspect the result and relevant checks before
+claiming verification; report any failure or unresolved work honestly.
 
-For interrupted repository consent, request the host form again with the same
-`run_id` and `run_reply: { "request_consent": true }`. This only reopens the
-decision; it never supplies approval. Ordinary inspection does not re-ask.
-
-A correction or side question continues the existing objective unless the user
-changes it. Keep completed evidence and pending run IDs. Route updates only
-through a supported same-session or grouped-attention capability; if live
-steering is unsupported, report it and reconcile or cancel the existing run.
-Do not create a replacement run as an implicit reply. Complete the checks
-needed for acceptance; repeat or broaden them only for a new change, failure,
-or unresolved concern. Keep the final report focused on outcome, evidence,
-and remaining blockers.
-
-After a complete candidate exists, inspect it, then say `Co-Engineer finished, and I verified the candidate.` That sentence is not a merge, push, or pull-request claim. If a required assignment fails or stays unresolved, report the gap honestly and never use the verified-final sentence. Cancel is chatting, not a new delegation.
-
-Raw MCP, payload, cursor, or control-plane debugging uses `$control-codex-co-engineer-agents`. Never ask the user to construct tool payloads.
-
-For inspect, continue, grouped-attention, cancel, failure, and no-run procedures, read [references/existing-run.md](references/existing-run.md) only when that case applies.
+Read [existing-run details](references/existing-run.md) only for an unfamiliar
+reply or diagnostic operation. Raw lifecycle debugging uses
+`$control-codex-co-engineer-agents`. Never ask the user to construct tool payloads.
