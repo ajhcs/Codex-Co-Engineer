@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   compileRunRequestV1,
   RUN_REQUEST_DEFAULT_CAPABILITIES,
+  RUN_REQUEST_DEFAULT_EXPECTED_DURATION_MS,
 } from '../mcp/v3/run-request-compiler.mjs';
 
 const BASE_SHA = 'a'.repeat(40);
@@ -111,6 +112,33 @@ test('semantic request identities are stable across object key order', async () 
   assert.equal(second.manifest_digest, first.manifest_digest);
   assert.equal(second.run_identity.digest, first.run_identity.digest);
   assert.equal(second.assignments[0].task_id, first.assignments[0].task_id);
+});
+
+test('omitted duration is identical to the explicit semantic default and invalid supplied values fail', async () => {
+  const assignment = { ...request().assignments[0] };
+  delete assignment.expected_duration_ms;
+  const omitted = await compileRunRequestV1(request({ assignments: [assignment] }), { observeGit });
+  const explicit = await compileRunRequestV1(request({
+    assignments: [{ ...assignment, expected_duration_ms: RUN_REQUEST_DEFAULT_EXPECTED_DURATION_MS }],
+  }), { observeGit });
+
+  assert.equal(omitted.assignments[0].expected_duration_ms, 600_000);
+  assert.equal(omitted.request_idempotency_key, explicit.request_idempotency_key);
+  assert.equal(omitted.manifest_digest, explicit.manifest_digest);
+  assert.equal(omitted.assignments[0].task_id, explicit.assignments[0].task_id);
+
+  await assert.rejects(
+    compileRunRequestV1(request({
+      assignments: [{ ...assignment, expected_duration_ms: 0 }],
+    }), { observeGit }),
+    (error) => error.code === 'out_of_range',
+  );
+  await assert.rejects(
+    compileRunRequestV1(request({
+      assignments: [{ ...assignment, expected_duration_ms: null }],
+    }), { observeGit }),
+    (error) => error.code === 'invalid_type',
+  );
 });
 
 test('semantic changes alter the derived request identity', async () => {

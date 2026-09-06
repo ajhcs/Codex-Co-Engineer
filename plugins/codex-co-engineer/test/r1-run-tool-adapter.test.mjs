@@ -762,7 +762,7 @@ test('simple receipts preserve cursor/revision and wait metadata through the bou
   const status = await adapter.dispatch('status', { run_id: runId });
   assert.equal(status.revision, 11);
   assert.equal(status.cursor, '11');
-  assert.equal(status.complete_candidate_blocked, false);
+  assert.equal(Object.hasOwn(status, 'blockers'), false);
 
   const waited = await adapter.dispatch('task', {
     run_id: runId,
@@ -832,9 +832,10 @@ test('undefined simple runtime receipts fail closed as blocked unresolved output
     assert.equal(receipt.run_id, runId);
     assert.equal(receipt.status, 'unresolved');
     assert.equal(receipt.phase, 'unresolved');
-    assert.equal(receipt.complete_candidate_blocked, true);
+    assert.equal(receipt.blockers.verification, true);
     assert.equal(receipt.error.code, 'durable_state_mismatch');
     assert.deepEqual(receipt.lanes, []);
+    assert.deepEqual(receipt.diagnostics, { view: 'diagnostics' });
   }
 });
 
@@ -859,8 +860,87 @@ test('large multi-assignment results retain bounded useful previews without inve
     assert.equal(result.lanes.length, 8);
     for (let index = 0; index < 8; index += 1) {
       assert.ok(JSON.stringify(result.lanes[index].result).includes(`Answer ${index}`));
+      assert.equal(result.lanes[index].result_truncated, true);
     }
-    assert.equal(result.candidate.accepted, false);
-    assert.ok(Object.values(result.checks).every(value => value === null));
+    for (const omitted of ['candidate', 'checks', 'telemetry', 'experience', 'side_effects', 'admission']) {
+      assert.equal(Object.hasOwn(result, omitted), false, `compact receipt included ${omitted}`);
+    }
+    assert.equal(Object.hasOwn(result, 'blockers'), false);
+    assert.deepEqual(result.diagnostics, { view: 'diagnostics' });
   }
+});
+
+test('simple run defaults to compact semantics and exposes detailed diagnostics explicitly', async () => {
+  const runId = 'compact-with-diagnostics';
+  const runtimeReceipt = {
+    schema: 'codex-co-engineer.run-admission.v1', version: 1, run_id: runId,
+    phase: 'running', status: 'running', cursor: '7', revision: 7,
+    assignment_count: 1, authoritative_required_dispatch: true,
+    lanes: [{
+      assignment_id: 'worker', task_id: 'worker-task', provider: 'grok',
+      status: 'running', phase: 'running', required: true,
+      prompt_dispatched: true, dispatch_confidence: 'authoritative',
+    }],
+    telemetry: { admission_duration_ms: 123 },
+    checks: { catalog_five_tools: true },
+  };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => runtimeReceipt;
+  }
+  const { runtime } = createAdapter();
+  const adapter = createRunToolAdapter({ runtime, simpleRuntime });
+
+  const compact = await adapter.dispatch('task', { run_id: runId });
+  assert.deepEqual(Object.keys(compact), [
+    'schema', 'version', 'mode', 'tool', 'operation', 'run_id', 'status', 'phase',
+    'cursor', 'revision', 'assignment_count', 'authoritative_required_dispatch',
+    'lanes', 'diagnostics',
+  ]);
+  assert.equal(compact.lanes[0].prompt_dispatched, true);
+  assert.equal(compact.diagnostics.view, 'diagnostics');
+
+  const detailed = await adapter.dispatch('task', { run_id: runId, view: 'diagnostics' });
+  assert.equal(detailed.telemetry.admission_duration_ms, 123);
+  assert.equal(detailed.checks.catalog_five_tools, true);
+  assert.equal(detailed.experience.schema, 'codex-co-engineer.experience-projection.v1');
+});
+
+test('compact semantic finals retain actual candidate, verification, and top-level-only result', async () => {
+  const runId = 'compact-review-artifact';
+  const runtimeReceipt = {
+    schema: 'codex-co-engineer.run-admission.v1', version: 1, run_id: runId,
+    phase: 'completed', status: 'completed', cursor: '8', revision: 8,
+    assignment_count: 1, authoritative_required_dispatch: true,
+    complete_candidate_blocked: false,
+    lanes: [{
+      assignment_id: 'worker', task_id: 'worker-task', provider: 'grok',
+      status: 'completed', phase: 'completed', required: true,
+      prompt_dispatched: true, dispatch_confidence: 'authoritative', task_final: true,
+    }],
+    result: { summary: 'Integrated candidate is ready.' },
+    candidate: {
+      ref: expectedCandidateRefV1({ run_id: runId }),
+      head: 'b'.repeat(40), tree: 'c'.repeat(40),
+      ready_for_codex_review: true, accepted: true, authority: 'p35',
+    },
+    verification: { status: 'passed', authority: 'p35', tests: ['node --test'] },
+  };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => runtimeReceipt;
+  }
+  const { runtime } = createAdapter();
+  const compact = await createRunToolAdapter({ runtime, simpleRuntime })
+    .dispatch('task', { run_id: runId });
+
+  assert.deepEqual(compact.result, { summary: 'Integrated candidate is ready.' });
+  assert.equal(compact.candidate.ref, expectedCandidateRefV1({ run_id: runId }));
+  assert.equal(compact.candidate.head, 'b'.repeat(40));
+  assert.equal(compact.candidate.tree, 'c'.repeat(40));
+  assert.equal(compact.candidate.ready_for_codex_review, true);
+  assert.deepEqual(compact.verification, {
+    status: 'passed', authority: 'p35', tests: ['node --test'],
+  });
+  assert.equal(Object.hasOwn(compact, 'blockers'), false);
 });

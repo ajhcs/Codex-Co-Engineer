@@ -114,7 +114,7 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[0], 'progress');
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[2], 'decision_or_attention');
-  assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured']);
+  assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured', 'legacy']);
   const tasksTool = values[1].result.tools.find((tool) => tool.name === 'tasks');
   assert.deepEqual(Object.keys(tasksTool.inputSchema.properties), [
     'detail', 'limit', 'cursor', 'provider', 'state', 'status', 'response_mode',
@@ -122,8 +122,8 @@ test('advertises only the thin public tool surface', async () => {
     'run_id',
   ]);
   for (const tool of values[1].result.tools) {
-    assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured']);
-    assert.match(tool.description, /response_mode="structured"/u);
+    assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured', 'legacy']);
+    assert.match(tool.description, /response_mode="legacy"/u);
   }
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.match(delegateTool.description, /property named repo/u);
@@ -158,6 +158,8 @@ test('advertises only the thin public tool surface', async () => {
   const runRequestAssignment = delegateTool.inputSchema.properties.run_request.properties.assignments.items;
   assert.equal(runRequestAssignment.required.includes('role'), true);
   assert.equal(runRequestAssignment.required.includes('access'), false);
+  assert.equal(runRequestAssignment.required.includes('expected_duration_ms'), false);
+  assert.equal(runRequestAssignment.properties.expected_duration_ms.default, 600000);
   assert.match(runRequestAssignment.properties.access.description, /derived from role/u);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
@@ -520,7 +522,7 @@ test('live MCP tool results use structured-first text fallback when response_mod
     const toolsList = await request({ jsonrpc: '2.0', id: 39, method: 'tools/list' });
     for (const tool of toolsList.result.tools) {
       assert.equal(tool.inputSchema.properties.response_mode.enum[0], 'structured');
-      assert.match(tool.description, /response_mode="structured"/u);
+      assert.match(tool.description, /response_mode="legacy"/u);
     }
     for (const [index, call] of [
       { name: 'status', arguments: { response_mode: 'structured' } },
@@ -588,6 +590,35 @@ test('structured-capable clients receive bounded transport by default', async ()
     assert.equal(response.result.content[0].type, 'text');
     assert.notEqual(response.result.content[0].text, JSON.stringify(response.result.structuredContent));
     assert.equal(JSON.parse(response.result.content[0].text).authoritative, 'structuredContent');
+  });
+});
+
+test('native run transport is structured-first when the host omits capability advertisement', async () => {
+  await withServer(async ({ request }) => {
+    await request({
+      jsonrpc: '2.0', id: 590, method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {} },
+    });
+    const response = await request({
+      jsonrpc: '2.0', id: 591, method: 'tools/call',
+      params: { name: 'status', arguments: { run_id: 'missing-semantic-run' } },
+    });
+    assert.equal(response.result.content[0].type, 'text');
+    assert.notEqual(response.result.content[0].text, JSON.stringify(response.result.structuredContent));
+    assert.equal(JSON.parse(response.result.content[0].text).authoritative, 'structuredContent');
+    assert.equal(response.result.structuredContent.error.code, 'runtime_run_unknown');
+
+    const textOnly = await request({
+      jsonrpc: '2.0', id: 592, method: 'tools/call',
+      params: {
+        name: 'status',
+        arguments: { run_id: 'missing-semantic-run', response_mode: 'legacy' },
+      },
+    });
+    assert.equal(
+      textOnly.result.content[0].text,
+      JSON.stringify(textOnly.result.structuredContent),
+    );
   });
 });
 

@@ -84,11 +84,11 @@ function advertisedTools() {
 
 const RESPONSE_MODE_PROPERTY = {
   type: 'string',
-  enum: ['structured'],
-  description: 'Optional presentation control stripped before business logic. Capable clients default to the bounded structured-first transport; legacy clients omit this field for the full sanitized receipt in content[0].text. Set to "structured" explicitly when needed.',
+  enum: ['structured', 'legacy'],
+  description: 'Optional presentation control stripped before business logic. Native runs default to bounded structured-first transport. Set legacy only for a text-only run client that requires the full sanitized receipt in content[0].text. Omitted legacy single-task calls retain their compatible full text.',
 };
 
-const RESPONSE_MODE_HINT = ' Capable clients receive structured-first bounded text by default; legacy clients may set response_mode="structured" explicitly or omit it for the full compatible receipt.';
+const RESPONSE_MODE_HINT = ' Native runs default to bounded structured-first text; text-only run clients may set response_mode="legacy" for the full compatible receipt. Omitted legacy single-task calls retain full compatible text.';
 
 const SERVER_INSTRUCTIONS = 'Use delegate.run_request for one bounded run, then task.run_id with the returned cursor for status or waits; use task.run_reply for one same-session decision, tasks.run_id for aggregate waits, and cancel.run_id to cancel. Use task_id for expanded task diagnostics or legacy single-task calls.';
 
@@ -157,7 +157,7 @@ const TOOLS = [
     title: TOOL_METADATA.delegate.title,
     annotations: TOOL_METADATA.delegate.annotations,
     outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
-    description: `Start one bounded native Co-Engineer run with run_request for a review or implementation task. The compatible single-task path remains available for Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
+    description: `Start one bounded native Co-Engineer run with run_request for a review or implementation task. A run_request assignment may omit expected_duration_ms to use the 600000 ms default; explicit estimates keep the 20% deadline margin. The compatible single-task path remains available for Grok, Cursor Local, Cursor Cloud, or DSH and still requires expected_duration_ms or a backwards-compatible timeout_ms. The absolute Git worktree path must be supplied in the property named repo. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -212,7 +212,7 @@ const TOOLS = [
               items: {
                 type: 'object',
                 additionalProperties: false,
-                required: ['assignment_id', 'provider', 'role', 'prompt', 'expected_duration_ms'],
+                required: ['assignment_id', 'provider', 'role', 'prompt'],
                 properties: {
                   assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
                   provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
@@ -220,7 +220,7 @@ const TOOLS = [
                   role: { type: 'string', enum: ['implement', 'review', 'verify'] },
                   access: { type: 'string', enum: ['write', 'writer', 'read', 'read_only'], description: 'Optional explicit access. Omitted access is derived from role: implement means writer; review and verify mean read_only.' },
                   prompt: { type: 'string', minLength: 1, maxLength: 16384 },
-                  expected_duration_ms: { type: 'integer', minimum: MIN_DURATION_MS, maximum: MAX_EXPECTED_DURATION_MS },
+                  expected_duration_ms: { type: 'integer', minimum: MIN_DURATION_MS, maximum: MAX_EXPECTED_DURATION_MS, default: 600000, description: 'Optional expected duration. Omitted means 600000 ms; the server records a deadline with the existing 20% margin. Explicit estimates retain the same validation and margin.' },
                   write_scope: { type: 'array', minItems: 0, maxItems: 16, items: { type: 'string' }, description: 'Optional for writers; required explicitly for each writer when more than one writer lane exists. Read-only lanes must use an empty scope.' },
                   required: { type: 'boolean', default: true },
                   capabilities: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['read_run_receipts', 'read_provider_logs', 'read_own_worktree'] } },
@@ -273,7 +273,7 @@ const TOOLS = [
     title: TOOL_METADATA.task.title,
     annotations: TOOL_METADATA.task.annotations,
     outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
-    description: `Inspect or wait on one bounded native run using run_id and its returned cursor; task_id remains the compatible 3.2.1 path. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
+    description: `Inspect or wait on one bounded native run using run_id and its returned cursor. Native run_request calls return the compact coordination receipt by default. Use view=diagnostics for the detailed run receipt; view=compact explicitly selects the normal compact run projection. task_id remains the compatible 3.2.1 path and uses event_cursor for expanded lane progress and diagnostics. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -297,7 +297,7 @@ const TOOLS = [
         view: {
           type: 'string',
           enum: ['summary', 'diagnostics', 'compact'],
-          description: 'summary is the default receipt plus diagnostic envelope. compact is a bounded coordination payload without full task or runtime bodies. diagnostics is a bounded, redacted, cursor-paged evidence page and never waits.',
+          description: 'For native run_request calls, omitted, summary, and compact return the compact coordination receipt; diagnostics returns the detailed sanitized run receipt. The compatible task_id path retains its existing summary, compact, and cursor-paged diagnostics behavior.',
         },
         cursor: {
           type: 'string',
@@ -616,7 +616,10 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
     if (value?.mode === 'legacy') {
       // Fall through only when classification and dispatch disagree; omission stays 3.2.1.
     } else {
-      return result(value, { responseMode });
+      // Native run receipts are structured-first even when older hosts omit
+      // the optional capability advertisement. The bounded content fallback
+      // remains valid MCP text and points at the authoritative projection.
+      return result(value, { responseMode: responseMode ?? 'structured' });
     }
   }
   if (name === 'status') {
@@ -779,14 +782,23 @@ async function handle(message) {
     const controller = new AbortController();
     if (message.id !== undefined) inflight.set(message.id, controller);
     const { responseMode, args } = takePresentationArgs(message.params?.arguments ?? {});
+    let effectiveResponseMode = responseMode;
+    try {
+      if (effectiveResponseMode == null
+        && classifyRunToolCall(message.params?.name, args).mode === 'run') {
+        effectiveResponseMode = 'structured';
+      }
+    } catch {
+      // callTool performs authoritative validation and returns the typed error.
+    }
     let response;
     try {
       response = await callTool(message.params?.name, args, {
         signal: controller.signal,
-        responseMode,
+        responseMode: effectiveResponseMode,
       });
     } catch (error) {
-      response = errorResult(error, { responseMode });
+      response = errorResult(error, { responseMode: effectiveResponseMode });
     } finally {
       inflight.delete(message.id);
     }

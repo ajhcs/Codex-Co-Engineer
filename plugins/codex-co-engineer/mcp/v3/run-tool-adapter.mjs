@@ -975,7 +975,16 @@ function projectCandidate(runId, runtimeCandidate) {
   });
 }
 
-function projectLane(lane, projectLaneTask, classifyLaneTask) {
+function providerResultExceededDefaultBound(raw) {
+  if (raw === undefined) return false;
+  try {
+    return byteLength(raw) > 8_192;
+  } catch {
+    return false;
+  }
+}
+
+function projectLane(lane, projectLaneTask, classifyLaneTask, reportTruncation = false) {
   if (lane === undefined || lane === null || typeof lane !== 'object') return lane;
   const copy = { ...lane };
   if (copy.task && typeof copy.task === 'object') {
@@ -989,9 +998,14 @@ function projectLane(lane, projectLaneTask, classifyLaneTask) {
   if (copy.artifacts && typeof copy.artifacts === 'object') {
     copy.artifacts = sanitizeModelFacing(copy.artifacts);
   }
-  const result = boundedProviderResult(providerResultFor(copy));
-  if (result !== undefined) {
-    copy.result = result;
+  const rawResult = providerResultFor(copy);
+  if (rawResult !== undefined) {
+    const bounded = boundProviderResult(rawResult);
+    copy.result = bounded.value;
+    if (reportTruncation === true
+      && (bounded.truncated === true || providerResultExceededDefaultBound(rawResult))) {
+      copy.result_truncated = true;
+    }
     if (capturedHasOwn(copy, 'provider_result')) delete copy.provider_result;
   }
   return sanitizeModelFacing(copy);
@@ -1041,7 +1055,9 @@ function compactAdmissionHandoff(handoff) {
 
 function compactAdmissionLane(lane) {
   if (lane === undefined || lane === null || typeof lane !== 'object' || Array.isArray(lane)) return lane;
-  const result = boundedProviderResult(providerResultFor(lane));
+  const rawResult = providerResultFor(lane);
+  const bounded = rawResult === undefined ? null : boundProviderResult(rawResult);
+  const result = bounded?.value;
   return {
     assignment_id: lane.assignment_id ?? null,
     task_id: lane.task_id ?? null,
@@ -1069,10 +1085,162 @@ function compactAdmissionLane(lane) {
     recovery_classification: lane.recovery_classification ?? null,
     cancel_confirmed: lane.cancel_confirmed ?? null,
     task_final: lane.task_final ?? null,
-    result_truncated: lane.result_truncated === true,
+    result_truncated: lane.result_truncated === true || bounded?.truncated === true,
     handoff: compactAdmissionHandoff(lane.handoff),
-    ...(result !== undefined ? { result } : {}),
+    ...(rawResult !== undefined ? { result } : {}),
   };
+}
+
+function compactSemanticHandoff(handoff) {
+  if (handoff === null || typeof handoff !== 'object' || Array.isArray(handoff)) return null;
+  return {
+    ...(typeof handoff.worktree === 'string' ? { worktree: handoff.worktree } : {}),
+    ...(typeof handoff.branch === 'string' ? { branch: handoff.branch } : {}),
+    ...(typeof handoff.current_head === 'string' ? { head: handoff.current_head } : {}),
+    ...(typeof handoff.clean === 'boolean' ? { clean: handoff.clean } : {}),
+    ...(handoff.partial_diff === true ? { partial: true } : {}),
+  };
+}
+
+function compactSemanticLane(lane) {
+  const projected = {
+    assignment_id: lane.assignment_id ?? null,
+    task_id: lane.task_id ?? null,
+    provider: lane.provider ?? null,
+    status: lane.status ?? lane.phase ?? null,
+    required: lane.required !== false,
+    prompt_dispatched: lane.prompt_dispatched === true,
+  };
+  if (lane.dispatch_confidence != null) projected.dispatch_confidence = lane.dispatch_confidence;
+  if (lane.result != null) projected.result = lane.result;
+  if (lane.result_truncated === true) projected.result_truncated = true;
+  if (lane.error != null) projected.error = lane.error;
+  if (lane.recovery_classification != null) {
+    projected.recovery_classification = lane.recovery_classification;
+  }
+  const handoff = compactSemanticHandoff(lane.handoff);
+  if (handoff) projected.artifacts = handoff;
+  return projected;
+}
+
+function cleanupNeedsAttention(receipt, unconfirmed) {
+  const cleanup = receipt.cleanup;
+  return unconfirmed === true
+    || receipt.phase === 'lifecycle_pending'
+    || cleanup?.proof_bound === false
+    || (Array.isArray(cleanup?.unresolved) && cleanup.unresolved.length > 0)
+    || (Number.isSafeInteger(cleanup?.remaining) && cleanup.remaining > 0)
+    || (receipt.operation === 'cleanup' && cleanup?.cleaned !== true)
+    || receipt.lanes.some((lane) => lane?.status === 'lifecycle_pending'
+      || (lane?.task_final === false && ['cancelled', 'unresolved'].includes(lane?.status)));
+}
+
+function compactSha(value) {
+  return typeof value === 'string' && capturedTest(/^[0-9a-fA-F]{40}$/u, value)
+    ? value.toLowerCase()
+    : null;
+}
+
+function compactSemanticCandidate(runtimeReceipt, projectedCandidate) {
+  const source = runtimeReceipt?.candidate;
+  const handoff = runtimeReceipt?.handoff;
+  const hasSource = source && typeof source === 'object' && !Array.isArray(source);
+  const hasHandoff = handoff && typeof handoff === 'object' && !Array.isArray(handoff);
+  if (!hasSource && !hasHandoff) return null;
+  const authoritative = source?.authority === 'p35';
+  const head = compactSha(source?.head) ?? compactSha(handoff?.current_head);
+  const tree = compactSha(source?.tree);
+  const candidate = {
+    ...(hasSource && isRunOwnedCandidateRefV1(source.ref, runtimeReceipt.run_id)
+      ? { ref: projectedCandidate?.ref ?? null }
+      : {}),
+    ...(head ? { head } : {}),
+    ...(tree ? { tree } : {}),
+    ...(authoritative && projectedCandidate?.ready_for_codex_review === true
+      ? { ready_for_codex_review: true }
+      : {}),
+    ...(projectedCandidate?.accepted === true ? { accepted: true } : {}),
+  };
+  return Object.keys(candidate).length > 0 ? candidate : null;
+}
+
+function projectSemanticRunReceipt(receipt, runtimeReceipt, { unconfirmed, simpleResponseCap }) {
+  const lanes = receipt.lanes.map(compactSemanticLane);
+  const terminal = [
+    'completed', 'failed', 'cancelled', 'degraded', 'unresolved',
+    'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
+  ].includes(receipt.phase);
+  const verificationBlocked = terminal && receipt.complete_candidate_blocked === true;
+  const cleanupBlocked = cleanupNeedsAttention(receipt, unconfirmed);
+  const attention = receipt.attention;
+  const attentionRequired = attention?.status === 'open'
+    || lanes.some((lane) => lane.status === 'needs_attention');
+  const candidate = compactSemanticCandidate(runtimeReceipt, receipt.candidate);
+  const verification = runtimeReceipt?.verification?.authority === 'p35'
+    ? sanitizeModelFacing(runtimeReceipt.verification)
+    : null;
+  const topLevelResult = lanes.some((lane) => lane.result != null)
+    ? undefined
+    : receipt.result;
+  const compact = {
+    schema: receipt.schema,
+    version: receipt.version,
+    mode: receipt.mode,
+    tool: receipt.tool,
+    operation: receipt.operation,
+    run_id: receipt.run_id,
+    status: receipt.status,
+    phase: receipt.phase,
+    cursor: receipt.cursor,
+    revision: receipt.revision,
+    assignment_count: receipt.assignment_count,
+    authoritative_required_dispatch: receipt.authoritative_required_dispatch === true,
+    lanes,
+    ...(attentionRequired || attention?.status === 'reply_committed' || attention?.status === 'resolved'
+      ? { attention }
+      : {}),
+    ...(receipt.consent != null ? { consent: receipt.consent } : {}),
+    ...(receipt.error != null ? { error: receipt.error } : {}),
+    ...(topLevelResult !== undefined ? { result: topLevelResult } : {}),
+    ...(candidate ? { candidate } : {}),
+    ...(verification ? { verification } : {}),
+    ...(receipt.operation === 'wait' ? {
+      wait_until: receipt.wait_until,
+      ...(Number.isSafeInteger(receipt.waited_ms) ? { waited_ms: receipt.waited_ms } : {}),
+      wake: receipt.wake === true,
+    } : {}),
+    ...((verificationBlocked || cleanupBlocked) ? {
+      blockers: {
+        ...(verificationBlocked ? { verification: true } : {}),
+        ...(cleanupBlocked ? { cleanup: true } : {}),
+      },
+    } : {}),
+    ...(cleanupBlocked || receipt.operation === 'cleanup'
+      ? { cleanup: receipt.cleanup }
+      : {}),
+    diagnostics: {
+      view: 'diagnostics',
+    },
+  };
+  if (byteLength(compact) > simpleResponseCap) {
+    const resultLanes = lanes.filter((lane) => lane.result !== undefined).length;
+    const perResultBytes = resultLanes > 0
+      ? Math.max(512, Math.floor((simpleResponseCap - 8_192) / resultLanes))
+      : 512;
+    return {
+      ...compact,
+      lanes: lanes.map((lane) => {
+        if (lane.result === undefined) return lane;
+        const bounded = boundProviderResult(lane.result, perResultBytes);
+        return {
+          ...lane,
+          result: bounded.value,
+          result_truncated: lane.result_truncated === true || bounded.truncated === true,
+        };
+      }),
+    };
+  }
+  return compact;
 }
 
 function byteLength(value) {
@@ -1161,15 +1329,17 @@ function isRuntimeReceipt(value, expectedRunId) {
 }
 
 function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
-  wakeRequested = false, expectedRunId = null) {
+  wakeRequested = false, expectedRunId = null, view = null) {
   if (!isRuntimeReceipt(runtimeReceipt, expectedRunId)) {
     runtimeReceipt = malformedRuntimeReceipt(expectedRunId);
   }
   const runId = runtimeReceipt?.run_id;
-  let lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
-    ? runtimeReceipt.lanes.map((lane) => projectLane(lane, projectLaneTask, classifyLaneTask))
-    : [];
   const simpleAdmission = runtimeReceipt?.schema === 'codex-co-engineer.run-admission.v1';
+  let lanes = ARRAY_IS_ARRAY(runtimeReceipt?.lanes)
+    ? runtimeReceipt.lanes.map((lane) => projectLane(
+      lane, projectLaneTask, classifyLaneTask, simpleAdmission,
+    ))
+    : [];
   const simpleResponseCap = operation === 'status'
     ? SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX
     : SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX;
@@ -1285,6 +1455,12 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     wake,
     remote_mutated: false,
   };
+  if (simpleAdmission && view !== 'diagnostics') {
+    return freezeData(projectSemanticRunReceipt(receiptBody, runtimeReceipt, {
+      unconfirmed,
+      simpleResponseCap,
+    }));
+  }
   if (simpleAdmission && byteLength(receiptBody) > simpleResponseCap) {
     receiptBody.attention = receiptBody.attention && {
       ...receiptBody.attention,
@@ -1561,6 +1737,13 @@ export function createRunToolAdapter(dependencies) {
     assertDirectJsonClosure(args, 'arguments');
     denyForbiddenTree(args, 'arguments');
     const operation = resolveOperation(tool, args);
+    const requestedView = tool === 'task' && capturedHasOwn(args, 'view')
+      ? optionalValue(args, 'view', 'view')
+      : null;
+    if (requestedView !== null
+      && !capturedIncludes(['summary', 'compact', 'diagnostics'], requestedView)) {
+      failAdapter('invalid_format', 'view', CONTENT_FREE.invalid_format);
+    }
     if ((tool === 'task' || tool === 'cancel' || tool === 'delegate' || tool === 'tasks')
       && mixLegacySingleTask(tool, args) && tool !== 'tasks') {
       failAdapter('mixed_tool_mode', tool, CONTENT_FREE.mixed_tool_mode);
@@ -1752,6 +1935,7 @@ export function createRunToolAdapter(dependencies) {
       tool, operation, runtimeReceipt, projectLaneTask, classifyLaneTask,
       operation === 'wait',
       requestedRunId,
+      requestedView,
     );
     return projected;
   }

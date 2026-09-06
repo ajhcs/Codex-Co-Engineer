@@ -88,6 +88,7 @@ export const RUN_REQUEST_CAPABILITIES = capturedFreeze([
   'read_run_receipts', 'read_provider_logs', 'read_own_worktree',
 ]);
 export const RUN_REQUEST_DEFAULT_CAPABILITIES = RUN_REQUEST_CAPABILITIES;
+export const RUN_REQUEST_DEFAULT_EXPECTED_DURATION_MS = 600_000;
 export const RUN_REQUEST_DEFAULT_MODELS = capturedFreeze({
   grok: 'grok-4',
   'cursor-local': 'composer-1',
@@ -273,7 +274,10 @@ function normalizeAssignment(value, index, baseSha) {
     path: `${field}.prompt`,
     label: `${field}.prompt`,
   });
-  const expectedDuration = readRequired(value, 'expected_duration_ms', `${field}.expected_duration_ms`);
+  const requestedDuration = readOptional(value, 'expected_duration_ms', `${field}.expected_duration_ms`);
+  const expectedDuration = requestedDuration === undefined
+    ? RUN_REQUEST_DEFAULT_EXPECTED_DURATION_MS
+    : requestedDuration;
   assertExpectedDurationMs(expectedDuration, `${field}.expected_duration_ms`);
   const required = readOptional(value, 'required', `${field}.required`);
   if (required !== undefined && typeof required !== 'boolean') {

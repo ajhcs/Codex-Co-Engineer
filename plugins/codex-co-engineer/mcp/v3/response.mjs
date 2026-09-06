@@ -5,6 +5,7 @@ export const TEXT_FALLBACK_SCHEMA = 'co_engineer.mcp_text_fallback.v1';
 export const TEXT_FALLBACK_MAX_BYTES = 2_048;
 export const TEXT_FALLBACK_TASK_PREVIEW = 5;
 export const RESPONSE_MODE_STRUCTURED = 'structured';
+export const RESPONSE_MODE_LEGACY = 'legacy';
 
 /** UX-04 experience projection: three semantic cards over sanitized run receipts. */
 export const EXPERIENCE_SCHEMA = 'codex-co-engineer.experience-projection.v1';
@@ -87,7 +88,7 @@ const TERMINAL_LANE_STATUSES = Object.freeze([
 ]);
 const ACCEPTED_LANE_STATUSES = Object.freeze(['completed']);
 const FAILED_LANE_STATUSES = Object.freeze([
-  'failed', 'timeout', 'transport_lost', 'environment_blocked',
+  'failed', 'failed_pre_prompt', 'timeout', 'transport_lost', 'environment_blocked',
 ]);
 const UNRESOLVED_LANE_STATUSES = Object.freeze([
   'unresolved', 'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
@@ -386,7 +387,9 @@ export function sanitizeToolPayload(value) {
 }
 
 export function normalizeResponseMode(responseMode) {
-  return responseMode === RESPONSE_MODE_STRUCTURED ? RESPONSE_MODE_STRUCTURED : null;
+  if (responseMode === RESPONSE_MODE_STRUCTURED) return RESPONSE_MODE_STRUCTURED;
+  if (responseMode === RESPONSE_MODE_LEGACY) return RESPONSE_MODE_LEGACY;
+  return null;
 }
 
 /**

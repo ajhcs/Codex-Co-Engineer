@@ -199,6 +199,22 @@ test('final card buckets lanes, git identity, and evidence without merge control
   assert.equal(projection.final.controls.create_pr, false);
 });
 
+test('final card reports failed_pre_prompt lanes as failures', async () => {
+  const receipt = await loadJson('final-receipt.json');
+  receipt.lanes.push({
+    assignment_id: 'startup-failure',
+    task_id: 'startup-failure-task',
+    provider: 'grok',
+    status: 'failed_pre_prompt',
+    required: true,
+    prompt_dispatched: false,
+  });
+  receipt.assignment_count = receipt.lanes.length;
+  const projection = projectExperience(receipt);
+  assert.equal(projection.card, 'final');
+  assert.deepEqual(projection.final.failed_lanes, ['docs', 'startup-failure']);
+});
+
 test('verified-final sentence is used only for an accepted complete candidate', async () => {
   const receipt = await loadJson('final-receipt.json');
   const lanesOnly = structuredClone(receipt);

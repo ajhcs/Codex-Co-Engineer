@@ -160,13 +160,14 @@ test('supervisor wires run_request through admission while preserving bounded re
     assert.equal(submitted.mode, 'run');
     assert.equal(submitted.phase, 'running');
     assert.equal(submitted.authoritative_required_dispatch, true);
-    assert.deepEqual(submitted.dispatched_assignment_ids, ['implementation']);
+    assert.equal(submitted.lanes[0].prompt_dispatched, true);
     assert.deepEqual(calls, ['implementation']);
     assert.equal(JSON.stringify(submitted).includes('Implement the bounded slice.'), false);
 
     const status = await adapter.dispatch('task', { run_id: 'simple-supervisor' });
     assert.equal(status.phase, 'running');
-    assert.equal(status.lanes[0].session_ready, true);
+    assert.equal(status.lanes[0].prompt_dispatched, true);
+    assert.equal(Object.hasOwn(status, 'telemetry'), false);
 
     const restarted = await createSupervisorRunToolAdapter(adapterOptions);
     const recovered = await restarted.dispatch('task', { run_id: 'simple-supervisor' });
