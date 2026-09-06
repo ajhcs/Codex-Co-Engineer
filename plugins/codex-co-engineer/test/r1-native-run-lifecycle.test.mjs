@@ -81,7 +81,11 @@ test('an observation failure can recover the same task without another dispatch'
     await rename(record, hidden);
     const uncertain = await adapter.dispatch('status', { run_id: submitted.run_id });
     assert.notEqual(uncertain.phase, 'completed');
-    assert.equal(uncertain.complete_candidate_blocked, true);
+    assert.equal(uncertain.blockers.verification, true);
+    const uncertainDiagnostics = await adapter.dispatch('task', {
+      run_id: submitted.run_id, view: 'diagnostics', wait_ms: 0,
+    });
+    assert.equal(uncertainDiagnostics.complete_candidate_blocked, true);
     await rename(hidden, record);
     const recovered = await adapter.dispatch('status', { run_id: submitted.run_id });
     assert.equal(recovered.phase, 'completed');
@@ -95,10 +99,16 @@ for (const status of ['cancelled', 'failed', 'environment_blocked']) {
     await fixture(async ({ adapter, submitted, dispatches }) => {
       const result = await adapter.dispatch('status', { run_id: submitted.run_id });
       assert.notEqual(result.phase, 'completed');
-      assert.equal(result.complete_candidate_blocked, true);
+      assert.equal(result.blockers.verification, true);
       assert.notEqual(result.candidate?.accepted, true);
-      assert.equal(result.lanes[0].task_final, true);
-      assert.equal(result.experience.card, 'final');
+      const expectedLaneStatus = status === 'cancelled' ? 'cancelled' : 'partial_handoff';
+      assert.equal(result.lanes[0].status, expectedLaneStatus);
+      const diagnostics = await adapter.dispatch('task', {
+        run_id: submitted.run_id, view: 'diagnostics', wait_ms: 0,
+      });
+      assert.equal(diagnostics.complete_candidate_blocked, true);
+      assert.equal(diagnostics.lanes[0].task_final, true);
+      assert.equal(diagnostics.experience.card, 'final');
       assert.equal(dispatches(), 1);
     }, { status, result: null, stop_reason: status });
   });

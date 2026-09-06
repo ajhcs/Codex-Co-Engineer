@@ -104,10 +104,15 @@ function submission(repo) {
   } };
 }
 
-function noDispatch(receipt) {
-  assert.equal(receipt.side_effects.provider_dispatched, false);
+async function noDispatch(call, receipt) {
   assert.equal(receipt.authoritative_required_dispatch, false);
-  assert.ok(receipt.lanes.every((lane) => !lane.prepared && !lane.prompt_dispatched));
+  assert.ok(receipt.lanes.every((lane) => !lane.prompt_dispatched));
+  const diagnostics = await call('task', {
+    run_id: receipt.run_id, view: 'diagnostics', wait_ms: 0,
+  });
+  assert.equal(diagnostics.side_effects.provider_dispatched, false);
+  assert.ok(diagnostics.lanes.every((lane) => !lane.prepared && !lane.prompt_dispatched));
+  return diagnostics;
 }
 
 for (const [action, approved] of [['decline', false], ['cancel', false], ['accept', false], ['accept', 'true']]) {
@@ -117,7 +122,7 @@ for (const [action, approved] of [['decline', false], ['cancel', false], ['accep
       const receipt = await call('delegate', submission(repo));
       assert.equal(forms.length, 1);
       assert.notEqual(receipt.consent.status, 'approved');
-      noDispatch(receipt);
+      await noDispatch(call, receipt);
       const inspected = await call('task', { run_id: receipt.run_id, wait_until: 'decision_or_attention', wait_ms: 0 });
       assert.equal(inspected.run_id, receipt.run_id);
       assert.equal(inspected.phase, receipt.phase);
@@ -137,8 +142,8 @@ test('stdio native acceptance crosses consent and stops at the isolated readines
     assert.ok(form.requestedSchema.required.includes('approved'));
     assert.equal(receipt.consent.status, 'approved');
     assert.equal(receipt.phase, 'failed');
-    assert.equal(receipt.telemetry.admission_failure_stage, 'readiness');
-    noDispatch(receipt);
+    const diagnostics = await noDispatch(call, receipt);
+    assert.equal(diagnostics.telemetry.admission_failure_stage, 'readiness');
     const inspected = await call('status', { run_id: receipt.run_id });
     assert.equal(inspected.run_id, receipt.run_id);
     assert.equal(inspected.phase, 'failed');
@@ -151,8 +156,9 @@ test('stdio host without form capability gives an explicit blocker without elici
     const receipt = await call('delegate', submission(repo));
     assert.equal(forms.length, 0);
     assert.equal(receipt.error.code, 'consent_host_unavailable');
-    assert.equal(receipt.complete_candidate_blocked, true);
-    noDispatch(receipt);
+    assert.equal(receipt.blockers.verification, true);
+    const diagnostics = await noDispatch(call, receipt);
+    assert.equal(diagnostics.complete_candidate_blocked, true);
   });
 });
 
@@ -163,15 +169,15 @@ test('a dismissed form can be reopened explicitly on the same run', async () => 
   await withClient({ elicitation: { form: {} } }, response, async ({ repo, forms, call }) => {
     const pending = await call('delegate', submission(repo));
     assert.equal(pending.phase, 'awaiting_consent');
-    noDispatch(pending);
+    await noDispatch(call, pending);
     const resumed = await call('task', {
       run_id: pending.run_id, run_reply: { request_consent: true },
     });
     assert.equal(forms.length, 2);
     assert.equal(resumed.run_id, pending.run_id);
     assert.equal(resumed.consent.status, 'approved');
-    assert.equal(resumed.telemetry.admission_failure_stage, 'readiness');
-    noDispatch(resumed);
+    const diagnostics = await noDispatch(call, resumed);
+    assert.equal(diagnostics.telemetry.admission_failure_stage, 'readiness');
   });
 });
 
@@ -183,11 +189,11 @@ test('status and cancellation remain usable while a native form is open', async 
     await opened;
     const pending = await call('status', { run_id: 'native-consent-roundtrip' });
     assert.equal(pending.phase, 'awaiting_consent');
-    noDispatch(pending);
+    await noDispatch(call, pending);
     const cancelled = await call('cancel', { run_id: pending.run_id });
     assert.equal(cancelled.phase, 'cancelled');
-    noDispatch(cancelled);
-    noDispatch(await submissionResult);
+    await noDispatch(call, cancelled);
+    await noDispatch(call, await submissionResult);
     const terminal = await call('status', { run_id: pending.run_id });
     assert.equal(terminal.phase, 'cancelled');
   });
