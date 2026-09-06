@@ -2,7 +2,9 @@
 
 Submit `delegate.run_request` once: a stable `run_id`, absolute Git `repo`,
 `objective`, and one to eight `assignments`. Each assignment needs an
-`assignment_id`, chosen `provider`, `role`, `prompt`, and `expected_duration_ms`.
+`assignment_id`, chosen `provider`, `role`, and `prompt`. Optional
+`expected_duration_ms` defaults to ten minutes, with the existing 20% deadline
+margin; supply an estimate when the task needs a different duration.
 State the outcome, allowed changes and acceptance checks in the prompt.
 Reuse existing provider/model choices. Model overrides are optional.
 The server derives identities, defaults and isolated workspaces; do not construct

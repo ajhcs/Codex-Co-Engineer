@@ -34,8 +34,8 @@ After the provider-free gate passes:
    `KillMode=control-group` solely for descendant cleanup and to survive the
    launching client; it is not a sandbox or capability restriction.
 3. Verify persistent normal authentication for Grok and Cursor Local, the
-   owner-only DSH Muse key, the separate owner-only OpenRouter key for Ox
-   Alpha, and the owner-only Cursor Cloud API key.
+   OpenRouter key for Muse and Ox Alpha (with their separate model configuration),
+   and the owner-only Cursor Cloud API key.
 4. Run one bounded opt-in acceptance task through Grok, Cursor Local, Cursor
    Cloud, DSH Muse, and DSH Ox Alpha.
 5. For local tasks, verify ACP first; if fallback occurs, prove it happened
@@ -149,3 +149,19 @@ and identity facts. A passing mock with a reduced response shape is insufficient
 Native consent checks cover timeout and same-run recovery. Host presentation
 latency requires actual host observations; a protocol test does not establish
 when the user saw the form.
+
+## Orchestrator efficiency acceptance
+
+Measure cold skill/schema loading separately from warm delegation. Compare the
+same one-worker and four-worker tasks against native subagents with equivalent
+prompts and required result detail. Count all orchestrator-visible requests,
+responses, retries and recovery turns; exclude external worker tokens. Record
+actual host usage where available and label tokenizer estimates otherwise.
+Payload bytes alone do not establish token cost or native-subagent parity.
+
+Exercise success, slow acknowledgement, one actionable question, cancellation
+and failure. The normal path is one semantic submission and one aggregate wait;
+routine progress must not require orchestrator polling. Inspect compact results
+for retained errors, review artifacts and retrieval references for omitted detail.
+Native comparison and live provider acceptance follow the exact-candidate gate
+and a refreshed host connection; automated projection tests do not replace them.
