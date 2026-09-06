@@ -22,6 +22,7 @@ import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
 import {
   advertiseMcpAppsCapability,
   buildToolResult,
+  classifyExperienceCard,
   listExperienceUiResourcesForClient,
   normalizeResponseMode,
   readExperienceUiResourceForClient,
@@ -588,7 +589,7 @@ function clientSupportsStructuredResponses() {
 function result(value, { responseMode } = {}) {
   const uiMeta = value?.mode === 'run'
     ? resolveExperienceResultMeta({
-      card: value?.experience?.card ?? null,
+      card: value?.experience?.card ?? classifyExperienceCard(value),
       clientCapabilities,
       resources: uiResources(),
     })
