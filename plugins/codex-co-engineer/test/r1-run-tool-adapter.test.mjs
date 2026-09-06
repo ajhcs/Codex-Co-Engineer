@@ -926,17 +926,36 @@ test('adversarial semantic metadata stays within caps and marks retrievable omis
     assert.equal(result.diagnostics.view, 'diagnostics');
     assert.equal(result.diagnostics.details_omitted, true);
     assert.equal(result.diagnostics.reason, 'response_size_limit');
-    assert.equal(result.attention.items.length, 8);
-    assert.deepEqual(
-      result.attention.items.map((item) => item.question_id),
-      items.map((item) => item.question_id),
-    );
-    assert.equal(result.attention.items.every((item) => item.options.length === 8), true);
     assert.equal(result.attention.details_omitted, true);
+    assert.equal(result.attention.reply_blocked, true);
+    assert.equal(Object.hasOwn(result.attention, 'items'), false);
     assert.equal(result.lanes.every((lane) => lane.result_omitted === true), true);
-    assert.equal(result.error.details_omitted, true);
-    assert.equal(result.cleanup.details_omitted, true);
+    assert.equal(result.error.code, 'run_error');
+    assert.equal(result.blockers.cleanup, true);
+    assert.equal(Object.hasOwn(result, 'cleanup'), false);
+    assert.match(result.diagnostics.instruction, /view="diagnostics"/u);
   }
+
+  const topReceipt = {
+    ...receipt,
+    phase: 'completed',
+    status: 'completed',
+    lanes: lanes.map(({ result: _result, error: _error, ...lane }) => ({
+      ...lane, phase: 'completed', status: 'completed',
+    })),
+    attention: null,
+    cleanup: { cleaned: true, proof_bound: true, unresolved: [], remaining: 0 },
+    error: null,
+    result: huge,
+  };
+  const topRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    topRuntime[name] = async () => topReceipt;
+  }
+  const top = await createRunToolAdapter({ runtime, simpleRuntime: topRuntime })
+    .dispatch('status', { run_id: runId });
+  assert.ok(Buffer.byteLength(JSON.stringify(top), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
+  assert.equal(top.result_truncated, true);
 });
 
 test('simple run defaults to compact semantics and exposes detailed diagnostics explicitly', async () => {
