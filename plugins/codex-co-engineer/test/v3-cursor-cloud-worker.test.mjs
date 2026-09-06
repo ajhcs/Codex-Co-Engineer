@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { cancelCursorCloudTask, reconcileCursorCloudTask, runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
+import {
+  cancelCursorCloudTask,
+  loadCursorSdk,
+  reconcileCursorCloudTask,
+  runCursorCloudTask,
+} from '../mcp/v3/cursor-cloud-worker.mjs';
 import { extendTaskDeadline } from '../mcp/v3/supervisor.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
 
@@ -22,6 +28,72 @@ async function createCloudTask({ root, prompt, record }) {
 }
 
 const run = promisify(execFile);
+
+test('global SDK discovery survives a deleted inherited working directory', async () => {
+  const inheritedCwd = await mkdtemp(path.join(tmpdir(), 'co-engineer-deleted-cwd-'));
+  const workerModule = new URL('../mcp/v3/cursor-cloud-worker.mjs', import.meta.url).href;
+  const script = `
+    import { once } from 'node:events';
+    import { loadCursorSdk } from ${JSON.stringify(workerModule)};
+    process.stdout.write('ready\\n');
+    await once(process.stdin, 'data');
+    const sdk = await loadCursorSdk({
+      execute: async (_command, _args, options) => {
+        if (options.cwd !== ${JSON.stringify(path.parse(process.execPath).root)}) {
+          throw Object.assign(new Error('unstable discovery cwd'), { code: 'wrong_cwd' });
+        }
+        return { stdout: ${JSON.stringify(path.join(path.parse(process.execPath).root, 'synthetic-global'))} };
+      },
+      importModule: async () => ({ loaded: true }),
+    });
+    process.stdout.write(JSON.stringify(sdk));
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+    cwd: inheritedCwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  await once(child.stdout, 'data');
+  await rm(inheritedCwd, { recursive: true, force: true });
+  child.stdin.end('continue');
+  const [code] = await once(child, 'close');
+
+  assert.equal(code, 0, stderr);
+  assert.match(stdout, /ready\n/u);
+  assert.match(stdout, /"loaded":true/u);
+});
+
+test('global SDK discovery reports a typed local failure and preserves credential projection', async () => {
+  let observed;
+  await assert.rejects(
+    loadCursorSdk({
+      env: {
+        PATH: process.env.PATH,
+        HOME: '/synthetic-home',
+        CURSOR_API_KEY: 'PRIVATE_CURSOR_KEY',
+        OPENAI_API_KEY: 'PRIVATE_OPENAI_KEY',
+      },
+      execute: async (command, args, options) => {
+        observed = { command, args, options };
+        throw Object.assign(new Error('npm failed PRIVATE_CURSOR_KEY'), { code: 7 });
+      },
+    }),
+    (error) => error.code === 'cursor_sdk_discovery_failed'
+      && error.message === 'Cursor SDK global installation path could not be discovered.'
+      && !error.message.includes('PRIVATE_CURSOR_KEY'),
+  );
+
+  assert.equal(observed.command, 'npm');
+  assert.deepEqual(observed.args, ['root', '--global']);
+  assert.equal(observed.options.cwd, path.parse(process.execPath).root);
+  assert.equal(observed.options.env.CURSOR_API_KEY, undefined);
+  assert.equal(observed.options.env.OPENAI_API_KEY, undefined);
+});
 
 async function commitRepo(repo) {
   await run('git', ['-C', repo, '-c', 'user.name=Co-Engineer Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'initial']);

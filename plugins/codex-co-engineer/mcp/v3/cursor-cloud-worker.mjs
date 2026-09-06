@@ -35,6 +35,7 @@ const CLEANUP_TIMEOUT_MS = 10_000;
 const DEADLINE_REFRESH_MS = 1_000;
 const CANCEL_TIMEOUT_MS = 30_000;
 const PROVIDER_CALL_TIMEOUT_MS = 5_000;
+const GLOBAL_DISCOVERY_CWD = path.parse(process.execPath).root;
 const COMMIT_SHA = /^[0-9a-f]{40}$/iu;
 const AMBIGUOUS_SEND_CODES = new Set([
   'network_error',
@@ -282,16 +283,46 @@ export async function loadCursorApiKey(env = process.env) {
   }
 }
 
-export async function loadCursorSdk() {
-  const { stdout } = await runFile('npm', ['root', '--global'], {
-    encoding: 'utf8',
-    timeout: PROVIDER_CALL_TIMEOUT_MS,
-    env: projectProviderEnvironment({ operation: 'sdk_probe', source: process.env }),
-  });
-  const module = path.join(stdout.trim(), '@cursor', 'sdk', 'dist', 'esm', 'index.js');
-  try { return await import(pathToFileURL(module).href); } catch (error) {
+let cachedCursorSdkLoad = null;
+
+async function discoverCursorSdk({
+  execute = runFile,
+  env = process.env,
+  importModule = (specifier) => import(specifier),
+} = {}) {
+  let stdout;
+  try {
+    ({ stdout } = await execute('npm', ['root', '--global'], {
+      cwd: GLOBAL_DISCOVERY_CWD,
+      encoding: 'utf8',
+      timeout: PROVIDER_CALL_TIMEOUT_MS,
+      env: projectProviderEnvironment({ operation: 'sdk_probe', source: env }),
+    }));
+  } catch (error) {
+    throw Object.assign(
+      new Error('Cursor SDK global installation path could not be discovered.', { cause: error }),
+      { code: 'cursor_sdk_discovery_failed' },
+    );
+  }
+  const globalRoot = String(stdout ?? '').trim();
+  if (!path.isAbsolute(globalRoot)) {
+    fail('cursor_sdk_discovery_failed', 'Cursor SDK global installation path could not be discovered.');
+  }
+  const module = path.join(globalRoot, '@cursor', 'sdk', 'dist', 'esm', 'index.js');
+  try { return await importModule(pathToFileURL(module).href); } catch (error) {
     throw Object.assign(new Error('Install @cursor/sdk@1.0.28 with the Co-Engineer setup command.', { cause: error }), { code: 'cursor_sdk_missing' });
   }
+}
+
+export async function loadCursorSdk(options) {
+  if (options !== undefined) return discoverCursorSdk(options);
+  if (cachedCursorSdkLoad === null) {
+    cachedCursorSdkLoad = discoverCursorSdk().catch((error) => {
+      cachedCursorSdkLoad = null;
+      throw error;
+    });
+  }
+  return cachedCursorSdkLoad;
 }
 
 async function gitValue(cwd, args) {
