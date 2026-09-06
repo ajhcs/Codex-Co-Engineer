@@ -1,6 +1,6 @@
 ---
 name: use-grok-co-engineer
-description: Delegate isolated Co-Engineer work specifically to Grok. Use when the user says Using Grok Co-Engineer or names Grok Co-Engineer for an assignment. Do not use for Cursor or Muse, for Chatting with Co-Engineer, when several co-engineers are named, or for raw MCP or control-plane debugging.
+description: Launch new work specifically with Grok Co-Engineer. Use shared delegation for multiple providers and the chat skill for existing work.
 ---
 
 # Using Grok Co-Engineer

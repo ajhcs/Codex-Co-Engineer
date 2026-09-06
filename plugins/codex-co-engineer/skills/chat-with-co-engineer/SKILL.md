@@ -1,6 +1,6 @@
 ---
 name: chat-with-co-engineer
-description: Act on an existing Co-Engineer run by inspecting, continuing, answering grouped attention, or cancelling. Use when the user says Chatting with Co-Engineer or asks to check, continue, answer, or cancel running Co-Engineer work. Never start a new run. Do not use for first-time Delegating to Co-Engineer or for raw MCP or control-plane debugging.
+description: Inspect, continue, answer grouped questions, or cancel an existing Co-Engineer run. Use for Chatting with Co-Engineer; never start new work.
 ---
 
 # Chatting with Co-Engineer

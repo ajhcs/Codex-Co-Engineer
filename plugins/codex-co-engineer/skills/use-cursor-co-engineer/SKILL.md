@@ -1,6 +1,6 @@
 ---
 name: use-cursor-co-engineer
-description: Delegate isolated Co-Engineer work specifically to Cursor. Use when the user says Using Cursor Co-Engineer or names Cursor Co-Engineer, including Cursor on this computer or Cursor Cloud. Do not use for Grok or Muse, for Chatting with Co-Engineer, when several co-engineers are named, or for raw MCP or control-plane debugging.
+description: Launch new work specifically with Cursor Co-Engineer, locally or in Cloud. Use shared delegation for multiple providers and the chat skill for existing work.
 ---
 
 # Using Cursor Co-Engineer

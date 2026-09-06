@@ -1,6 +1,6 @@
 ---
 name: use-muse-co-engineer
-description: Delegate isolated Co-Engineer work specifically to Muse. Use when the user says Using Muse Co-Engineer or names Muse Co-Engineer for an assignment. Do not use DSH or Ox as public names, and do not use for Grok, Cursor, Chatting with Co-Engineer, several named co-engineers, or raw MCP or control-plane debugging.
+description: Launch new work specifically with Muse Co-Engineer. Use shared delegation for multiple providers and the chat skill for existing work.
 ---
 
 # Using Muse Co-Engineer

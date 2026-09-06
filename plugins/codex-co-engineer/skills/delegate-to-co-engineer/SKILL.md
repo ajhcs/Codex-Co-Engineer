@@ -1,6 +1,6 @@
 ---
 name: delegate-to-co-engineer
-description: Start one new bounded Co-Engineer run of one to eight isolated independent assignments. Use when the user says Delegating to Co-Engineer, asks for a team of external co-engineers, or wants parallel independent assignments without naming a single co-engineer. Do not use to inspect, continue, answer grouped attention, or cancel an existing run, and do not use for raw MCP or control-plane debugging.
+description: Start a new Co-Engineer run with up to eight independent assignments. Use for external delegation or several named providers; existing-run management and raw MCP debugging use their dedicated skills.
 ---
 
 # Delegating to Co-Engineer

@@ -1,6 +1,6 @@
 ---
 name: control-codex-co-engineer-agents
-description: Operate Codex-Co-Engineer through the five MCP tools for raw status, payload, cursor, deadline, worktree, and control-plane debugging. Use when the user asks to inspect MCP arguments, event cursors, diagnostics, or lifecycle internals. Do not use for ordinary Delegating to Co-Engineer, Chatting with Co-Engineer, or Using Grok, Cursor, or Muse Co-Engineer.
+description: Debug Co-Engineer MCP payloads, cursors, deadlines, worktrees, or lifecycle internals. Use for explicit troubleshooting; ordinary delegation and existing-run management use their dedicated skills.
 ---
 
 # Advanced Co-Engineer Control
