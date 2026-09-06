@@ -34,6 +34,7 @@ import {
   createRunToolAdapter,
   denyRunToolRemoteMutationV1,
   describeRunToolAdapterV1,
+  experienceForRunToolResult,
 } from '../mcp/v3/run-tool-adapter.mjs';
 import {
   ASSIGNMENT_ID,
@@ -870,6 +871,74 @@ test('large multi-assignment results retain bounded useful previews without inve
   }
 });
 
+test('adversarial semantic metadata stays within caps and marks retrievable omissions', async () => {
+  const runId = 'bounded-adversarial-metadata';
+  const huge = '🙂'.repeat(30_000);
+  const lanes = Array.from({ length: 8 }, (_, index) => ({
+    assignment_id: `lane-${index}`,
+    task_id: `task-${index}`,
+    provider: 'grok',
+    role: index === 0 ? 'review' : 'implement',
+    phase: 'needs_attention',
+    status: 'needs_attention',
+    required: true,
+    prompt_dispatched: true,
+    dispatch_confidence: 'authoritative',
+    result: `result-${index}-${huge}`,
+    error: { code: 'provider_error', message: huge, detail: huge },
+    handoff: { worktree: `/mnt/d/${huge}`, branch: `codex/${huge}` },
+  }));
+  const items = lanes.map((lane, index) => ({
+    assignment_id: lane.assignment_id,
+    task_id: lane.task_id,
+    question_id: `question-${index}`,
+    session_id: `session-${index}`,
+    question: `Choose for lane ${index}: ${huge}`,
+    options: Array.from({ length: 8 }, (_, option) => `choice-${index}-${option}-${huge}`),
+    event_cursor: String(index + 1),
+  }));
+  const receipt = {
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: runId,
+    phase: 'needs_attention',
+    status: 'needs_attention',
+    cursor: '9',
+    revision: 9,
+    assignment_count: 8,
+    lanes,
+    attention: { status: 'open', batch_id: 'batch-adversarial', revision: 9, items },
+    cleanup: { cleaned: false, proof_bound: false, unresolved: [huge], remaining: 8 },
+    error: { code: 'run_error', message: huge, detail: huge },
+  };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => receipt;
+  }
+  const { runtime } = createAdapter();
+  const adapter = createRunToolAdapter({ runtime, simpleRuntime });
+  for (const [tool, cap] of [
+    ['status', SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX],
+    ['task', SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX],
+  ]) {
+    const result = await adapter.dispatch(tool, { run_id: runId });
+    assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') <= cap, tool);
+    assert.equal(result.diagnostics.view, 'diagnostics');
+    assert.equal(result.diagnostics.details_omitted, true);
+    assert.equal(result.diagnostics.reason, 'response_size_limit');
+    assert.equal(result.attention.items.length, 8);
+    assert.deepEqual(
+      result.attention.items.map((item) => item.question_id),
+      items.map((item) => item.question_id),
+    );
+    assert.equal(result.attention.items.every((item) => item.options.length === 8), true);
+    assert.equal(result.attention.details_omitted, true);
+    assert.equal(result.lanes.every((lane) => lane.result_omitted === true), true);
+    assert.equal(result.error.details_omitted, true);
+    assert.equal(result.cleanup.details_omitted, true);
+  }
+});
+
 test('simple run defaults to compact semantics and exposes detailed diagnostics explicitly', async () => {
   const runId = 'compact-with-diagnostics';
   const runtimeReceipt = {
@@ -915,8 +984,13 @@ test('compact semantic finals retain actual candidate, verification, and top-lev
     complete_candidate_blocked: false,
     lanes: [{
       assignment_id: 'worker', task_id: 'worker-task', provider: 'grok',
-      status: 'completed', phase: 'completed', required: true,
+      role: 'review', status: 'completed', phase: 'completed', required: true,
       prompt_dispatched: true, dispatch_confidence: 'authoritative', task_final: true,
+      handoff: {
+        branch: 'codex/compact-review-artifact',
+        current_head: 'b'.repeat(40),
+        tree_sha: 'c'.repeat(40),
+      },
     }],
     result: { summary: 'Integrated candidate is ready.' },
     candidate: {
@@ -925,6 +999,11 @@ test('compact semantic finals retain actual candidate, verification, and top-lev
       ready_for_codex_review: true, accepted: true, authority: 'p35',
     },
     verification: { status: 'passed', authority: 'p35', tests: ['node --test'] },
+    evidence: {
+      facts: [{ fact_kind: 'git_identity' }],
+      claims: [{ claim_kind: 'tests_passed' }],
+      digest: `sha256:${'d'.repeat(64)}`,
+    },
   };
   const simpleRuntime = { hasRun: () => true };
   for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
@@ -942,5 +1021,11 @@ test('compact semantic finals retain actual candidate, verification, and top-lev
   assert.deepEqual(compact.verification, {
     status: 'passed', authority: 'p35', tests: ['node --test'],
   });
+  const uiExperience = experienceForRunToolResult(compact);
+  assert.equal(uiExperience.final.reviews.present, true);
+  assert.deepEqual(uiExperience.final.reviews.lanes, ['worker']);
+  assert.equal(uiExperience.final.git.head, 'b'.repeat(40));
+  assert.deepEqual(uiExperience.final.evidence.kinds, ['git_identity', 'tests_passed']);
+  assert.equal(Object.hasOwn(compact, 'experience'), false);
   assert.equal(Object.hasOwn(compact, 'blockers'), false);
 });

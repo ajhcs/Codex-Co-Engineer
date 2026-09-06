@@ -102,6 +102,13 @@ import {
   ownDataValue,
 } from './selection-json.mjs';
 
+const semanticRunExperiences = new WeakMap();
+
+export function experienceForRunToolResult(value) {
+  if (!value || typeof value !== 'object') return null;
+  return semanticRunExperiences.get(value) ?? value.experience ?? null;
+}
+
 export const RUN_TOOL_ADAPTER_SCHEMA_ID = 'codex-co-engineer.run-tool-adapter.v1';
 export const RUN_TOOL_ADAPTER_VERSION = 1;
 export const RUN_TOOL_ADAPTER_RECEIPT_SCHEMA_ID = 'codex-co-engineer.run-tool-receipt.v1';
@@ -1107,6 +1114,7 @@ function compactSemanticLane(lane) {
     assignment_id: lane.assignment_id ?? null,
     task_id: lane.task_id ?? null,
     provider: lane.provider ?? null,
+    ...(typeof lane.role === 'string' ? { role: lane.role } : {}),
     status: lane.status ?? lane.phase ?? null,
     required: lane.required !== false,
     prompt_dispatched: lane.prompt_dispatched === true,
@@ -1162,6 +1170,130 @@ function compactSemanticCandidate(runtimeReceipt, projectedCandidate) {
     ...(projectedCandidate?.accepted === true ? { accepted: true } : {}),
   };
   return Object.keys(candidate).length > 0 ? candidate : null;
+}
+
+function compactOverflowAttention(attention) {
+  if (!attention || typeof attention !== 'object' || Array.isArray(attention)) return undefined;
+  const items = Array.isArray(attention.items) ? attention.items.map((item) => ({
+    assignment_id: item?.assignment_id ?? null,
+    question_id: item?.question_id ?? null,
+    session_id: item?.session_id ?? null,
+    task_id: item?.task_id ?? null,
+    question: utf8Head(item?.question ?? item?.prompt, 320),
+    options: Array.isArray(item?.options)
+      ? item.options.map((option) => utf8Head(String(option), 128))
+      : item?.options ?? null,
+    event_cursor: item?.event_cursor ?? null,
+    reply_capability: item?.reply_capability ?? item?.capability ?? null,
+    disposition: item?.disposition ?? null,
+  })) : [];
+  return {
+    status: attention.status ?? null,
+    batch_id: attention.batch_id ?? null,
+    revision: attention.revision ?? null,
+    items,
+    details_omitted: true,
+  };
+}
+
+function compactOverflowReceipt(compact, simpleResponseCap) {
+  const fallback = {
+    schema: compact.schema,
+    version: compact.version,
+    mode: compact.mode,
+    tool: compact.tool,
+    operation: compact.operation,
+    run_id: compact.run_id,
+    status: compact.status,
+    phase: compact.phase,
+    cursor: compact.cursor,
+    revision: compact.revision,
+    assignment_count: compact.assignment_count,
+    authoritative_required_dispatch: compact.authoritative_required_dispatch === true,
+    lanes: compact.lanes.map((lane) => ({
+      assignment_id: lane.assignment_id,
+      task_id: lane.task_id,
+      provider: lane.provider,
+      ...(typeof lane.role === 'string' ? { role: lane.role } : {}),
+      status: lane.status,
+      required: lane.required,
+      prompt_dispatched: lane.prompt_dispatched,
+      ...(lane.dispatch_confidence != null ? { dispatch_confidence: lane.dispatch_confidence } : {}),
+      ...(lane.result !== undefined ? { result_omitted: true } : {}),
+      ...(lane.error != null ? { error: {
+        code: lane.error?.code ?? null,
+        message: utf8Head(lane.error?.message, 320),
+        details_omitted: true,
+      } } : {}),
+      ...(lane.artifacts ? {
+        artifacts: {
+          ...(typeof lane.artifacts.worktree === 'string'
+            ? { worktree: utf8Head(lane.artifacts.worktree, 512) } : {}),
+          ...(typeof lane.artifacts.branch === 'string'
+            ? { branch: utf8Head(lane.artifacts.branch, 256) } : {}),
+          ...(typeof lane.artifacts.head === 'string' ? { head: lane.artifacts.head } : {}),
+          ...(typeof lane.artifacts.clean === 'boolean' ? { clean: lane.artifacts.clean } : {}),
+          ...(lane.artifacts.partial === true ? { partial: true } : {}),
+          details_omitted: true,
+        },
+      } : {}),
+    })),
+    ...(compact.attention ? { attention: compactOverflowAttention(compact.attention) } : {}),
+    ...(compact.consent ? { consent: {
+      status: compact.consent.status ?? compact.consent.consent?.status ?? null,
+      request: compact.consent.request ? {
+        kind: compact.consent.request.kind ?? null,
+        run_id: compact.consent.request.run_id ?? compact.run_id,
+        repository_identity: compact.consent.request.repository_identity ?? null,
+        providers: Array.isArray(compact.consent.request.providers)
+          ? compact.consent.request.providers.slice(0, 8) : [],
+        scope: compact.consent.request.scope ?? null,
+        duration: compact.consent.request.duration ?? null,
+        remote_mutation: compact.consent.request.remote_mutation ?? null,
+      } : null,
+      details_omitted: true,
+    } } : {}),
+    ...(compact.error ? { error: {
+      code: compact.error?.code ?? null,
+      message: utf8Head(compact.error?.message, 512),
+      details_omitted: true,
+    } } : {}),
+    ...(compact.result !== undefined ? { result_omitted: true } : {}),
+    ...(compact.candidate ? { candidate: compact.candidate } : {}),
+    ...(compact.verification ? { verification: {
+      status: compact.verification.status ?? null,
+      authority: compact.verification.authority ?? null,
+      tests: Array.isArray(compact.verification.tests)
+        ? compact.verification.tests.slice(0, 16).map((test) => utf8Head(String(test), 256))
+        : [],
+      details_omitted: true,
+    } } : {}),
+    ...(compact.blockers ? { blockers: compact.blockers } : {}),
+    ...(compact.cleanup ? { cleanup: {
+      cleaned: compact.cleanup.cleaned === true,
+      proof_bound: compact.cleanup.proof_bound === true,
+      removed: Number.isSafeInteger(compact.cleanup.removed) ? compact.cleanup.removed : null,
+      remaining: Number.isSafeInteger(compact.cleanup.remaining) ? compact.cleanup.remaining : null,
+      details_omitted: true,
+    } } : {}),
+    diagnostics: {
+      view: 'diagnostics',
+      details_omitted: true,
+      reason: 'response_size_limit',
+    },
+  };
+  if (byteLength(fallback) <= simpleResponseCap) return fallback;
+  return {
+    ...fallback,
+    lanes: fallback.lanes.map((lane) => ({
+      assignment_id: lane.assignment_id,
+      task_id: lane.task_id,
+      status: lane.status,
+      required: lane.required,
+      prompt_dispatched: lane.prompt_dispatched,
+      ...(lane.result_omitted === true ? { result_omitted: true } : {}),
+    })),
+  };
 }
 
 function projectSemanticRunReceipt(receipt, runtimeReceipt, { unconfirmed, simpleResponseCap }) {
@@ -1223,22 +1355,35 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, { unconfirmed, simpl
     },
   };
   if (byteLength(compact) > simpleResponseCap) {
-    const resultLanes = lanes.filter((lane) => lane.result !== undefined).length;
-    const perResultBytes = resultLanes > 0
-      ? Math.max(512, Math.floor((simpleResponseCap - 8_192) / resultLanes))
-      : 512;
-    return {
+    const resultCount = lanes.filter((lane) => lane.result !== undefined).length
+      + (topLevelResult !== undefined ? 1 : 0);
+    const resultFree = {
       ...compact,
-      lanes: lanes.map((lane) => {
-        if (lane.result === undefined) return lane;
-        const bounded = boundProviderResult(lane.result, perResultBytes);
-        return {
-          ...lane,
-          result: bounded.value,
-          result_truncated: lane.result_truncated === true || bounded.truncated === true,
-        };
-      }),
+      lanes: compact.lanes.map(({ result: _result, ...lane }) => lane),
+      ...(topLevelResult !== undefined ? { result: undefined } : {}),
     };
+    const available = Math.max(128, simpleResponseCap - byteLength(resultFree));
+    let perResultBytes = Math.max(128, Math.floor(available / Math.max(1, resultCount)));
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const boundedCompact = {
+        ...compact,
+        lanes: lanes.map((lane) => {
+          if (lane.result === undefined) return lane;
+          const bounded = boundProviderResult(lane.result, perResultBytes);
+          return {
+            ...lane,
+            result: bounded.value,
+            result_truncated: lane.result_truncated === true || bounded.truncated === true,
+          };
+        }),
+        ...(topLevelResult !== undefined
+          ? { result: boundProviderResult(topLevelResult, perResultBytes).value }
+          : {}),
+      };
+      if (byteLength(boundedCompact) <= simpleResponseCap) return boundedCompact;
+      perResultBytes = Math.max(128, Math.floor(perResultBytes * 0.75));
+    }
+    return compactOverflowReceipt(compact, simpleResponseCap);
   }
   return compact;
 }
@@ -1455,11 +1600,29 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     wake,
     remote_mutated: false,
   };
+  const experience = projectExperience({
+    ...receiptBody,
+    objective: ctx.objective ?? runtimeReceipt?.objective ?? null,
+    base_sha: typeof runtimeReceipt?.base_sha === 'string'
+      ? runtimeReceipt.base_sha
+      : (typeof ctx.base_sha === 'string' ? ctx.base_sha : null),
+    git: {
+      base_sha: typeof runtimeReceipt?.base_sha === 'string'
+        ? runtimeReceipt.base_sha
+        : (typeof ctx.base_sha === 'string' ? ctx.base_sha : null),
+      digest: typeof ctx.digest === 'string' ? ctx.digest : (runtimeReceipt?.git?.digest ?? null),
+    },
+    journal: runtimeReceipt?.journal ?? null,
+    evidence: runtimeReceipt?.evidence ?? null,
+    candidate: runtimeReceipt?.candidate ?? receiptBody.candidate,
+  });
   if (simpleAdmission && view !== 'diagnostics') {
-    return freezeData(projectSemanticRunReceipt(receiptBody, runtimeReceipt, {
+    const compact = freezeData(projectSemanticRunReceipt(receiptBody, runtimeReceipt, {
       unconfirmed,
       simpleResponseCap,
     }));
+    semanticRunExperiences.set(compact, experience);
+    return compact;
   }
   if (simpleAdmission && byteLength(receiptBody) > simpleResponseCap) {
     receiptBody.attention = receiptBody.attention && {
@@ -1480,21 +1643,6 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
   if (simpleAdmission && byteLength(receiptBody) > simpleResponseCap) {
     receiptBody.lanes = receiptBody.lanes.map(({ handoff: _handoff, ...lane }) => lane);
   }
-  const experience = projectExperience({
-    ...receiptBody,
-    objective: ctx.objective ?? runtimeReceipt?.objective ?? null,
-    base_sha: typeof runtimeReceipt?.base_sha === 'string'
-      ? runtimeReceipt.base_sha
-      : (typeof ctx.base_sha === 'string' ? ctx.base_sha : null),
-    git: {
-      base_sha: typeof runtimeReceipt?.base_sha === 'string'
-        ? runtimeReceipt.base_sha
-        : (typeof ctx.base_sha === 'string' ? ctx.base_sha : null),
-      digest: typeof ctx.digest === 'string' ? ctx.digest : (runtimeReceipt?.git?.digest ?? null),
-    },
-    journal: runtimeReceipt?.journal ?? null,
-    evidence: runtimeReceipt?.evidence ?? null,
-  });
   let projected = {
     ...receiptBody,
     experience,

@@ -24,6 +24,7 @@ import {
 } from '../mcp/v3/experience-ui-resource.mjs';
 import {
   EXPERIENCE_PHRASES,
+  EXPERIENCE_RESULT_META_KEY,
   EXPERIENCE_UI_RESOURCE_URIS,
   MCP_APPS_EXTENSION_ID,
   MCP_APPS_MIME_TYPE,
@@ -199,6 +200,155 @@ test('compatible Apps plus resources clients receive nested metadata for all thr
   const wrapped = buildToolResult({ mode: 'run', experience: { card: 'attention' } }, { uiMeta: attentionMeta });
   assert.deepEqual(wrapped._meta, attentionMeta);
   assert.equal(Object.hasOwn(wrapped._meta, 'ui/resourceUri'), false);
+});
+
+test('compact semantic protocol payloads render run, attention, consent, and final UI from result metadata', () => {
+  const capabilities = compatibleCapabilities();
+  const resources = experienceUiResourcesForClient(capabilities);
+  const protocolPayload = (compact, experienceSource = compact) => {
+    assert.equal(Object.hasOwn(compact, 'experience'), false);
+    assert.equal(Object.hasOwn(compact, 'checks'), false);
+    assert.equal(Object.hasOwn(compact, 'telemetry'), false);
+    const experience = projectExperience(experienceSource);
+    const uiMeta = resolveExperienceResultMeta({
+      card: experience.card, experience, clientCapabilities: capabilities, resources,
+    });
+    const result = buildToolResult(compact, { responseMode: 'structured', uiMeta });
+    assert.deepEqual(result.structuredContent, compact);
+    assert.equal(Object.hasOwn(result.structuredContent, 'experience'), false);
+    assert.ok(Buffer.byteLength(JSON.stringify(result._meta[EXPERIENCE_RESULT_META_KEY]), 'utf8') <= 8_192);
+    return {
+      experience,
+      message: {
+        jsonrpc: '2.0',
+        method: 'ui/notifications/tool-result',
+        params: { result },
+      },
+    };
+  };
+  const lane = (status, provider = 'grok') => ({
+    assignment_id: 'validator',
+    task_id: 'compact-ui-validator',
+    provider,
+    status,
+    required: true,
+    prompt_dispatched: status !== 'planned',
+    ...(status !== 'planned' ? { dispatch_confidence: 'authoritative' } : {}),
+  });
+  const compact = (runId, status, extra = {}) => ({
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    mode: 'run',
+    operation: 'status',
+    run_id: runId,
+    status,
+    phase: status,
+    assignment_count: 1,
+    lanes: [lane(status)],
+    cursor: '4',
+    revision: 4,
+    diagnostics: { view: 'diagnostics' },
+    ...extra,
+  });
+
+  const run = protocolPayload(compact('compact-ui-run', 'running', {
+    authoritative_required_dispatch: true,
+  }));
+  const runExtracted = ui.unwrapExperience(run.message);
+  assert.equal(JSON.stringify(runExtracted), JSON.stringify(run.experience));
+  assert.match(ui.visiblePlainText(ui.renderInlineCardHtml('run', runExtracted)), /running 1 independent assignment/u);
+
+  const attention = protocolPayload(compact('compact-ui-attention', 'needs_attention', {
+    operation: 'attention',
+    attention: {
+      status: 'open',
+      batch_id: 'batch-ui-1',
+      revision: 3,
+      items: [{
+        assignment_id: 'validator',
+        task_id: 'compact-ui-validator',
+        question_id: 'strictness',
+        session_id: 'session-ui',
+        question: 'Use the stricter validator?',
+        options: ['stricter', 'compatible'],
+        event_cursor: '7',
+      }],
+    },
+  }));
+  const attentionExtracted = ui.unwrapExperience(attention.message);
+  assert.equal(JSON.stringify(attentionExtracted), JSON.stringify(attention.experience));
+  const attentionText = attentionUi.visiblePlainText(attentionUi.renderAttentionCardHtml(attentionExtracted));
+  assert.match(attentionText, /Use the stricter validator\?/u);
+  assert.match(attentionText, /stricter/u);
+  assert.equal(attentionUi.bindAttention(attentionExtracted).batch_id, 'batch-ui-1');
+
+  const consent = protocolPayload(compact('compact-ui-consent', 'awaiting_consent', {
+    operation: 'submit',
+    lanes: [lane('planned', 'cursor-cloud')],
+    consent: {
+      status: 'required',
+      request: {
+        kind: 'repository_exposure_consent',
+        run_id: 'compact-ui-consent',
+        repository_identity: `sha256:${'a'.repeat(64)}`,
+        providers: ['cursor-cloud'],
+        scope: 'full_repository',
+        duration: 'this_run_only',
+        remote_mutation: false,
+      },
+    },
+  }));
+  const consentText = ui.visiblePlainText(
+    ui.renderInlineCardHtml('attention', ui.unwrapExperience(consent.message)),
+  );
+  assert.match(consentText, /approval to share the full repository/u);
+  assert.match(consentText, /Using Cursor Co-Engineer/u);
+
+  const finalCompact = compact('compact-ui-final', 'completed', {
+    authoritative_required_dispatch: true,
+    complete_candidate_blocked: false,
+    lanes: [{
+      ...lane('completed'),
+      role: 'review',
+      artifacts: {
+        branch: 'codex/compact-ui-final',
+        head: 'b'.repeat(40),
+        clean: true,
+      },
+    }],
+    candidate: {
+      ref: 'refs/codex-co-engineer/runs/compact-ui-final/candidate',
+      head: 'b'.repeat(40),
+      tree: 'c'.repeat(40),
+      ready_for_codex_review: true,
+      accepted: true,
+    },
+  });
+  const final = protocolPayload(finalCompact, {
+    ...finalCompact,
+    lanes: [{
+      ...finalCompact.lanes[0],
+      handoff: {
+        branch: 'codex/compact-ui-final',
+        current_head: 'b'.repeat(40),
+        tree_sha: 'c'.repeat(40),
+      },
+    }],
+    evidence: {
+      facts: [{ fact_kind: 'git_identity' }],
+      claims: [{ claim_kind: 'tests_passed' }],
+      digest: `sha256:${'d'.repeat(64)}`,
+    },
+  });
+  const finalExtracted = ui.unwrapExperience(final.message);
+  assert.equal(JSON.stringify(finalExtracted), JSON.stringify(final.experience));
+  const finalText = ui.visiblePlainText(ui.renderInlineCardHtml('final', finalExtracted));
+  assert.match(finalText, /compact-ui-final/u);
+  assert.match(finalText, /b{40}/u);
+  assert.match(finalText, /validator/u);
+  assert.match(finalText, /git_identity/u);
+  assert.match(finalText, /tests_passed/u);
+  assert.match(finalText, /Ready for Codex review yes/u);
 });
 
 test('run card HTML shows objective, repository SHA, lanes, and Codex authority', async () => {

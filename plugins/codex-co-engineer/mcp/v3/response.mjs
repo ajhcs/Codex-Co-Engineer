@@ -17,6 +17,7 @@ export const EXPERIENCE_QUESTION_BYTES = 320;
 export const EXPERIENCE_SCOPE_PATTERN_BYTES = 96;
 export const EXPERIENCE_MAX_LANES = 8;
 export const EXPERIENCE_MAX_QUESTIONS = 8;
+export const EXPERIENCE_RESULT_META_KEY = 'codex-co-engineer/experience';
 export const PUBLIC_MCP_TOOLS = Object.freeze([
   'status', 'delegate', 'task', 'tasks', 'cancel',
 ]);
@@ -1250,6 +1251,7 @@ export function resolveExperienceToolMeta(toolName, {
 
 export function resolveExperienceResultMeta({
   card = null,
+  experience = null,
   clientCapabilities = null,
   resources = experienceUiResourceRegistry(),
 } = {}) {
@@ -1261,7 +1263,11 @@ export function resolveExperienceResultMeta({
   for (const uri of candidates) {
     const resource = typeof resources?.get === 'function' ? resources.get(uri) : null;
     if (resource && resource.mimeType === MCP_APPS_MIME_TYPE && isMcpAppsResourceUri(uri)) {
-      return { ui: { resourceUri: uri } };
+      const safeExperience = normalizeExperienceResultMeta(experience);
+      return {
+        ui: { resourceUri: uri },
+        ...(safeExperience ? { [EXPERIENCE_RESULT_META_KEY]: safeExperience } : {}),
+      };
     }
   }
   return null;
@@ -1314,5 +1320,16 @@ function normalizeToolResultUiMeta(uiMeta) {
     ? uiMeta.ui.resourceUri
     : null;
   if (!isMcpAppsResourceUri(nested)) return null;
-  return { ui: { resourceUri: nested } };
+  const safeExperience = normalizeExperienceResultMeta(uiMeta[EXPERIENCE_RESULT_META_KEY]);
+  return {
+    ui: { resourceUri: nested },
+    ...(safeExperience ? { [EXPERIENCE_RESULT_META_KEY]: safeExperience } : {}),
+  };
+}
+
+function normalizeExperienceResultMeta(experience) {
+  if (!experience || typeof experience !== 'object' || Array.isArray(experience)) return null;
+  const safe = stripOwnerOnly(experience);
+  if (safe?.schema !== EXPERIENCE_SCHEMA || !EXPERIENCE_CARD_STATES.includes(safe?.card)) return null;
+  return byteLength(JSON.stringify(safe)) <= EXPERIENCE_MAX_BYTES ? safe : null;
 }

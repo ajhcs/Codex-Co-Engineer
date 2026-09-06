@@ -440,6 +440,15 @@
     if (data.experience && typeof data.experience === 'object') return stripOwnerOnly(data.experience);
     var params = data.params && typeof data.params === 'object' ? data.params : null;
     var result = params && params.result && typeof params.result === 'object' ? params.result : params;
+    var resultMeta = result && result._meta && typeof result._meta === 'object'
+      ? result._meta
+      : (params && params._meta && typeof params._meta === 'object'
+        ? params._meta
+        : (data._meta && typeof data._meta === 'object' ? data._meta : null));
+    var metaExperience = resultMeta && resultMeta['codex-co-engineer/experience'];
+    if (metaExperience && typeof metaExperience === 'object') {
+      return stripOwnerOnly(metaExperience);
+    }
     var structured = result && result.structuredContent && typeof result.structuredContent === 'object'
       ? result.structuredContent
       : (data.structuredContent && typeof data.structuredContent === 'object' ? data.structuredContent : null);
