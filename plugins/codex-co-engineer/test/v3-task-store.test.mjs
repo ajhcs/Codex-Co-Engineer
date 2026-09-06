@@ -694,17 +694,30 @@ test('explicit cursorless progress wait starts from the current event-log tail',
     }
 
     let settled = false;
+    let clock = 0;
+    const waiting = Promise.withResolvers();
     const { watch, state } = createMockWatch();
     const pending = waitForTaskProgress(root, 'wait-cursorless', {
       wait_until: 'progress',
       wait_ms: 1_000,
       watch,
+      now: () => clock,
+      delay: (milliseconds, signal) => {
+        waiting.resolve();
+        return waitDelay(milliseconds, signal);
+      },
     }).then((value) => {
       settled = true;
       return value;
     });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    // Wait until the implementation has baselined historical events and
+    // entered its wait, rather than racing filesystem setup against a timer.
+    await Promise.race([
+      waiting.promise,
+      pending.then(() => assert.fail('historical events must not settle the wait')),
+    ]);
     assert.equal(settled, false);
+    clock = 40;
 
     await appendTaskEvent(root, 'wait-cursorless', {
       type: 'provider',
@@ -714,8 +727,7 @@ test('explicit cursorless progress wait starts from the current event-log tail',
     const woke = await pending;
     assert.equal(woke.progress.wait_reason, 'progress');
     assert.equal(woke.progress.last_event.text, 'fresh');
-    assert.ok(woke.progress.waited_ms >= 40);
-    assert.ok(woke.progress.waited_ms < 400);
+    assert.equal(woke.progress.waited_ms, 40);
     assert.equal(state.closed, state.opened);
 
     const timedOut = await waitForTaskProgress(root, 'wait-cursorless', {
