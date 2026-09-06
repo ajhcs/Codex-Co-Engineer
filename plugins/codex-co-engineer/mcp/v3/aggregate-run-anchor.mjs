@@ -117,7 +117,10 @@ export const SELECTION_ANSWER_KEYS = capturedFreeze(['assignment_id', 'model', '
 
 export const MAX_AGGREGATE_RUNS = 64;
 export const MAX_AGGREGATE_RUN_DIRECTORY_ENTRIES = 16;
-export const MAX_AGGREGATE_ROOT_ENTRIES = 8;
+export const MAX_AGGREGATE_TEMPORARIES = 8;
+// The initialized root has marker, claims, and runs entries. Audits can also
+// overlap the namespace lock plus the declared bounded owner/temp allowance.
+export const MAX_AGGREGATE_ROOT_ENTRIES = MAX_AGGREGATE_TEMPORARIES + 4;
 export const MAX_AGGREGATE_CLAIMS_DIRECTORY_ENTRIES = MAX_AGGREGATE_RUNS + 4;
 export const MAX_AGGREGATE_RUNS_DIRECTORY_ENTRIES = MAX_AGGREGATE_RUNS + 4;
 export const MAX_AGGREGATE_ANCHOR_BYTES = 64 * 1024;
@@ -127,7 +130,6 @@ export const MAX_AGGREGATE_MARKER_BYTES = 512;
 export const MAX_AGGREGATE_STAMP_BYTES = 256;
 export const MAX_AGGREGATE_LOCK_BYTES = 160;
 export const MAX_AGGREGATE_RECORD_BYTES = 16 * 1024;
-export const MAX_AGGREGATE_TEMPORARIES = 8;
 export const MAX_AGGREGATE_FILENAME_BYTES = 80;
 export const MAX_AGGREGATE_DIAGNOSTIC_BYTES = 160;
 export const AGGREGATE_LOCK_WAIT_MS = 8_000;
