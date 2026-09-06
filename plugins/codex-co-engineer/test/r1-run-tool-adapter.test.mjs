@@ -886,7 +886,7 @@ test('adversarial semantic metadata stays within caps and marks retrievable omis
     dispatch_confidence: 'authoritative',
     result: `result-${index}-${huge}`,
     error: { code: 'provider_error', message: huge, detail: huge },
-    handoff: { worktree: `/mnt/d/${huge}`, branch: `codex/${huge}` },
+    handoff: { worktree: `/workspace/${huge}`, branch: `codex/${huge}` },
   }));
   const items = lanes.map((lane, index) => ({
     assignment_id: lane.assignment_id,

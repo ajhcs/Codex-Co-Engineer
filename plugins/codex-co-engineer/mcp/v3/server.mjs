@@ -88,7 +88,7 @@ function advertisedTools() {
 const RESPONSE_MODE_PROPERTY = {
   type: 'string',
   enum: ['structured', 'legacy'],
-  description: 'Optional presentation control stripped before business logic. Native runs default to bounded structured-first transport. Set legacy only for a text-only run client that requires the full sanitized receipt in content[0].text. Omitted legacy single-task calls retain their compatible full text.',
+  description: 'Optional presentation control stripped before business logic. Native runs default to bounded structured-first transport. Set legacy only for a text-only run client that requires the same compact semantic receipt fully encoded in content[0].text. Omitted legacy single-task calls retain their compatible full text.',
 };
 
 const RESPONSE_MODE_HINT = ' Native runs default to bounded structured-first text; text-only run clients may set response_mode="legacy" to encode the same compact semantic receipt fully in text. Use task.run_id with view="diagnostics" for detailed run evidence. Omitted legacy single-task calls retain full compatible text.';

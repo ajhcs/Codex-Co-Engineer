@@ -133,11 +133,11 @@ if (!serverText.includes('dsh_model') || !serverText.includes('stealth/ox-alpha'
   fail('3.2.1 public contract must advertise the optional Ox Alpha DSH model selector.');
 }
 if (!serverText.includes('response_mode')
-  || !serverText.includes("enum: ['structured']")
+  || !serverText.includes("enum: ['structured', 'legacy']")
   || !serverText.includes("enum: ['summary', 'diagnostics', 'compact']")
   || !serverText.includes('task_ids')
   || !serverText.includes('cursors')) {
-  fail('3.2 public contract must advertise structured response_mode, compact task view, and wait-any task_ids/cursors.');
+  fail('3.2 public contract must advertise structured/legacy response_mode, compact task view, and wait-any task_ids/cursors.');
 }
 const compactTaskText = await text(`${PLUGIN}/mcp/v3/compact-task.mjs`);
 if (!compactTaskText.includes('WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX')
