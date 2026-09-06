@@ -956,6 +956,18 @@ test('adversarial semantic metadata stays within caps and marks retrievable omis
     .dispatch('status', { run_id: runId });
   assert.ok(Buffer.byteLength(JSON.stringify(top), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
   assert.equal(top.result_truncated, true);
+
+  const overflowReceipt = { ...receipt, status: huge, phase: huge };
+  const overflowRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    overflowRuntime[name] = async () => overflowReceipt;
+  }
+  const overflow = await createRunToolAdapter({ runtime, simpleRuntime: overflowRuntime })
+    .dispatch('status', { run_id: runId });
+  assert.ok(Buffer.byteLength(JSON.stringify(overflow), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
+  assert.equal(overflow.status, 'unresolved');
+  assert.equal(overflow.phase, 'unresolved');
+  assert.equal(overflow.error.code, 'response_projection_overflow');
 });
 
 test('simple run defaults to compact semantics and exposes detailed diagnostics explicitly', async () => {
