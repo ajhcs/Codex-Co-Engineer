@@ -195,7 +195,10 @@ async function handleRequest(message) {
         method: 'session/request_permission',
         params: {
           sessionId: params.sessionId,
-          toolCall: { toolCallId: 'fake-permission', title: 'Fake permission' },
+          toolCall: {
+            toolCallId: 'fake-permission',
+            title: text.includes('title question') ? 'Which environment should I use?' : 'Fake permission',
+          },
           options: [
             { optionId: 'allow', kind: 'allow_once', name: 'Allow once' },
             { optionId: 'reject', kind: 'reject_once', name: 'Reject once' },

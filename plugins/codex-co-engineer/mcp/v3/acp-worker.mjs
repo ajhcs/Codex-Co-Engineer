@@ -389,7 +389,8 @@ export function isUserFacingPermission(params) {
   const kind = params?.raw?.toolCall?.kind ?? params?.inferredKind;
   if (typeof kind === 'string' && kind !== 'other') return false;
   const title = String(params?.raw?.toolCall?.title ?? '').trim();
-  return /^(?:user input|needs? attention|approval required|fake permission|confirm(?:ation)?(?: required)?)(?:\b|:|\?)/iu.test(title);
+  return /^(?:user input|needs? attention|approval required|fake permission|confirm(?:ation)?(?: required)?)(?:\b|:|\?)/iu.test(title)
+    || (title.endsWith('?') && !title.includes('$?'));
 }
 
 export function safeQuestionId(value) {
@@ -400,16 +401,21 @@ export function safeQuestionId(value) {
   return `${normalized.slice(0, 63)}-${suffix}`;
 }
 
-async function handlePermissionRequest(root, taskId, params, signal) {
+export async function handlePermissionRequest(root, taskId, params, signal) {
   if (!isUserFacingPermission(params)) return undefined;
   const { task } = await readTask(root, taskId);
   const sessionId = params.sessionId ?? task.acp_session_id;
   if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined;
   const questionId = safeQuestionId(params.raw?.toolCall?.toolCallId ?? randomUUID());
+  const explicitQuestion = params.raw?.question;
   await recordNeedsAttention(root, taskId, {
     session_id: sessionId,
     question_id: questionId,
-    prompt: typeof params.raw?.toolCall?.title === 'string' ? params.raw.toolCall.title : 'Provider requested approval.',
+    prompt: typeof explicitQuestion === 'string' && explicitQuestion.trim().length > 0
+      ? explicitQuestion
+      : typeof params.raw?.toolCall?.title === 'string'
+        ? params.raw.toolCall.title
+        : 'Provider requested approval.',
     options: Array.isArray(params.raw?.options) ? params.raw.options : null,
     stage: 'provider_feedback',
   });

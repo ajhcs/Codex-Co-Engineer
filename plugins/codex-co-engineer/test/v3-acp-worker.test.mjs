@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   boundedEvent,
+  handlePermissionRequest,
   isUserFacingPermission,
   publicError,
   reconnectAcpTask,
@@ -88,6 +89,14 @@ test('typed ACP tool permissions do not become user questions from command text'
     inferredKind: 'other',
     raw: { toolCall: { title: 'Confirm release to production?' } },
   }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Which environment should I use?' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Run `echo "exit=$?"`' } },
+  }), false);
 });
 
 test('long ACP permission ids retain a bounded collision-resistant identity', () => {
@@ -606,28 +615,89 @@ test('DSH deadline kills a detached ACPX descendant before terminalizing', async
   assert.equal((await readdir(path.join(value.root, 'tasks', value.taskId))).includes('acpx-home'), false);
 });
 
-test('user-facing ACP permission requests persist needs_attention and accept one same-session reply', async () => {
-  const value = await fixture({ prompt: 'need permission please', id: 'perm-one', timeoutMs: 8_000 });
-  const running = runAcpTask({ root: value.root, taskId: value.taskId });
-  const deadline = Date.now() + 5_000;
-  let attention;
-  while (Date.now() < deadline) {
-    const current = (await readTask(value.root, value.taskId)).task;
-    if (current.status === 'needs_attention') {
-      attention = current;
-      break;
+test('worker permission handling persists question text and resumes through the mailbox reply', async () => {
+  const value = await fixture({ id: 'perm-question' });
+  const controller = new AbortController();
+  const question = 'Which environment should I use?';
+  const options = [
+    { optionId: 'allow', kind: 'allow_once', name: 'Allow once' },
+    { optionId: 'reject', kind: 'reject_once', name: 'Reject' },
+  ];
+  const pending = handlePermissionRequest(value.root, value.taskId, {
+    sessionId: 'fake-session-question',
+    inferredKind: 'other',
+    raw: {
+      question,
+      toolCall: { toolCallId: 'question-environment', title: 'Ask operator' },
+      options,
+    },
+  }, controller.signal);
+  try {
+    const deadline = Date.now() + 1_000;
+    let attention;
+    while (Date.now() < deadline) {
+      const current = (await readTask(value.root, value.taskId)).task;
+      if (current.status === 'needs_attention') {
+        attention = current;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(attention?.status, 'needs_attention');
+    const stored = JSON.parse(await readFile(
+      path.join(value.root, 'tasks', value.taskId, 'attention.json'),
+      'utf8',
+    ));
+    assert.equal(stored.prompt, question);
+    assert.deepEqual(stored.options, options);
+    await submitReply(value.root, value.taskId, {
+      session_id: attention.attention.session_id,
+      question_id: attention.attention.question_id,
+      response: { optionId: 'allow' },
+    });
+    assert.deepEqual(await pending, { outcome: 'allow_once', optionId: 'allow' });
+    assert.equal((await readTask(value.root, value.taskId)).task.status, 'running');
+  } finally {
+    controller.abort();
+    await pending.catch(() => {});
   }
-  assert.equal(attention?.status, 'needs_attention');
-  assert.ok(attention.attention?.session_id);
-  assert.ok(attention.attention?.question_id);
-  await submitReply(value.root, value.taskId, {
-    session_id: attention.attention.session_id,
-    question_id: attention.attention.question_id,
-    response: 'allow_once',
-  });
-  const terminal = await running;
-  assert.equal(terminal.status, 'completed');
-  assert.equal((await readTask(value.root, value.taskId)).task.status, 'completed');
+});
+
+test('title-only ACP questions persist and continue the real worker session', async () => {
+  const controller = new AbortController();
+  let running;
+  try {
+    const question = 'Which environment should I use?';
+    const value = await fixture({
+      prompt: 'need permission title question please',
+      id: 'perm-title-question',
+      timeoutMs: 8_000,
+    });
+    running = runAcpTask({ root: value.root, taskId: value.taskId, signal: controller.signal });
+    const deadline = Date.now() + 5_000;
+    let attention;
+    while (Date.now() < deadline) {
+      const current = (await readTask(value.root, value.taskId)).task;
+      if (current.status === 'needs_attention') {
+        attention = current;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(attention?.status, 'needs_attention');
+    const stored = JSON.parse(await readFile(
+      path.join(value.root, 'tasks', value.taskId, 'attention.json'),
+      'utf8',
+    ));
+    assert.equal(stored.prompt, question);
+    await submitReply(value.root, value.taskId, {
+      session_id: attention.attention.session_id,
+      question_id: attention.attention.question_id,
+      response: { optionId: 'allow' },
+    });
+    assert.equal((await running).status, 'completed');
+  } finally {
+    controller.abort();
+    await running?.catch(() => {});
+  }
 });
