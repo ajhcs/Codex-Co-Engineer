@@ -176,44 +176,94 @@ AsyncEventQueue = class CoEngineerAsyncEventQueue {
 };
 
 async function coEngineerRememberAgentDescendants(child) {
-  if (!child?.pid) return new Set();
+  if (!child?.pid) return new Map();
   const descendants = child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS]
-    ?? (child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] = new Set());
-  for (const pid of await listDescendantPids(child.pid)) descendants.add(pid);
+    ?? (child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] = new Map());
+  if (process.platform === 'linux') {
+    const processTable = coEngineerReadLinuxProcessTable();
+    const root = processTable.get(child.pid);
+    if (!root) {
+      try {
+        process.kill(child.pid, 0);
+      } catch {
+        return descendants;
+      }
+      throw new Error('Could not inspect the live ACP agent in /proc.');
+    }
+    const children = new Map();
+    for (const identity of processTable.values()) {
+      if (identity.state === 'Z') continue;
+      const siblings = children.get(identity.parentPid) ?? [];
+      siblings.push(identity);
+      children.set(identity.parentPid, siblings);
+    }
+    const pending = [child.pid];
+    const visited = new Set(pending);
+    for (let index = 0; index < pending.length; index += 1) {
+      for (const identity of children.get(pending[index]) ?? []) {
+        if (visited.has(identity.pid)) continue;
+        visited.add(identity.pid);
+        descendants.set(identity.pid, identity.startTime);
+        pending.push(identity.pid);
+      }
+    }
+    for (const identity of processTable.values()) {
+      if (identity.pid !== child.pid && identity.processGroupId === child.pid && identity.state !== 'Z') {
+        descendants.set(identity.pid, identity.startTime);
+      }
+    }
+    return descendants;
+  }
+  for (const pid of await listDescendantPids(child.pid)) descendants.set(pid, null);
   for (const pid of await listProcessGroupPids(child.pid)) {
-    if (pid !== child.pid) descendants.add(pid);
+    if (pid !== child.pid) descendants.set(pid, null);
   }
   return descendants;
+}
+
+function coEngineerReadLinuxProcessIdentity(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const stateOffset = stat.lastIndexOf(')') + 2;
+    if (stateOffset <= 1) throw new Error(`Malformed /proc/${pid}/stat.`);
+    const fields = stat.slice(stateOffset).trim().split(/\s+/u);
+    const parentPid = Number(fields[1]);
+    const processGroupId = Number(fields[2]);
+    const startTime = fields[19];
+    if (!Number.isInteger(parentPid) || !Number.isInteger(processGroupId) || !startTime) {
+      throw new Error(`Malformed /proc/${pid}/stat.`);
+    }
+    return { pid, state: fields[0], parentPid, processGroupId, startTime };
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ESRCH') return null;
+    throw error;
+  }
+}
+
+function coEngineerReadLinuxProcessTable() {
+  const processes = new Map();
+  for (const entry of fs.readdirSync('/proc', { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
+    const identity = coEngineerReadLinuxProcessIdentity(Number(entry.name));
+    if (identity) processes.set(identity.pid, identity);
+  }
+  return processes;
 }
 
 function coEngineerAgentTreeAlive(child) {
   if (!child?.pid) return false;
   if (isChildProcessRunning(child)) return true;
-  return coEngineerHasLivePid(child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] ?? new Set());
-}
-
-/*
- * On Linux, a killed detached child can remain as a zombie until its new
- * parent reaps it. `kill(pid, 0)` still succeeds for that zombie, but it has
- * no running work or handles left. Treat the process as terminated for
- * containment waits so a reaper delay cannot consume the close deadline.
- */
-function coEngineerPidIsZombie(pid) {
-  if (process.platform !== 'linux') return false;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const stateOffset = stat.lastIndexOf(')') + 2;
-    return stateOffset > 1 && stat[stateOffset] === 'Z';
-  } catch {
-    return false;
-  }
+  return coEngineerHasLivePid(child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] ?? new Map());
 }
 
 function coEngineerHasLivePid(pids) {
-  for (const pid of pids) {
-    if (coEngineerPidIsZombie(pid)) {
-      pids.delete(pid);
-      continue;
+  for (const [pid, startTime] of pids) {
+    if (process.platform === 'linux') {
+      const identity = coEngineerReadLinuxProcessIdentity(pid);
+      if (!identity || identity.state === 'Z' || identity.startTime !== startTime) {
+        pids.delete(pid);
+        continue;
+      }
     }
     try {
       process.kill(pid, 0);
@@ -230,11 +280,20 @@ async function coEngineerSignalAgentTree(child, signal) {
   const descendants = await coEngineerRememberAgentDescendants(child);
   if (process.platform === 'win32') {
     await killWindowsProcessTree(child.pid, signal);
-    for (const pid of descendants) await killWindowsProcessTree(pid, signal);
+    for (const pid of descendants.keys()) await killWindowsProcessTree(pid, signal);
     return;
   }
   if (isChildProcessRunning(child) && hasLiveProcessGroup(child.pid)) sendSignal(-child.pid, signal);
-  for (const pid of descendants) sendSignal(pid, signal);
+  for (const [pid, startTime] of descendants) {
+    if (process.platform === 'linux') {
+      const identity = coEngineerReadLinuxProcessIdentity(pid);
+      if (!identity || identity.state === 'Z' || identity.startTime !== startTime) {
+        descendants.delete(pid);
+        continue;
+      }
+    }
+    sendSignal(pid, signal);
+  }
 }
 
 async function coEngineerWaitForAgentTree(child, waitMs) {
@@ -289,7 +348,7 @@ AcpClient.prototype.spawnAgentProcess = async function coEngineerSpawnAgentProce
     detached: process.platform !== 'win32',
     windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
   });
-  spawnedChild[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] = new Set();
+  spawnedChild[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] = new Map();
   spawnedChild.once('exit', () => {
     void coEngineerRememberAgentDescendants(spawnedChild).catch(() => {});
   });
