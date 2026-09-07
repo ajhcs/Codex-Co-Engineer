@@ -751,15 +751,32 @@ function boundText(value, maxBytes) {
 }
 
 function boundOptions(value) {
-  if (!ARRAY_IS_ARRAY(value) || IS_PROXY(value)) return null;
+  if (value === undefined || value === null) return { options: null, invalid: false };
+  if (!ARRAY_IS_ARRAY(value) || IS_PROXY(value)) return { options: null, invalid: true };
   const options = [];
+  const allowedKeys = new Set(['optionId', 'kind', 'name', 'label', 'description']);
   const limit = Math.min(value.length, MAX_SCHEDULER_ATTENTION_OPTIONS);
   for (let index = 0; index < limit; index += 1) {
-    const option = boundText(value[index], MAX_SCHEDULER_ATTENTION_OPTION_BYTES);
-    if (option === null) continue;
+    const raw = value[index];
+    if (typeof raw === 'string') {
+      const option = boundText(raw, MAX_SCHEDULER_ATTENTION_OPTION_BYTES);
+      if (option !== null) options.push(option);
+      continue;
+    }
+    if (raw === null || typeof raw !== 'object' || ARRAY_IS_ARRAY(raw) || IS_PROXY(raw)) {
+      return { options: null, invalid: true };
+    }
+    const option = {};
+    for (const key of capturedOwnKeys(raw)) {
+      if (typeof key !== 'string' || !allowedKeys.has(key)) return { options: null, invalid: true };
+      const text = boundText(pickOwn(raw, key), MAX_SCHEDULER_ATTENTION_OPTION_BYTES);
+      if (text === null || text.length === 0) return { options: null, invalid: true };
+      option[key] = text;
+    }
+    if (typeof option.kind !== 'string') return { options: null, invalid: true };
     options.push(option);
   }
-  return options.length === 0 ? null : options;
+  return { options: options.length === 0 ? null : options, invalid: false };
 }
 
 function projectAttention(raw, provider) {
@@ -773,12 +790,14 @@ function projectAttention(raw, provider) {
     || typeof questionId !== 'string' || !capturedTest(QUESTION_ID_PATTERN, questionId)) {
     return { attention: null, invalid: true };
   }
+  const boundedOptions = boundOptions(pickOwn(raw, 'options'));
+  if (boundedOptions.invalid) return { attention: null, invalid: true };
   return {
     attention: {
       session_id: sessionId,
       question_id: questionId,
       prompt: boundText(pickOwn(raw, 'prompt'), MAX_SCHEDULER_ATTENTION_PROMPT_BYTES),
-      options: boundOptions(pickOwn(raw, 'options')),
+      options: boundedOptions.options,
       reply_capability: expectedReplyCapability(provider),
     },
     invalid: false,

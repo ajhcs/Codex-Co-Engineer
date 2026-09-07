@@ -262,14 +262,38 @@ function normalizeAttention(value) {
     && (value.resource !== CAPABILITY_RESOURCES[value.capability] || value.action !== 'read')) return { invalid: true };
   if (value.prompt !== undefined && (typeof value.prompt !== 'string' || value.prompt.length > 4096)) return { invalid: true };
   if (value.stage !== undefined && (typeof value.stage !== 'string' || value.stage.length === 0 || value.stage.length > 128)) return { invalid: true };
-  if (value.options !== undefined) {
-    if (!Array.isArray(value.options) || value.options.length > 8
-      || value.options.some((option) => typeof option !== 'string' || option.length > 128)) return { invalid: true };
+  let options;
+  if (value.options !== undefined && value.options !== null) {
+    if (!Array.isArray(value.options) || value.options.length > 8) return { invalid: true };
+    options = [];
+    const allowedOptionKeys = new Set(['optionId', 'kind', 'name', 'label', 'description']);
+    for (const option of value.options) {
+      if (typeof option === 'string') {
+        if (option.length > 128) return { invalid: true };
+        options.push(option);
+        continue;
+      }
+      try {
+        assertNotProxy(option, 'attention.options');
+        assertPlainObject(option, 'invalid_type', 'attention.options', 'attention option');
+        assertDirectJsonClosure(option, 'attention.options');
+      } catch {
+        return { invalid: true };
+      }
+      for (const key of Object.keys(option)) {
+        if (!allowedOptionKeys.has(key)
+          || typeof option[key] !== 'string'
+          || option[key].length === 0
+          || option[key].length > 128) return { invalid: true };
+      }
+      if (typeof option.kind !== 'string') return { invalid: true };
+      options.push({ ...option });
+    }
   }
   if (value.required !== undefined && typeof value.required !== 'boolean') return { invalid: true };
   return {
     ...value,
-    ...(value.options ? { options: [...value.options] } : {}),
+    ...(options !== undefined ? { options } : {}),
   };
 }
 

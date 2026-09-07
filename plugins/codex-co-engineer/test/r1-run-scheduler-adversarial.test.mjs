@@ -290,6 +290,30 @@ test('oversized attention is dropped and malformed attention is unresolved', asy
   assert.doesNotMatch(serialized, /sk-live/u);
 });
 
+test('structured ACP attention options retain their provider reply identities', async () => {
+  const options = [
+    { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+    { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+  ];
+  const harness = createScopedStubs({
+    attentionByTask: {
+      [TASK_A]: {
+        session_id: 'sess-a',
+        question_id: 'permission-a',
+        prompt: 'Allow this operation?',
+        options,
+      },
+    },
+    inspectStatusByTask: { [TASK_A]: 'needs_attention' },
+  });
+  await harness.scheduler.submitAssignments(twoWriterRequest());
+  const receipt = await harness.scheduler.resumeAssignments({ run_id: RUN_ID });
+  const lane = receipt.lanes.find((entry) => entry.assignment_id === ASSIGNMENT_A);
+  assert.equal(lane.status, 'needs_attention');
+  assert.deepEqual(lane.attention.options, options);
+  assert.equal(lane.attention.options[0].optionId, 'allow-once');
+});
+
 test('resume and cancel never accept a second run identity or replay flag', async () => {
   const harness = createScopedStubs();
   await harness.scheduler.submitAssignments(twoWriterRequest());

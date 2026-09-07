@@ -5,7 +5,17 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { boundedEvent, publicError, reconnectAcpTask, runAcpTask, runCliFallback, sanitizeText, workerSeamIncident } from '../mcp/v3/acp-worker.mjs';
+import {
+  boundedEvent,
+  isUserFacingPermission,
+  publicError,
+  reconnectAcpTask,
+  runAcpTask,
+  runCliFallback,
+  safeQuestionId,
+  sanitizeText,
+  workerSeamIncident,
+} from '../mcp/v3/acp-worker.mjs';
 import { installClosedProviderTestInjection } from '../mcp/v3/credential-boundary.mjs';
 import { submitReply } from '../mcp/v3/mailbox.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
@@ -54,6 +64,41 @@ async function withFakeAcpx(mode, callback, options = {}) {
     }
   }
 }
+
+test('typed ACP tool permissions do not become user questions from command text', () => {
+  for (const title of [
+    'Run `echo "exit=$?"`',
+    'Execute confirm-release-state --dry-run',
+    'Approval required by the shell script',
+  ]) {
+    assert.equal(isUserFacingPermission({
+      inferredKind: 'execute',
+      raw: { toolCall: { kind: 'execute', title } },
+    }), false);
+  }
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { question: 'Which release channel should I use?', toolCall: { title: 'Ask operator' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Fake permission' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Confirm release to production?' } },
+  }), true);
+});
+
+test('long ACP permission ids retain a bounded collision-resistant identity', () => {
+  const shared = `call-${'a'.repeat(100)}`;
+  const first = safeQuestionId(`${shared}-one`);
+  const second = safeQuestionId(`${shared}-two`);
+  assert.match(first, /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u);
+  assert.equal(first.length, 80);
+  assert.notEqual(first, second);
+  assert.equal(safeQuestionId('fake-permission'), 'fake-permission');
+});
 
 async function processExited(pid, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;

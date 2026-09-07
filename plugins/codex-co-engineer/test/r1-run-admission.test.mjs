@@ -489,6 +489,44 @@ test('new equivalent attention questions are grouped once across lanes', async (
   assert.deepEqual(repeated.attention, receipt.attention);
 });
 
+test('structured ACP options and the selected option identity survive aggregate reply delivery', async () => {
+  const options = [
+    { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+    { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+  ];
+  const { calls, dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    inspectLane: async ({ assignment }) => ({
+      status: 'needs_attention',
+      attention: {
+        session_id: `${assignment.assignment_id}-session`,
+        question_id: `permission-${assignment.assignment_id}`,
+        prompt: 'Allow this operation?',
+        options,
+      },
+      cursor: '2',
+    }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  await runtime.submitRunRequest(request({ run_id: 'structured-attention' }));
+  const attention = await runtime.inspectRun({ run_id: 'structured-attention' });
+  assert.deepEqual(attention.attention.items[0].options, options);
+
+  const item = attention.attention.items[0];
+  const selected = {
+    assignment_id: item.assignment_id,
+    task_id: item.task_id,
+    session_id: item.session_id,
+    question_id: item.question_id,
+    response: { optionId: 'allow-once' },
+  };
+  await runtime.replyRun({
+    run_id: 'structured-attention',
+    attention_reply: { reply: { answers: [selected] } },
+  });
+  assert.deepEqual(calls.attention[0].reply.reply.answers[0], selected);
+});
+
 test('hostile nested attention evidence fails closed with a partial handoff', async () => {
   const { dependencies } = baseDependencies({
     requestConsent: async () => ({ status: 'approved' }),

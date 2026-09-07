@@ -37,7 +37,7 @@ function requireSessionId(value) {
 }
 
 function normalizeOptions(value) {
-  if (value === undefined) return null;
+  if (value === undefined || value === null) return null;
   if (!Array.isArray(value) || value.length > 8) {
     fail('invalid_attention', 'The attention options must be a bounded list.');
   }

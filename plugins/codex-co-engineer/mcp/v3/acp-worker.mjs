@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { readFileSync, watch as watchDirectory } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -383,14 +383,21 @@ function taskTimeoutMs(task, now = Date.now()) {
   fail('invalid_timeout', 'Task is missing a recorded deadline.');
 }
 
-function isUserFacingPermission(params) {
-  const title = String(params?.raw?.toolCall?.title ?? params?.raw?.question ?? '');
-  return /\?|user input|needs? attention|confirm|approval required|fake permission/iu.test(title);
+export function isUserFacingPermission(params) {
+  const explicitQuestion = params?.raw?.question;
+  if (typeof explicitQuestion === 'string' && explicitQuestion.trim().length > 0) return true;
+  const kind = params?.raw?.toolCall?.kind ?? params?.inferredKind;
+  if (typeof kind === 'string' && kind !== 'other') return false;
+  const title = String(params?.raw?.toolCall?.title ?? '').trim();
+  return /^(?:user input|needs? attention|approval required|fake permission|confirm(?:ation)?(?: required)?)(?:\b|:|\?)/iu.test(title);
 }
 
-function safeQuestionId(value) {
-  const normalized = String(value ?? 'permission').replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, 'q');
-  return (normalized || 'permission').slice(0, 80);
+export function safeQuestionId(value) {
+  const source = String(value ?? 'permission');
+  const normalized = source.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, 'q') || 'permission';
+  if (source === normalized && normalized.length <= 80) return normalized;
+  const suffix = createHash('sha256').update(source, 'utf8').digest('hex').slice(0, 16);
+  return `${normalized.slice(0, 63)}-${suffix}`;
 }
 
 async function handlePermissionRequest(root, taskId, params, signal) {
