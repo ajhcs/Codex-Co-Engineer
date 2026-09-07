@@ -12,7 +12,10 @@ const SERVER = fileURLToPath(new URL('../mcp/v3/server.mjs', import.meta.url));
 async function withClient(capabilities, formResult, exercise) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-consent-roundtrip-'));
   const repo = path.join(root, 'repo');
-  await mkdir(repo);
+  const fixtureBin = path.join(root, 'bin');
+  await Promise.all([mkdir(repo), mkdir(fixtureBin)]);
+  // Keep unrelated SDK readiness discovery from running real npm and writing logs after teardown.
+  await writeFile(path.join(fixtureBin, 'npm'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
   git('init', '--quiet');
   git('config', 'user.name', 'Fixture');
@@ -23,7 +26,7 @@ async function withClient(capabilities, formResult, exercise) {
   const sha = git('rev-parse', 'HEAD').toString().trim();
   const child = spawn(process.execPath, ['--no-warnings', SERVER, '--stdio'], {
     env: {
-      PATH: process.env.PATH,
+      PATH: `${fixtureBin}${path.delimiter}${process.env.PATH}`,
       HOME: root,
       XDG_CONFIG_HOME: path.join(root, 'config'),
       XDG_STATE_HOME: path.join(root, 'state'),
