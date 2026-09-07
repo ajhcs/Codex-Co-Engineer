@@ -9,12 +9,14 @@ import { promisify } from 'node:util';
 
 import {
   cancelTask,
+  classifyGrokReadinessOutput,
   cleanupLocalTaskLifecycle,
   cleanupManagedWorkspace,
   createSupervisorRunToolAdapter,
   createWriterWorkspace,
   invokeRunTool,
   launchWorker,
+  probeGrokReadiness,
   settleLocalTaskLifecycle,
   submitTask,
   supervisorStatus,
@@ -39,6 +41,44 @@ const readyBoundary = async () => ({
   status: 'prerequisites_ready',
   provider_started: false,
   boundary: 'systemd-user-service-cgroup',
+});
+
+test('Grok readiness accepts explicit login despite ancillary unauthorized settings stderr', () => {
+  assert.deepEqual(classifyGrokReadinessOutput(
+    'You are logged in with grok.com.\n\nDefault model: grok-4.6\n',
+    'ERROR Settings fetch failed: 401 Unauthorized\n',
+  ), { ready: true });
+});
+
+test('Grok readiness treats an explicit logout as authoritative over a stale login marker', () => {
+  assert.deepEqual(classifyGrokReadinessOutput(
+    'You are logged in with grok.com.',
+    'You are not logged in. Run `grok login` to continue.\n',
+  ), { ready: false, reason: 'needs_login' });
+  assert.deepEqual(classifyGrokReadinessOutput(
+    '',
+    'Models request failed: 401 Unauthorized\n',
+  ), { ready: false, reason: 'needs_login' });
+});
+
+test('Grok readiness keeps execution failures distinct from authentication failures', async () => {
+  const executeWith = (code) => async () => {
+    throw Object.assign(new Error('synthetic probe failure'), { code });
+  };
+  const missing = await probeGrokReadiness('grok', {}, { execute: executeWith('ENOENT') });
+  assert.deepEqual({ ...missing, probe_duration_ms: 0 }, {
+    installed: false,
+    ready: false,
+    reason: 'not_installed',
+    probe_duration_ms: 0,
+  });
+  const timedOut = await probeGrokReadiness('grok', {}, { execute: executeWith('ETIMEDOUT') });
+  assert.deepEqual({ ...timedOut, probe_duration_ms: 0 }, {
+    installed: true,
+    ready: false,
+    reason: 'probe_failed',
+    probe_duration_ms: 0,
+  });
 });
 
 test('writer workspace parses noisy pretty JSON and requests a bounded large buffer', async () => {

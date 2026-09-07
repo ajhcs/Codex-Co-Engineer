@@ -2319,21 +2319,67 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
   return createRunAdmissionRuntime(simpleDeps);
 }
 
-async function probeCommand(command, args, authenticatedPattern, env, timeoutMs = PROVIDER_READINESS_PROBE_TIMEOUT_MS) {
+const AUTHENTICATION_FAILURE_PATTERN = /not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu;
+const GROK_EXPLICIT_LOGGED_IN_PATTERN = /(?:^|\r?\n)\s*you are logged in(?:\s+with [^\r\n]+)?\.?\s*(?=\r?\n|$)/iu;
+const GROK_EXPLICIT_LOGGED_OUT_PATTERN = /(?:^|\r?\n)\s*(?:you are\s+)?(?:not logged in|not signed in|not authenticated|log ?in required|login required|authentication required)\b/iu;
+
+export function classifyGrokReadinessOutput(stdout = '', stderr = '') {
+  const standardOutput = String(stdout);
+  const standardError = String(stderr);
+  const output = `${standardOutput}\n${standardError}`;
+  if (GROK_EXPLICIT_LOGGED_OUT_PATTERN.test(output)
+    || AUTHENTICATION_FAILURE_PATTERN.test(standardOutput)) {
+    return { ready: false, reason: 'needs_login' };
+  }
+  if (GROK_EXPLICIT_LOGGED_IN_PATTERN.test(standardOutput)) return { ready: true };
+  if (AUTHENTICATION_FAILURE_PATTERN.test(standardError)) {
+    return { ready: false, reason: 'needs_login' };
+  }
+  return { ready: true };
+}
+
+function classifyReadinessProbeFailure(error) {
+  return {
+    installed: error?.code !== 'ENOENT',
+    ready: false,
+    reason: error?.code === 'ENOENT' ? 'not_installed' : 'probe_failed',
+  };
+}
+
+async function probeCommand(command, args, authenticatedPattern, env, timeoutMs = PROVIDER_READINESS_PROBE_TIMEOUT_MS, outputClassifier = null, execute = execFile) {
   const started = Date.now();
   try {
-    const { stdout, stderr } = await execFile(command, args, {
+    const { stdout, stderr } = await execute(command, args, {
       cwd: '/tmp', encoding: 'utf8', timeout: timeoutMs, maxBuffer: 256 * 1024,
       env,
     });
+    if (outputClassifier) {
+      return {
+        installed: true,
+        ...outputClassifier(stdout, stderr),
+        probe_duration_ms: Date.now() - started,
+      };
+    }
     const output = `${stdout}${stderr}`;
-    if (/not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu.test(output)) {
+    if (AUTHENTICATION_FAILURE_PATTERN.test(output)) {
       return { installed: true, ready: false, reason: 'needs_login', probe_duration_ms: Date.now() - started };
     }
     return { installed: true, ready: authenticatedPattern ? authenticatedPattern.test(output) : true, probe_duration_ms: Date.now() - started };
   } catch (error) {
-    return { installed: error?.code !== 'ENOENT', ready: false, reason: error?.code === 'ENOENT' ? 'not_installed' : 'probe_failed', probe_duration_ms: Date.now() - started };
+    return { ...classifyReadinessProbeFailure(error), probe_duration_ms: Date.now() - started };
   }
+}
+
+export async function probeGrokReadiness(command, env, options = {}) {
+  return probeCommand(
+    command,
+    ['models'],
+    undefined,
+    env,
+    options.timeoutMs ?? PROVIDER_READINESS_PROBE_TIMEOUT_MS,
+    classifyGrokReadinessOutput,
+    options.execute ?? execFile,
+  );
 }
 
 async function providerReadiness(env = process.env) {
@@ -2346,7 +2392,7 @@ async function providerReadiness(env = process.env) {
   const acpxCommand = dshProbeEnv.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
   const dshAcpCommand = dshProbeEnv.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
   const [grok, cursorLocal, dshCli, acpx, dshAcp, dshMuseCredential, dshOxCredential, cursorCloud] = await Promise.all([
-    probeCommand(grokCommand, ['models'], undefined, grokEnv),
+    probeGrokReadiness(grokCommand, grokEnv),
     probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu, cursorLocalEnv),
     probeCommand(dshCommand, ['--version'], undefined, dshProbeEnv),
     probeCommand(acpxCommand, ['--version'], undefined, dshProbeEnv),
