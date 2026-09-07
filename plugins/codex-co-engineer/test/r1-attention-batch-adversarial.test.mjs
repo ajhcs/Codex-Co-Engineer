@@ -125,6 +125,37 @@ test('unknown keys, extra item fields, and capability mismatches fail closed', a
   });
 });
 
+test('structured options reject unknown fields, missing kinds, and hostile containers', async () => {
+  await withRoot(async ({ handle }) => {
+    for (const [options, expectedCode] of [
+      [[{ optionId: 'allow', kind: 'allow_once', extra: HOSTILE_SECRET }], 'unknown_key'],
+      [[{ optionId: 'allow' }], 'missing_key'],
+    ]) {
+      const item = grokItem({ options });
+      const pair = itemsAndSource([item]);
+      const error = await errorOf(() => handle.latch({
+        run_id: RUN_ID, source: pair.source, items: pair.items, expected_revision: 0,
+      }));
+      assert.equal(error.code, expectedCode);
+      assertContentFree(error);
+    }
+
+    const proxyItem = grokItem();
+    const { proxy, counts } = countingProxy({ optionId: 'allow', kind: 'allow_once' });
+    proxyItem.options = [proxy];
+    const proxyPair = itemsAndSource([proxyItem]);
+    const proxyError = await errorOf(() => handle.latch({
+      run_id: RUN_ID,
+      source: proxyPair.source,
+      items: proxyPair.items,
+      expected_revision: 0,
+    }));
+    assert.equal(proxyError.code, 'proxy_denied');
+    assert.equal(trapTotal(counts), 0);
+    assertContentFree(proxyError);
+  });
+});
+
 test('duplicate assignment ids, empty batches, and oversized prompts fail closed', async () => {
   await withRoot(async ({ handle }) => {
     const grok = grokItem();

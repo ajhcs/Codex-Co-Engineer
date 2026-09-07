@@ -83,6 +83,10 @@ export const ATTENTION_BATCH_ITEM_KEYS = capturedFreeze([
   'question_id', 'event_cursor', 'question_digest', 'prompt', 'options',
   'reply_capability', 'disposition', 'deadline_at',
 ]);
+export const ATTENTION_BATCH_OPTION_KEYS = capturedFreeze([
+  'optionId', 'kind', 'name', 'label', 'description',
+]);
+const ATTENTION_BATCH_OPTION_REQUIRED_KEYS = capturedFreeze(['kind']);
 export const ATTENTION_BATCH_PROVIDERS = capturedFreeze([
   'grok', 'cursor-local', 'cursor-cloud', 'dsh',
 ]);
@@ -425,12 +429,33 @@ function assertOptions(value, path) {
   for (let index = 0; index < value.length; index += 1) {
     const optionPath = `${path}[${index}]`;
     const option = ownDataValue(value, STRING(index), optionPath);
-    if (typeof option !== 'string' || option.length === 0
-      || capturedUtf8ByteLength(option) > MAX_ATTENTION_OPTION_BYTES) {
-      failBatch('invalid_format', optionPath,
-        `${optionPath} must be a bounded non-empty option string.`);
+    if (typeof option === 'string') {
+      if (option.length === 0 || capturedUtf8ByteLength(option) > MAX_ATTENTION_OPTION_BYTES) {
+        failBatch('invalid_format', optionPath,
+          `${optionPath} must be a bounded non-empty option string.`);
+      }
+      options.push(option);
+      continue;
     }
-    options.push(option);
+    const fields = closedObject(
+      option, optionPath, ATTENTION_BATCH_OPTION_KEYS, ATTENTION_BATCH_OPTION_REQUIRED_KEYS,
+    );
+    const normalized = capturedCreate(null);
+    for (const key of ATTENTION_BATCH_OPTION_KEYS) {
+      if (!capturedHasOwn(fields, key)) continue;
+      const text = fields[key];
+      if (typeof text !== 'string' || text.length === 0
+        || capturedUtf8ByteLength(text) > MAX_ATTENTION_OPTION_BYTES) {
+        failBatch('invalid_format', `${optionPath}.${key}`,
+          `${optionPath}.${key} must be bounded non-empty option text.`);
+      }
+      normalized[key] = text;
+    }
+    if (typeof normalized.kind !== 'string') {
+      failBatch('invalid_format', optionPath,
+        `${optionPath}.kind is required for a structured option.`);
+    }
+    options.push(normalized);
   }
   return options;
 }
