@@ -1075,6 +1075,40 @@ test('accepts one exact provider request identity and leaves ambiguous matches t
   assert.equal(ambiguousCreated, 0);
 });
 
+test('preserves a legitimate answer contained in the prompt while diagnostics stay redacted', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-answer-overlap-'));
+  const repo = await createCloudRepo(root);
+  const prompt = 'Return exactly CLOUD_NATIVE_OK';
+  const apiKey = 'cursor-answer-secret-123456';
+  await createCloudTask({ root, prompt, record: {
+    id: 'cloud-answer-overlap', status: 'accepted', provider: 'cursor-cloud', role: 'review', cwd: repo,
+  } });
+  const sdk = { Agent: {
+    create: async () => ({
+      send: async () => ({ id: 'run-answer-overlap', wait: async () => ({
+        id: 'run-answer-overlap', status: 'finished',
+        result: `CLOUD_NATIVE_OK; Authorization: Bearer ${apiKey}`,
+        error: {
+          message: `diagnostic echoed ${prompt}; Bearer ${apiKey}`,
+          detail: 'CLOUD_NATIVE_OK',
+        },
+        git: { branches: [] },
+      }) }),
+      close() {},
+    }),
+    archive: async () => {},
+  } };
+
+  const terminal = await runCursorCloudTask({ root, taskId: 'cloud-answer-overlap', sdk, apiKey });
+  const serializedError = JSON.stringify(terminal.provider_error);
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.result, /^CLOUD_NATIVE_OK;/u);
+  assert.doesNotMatch(terminal.result, new RegExp(apiKey, 'u'));
+  assert.doesNotMatch(serializedError, new RegExp(prompt, 'u'));
+  assert.doesNotMatch(serializedError, new RegExp(apiKey, 'u'));
+  assert.equal(terminal.provider_error.detail, '[REDACTED]');
+});
+
 test('recursively redacts prompt, bearer, and API-key material from normal provider results', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-cursor-result-redaction-'));
   const repo = path.join(root, 'repo');

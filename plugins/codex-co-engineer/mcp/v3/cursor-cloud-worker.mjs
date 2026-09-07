@@ -217,6 +217,14 @@ function redactProviderText(value, sensitiveValues = []) {
     .replace(COMMON_TOKEN_PATTERNS[2], '[redacted]');
 }
 
+function redactProviderResultText(value, credentialValues = [], prompt = '') {
+  let message = String(value ?? '');
+  if (typeof prompt === 'string' && prompt.length > 0 && message.includes(prompt)) {
+    message = message.split(prompt).join('[REDACTED]');
+  }
+  return redactProviderText(message, credentialValues);
+}
+
 function redactedString(value, sensitiveValues = []) {
   return redactProviderText(value, sensitiveValues).slice(0, 4096);
 }
@@ -877,11 +885,16 @@ async function persistTerminalRun({ root, taskId, client, key, prompt, agentId, 
   const sources = assertTerminalResultSources(current, run, agentId, adaptedResult);
   const status = adaptedResult.status === 'finished' ? 'completed' : adaptedResult.status === 'cancelled' ? 'cancelled' : 'failed';
   const providerSecrets = [key, prompt];
+  const providerCredentials = [key];
   const sanitizedBranches = sanitizeProviderValue(adaptedResult.git?.branches ?? [], providerSecrets);
   const branches = Array.isArray(sanitizedBranches) ? sanitizedBranches : [];
   const bounded = typeof adaptedResult.result === 'string'
-    ? boundedProviderResult(adaptedResult.result, { sanitize: (text) => redactProviderText(text, providerSecrets) })
-    : boundedProviderValue(adaptedResult.result ?? null, { sanitize: (text) => redactProviderText(text, providerSecrets) });
+    ? boundedProviderResult(adaptedResult.result, {
+      sanitize: (text) => redactProviderResultText(text, providerCredentials, prompt),
+    })
+    : boundedProviderValue(adaptedResult.result ?? null, {
+      sanitize: (text) => redactProviderResultText(text, providerCredentials, prompt),
+    });
   const providerResult = bounded.value;
   const providerError = sanitizeProviderValue(adaptedResult.error ?? null, providerSecrets);
   let archived = false;
