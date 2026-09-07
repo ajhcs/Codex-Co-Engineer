@@ -5,11 +5,15 @@ Submit `delegate.run_request` once: a stable `run_id`, absolute Git `repo`,
 `assignment_id`, chosen `provider`, `role`, and `prompt`. Optional
 `expected_duration_ms` defaults to ten minutes, with the existing 20% deadline
 margin; supply an estimate when the task needs a different duration.
-State the outcome, allowed changes and acceptance checks in the prompt.
+State the requested output, allowed changes, tests and brief relevant evidence
+in the prompt. Preserve repository instructions and required verification, but
+do not ask the provider to duplicate machine-generated lifecycle or handoff receipts.
 Reuse existing provider/model choices. Model overrides are optional.
-The server derives identities, defaults and isolated workspaces; do not construct
-the legacy full `run` envelope. Multiple writers need disjoint `write_scope` paths.
-Dependent review starts after its input exists.
+The controller creates managed worktrees; the worker wrapper verifies them and
+owns the writer lock and lifecycle. Do not ask the provider to reconstruct that
+harness setup or supply its hidden writer token. The server derives identities
+and defaults; do not construct the legacy full `run` envelope. Multiple writers
+need disjoint `write_scope` paths. Dependent review starts after its input exists.
 
 Keep the returned run ID and same run cursor. Wait through `task` with
 `wait_until` set to `decision_or_attention`. Preparation and pending acknowledgement

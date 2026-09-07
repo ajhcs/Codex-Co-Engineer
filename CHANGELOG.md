@@ -33,6 +33,10 @@
   of a duplicate check that rejected separate directories.
 - Repeated status checks no longer repeat terminal cleanup grace periods for
   previously reconciled receipts; ownership inspection remains active.
+- Preserve structured Cursor permission options through grouped questions and
+  stop treating shell command punctuation as user input.
+- Distinguish explicit Grok login status from ancillary command errors during
+  readiness checks.
 - All-Cursor Cloud runs skip the irrelevant local systemd/cgroup prerequisite;
   mixed and local runs still enforce it.
 - Assignment access can be derived from its explicit role, eliminating a
@@ -51,6 +55,9 @@
 - Made the installed skill path use existing provider choices and semantic
   admission directly, with setup and manager tasks outside routine launch.
   Clarified continuation, typed approvals, dependent reviews, and verification.
+  Provider prompts stay focused on requested output, tests and brief evidence;
+  the controller creates managed worktrees while the worker wrapper owns
+  verification, hidden writer tokens, lifecycle and machine receipts.
 
 ## [3.4.1] - 2026-09-01
 
