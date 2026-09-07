@@ -40,6 +40,21 @@ pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and the cohesive DSH
 `0.1.0-rc.7` composition. It does not log you into Grok, Cursor Local,
 or Cursor Cloud.
 
+**The plugin cache reverts after Windows Desktop reconnects to a remote host.**
+A host-only cache restore is not durable if the Desktop client resyncs an older
+copy. Add or update the exact local marketplace and install and test the plugin
+on the Desktop computer too, following the
+[official local-plugin install guide](https://developers.openai.com/plugins/build/plugins):
+
+```text
+codex plugin marketplace add LOCAL_ROOT
+codex plugin add codex-co-engineer@codex-co-engineer
+```
+
+Treat client-to-host resync as suspected until versions or file hashes confirm
+it. Do not add an auto-repair cron, replace the cache with a symlink, or disable
+unrelated configuration to mask the problem.
+
 ## Worktrees and cleanup
 
 **A managed worktree appeared without a receipt.**
@@ -66,6 +81,13 @@ prompt that was already dispatched.
 Cursor Cloud does not use a local worktree. A bounded-run Cloud lane
 needs a provider-accessible origin and an exact already-pushed commit
 SHA. Individual 3.2.1 Cloud tasks still treat that SHA as optional.
+
+**Cursor Cloud completed, but the answer is incomplete.**
+`completed` proves terminal lifecycle state; it does not prove that the answer
+satisfies the task. Codex must inspect the actual result before accepting it.
+If the SDK transcript and result both contain only the same progress sentence,
+record the task outcome as incomplete. Do not infer a hidden final answer from
+natural language and do not replay the prompt automatically.
 
 ## Credentials
 
