@@ -6,6 +6,14 @@
 
 ### Fixed
 
+- Remember explicit native approval for the same repository and selected
+  providers, with a one-run option and local revocation. Remove the redundant
+  approval checkbox and allow more time to answer the native form.
+- Detect missing installed worker entrypoints before preparing workspaces or
+  dispatching providers, with actionable reinstall and restart guidance.
+- Direct provider workers to their assigned working directory and clarify
+  controller-owned receipts, reducing unnecessary setup and evidence searches.
+
 - Adapt Cursor Cloud SDK results before internal validation so documented
   timing, model, and usage metadata does not prevent terminal result delivery.
 - Use ACPX's one-shot command for DSH, preserving bounded provider errors and

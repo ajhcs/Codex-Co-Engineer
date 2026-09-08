@@ -87,6 +87,19 @@ The 3.3.0 authority split and honest threat model are
   commits are handed off for Codex to inspect and push or turn into a PR.
   Codex remains the merge authority.
 
+## Remembered repository consent
+
+Native form acceptance can authorize this run only or remember access for the
+repository and selected providers. Remembered grants are owner-only local state,
+shared across linked worktrees of the same repository. They do not authorize new
+providers, changed origins, or replacement repositories. Earlier one-run approvals
+are not automatically converted into remembered grants.
+
+Use `codex-co-engineer-consent list` and `codex-co-engineer-consent revoke`
+to inspect or revoke grants; see the [plugin README](plugins/codex-co-engineer/README.md)
+for command arguments. Revocation affects later admissions, not already authorized
+running tasks; cancel those tasks separately when required.
+
 ## Credentials and persistent sessions
 
 Provider authentication is normal, persistent user authentication:
