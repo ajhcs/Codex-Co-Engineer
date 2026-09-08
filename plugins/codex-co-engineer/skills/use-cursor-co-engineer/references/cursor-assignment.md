@@ -6,7 +6,9 @@ Read this only when the Cursor place or public speech still needs a decision. Th
 
 User: Using Cursor Co-Engineer, review the operator guide on this computer.
 
-Codex: I am delegating this to Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is running 1 independent assignment.
+Codex: I am delegating this to Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is preparing 1 independent assignment.
+
+The card changes to running only after authoritative prompt-dispatch evidence exists for the required lane.
 
 The user named this computer in plain language. Public speech stays Using Cursor Co-Engineer. Do not say Using Cursor Local Co-Engineer.
 

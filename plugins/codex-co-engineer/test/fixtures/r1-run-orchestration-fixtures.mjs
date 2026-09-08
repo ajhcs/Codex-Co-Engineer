@@ -68,7 +68,7 @@ export function mixedProviderManifest(overrides = {}) {
       starting_ref: baseSha,
     }),
     writerLane('lane-muse', ['src/muse/**'], {
-      execution: { provider: 'dsh', model: 'muse-spark-1.2-contributor' },
+      execution: { provider: 'dsh', model: 'meta/muse-spark-1.3-contributor' },
     }),
     writerLane('lane-ox', ['src/ox/**'], {
       execution: { provider: 'dsh', model: 'stealth/ox-alpha' },

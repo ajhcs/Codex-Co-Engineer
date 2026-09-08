@@ -4,10 +4,19 @@ import path from 'node:path';
 
 import { providerCapabilities } from './contract.mjs';
 import { appendTaskEvent, readTask, taskPaths, updateTask, waitDelay } from './task-store.mjs';
+import { assertDirectJsonClosure, assertNotProxy, assertPlainObject } from './selection-json.mjs';
 
 const QUESTION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const RESPONSE_MAX_BYTES = 16 * 1024;
+const SAFE_ATTENTION_CAPABILITIES = Object.freeze([
+  'read_run_receipts', 'read_provider_logs', 'read_own_worktree',
+]);
+const CAPABILITY_RESOURCES = Object.freeze({
+  read_run_receipts: 'run_receipt',
+  read_provider_logs: 'provider_log',
+  read_own_worktree: 'own_worktree',
+});
 
 function fail(code, message) {
   throw Object.assign(new Error(message), { code });
@@ -25,6 +34,35 @@ function requireSessionId(value) {
     fail('invalid_session_id', 'session_id must be a stable live-session identifier.');
   }
   return value;
+}
+
+function normalizeOptions(value) {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length > 8) {
+    fail('invalid_attention', 'The attention options must be a bounded list.');
+  }
+  return value.map((option, index) => {
+    if (typeof option === 'string') {
+      if (option.length > 128) fail('invalid_attention', `The attention option ${index} is too long.`);
+      return option;
+    }
+    try {
+      assertNotProxy(option, `attention.options[${index}]`);
+      assertPlainObject(option, 'invalid_attention', `attention.options[${index}]`, 'Attention option');
+      assertDirectJsonClosure(option, `attention.options[${index}]`);
+    } catch {
+      fail('invalid_attention', 'The attention options must contain direct JSON values.');
+    }
+    const allowed = new Set(['optionId', 'kind', 'name', 'label', 'description']);
+    for (const key of Object.keys(option)) {
+      if (!allowed.has(key)) fail('invalid_attention', 'The attention option has an unknown field.');
+      if (typeof option[key] !== 'string' || option[key].length === 0 || option[key].length > 128) {
+        fail('invalid_attention', 'The attention option text is invalid.');
+      }
+    }
+    if (typeof option.kind !== 'string') fail('invalid_attention', 'The attention option kind is required.');
+    return { ...option };
+  });
 }
 
 function replyPaths(root, taskId, questionId) {
@@ -68,13 +106,32 @@ export async function readAttention(root, taskId) {
 export async function recordNeedsAttention(root, taskId, attention) {
   const sessionId = requireSessionId(attention?.session_id);
   const questionId = requireQuestionId(attention?.question_id);
+  const capability = attention?.capability;
+  const resource = attention?.resource;
+  const action = attention?.action;
+  if (capability !== undefined
+    && (!SAFE_ATTENTION_CAPABILITIES.includes(capability)
+      || resource !== CAPABILITY_RESOURCES[capability]
+      || action !== 'read')) {
+    fail('invalid_attention', 'The attention capability is outside the safe typed vocabulary.');
+  }
+  if (resource !== undefined && (typeof resource !== 'string' || resource.length === 0 || resource.length > 128)) {
+    fail('invalid_attention', 'The attention resource is invalid.');
+  }
+  if (action !== undefined && (typeof action !== 'string' || action.length === 0 || action.length > 64)) {
+    fail('invalid_attention', 'The attention action is invalid.');
+  }
+  const options = normalizeOptions(attention?.options);
   const paths = replyPaths(root, taskId, questionId);
   const record = {
     session_id: sessionId,
     question_id: questionId,
     prompt: typeof attention.prompt === 'string' ? attention.prompt.slice(0, 4_096) : null,
-    options: Array.isArray(attention.options) ? attention.options.slice(0, 8) : null,
+    options,
     stage: typeof attention.stage === 'string' ? attention.stage : 'provider_feedback',
+    ...(capability !== undefined ? { capability } : {}),
+    ...(resource !== undefined ? { resource } : {}),
+    ...(action !== undefined ? { action } : {}),
     at: new Date().toISOString(),
   };
   const current = await readAttention(root, taskId);
@@ -88,6 +145,9 @@ export async function recordNeedsAttention(root, taskId, attention) {
       session_id: sessionId,
       question_id: questionId,
       stage: record.stage,
+      ...(capability !== undefined ? { capability } : {}),
+      ...(resource !== undefined ? { resource } : {}),
+      ...(action !== undefined ? { action } : {}),
     },
   });
   await appendTaskEvent(root, taskId, {

@@ -942,8 +942,9 @@ test('descriptors are deeply frozen, primitive-only, and detached', () => {
 test('manifest, prompt, envelope, and run-identity goldens keep their exact bytes', () => {
   const manifest = goldenManifest();
   const envelope = compileChildEnvelopeV1(manifest, 'backend-writer');
-  // Pinned against the accepted product-foundation identity bytes for this
-  // fixture; the authority refactor must not move one byte.
+  // Pinned against the current deterministic execution envelope. The task
+  // prompt digest remains stable while canonical provider guidance changes
+  // the exact dispatched envelope bytes and therefore its own digest.
   assert.deepEqual(runManifestDigestV1(manifest), {
     algorithm: 'sha256',
     domain: 'codex-co-engineer.identity.v1',
@@ -973,8 +974,8 @@ test('manifest, prompt, envelope, and run-identity goldens keep their exact byte
     domain: 'codex-co-engineer.identity.v1',
     version: 1,
     label: 'child-envelope.v1',
-    input_bytes: 1519,
-    digest: '61359b14dcaf7dcf5015ea1242ecdbd49540f125a75942f5bd31527ee4b85f30',
+    input_bytes: 2188,
+    digest: 'fa0f7729b3f2f8295843caf6869cc81e222de04c8a390757645c76c158e74ecb',
   });
   const identity = describeRunIdentityV1(manifest);
   assert.deepEqual(identity.assignment_prompt_digests.map((entry) => entry.digest), [

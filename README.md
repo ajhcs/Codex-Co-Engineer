@@ -1,533 +1,266 @@
 # Codex-Co-Engineer
 
-Give Codex a team of external co-engineers without giving up control.
+**Give Codex a team. Keep control of the result.**
 
-[![Codex-Co-Engineer CI status](https://github.com/ajhcs/Codex-Co-Engineer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ajhcs/Codex-Co-Engineer/actions/workflows/ci.yml)
-[![Latest Codex-Co-Engineer release](https://img.shields.io/github/v/release/ajhcs/Codex-Co-Engineer?sort=semver)](https://github.com/ajhcs/Codex-Co-Engineer/releases/latest)
-[![Node.js 24 or newer](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![CI](https://github.com/ajhcs/Codex-Co-Engineer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ajhcs/Codex-Co-Engineer/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/ajhcs/Codex-Co-Engineer?sort=semver)](https://github.com/ajhcs/Codex-Co-Engineer/releases/latest)
+[![Node.js 24+](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Codex remains chief engineer and reviewer. External co-engineers do
-isolated assigned work. External workers may commit. A scoped publisher
-may non-force push only the task branch and open a draft PR. Sol High
-or Sol XHigh alone may perform a regular merge after deterministic
-exact-head/tree, current green CI, verifier, and topology checks. The
-user retains version, tag, release, protected-ref, and product-policy
-authority. You keep control. The honest shape is up to eight isolated
-external co-engineers, one bounded run, one coordinated wait, one
-verified decision.
+[Install](#install-and-authentication) · [Try it](#your-first-delegation) · [Providers](#provider-choices) · [Release notes](docs/releases/v3.4.2.md) · [Troubleshooting](#troubleshooting)
 
-`Delegating to Co-Engineer` starts that one bounded run. `Chatting with
-Co-Engineer` inspects, continues, answers grouped attention, or cancels
-the run that already exists. If you ask to chat and nothing is running,
-Codex says chatting needs existing work and offers to delegate. It does
-not silently submit.
+Ask Codex to bring in **Grok, Cursor, or Muse** for implementation, investigation,
+or a second opinion. Co-Engineer prepares isolated workspaces, coordinates up to
+**eight independent assignments**, and brings their results back for Codex to review.
+You decide what ships.
 
-The public co-engineer names are `Using Grok Co-Engineer`, `Using Cursor
-Co-Engineer`, and `Using Muse Co-Engineer`. Cursor on this computer and
-Cursor Cloud both stay Cursor Co-Engineer in public speech.
+> Use Grok Co-Engineer to review this change. Focus on correctness and regressions.
 
-Any extra Co-Engineer panel is optional, feature-detected, and
-host-specific. The same conversation works headless in Codex CLI. This
-documentation does not claim a Co-Engineer UI on every Codex Desktop
-host.
-
-The stable machine identifier is `codex-co-engineer`. Published package
-notes: [docs/releases/v3.4.0.md](docs/releases/v3.4.0.md).
-
-## Visual demo
-
-The static Co-Engineer architecture illustration is the authoritative
-GitHub-compatible visual. It uses the approved Co-Engineer identity. It
-is not a live-run screenshot. There is no autoplay audio.
+No hand-written tool payloads. No profile required for an ordinary launch.
+Choose a provider, describe the work, and keep talking in the same Codex task.
 
 <!-- README_ART_SLOT: hero-demo -->
 
 ![Give Codex a team of external co-engineers without giving up control.](docs/assets/co-engineer-3.4.0/final/derived/hero-demo.jpg)
 
-## First 60 seconds
+*Architecture illustration, not a live screenshot. There is no autoplay audio.*
 
-After [install and authentication](#install-and-authentication), start a
-**new** Codex session and speak in ordinary language. You do not write
-tool payloads.
+## What makes it useful
 
-### Your first delegation
-
-> Delegating to Co-Engineer: review the auth change with Grok Co-Engineer.
-
-Codex:
-
-> I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-> Co-Engineer is running 1 independent assignment.
-
-That is the only submission. Codex waits once. When the work is
-complete, Codex inspects it:
-
-> Co-Engineer finished, and I verified the candidate.
-
-<!-- README_ART_SLOT: first-delegation -->
-
-![Conceptual illustration of a first Co-Engineer delegation: one explicit Grok assignment, one submission, and one verified candidate.](docs/assets/co-engineer-3.4.0/final/derived/first-delegation.jpg)
-
-You still decide whether to keep, change, or discard the result.
-
-### Several independent assignments
-
-If you want several independent assignments in one run:
-
-> Split this into three isolated independent assignments: API
-> validation, the operator guide, and a review of both diffs.
-
-Codex:
-
-> I am delegating this to Co-Engineer. Co-Engineer is running 3
-> independent assignments.
-
-<!-- README_ART_SLOT: multi-lane-run -->
-
-Independent assignments stay isolated. They do not share a writer path.
-Codex submits once, waits once, and inspects the whole set together.
-
-If you have no saved profile and name no co-engineers, Codex asks once
-which co-engineers should take the independent assignments: Grok,
-Cursor, or Muse. It does not keep asking and does not invent a default
-router.
-
-A longer walkthrough lives in
-[docs/co-engineer-quickstart.md](docs/co-engineer-quickstart.md).
-
-## How a run works
-
-A run is one submission, one coordinated wait, and one verified
-decision. Independent means the assignments do not share a writer path.
-The bound is eight.
-
-Codex speech during a run uses these utterances:
-
-- `I am delegating this to Co-Engineer`
-- `Co-Engineer is running N independent assignments` (`assignment` when
-  N is 1)
-- `Co-Engineer needs one decision from you`
-- `Co-Engineer finished, and I verified the candidate.`
-
-The verified-final sentence includes its period. Codex uses it only
-after it has inspected a complete candidate. Failure, cancel, and
-unresolved outcomes must not use it.
-
-Use Codex-Co-Engineer when you want Codex to keep control while isolated
-external co-engineers do assigned review or implementation work. Do not
-use it as a security sandbox, a credential broker, or a replacement for
-the provider's own login and approval flow.
-
-The bundled skill is `control-codex-co-engineer-agents`. Normal-user
-journeys: [docs/co-engineer-user-journeys.md](docs/co-engineer-user-journeys.md).
-
-## Provider choices
-
-Provider and model are explicit, chosen by you, or filled from one named
-profile. Missing selection is one ask, not a router. Codex never ranks,
-predicts cost, or substitutes a different co-engineer.
-
-| You say | Codex says |
+| You want to… | Co-Engineer handles… |
 | --- | --- |
-| Grok Co-Engineer | Using Grok Co-Engineer |
-| Cursor Co-Engineer | Using Cursor Co-Engineer |
-| Muse Co-Engineer | Using Muse Co-Engineer |
+| Get another model's perspective | Explicit Grok, Cursor, and Muse assignments using your provider accounts |
+| Work on several independent changes | A separate managed Git worktree and branch for each local assignment |
+| Keep Codex focused | One submission, coordinated waits, compact results, and details on demand |
+| Continue after a disconnect | Durable task identities and receipts; accepted prompts are never blindly replayed |
+| Avoid repeated setup decisions | Existing provider choices and optional remembered repository/provider approval |
+| Review before integrating | Retained branches, output, and handoffs for Codex to inspect |
 
-- **Using Grok Co-Engineer** runs an explicitly selected Grok assignment.
-- **Using Cursor Co-Engineer** covers Cursor on this computer or Cursor
-  Cloud; Codex keeps the location and immutable starting commit explicit.
-- **Using Muse Co-Engineer** runs the explicitly selected Muse profile and
-  model. It does not silently become another provider.
-
-You may name the Cursor place in plain language. Public speech still
-stays `Using Cursor Co-Engineer`. Muse is the public name for that
-route. Optional Ox Alpha stays a Muse-route model choice, not a separate
-public co-engineer name.
-
-Example:
-
-> Use Grok Co-Engineer for the API change and Muse Co-Engineer for the
-> docs. Keep the review on Cursor Co-Engineer.
-
-Codex:
-
-> I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-> Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
-> running 3 independent assignments.
-
-<!-- README_ART_SLOT: provider-choices -->
-
-![Conceptual illustration of explicit Grok, Cursor, and Muse Co-Engineer choices, with no learned or global router.](docs/assets/co-engineer-3.4.0/final/derived/provider-choices.jpg)
-
-## Codex authority and safety
-
-Codex remains the chief engineer and reviewer. External workers may
-commit. A scoped publisher may non-force push only the task branch and
-open a draft PR. Sol High or Sol XHigh alone may perform a regular merge
-after deterministic exact-head/tree, current green CI, verifier, and
-topology checks. The user retains version, tag, release, protected-ref,
-and product-policy authority. External co-engineers stay isolated. One
-bounded run is in flight at a time for this work. Chatting never becomes
-a second submission. Failure stays visible.
-
-Selecting a provider authorizes the assignment prompt and repository
-content to be sent to that provider. Private repositories are supported
-when the configured provider is authorized to review them. Provider
-children inherit the user's normal authenticated environment because
-they are trusted peer coding agents.
-
-Local workers are launched as manager-owned transient `systemd --user`
-services with `KillMode=control-group` solely so cancellation reaches
-detached descendants and the worker survives the launching client. This
-is a lifecycle/cleanup boundary, not a sandbox: providers inherit the
-normal environment, network, filesystem, credentials, and shell
-capabilities. Local dispatch fails closed when the Linux systemd/cgroup
-prerequisite is not available. The check occurs before Codex-Co-Engineer
-creates a managed worktree, task receipt, or prompt file. Cursor Cloud
-runs in the provider's remote environment and does not depend on the
-local process boundary.
-
-Cursor Local and DSH's official fallback CLIs take the prompt
-positionally, so it may be visible to other processes running as the
-same Unix user for the duration of that fallback. Grok fallback uses an
-owner-only prompt file.
-
-Managed local work uses one locked `worktree-bootstrap` worktree and
-branch per assignment:
-
-```text
-one task → one worktree → one branch → one writer
-```
-
-Direct mutation of a supplied checkout is an explicit 3.2.1 single-task
-choice only. Bounded-run submissions do not use direct mode.
-
-If `worktree-bootstrap` fails before returning an authoritative receipt
-and path, Codex-Co-Engineer does not guess at or delete an unknown
-worktree. Inspect the repository with `git worktree list` and the
-`worktree-bootstrap` lock tooling; clean only an exact task/lock that
-the tooling identifies.
-
-Cursor Cloud does not use a local worktree. The supplied repository must
-have an origin that Cursor can access. A bounded-run Cloud lane needs an
-exact, immutable commit SHA that has already been pushed to that origin.
-An exact SHA that is reachable only from a feature branch can still be
-invisible to Cursor until that branch is provider-visible through an
-open pull request or the default branch. Create the draft PR (or make
-the commit reachable from the default branch) before final Cloud
-acceptance. If Cursor returns HTTP 400 for an otherwise-valid SHA, treat
-it as a provider visibility failure and fix reachability before
-retrying; do not blindly replay the work.
-
-Local implementations return a branch and handoff for Codex to inspect.
-External workers may commit. A scoped publisher may non-force push only
-the task branch and open a draft PR after confirming that real commits
-exist. Sol High or Sol XHigh alone may perform a regular merge after
-deterministic exact-head/tree, current green CI, verifier, and topology
-checks.
-
-Task prompts, events, logs, runtime identities, local paths, branch
-names, and opaque provider IDs are stored under the owner-only state
-directory, normally `$XDG_STATE_HOME/codex-co-engineer` or
-`~/.local/state/codex-co-engineer`. Task directories are `0700`; files
-are `0600`. See [data handling](docs/data-handling.md).
-
-## Chatting, grouped attention, and the final decision
-
-Chatting with Co-Engineer during a live run is not a second delegation.
-It can inspect the current run, continue from its recorded cursor, answer
-one grouped decision, or cancel the existing run. It never creates
-unlimited persistent chat and never silently starts new work.
-
-The run is already in its one coordinated wait. More than one assignment
-needs a choice. Codex groups those questions into one decision.
-Unaffected assignments keep working.
-
-Codex:
-
-> Co-Engineer needs one decision from you.
-
-You:
-
-> Use the stricter validator and keep the docs change as written.
-
-<!-- README_ART_SLOT: grouped-attention -->
-
-One grouped decision covers every assignment that asked. Lanes that did
-not ask keep working. Codex resumes from the same cursor after you
-answer.
-
-That answer is chatting: answer grouped attention. It is not a debate
-loop. Codex continues the same run with the same single wait.
-
-After the wait, Codex inspects the candidate. Only then may it say:
-
-> Co-Engineer finished, and I verified the candidate.
-
-<!-- README_ART_SLOT: verified-final-decision -->
-
-The verified result is an evidence packet Codex has inspected: the
-candidate, its branch, head, and tree, plus the scope, tests, and
-reviews that support the decision. Verification is Codex's review of
-that packet, not automatic merge. You keep control.
-
-If a required assignment fails, cannot be answered, or stays unresolved,
-Codex reports that honestly. It does not say Co-Engineer finished, and I
-verified the candidate. A required gap blocks a complete candidate.
-Cancel is chatting with Co-Engineer, not a new delegation.
-
-<!-- README_ART_SLOT: failure-unresolved -->
-
-![Conceptual illustration of a required Co-Engineer assignment that failed or stayed unresolved, so no verified candidate is claimed.](docs/assets/co-engineer-3.4.0/final/derived/failure-unresolved.jpg)
+**New in 3.4.2:** simpler launches, reusable consent, more reliable provider
+completion and cleanup, and concise Grok results. Read the
+[detailed release notes](docs/releases/v3.4.2.md) for compatibility and limits.
 
 ## Install and authentication
 
-Requires Node.js 24+, Git, and Codex CLI. Local providers also need
-Linux `systemd --user`, `systemd-run` 244 or newer, unified cgroup v2,
-and `worktree-bootstrap` on `PATH`.
+### 1. Check your host
+
+You need **Node.js 24+**, **Git**, **Python 3.11+** for the bundled setup, and a
+current **Codex CLI** with plugin support.
+Local Grok, Cursor, and Muse also require **Linux**, a working `systemd --user`
+manager, `systemd-run` 244+, and unified cgroup v2.
+Cursor Cloud runs remotely and does not require that local process boundary.
+
+Install the CLI and account access for **only the providers you plan to use**.
+The provider table below separates these requirements. Co-Engineer does not
+install or sign you into Grok or Cursor.
+
+### 2. Install the release
+
+Run these commands from the directory where you keep your projects:
 
 ```bash
-git clone https://github.com/ajhcs/Codex-Co-Engineer.git
+git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
 cd Codex-Co-Engineer
+npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
-npm --prefix plugins/codex-co-engineer run setup
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
+Keep this clone: it is the registered local marketplace source. Setup installs
+pinned ACPX, Cursor SDK, and DSH dependencies globally and creates key-free DSH
+configuration. It preserves existing compatible configuration and reports
+incompatible profiles instead of overwriting them. Use a user-writable npm global
+prefix on your `PATH`; a Node version manager is one way to provide it.
+
+`setup:check` checks Node/Python prerequisites, installed dependencies, and DSH configuration. Provider login
+and the running MCP process's Linux boundary are checked separately by `status`.
+The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
+
+### 3. Connect your chosen provider
+
+| Provider | One-time authentication | Runs where? |
+| --- | --- | --- |
+| **Grok** | Install [Grok Build](https://docs.x.ai/build/cli), then run `grok login` | Local managed worktree |
+| **Cursor Local** | Install [Cursor CLI](https://cursor.com/docs/cli/installation), then run `cursor-agent login` | Local managed worktree |
+| **Cursor Cloud** | Configure `CURSOR_API_KEY` or an owner-only key file; see [configuration](docs/configuration.md#cursor-cloud) | Cursor's remote environment |
+| **Muse** | From this clone, run `plugins/codex-co-engineer/bin/set-model-api-key` to save your OpenRouter key | Local DSH managed worktree |
+
+Muse defaults to **Muse Spark 1.3 Contributor, XHigh, through OpenRouter**.
+Provider credentials stay in normal login state, environment variables, or
+owner-only key files. Never paste them into task prompts or MCP arguments.
+
+### 4. Start a new Codex session
+
+Ask:
+
+> Show Co-Engineer status, then use Grok Co-Engineer to review the latest change.
+
+The first repository-sharing form offers **this run only** or **remember access
+for this repository and the selected providers**. Remembered access works across
+linked worktrees. Adding a provider or changing the repository origin requires a
+new decision. [Inspect or revoke remembered access](plugins/codex-co-engineer/README.md#remembered-repository-consent).
+
+<details>
+<summary>See the installation overview</summary>
+
 <!-- README_ART_SLOT: install-auth -->
 
-![Conceptual illustration of a clean Codex-Co-Engineer install and provider sign-in, with credentials and private paths omitted.](docs/assets/co-engineer-3.4.0/final/derived/install-auth.jpg)
+![Conceptual illustration of a clean Co-Engineer install and provider sign-in.](docs/assets/co-engineer-3.4.0/final/derived/install-auth.jpg)
 
-`npm run setup` installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and
-the cohesive DSH `0.1.0-rc.7` composition. It does not log you into
-Grok, Cursor Local, or Cursor Cloud. `setup:check` verifies those pinned
-packages plus `worktree-bootstrap`. Start a **new** Codex session after
-the plugin add.
+</details>
 
-Sign in once for only the providers you will use:
+## Your first delegation
+
+> Use Grok Co-Engineer to review the authentication changes. Report actionable findings.
+
+Codex submits the assignment, Co-Engineer prepares its workspace, and the provider
+runs. Codex then reads the result and checks the supporting evidence. A launch
+acknowledgement is not a completed review.
+
+<details>
+<summary>See a single-assignment walkthrough</summary>
+
+<!-- README_ART_SLOT: first-delegation -->
+
+![Conceptual illustration of one explicit Grok assignment, one submission, and a verified candidate.](docs/assets/co-engineer-3.4.0/final/derived/first-delegation.jpg)
+
+</details>
+
+### Several independent assignments
+
+> Use Grok for the API validator and Muse for the operator guide. Give them separate workspaces.
+
+<!-- README_ART_SLOT: multi-lane-run -->
+
+Independent assignments stay isolated. Assign work that can proceed independently;
+ask for a review of the resulting changes after the implementation is available.
+
+If you have no saved profile and do not name a provider, Codex asks which one to
+use. It does not silently choose a different provider or model.
+
+### Continue, answer, or cancel
+
+> Chat with Co-Engineer: show the current result.
+>
+> Use the stricter validation option.
+>
+> Cancel that Co-Engineer run.
+
+<!-- README_ART_SLOT: grouped-attention -->
+
+One grouped decision covers every assignment that asked; unaffected assignments
+can keep working. That answer is chatting with the existing run, not a new launch.
+Chatting requires an existing run. Starting new work remains an explicit delegation.
+
+<!-- README_ART_SLOT: verified-final-decision -->
+
+The verified result is an evidence packet: the changes, branch, tests, and review
+that support Codex's decision. It does not automatically merge your code.
+
+If a required assignment fails, Codex reports the gap and available recovery steps.
+It does not describe an incomplete run as a verified result.
+
+<details>
+<summary>What a failed or unresolved assignment means</summary>
+
+<!-- README_ART_SLOT: failure-unresolved -->
+
+![Conceptual illustration of a required assignment that failed or stayed unresolved, with no verified candidate claimed.](docs/assets/co-engineer-3.4.0/final/derived/failure-unresolved.jpg)
+
+</details>
+
+## Provider choices
+
+Use your preferred providers for the work at hand. Grok and Cursor keep their
+configured provider model; unsupported overrides fail before launch. Muse uses
+its configured DSH profile. Provider selection is explicit, and an assignment's
+role is an instruction to a trusted coding agent, not a filesystem sandbox.
+
+<details>
+<summary>Grok, Cursor, and Muse at a glance</summary>
+
+<!-- README_ART_SLOT: provider-choices -->
+
+![Conceptual illustration of explicit Grok, Cursor, and Muse Co-Engineer choices.](docs/assets/co-engineer-3.4.0/final/derived/provider-choices.jpg)
+
+</details>
+
+For Codex itself, use one task owner and add workers when useful. Luna, Terra,
+Sol, and Astra can cover different scopes; a second coordinator is optional.
+The [model-role guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/model-roles.md)
+separates practical suggestions from official model documentation. Co-Engineer
+does not change your Codex model, reasoning effort, or experimental settings.
+
+## Upgrade to 3.4.2
+
+Finish or cancel active runs first. In a **clean existing source clone**:
 
 ```bash
-grok login
-cursor-agent login
-plugins/codex-co-engineer/bin/set-model-api-key
+git fetch origin tag v3.4.2
+git switch --detach v3.4.2
+npm --prefix plugins/codex-co-engineer run setup
+codex plugin remove codex-co-engineer@codex-co-engineer
+codex plugin add codex-co-engineer@codex-co-engineer
+npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Cursor Cloud uses `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the
-owner-only `~/.config/cursor-cloud-control/api-key`. DSH uses
-`MODEL_API_KEY`, `CODEX_CO_ENGINEER_MODEL_API_KEY_FILE`, or
-`~/.config/codex-co-engineer/model-api-key` for Muse. The optional Ox
-Alpha route uses `OPENROUTER_API_KEY`,
-`CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or
-`~/.config/codex-co-engineer/openrouter-api-key`. Never put credentials
-in MCP arguments or prompts.
+Start a new Codex session, then check Co-Engineer status. Keep your local changes
+if the source clone is dirty; use a separate clean release clone instead of
+resetting it. If your marketplace uses a different name, use the installed
+identity shown by `codex plugin list`.
 
-Host variables, profiles, and package-local setup live in
-[docs/configuration.md](docs/configuration.md) and the
-[plugin README](plugins/codex-co-engineer/README.md).
-
-The older `cursor-cloud-control` package remains in this repository as a
-compatibility plugin for existing installations. New installations need
-only Codex-Co-Engineer.
-
-## Migrating from 3.2.1
-
-The public catalog is still five tools. Bounded runs are additive. If
-you omit run fields, exact 3.2.1 single-task behavior remains, including
-direct mode on that path only.
-
-The normal 3.2.1 habit of writing a tool payload is no longer the
-visitor path. Say `Delegating to Co-Engineer` and name Grok, Cursor, or
-Muse Co-Engineer. Codex submits once and waits once.
-
-Details: [docs/co-engineer-migration-3.2.1.md](docs/co-engineer-migration-3.2.1.md).
+Existing task receipts and provider accounts are retained. Users with a direct
+Meta Muse profile must migrate to OpenRouter; see the
+[upgrade notes](docs/releases/v3.4.2.md#upgrading).
 
 ## Troubleshooting
 
-**How do I check whether Codex-Co-Engineer can dispatch locally?**
-Ask Codex: `Show Codex-Co-Engineer status.` Local providers are ready
-only when `local_boundary.ready` is true. If it is false, the MCP
-process is missing Linux `systemd --user`, `systemd-run` 244+, unified
-cgroup v2, or the forwarded user-session locators (`XDG_RUNTIME_DIR`,
-`DBUS_SESSION_BUS_ADDRESS`).
+| Symptom | Next step |
+| --- | --- |
+| Plugin tools are missing | Start a new Codex session after installation; check `codex plugin list` |
+| Local provider is unavailable | Ask for Co-Engineer status; inspect `local_boundary` and the named missing dependency |
+| Setup reports an incompatible Muse profile | Follow the OpenRouter migration in the release notes; keep a backup of your configuration |
+| Repeated repository-sharing prompts | Choose remembered access; confirm the provider and repository origin have not changed |
+| Installed files disappear or an old version returns | Check for another local marketplace using the same identity; use a distinct marketplace name for development candidates |
+| Cursor Cloud cannot see a commit | Push the exact SHA and make the branch visible through an open PR or the default branch |
+| No extra panel appears | Continue in the conversation; the CLI workflow is complete without an optional host UI |
 
-**Setup passed, but local providers are unavailable.**
-`setup:check` does not prove the MCP environment. Re-run status from the
-actual MCP server process, then confirm the plugin `.mcp.json` allowlist
-forwards `HOME`, `PATH`, `XDG_*`, and `DBUS_SESSION_BUS_ADDRESS`.
+More detail: [troubleshooting](docs/co-engineer-troubleshooting.md) ·
+[configuration](docs/configuration.md) · [quickstart](docs/co-engineer-quickstart.md).
 
-**Where is the installed plugin?**
-After `codex plugin add codex-co-engineer@codex-co-engineer`, Codex
-reports the cached install path. The source package in this repository
-is `plugins/codex-co-engineer`. Run `npm run setup` from that source
-package (or with `npm --prefix plugins/codex-co-engineer`) rather than
-guessing a cache path.
+## Control and data handling
 
-**A managed worktree appeared without a receipt.**
-Do not guess or delete it. Inspect `git worktree list` and
-`worktree-bootstrap lock inspect`, then clean only an exact identified
-task/lock.
+External workers may commit within their assigned scope. Publication and merge require user authorization and Codex review.
 
-**Cursor Cloud returned HTTP 400 for a valid SHA.**
-Treat it as a provider visibility failure. Make the commit reachable
-from an open PR or the default branch, then retry. Do not replay a
-prompt that was already dispatched.
+You authorize the repository and providers. Codex reviews the result and integrates
+only the work you approve. Provider agents can use their normal coding tools,
+shell, network, and authenticated accounts; **Co-Engineer is not a sandbox**.
+Local process control exists to keep workers durable and cancel their descendants.
 
-**Can I put API keys in the MCP tool arguments?**
-No. Use normal provider login or the owner-only key files. Credentials
-must not appear in MCP arguments, prompts, receipts, fixtures, or Git.
+Repository content and history accessible from the assigned workspace can reach
+the selected provider. Task state is retained locally with owner-only permissions.
+Managed worktrees remain available for inspection; cleanup is explicit and tied
+to the recorded task. Read [Security](SECURITY.md) and
+[data handling](docs/data-handling.md) before delegating private repositories.
 
-**There is no Co-Engineer panel in this host.**
-That is expected on hosts that do not expose one. The headless
-Delegating/Chatting conversation is complete. Missing UI is not a failed
-install.
-
-**Chatting did nothing.**
-Chatting with Co-Engineer needs an existing run. Codex should offer to
-delegate instead of silently submitting.
-
-More cases: [docs/co-engineer-troubleshooting.md](docs/co-engineer-troubleshooting.md).
-
-## Advanced Co-Engineer Control/API
-
-This section is for operators and Codex internals. Normal users do not
-construct these payloads.
+## For integrators and contributors
 
 The catalog remains exactly `status`, `delegate`, `task`, `tasks`, and
-`cancel`. There is no sixth tool. Bounded runs use additive `run`,
-`run_id`, `attention`, `run_reply`, `cleanup`, and
-`wait_until: "decision_or_attention"` on those tools; omitting them
-keeps exact 3.2.1 single-task behavior.
+`cancel`. New integrations use the small semantic `run_request`; legacy
+single-task calls and full run envelopes remain supported.
 
-| Coordination step | Tool | Additive mode |
-| --- | --- | --- |
-| one submission | `delegate` | `run` with 1–8 isolated assignments |
-| inspect | `status` or `task` | `run_id` |
-| one aggregate wait | `task` or `tasks` | `wait_until: "decision_or_attention"` |
-| answer grouped attention | `task` | one reply for the grouped decision |
-| cancel | `cancel` | `run_id` |
+| Guide | What it covers |
+| --- | --- |
+| [Run tool API](docs/run-tool-api.md) | Submission, waits, attention, diagnostics, and cancellation |
+| [Plugin reference](plugins/codex-co-engineer/README.md) | Installed-package setup, authentication, and API examples |
+| [Configuration](docs/configuration.md) | Providers, credentials, profiles, and host variables |
+| [Contributing](CONTRIBUTING.md) | Local commands, compatibility, and review expectations |
+| [Release process](docs/release.md) | Exact-candidate qualification and publication |
 
-The repository argument is the literal MCP property `repo`. Always send
-it as `"repo": "/absolute/path/to/git-worktree"`; `git_root`,
-`repository`, and other aliases are unknown properties and fail schema
-validation. Cursor Cloud also requires `repo` for the clean local
-checkout. Its pushed immutable commit SHA is a separate, Cursor
-Cloud-only `starting_ref` property.
+Co-Engineer keeps coordination compact, but token parity with native subagents
+has not been established. The [efficiency guide](docs/efficient-dogfood.md) explains
+what to measure. Licensed under [MIT](LICENSE).
 
-`delegate` records `expected_duration_ms` or `timeout_ms` and a 20%
-deadline margin. `task` can wait with `wait_until: "terminal"` until the
-recorded deadline, inspect summary/compact/diagnostics views, extend a
-deadline with an explicit reason, and deliver a same-session reply. It
-does not push unsolicited stdio callbacks across assistant turns.
-
-Local 3.2.1 review:
-
-```json
-{
-  "task_id": "review-auth-refactor",
-  "provider": "grok",
-  "repo": "/absolute/path/to/git-worktree",
-  "role": "review",
-  "workspace_mode": "managed",
-  "prompt": "Review the current branch and report concrete correctness risks.",
-  "expected_duration_ms": 600000
-}
-```
-
-```json
-{
-  "task_id": "review-auth-refactor",
-  "wait_until": "terminal"
-}
-```
-
-Inspect the receipt before a scoped publisher non-force pushes the task
-branch, opens a draft PR, or Sol High or Sol XHigh merges.
-
-Cursor Cloud implementation:
-
-```json
-{
-  "task_id": "cloud-auth-refactor",
-  "provider": "cursor-cloud",
-  "repo": "/absolute/path/to/clean-checkout",
-  "role": "implement",
-  "starting_ref": "0123456789abcdef0123456789abcdef01234567",
-  "prompt": "Implement the requested change, run tests, and commit the result.",
-  "expected_duration_ms": 3600000,
-  "create_pr": true
-}
-```
-
-Wait on a bounded run without waking on routine text:
-
-```json
-{
-  "run_id": "auth-split",
-  "wait_until": "decision_or_attention"
-}
-```
-
-Internal provider slots remain `grok`, `cursor-local`, `cursor-cloud`,
-and `dsh`. Roles are `review` and `implement`. An accepted prompt is
-never replayed through another transport. ACPX does not provide an
-authoritative prompt-sent acknowledgement, so a DSH task is marked
-`dispatch_uncertain` as soon as ACPX spawns and is never replayed
-through CLI.
-
-`create_pr` is a Cursor Cloud-only option and defaults to `false`. Local
-tasks reject it.
-
-For parallel 3.2.1 tasks, coordinate the result set with one `tasks`
-wait-any call instead of polling every task. Use `status` and `task`
-compact views for routine decisions; open diagnostics pages only when a
-task needs attention or fails. Clients that consume `structuredContent`
-can opt into `response_mode: "structured"`. Text-only clients should
-omit it. The compact single-task projection is capped at 8,192 UTF-8
-bytes by the MCP server. That is a server payload guarantee, not a
-measured or claimed hard limit in the Codex desktop renderer. See the
-[efficient dogfood workflow](docs/efficient-dogfood.md).
-
-Terminal managed tasks retain their worktree and branch for Codex
-inspection; they are not silently deleted. Watch with `task`
-(`wait_until: "terminal"` plus optional `cursor`), then run the
-authoritative handoff from the recorded worktree:
-
-```bash
-worktree-bootstrap handoff TASK --repo /absolute/worktree --format markdown
-```
-
-Inspect commits, diff, tests, and ownership evidence before pushing or
-opening a PR. After merge or deliberate discard:
-
-```bash
-worktree-bootstrap lock inspect TASK --repo /absolute/worktree
-worktree-bootstrap lock clean TASK --repo /absolute/worktree \
-  --policy dead-local --lock-id LOCK_ID
-git worktree remove /absolute/worktree
-```
-
-Clean only the exact corresponding branch and terminal task-state
-directory after its receipt is no longer needed. Direct tasks have no
-managed worktree; review their caller checkout explicitly. Cursor Cloud
-agents are archived after terminal completion where supported, while
-their remote branch/PR remains for Codex review.
-
-```bash
-npm --prefix plugins/codex-co-engineer test
-node scripts/validate-release.mjs
-node scripts/inspector-preflight.mjs
-```
-
-The authoritative release gate runs against one exact local candidate
-using Node 24. GitHub Actions is a credential-free mirror; live Grok,
-Cursor, Cursor Cloud, and DSH acceptance is recorded separately because
-CI must not send repository content to model providers.
-
-This repository does not create the GitHub Release, tag, or remote from
-the published notes file.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+Historical [3.4.0 notes](docs/releases/v3.4.0.md) and historical
+3.3.0 notes in [the release archive](docs/releases/v3.3.0.md) remain available.

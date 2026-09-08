@@ -5,7 +5,7 @@ The authoritative gate runs once against one exact clean local candidate:
 ```sh
 release-gate plan --repo "$PWD"
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.0-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.4.2-release-gate.json
 ```
 
 The package supports Node.js 24 and newer. The release gate is intentionally
@@ -24,7 +24,7 @@ replacement for the exact-tree local receipt.
 After the provider-free gate passes:
 
 1. Run `npm run setup:check` on the target host.
-   This validates DSH/ACPX, the Cursor SDK, and `worktree-bootstrap`
+   This validates DSH/ACPX, the Cursor SDK, runtime versions, and bundled `worktree-bootstrap`
    dependencies. It does not install or authenticate Grok or Cursor Local,
    validate their CLIs or the Cursor Cloud key, or prove the local process
    boundary. Use the `status` tool to check provider readiness.
@@ -34,8 +34,8 @@ After the provider-free gate passes:
    `KillMode=control-group` solely for descendant cleanup and to survive the
    launching client; it is not a sandbox or capability restriction.
 3. Verify persistent normal authentication for Grok and Cursor Local, the
-   owner-only DSH Muse key, the separate owner-only OpenRouter key for Ox
-   Alpha, and the owner-only Cursor Cloud API key.
+   OpenRouter key for Muse and Ox Alpha (with their separate model configuration),
+   and the owner-only Cursor Cloud API key.
 4. Run one bounded opt-in acceptance task through Grok, Cursor Local, Cursor
    Cloud, DSH Muse, and DSH Ox Alpha.
 5. For local tasks, verify ACP first; if fallback occurs, prove it happened
@@ -64,6 +64,49 @@ After the provider-free gate passes:
    4-hour `tool_timeout_sec` as a measured Desktop limit until those probes
    have been run on the shipping host.
 
+## Local release installation identity
+
+Use a distinct local marketplace name for an unpublished release candidate when
+an open project still contains an older plugin under the public marketplace name.
+Keep the plugin name and tested plugin bytes unchanged. Remove the conflicting
+installed identity through the supported plugin CLI; preserve any dirty source
+checkout instead of changing its version label or replacing its files.
+
+Codex can refresh installed local plugins when listing project marketplaces.
+A project source with the same marketplace/plugin identity can replace the
+shared cache even when its version is older than the configured global source.
+An existing MCP process then retains paths into the removed version.
+
+After installation, verify the actual project-scoped `plugin/list` operation for
+open development checkouts: the candidate must remain installed and enabled,
+its complete file inventory must match the qualified source, and old identities
+must remain uninstalled. Repeat the inventory check after the host connection
+restarts, then run native provider acceptance. CLI marketplace listing alone
+and a successful check immediately after copying files do not prove persistence.
+
+## Native run acceptance
+
+Qualify the normal semantic `run_request` path as a complete user workflow.
+A successful handshake, accepted consent form, or provider prompt dispatch is
+an intermediate result. Acceptance requires the same run ID to deliver the
+provider result, accurate terminal state, and retained handoff without asking
+the operator to discover a hidden task ID or repair configuration.
+
+Exercise the production task bridge with synthetic task-store fixtures in CI.
+Only provider/process boundaries should be replaced for these contract tests;
+replacing inspection, cancellation, and result projection would hide the very
+interfaces being qualified. Cover completion, transient observation failure,
+restart, cancellation, optional active assignments, unchanged cursors, and
+bounded results. Verify that idle waits use event notifications and do not
+continually rewrite run state.
+
+After the exact-candidate gate, repeat one authorized host run through native
+consent and normal run completion. A result recovered through a legacy task
+fallback is useful diagnostic evidence, but it does not pass this acceptance.
+Record the tested commit and whether other provider routes were exercised.
+The lifecycle ownership decision is
+[ADR 0002](adr/0002-native-run-lifecycle.md).
+
 ## Handoff and cleanup
 
 Codex reviews and merges. Managed local worktrees remain until their result is
@@ -88,26 +131,56 @@ independent provider review pass. `create_pr` is Cloud-only; local workers
 return commits and handoff evidence for Codex to decide whether a PR should be
 opened. Never create an empty PR.
 
-## GitHub Release notes
+## Authorized GitHub publication
 
-The 3.4.0 GitHub Release body is
-[releases/v3.4.0.md](releases/v3.4.0.md). Keep historical
-[releases/v3.3.0.md](releases/v3.3.0.md),
-[releases/v3.2.1.md](releases/v3.2.1.md),
-[releases/v3.2.0.md](releases/v3.2.0.md),
-[releases/v3.1.0.md](releases/v3.1.0.md) and
-[releases/v3.1.1.md](releases/v3.1.1.md) in the repository even when
-GitHub Releases is empty. Documentation work must not tag, push, or
-publish the GitHub Release.
+The release body is [releases/v3.4.2.md](releases/v3.4.2.md). Preserve all historical
+release notes, including [3.4.0](releases/v3.4.0.md). Documentation changes alone
+are not publication authorization; an explicit maintainer release instruction is.
 
-Capture the exact-tree gate receipt before any later publication:
+1. Fetch public main and reconcile it into the candidate. Both the published
+   baseline and the accepted local fixes must be ancestors of the release.
+2. Review the diff against public main, including deleted files, historical
+   feature inventory, installation, packaged documentation, and privacy.
+3. Run the exact-candidate local gate. Keep private host evidence outside Git.
+4. Push the release branch without force and open a release PR. Verify current
+   GitHub CI and required review before merging; do not bypass failed checks.
+5. Merge the reviewed branch, capture the exact resulting main SHA, and verify
+   that its tree matches the qualified candidate. If content changed, qualify
+   the new candidate before tagging.
+6. Create `v3.4.2` at that reviewed main SHA and publish the body from
+   `docs/releases/v3.4.2.md`. Verify the remote tag, release body, source download,
+   and tag-based installation instructions after publication.
 
-```sh
-release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.0-release-gate.json
-```
+The public release includes source and documentation. Never attach owner-only
+live receipts, prompts, credentials, machine configuration, or private logs.
 
-When a maintainer later publishes against an exact reviewed `main` SHA,
-use the placeholder form in [releases/v3.4.0.md](releases/v3.4.0.md)
-(`EXACT_REVIEWED_MAIN_SHA`). Do not invent a tag or remote mutation from
-documentation work.
+## Provider boundary regressions
+
+Before live acceptance, exercise the installed ACPX CLI against local fake ACP
+agents for success and model/API rejection. A nonzero exit must retain a useful
+sanitized cause; raw outgoing requests and prompts must not enter public logs.
+Test fragmented and oversized output, cancellation, deadlines, and cleanup.
+
+Feed the Cursor adapter realistic SDK completion objects, including duration,
+model, and usage metadata. Keep provider metadata separate from verified Git
+and identity facts. A passing mock with a reduced response shape is insufficient.
+
+Native consent checks cover timeout and same-run recovery. Host presentation
+latency requires actual host observations; a protocol test does not establish
+when the user saw the form.
+
+## Orchestrator efficiency acceptance
+
+Measure cold skill/schema loading separately from warm delegation. Compare the
+same one-worker and four-worker tasks against native subagents with equivalent
+prompts and required result detail. Count all orchestrator-visible requests,
+responses, retries and recovery turns; exclude external worker tokens. Record
+actual host usage where available and label tokenizer estimates otherwise.
+Payload bytes alone do not establish token cost or native-subagent parity.
+
+Exercise success, slow acknowledgement, one actionable question, cancellation
+and failure. The normal path is one semantic submission and one aggregate wait;
+routine progress must not require orchestrator polling. Inspect compact results
+for retained errors, review artifacts and retrieval references for omitted detail.
+Native comparison and live provider acceptance follow the exact-candidate gate
+and a refreshed host connection; automated projection tests do not replace them.

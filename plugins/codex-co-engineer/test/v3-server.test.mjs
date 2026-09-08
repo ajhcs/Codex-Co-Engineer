@@ -97,12 +97,12 @@ test('advertises only the thin public tool surface', async () => {
   ]);
   assert.equal(values[0].result.serverInfo.name, 'codex-co-engineer');
   assert.equal(values[0].result.serverInfo.title, 'Codex-Co-Engineer');
-  assert.equal(values[0].result.serverInfo.version, '3.4.0');
+  assert.equal(values[0].result.serverInfo.version, '3.4.2');
   assert.deepEqual(values[1].result.tools.map((tool) => tool.name), ['status', 'delegate', 'task', 'tasks', 'cancel']);
   assert.equal(values[1].result.tools.length, 5);
   const statusTool = values[1].result.tools.find((tool) => tool.name === 'status');
   assert.deepEqual(Object.keys(statusTool.inputSchema.properties), [
-    'detail', 'task_limit', 'include_tasks', 'response_mode', 'run_id',
+    'detail', 'task_limit', 'include_tasks', 'refresh', 'response_mode', 'run_id',
   ]);
   const taskTool = values[1].result.tools.find((tool) => tool.name === 'task');
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
@@ -114,7 +114,7 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[0], 'progress');
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[1], 'terminal');
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[2], 'decision_or_attention');
-  assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured']);
+  assert.deepEqual(taskTool.inputSchema.properties.response_mode.enum, ['structured', 'legacy']);
   const tasksTool = values[1].result.tools.find((tool) => tool.name === 'tasks');
   assert.deepEqual(Object.keys(tasksTool.inputSchema.properties), [
     'detail', 'limit', 'cursor', 'provider', 'state', 'status', 'response_mode',
@@ -122,11 +122,17 @@ test('advertises only the thin public tool surface', async () => {
     'run_id',
   ]);
   for (const tool of values[1].result.tools) {
-    assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured']);
-    assert.match(tool.description, /response_mode="structured"/u);
+    assert.deepEqual(tool.inputSchema.properties.response_mode.enum, ['structured', 'legacy']);
+    assert.match(tool.description, /response_mode="legacy"/u);
   }
   const delegateTool = values[1].result.tools.find((tool) => tool.name === 'delegate');
   assert.match(delegateTool.description, /property named repo/u);
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].if.anyOf, [
+    { required: ['run'] }, { required: ['run_request'] },
+  ]);
+  assert.deepEqual(delegateTool.inputSchema.allOf[0].then.oneOf, [
+    { required: ['run'] }, { required: ['run_request'] },
+  ]);
   assert.deepEqual(delegateTool.inputSchema.allOf[0].else.required, ['task_id', 'provider', 'repo', 'prompt']);
   assert.match(delegateTool.inputSchema.properties.repo.description, /Required property named repo/u);
   assert.match(delegateTool.inputSchema.properties.repo.description, /\/absolute\/path\/to\/git-worktree/u);
@@ -134,7 +140,7 @@ test('advertises only the thin public tool surface', async () => {
   assert.match(delegateTool.inputSchema.properties.starting_ref.description, /Cursor Cloud only/u);
   assert.match(delegateTool.inputSchema.properties.starting_ref.description, /does not replace the required repo/u);
   assert.deepEqual(delegateTool.inputSchema.properties.dsh_model.enum, [
-    'muse-spark-1.2-contributor',
+    'meta/muse-spark-1.3-contributor',
     'stealth/ox-alpha',
   ]);
   assert.match(delegateTool.inputSchema.properties.dsh_model.description, /DSH only/u);
@@ -149,6 +155,12 @@ test('advertises only the thin public tool surface', async () => {
   assert.ok(Object.hasOwn(delegateTool.inputSchema.properties, 'run'));
   assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.minItems, 1);
   assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.maxItems, 8);
+  const runRequestAssignment = delegateTool.inputSchema.properties.run_request.properties.assignments.items;
+  assert.equal(runRequestAssignment.required.includes('role'), true);
+  assert.equal(runRequestAssignment.required.includes('access'), false);
+  assert.equal(runRequestAssignment.required.includes('expected_duration_ms'), false);
+  assert.equal(runRequestAssignment.properties.expected_duration_ms.default, 600000);
+  assert.match(runRequestAssignment.properties.access.description, /derived from role/u);
   assert.match(taskTool.description, /event_cursor/u);
   assert.match(taskTool.description, /Unsolicited stdio callbacks/u);
   assert.match(taskTool.description, /view=compact/u);
@@ -510,7 +522,7 @@ test('live MCP tool results use structured-first text fallback when response_mod
     const toolsList = await request({ jsonrpc: '2.0', id: 39, method: 'tools/list' });
     for (const tool of toolsList.result.tools) {
       assert.equal(tool.inputSchema.properties.response_mode.enum[0], 'structured');
-      assert.match(tool.description, /response_mode="structured"/u);
+      assert.match(tool.description, /response_mode="legacy"/u);
     }
     for (const [index, call] of [
       { name: 'status', arguments: { response_mode: 'structured' } },
@@ -546,6 +558,66 @@ test('live MCP tool results use structured-first text fallback when response_mod
       legacy.result.content[0].text,
       JSON.stringify(legacy.result.structuredContent),
       'omitted response_mode must preserve full text duplication',
+    );
+  });
+});
+
+test('structured-capable clients receive bounded transport by default', async () => {
+  await withServer(async ({ request }) => {
+    const initialize = await request({
+      jsonrpc: '2.0',
+      id: 58,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-11-25',
+        capabilities: {
+          structuredContent: true,
+          extensions: {
+            'io.modelcontextprotocol/ui': {
+              mimeTypes: ['text/html;profile=mcp-app'],
+            },
+          },
+        },
+      },
+    });
+    assert.equal(initialize.result.protocolVersion, '2025-11-25');
+    const response = await request({
+      jsonrpc: '2.0',
+      id: 59,
+      method: 'tools/call',
+      params: { name: 'status', arguments: {} },
+    });
+    assert.equal(response.result.content[0].type, 'text');
+    assert.notEqual(response.result.content[0].text, JSON.stringify(response.result.structuredContent));
+    assert.equal(JSON.parse(response.result.content[0].text).authoritative, 'structuredContent');
+  });
+});
+
+test('native run transport is structured-first when the host omits capability advertisement', async () => {
+  await withServer(async ({ request }) => {
+    await request({
+      jsonrpc: '2.0', id: 590, method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {} },
+    });
+    const response = await request({
+      jsonrpc: '2.0', id: 591, method: 'tools/call',
+      params: { name: 'status', arguments: { run_id: 'missing-semantic-run' } },
+    });
+    assert.equal(response.result.content[0].type, 'text');
+    assert.notEqual(response.result.content[0].text, JSON.stringify(response.result.structuredContent));
+    assert.equal(JSON.parse(response.result.content[0].text).authoritative, 'structuredContent');
+    assert.equal(response.result.structuredContent.error.code, 'runtime_run_unknown');
+
+    const textOnly = await request({
+      jsonrpc: '2.0', id: 592, method: 'tools/call',
+      params: {
+        name: 'status',
+        arguments: { run_id: 'missing-semantic-run', response_mode: 'legacy' },
+      },
+    });
+    assert.equal(
+      textOnly.result.content[0].text,
+      JSON.stringify(textOnly.result.structuredContent),
     );
   });
 });

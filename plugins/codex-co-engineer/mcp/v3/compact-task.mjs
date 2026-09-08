@@ -74,6 +74,27 @@ export function utf8Head(value, maxBytes) {
   return `${buffer.subarray(0, end).toString('utf8')}${ELLIPSIS}`;
 }
 
+// Shared by durable run storage and public result projection.
+export function boundProviderResult(value, maxBytes = 8_192) {
+  if (value === undefined || value === null) return { value: null, truncated: false };
+  let safe;
+  let encoded;
+  try {
+    safe = sanitizePublicReceipt(value);
+    encoded = JSON.stringify(safe);
+  } catch {
+    return { value: null, truncated: false };
+  }
+  if (encoded === undefined) return { value: null, truncated: false };
+  if (Buffer.byteLength(encoded, 'utf8') <= maxBytes) return { value: safe, truncated: false };
+  let preview = utf8Head(typeof safe === 'string' ? safe : encoded, maxBytes - 2);
+  // Escaped quotes/control characters also count toward the JSON byte cap.
+  while (byteLength(preview) > maxBytes) {
+    preview = utf8Head(preview, Math.floor(Buffer.byteLength(preview, 'utf8') / 2));
+  }
+  return { value: preview, truncated: true };
+}
+
 function boundedString(value, maxBytes, { tail = false } = {}) {
   if (typeof value !== 'string') return null;
   return tail ? tailText(value, maxBytes) : utf8Head(value, maxBytes);
@@ -265,7 +286,7 @@ function essentialCompactEnvelope(payload) {
     task_id: boundedString(payload.task_id, COMPACT_ID_BYTES) ?? utf8Head('unknown', COMPACT_ID_BYTES),
     provider: boundedString(payload.provider, COMPACT_SCALAR_BYTES),
     ...(payload.provider === 'dsh' ? {
-      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'muse-spark-1.2-contributor',
+      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'meta/muse-spark-1.3-contributor',
     } : {}),
     role: payload.role === 'review' || payload.role === 'implement' ? payload.role : null,
     status: boundedString(payload.status, COMPACT_SCALAR_BYTES),
@@ -312,7 +333,7 @@ function lastResortEnvelope(payload) {
     task_id: boundedString(payload.task_id, COMPACT_ID_BYTES) ?? utf8Head('unknown', COMPACT_ID_BYTES),
     provider: payload.provider === 'dsh' ? 'dsh' : null,
     ...(payload.provider === 'dsh' ? {
-      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'muse-spark-1.2-contributor',
+      dsh_model: boundedString(payload.dsh_model, COMPACT_SCALAR_BYTES) ?? 'meta/muse-spark-1.3-contributor',
     } : {}),
     role: payload.role === 'review' || payload.role === 'implement' ? payload.role : null,
     status: boundedString(payload.status, COMPACT_SCALAR_BYTES),
@@ -510,7 +531,7 @@ export function projectCompactTask({ task, progress = null, runtime = null, extr
     task_id: typeof task.id === 'string' ? task.id : 'unknown',
     provider: typeof task.provider === 'string' ? task.provider : null,
     ...(task.provider === 'dsh' ? {
-      dsh_model: typeof task.dsh_model === 'string' ? task.dsh_model : 'muse-spark-1.2-contributor',
+      dsh_model: typeof task.dsh_model === 'string' ? task.dsh_model : 'meta/muse-spark-1.3-contributor',
     } : {}),
     role: task.role === 'review' || task.role === 'implement' ? task.role : null,
     status: typeof task.status === 'string' ? task.status : null,

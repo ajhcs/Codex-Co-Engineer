@@ -9,12 +9,14 @@ import { promisify } from 'node:util';
 
 import {
   cancelTask,
+  classifyGrokReadinessOutput,
   cleanupLocalTaskLifecycle,
   cleanupManagedWorkspace,
   createSupervisorRunToolAdapter,
   createWriterWorkspace,
   invokeRunTool,
   launchWorker,
+  probeGrokReadiness,
   settleLocalTaskLifecycle,
   submitTask,
   supervisorStatus,
@@ -31,6 +33,7 @@ import {
 import { createClock, createLifecycleFns } from './fixtures/r1-run-runtime-fixtures.mjs';
 import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
 import { runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from '../mcp/v3/worktree-bootstrap-runtime.mjs';
 
 const SHA = 'a'.repeat(40);
 const run = promisify(execFile);
@@ -39,6 +42,44 @@ const readyBoundary = async () => ({
   status: 'prerequisites_ready',
   provider_started: false,
   boundary: 'systemd-user-service-cgroup',
+});
+
+test('Grok readiness accepts explicit login despite ancillary unauthorized settings stderr', () => {
+  assert.deepEqual(classifyGrokReadinessOutput(
+    'You are logged in with grok.com.\n\nDefault model: grok-4.6\n',
+    'ERROR Settings fetch failed: 401 Unauthorized\n',
+  ), { ready: true });
+});
+
+test('Grok readiness treats an explicit logout as authoritative over a stale login marker', () => {
+  assert.deepEqual(classifyGrokReadinessOutput(
+    'You are logged in with grok.com.',
+    'You are not logged in. Run `grok login` to continue.\n',
+  ), { ready: false, reason: 'needs_login' });
+  assert.deepEqual(classifyGrokReadinessOutput(
+    '',
+    'Models request failed: 401 Unauthorized\n',
+  ), { ready: false, reason: 'needs_login' });
+});
+
+test('Grok readiness keeps execution failures distinct from authentication failures', async () => {
+  const executeWith = (code) => async () => {
+    throw Object.assign(new Error('synthetic probe failure'), { code });
+  };
+  const missing = await probeGrokReadiness('grok', {}, { execute: executeWith('ENOENT') });
+  assert.deepEqual({ ...missing, probe_duration_ms: 0 }, {
+    installed: false,
+    ready: false,
+    reason: 'not_installed',
+    probe_duration_ms: 0,
+  });
+  const timedOut = await probeGrokReadiness('grok', {}, { execute: executeWith('ETIMEDOUT') });
+  assert.deepEqual({ ...timedOut, probe_duration_ms: 0 }, {
+    installed: true,
+    ready: false,
+    reason: 'probe_failed',
+    probe_duration_ms: 0,
+  });
 });
 
 test('writer workspace parses noisy pretty JSON and requests a bounded large buffer', async () => {
@@ -64,11 +105,63 @@ test('writer workspace parses noisy pretty JSON and requests a bounded large buf
     },
     checkPath: async () => ({ isDirectory: () => true }),
   });
-  assert.equal(calls[0][0], 'worktree-bootstrap');
+  assert.equal(calls[0][0], BUNDLED_WORKTREE_BOOTSTRAP);
   assert.deepEqual(calls[0][1], ['create', 'parallel-one', '--repo', '/repo', '--base', 'feature']);
   assert.ok(calls[0][2].maxBuffer >= 16 * 1024 * 1024);
   assert.equal(result.worktree_path, '/worktrees/parallel-one');
   assert.equal(result.branch, 'codex/parallel-one');
+});
+
+test('exact local SHA workspace creation does not require an upstream or source branch', async () => {
+  const calls = [];
+  const result = await createWriterWorkspace({
+    taskId: 'local-sha',
+    repo: '/repo',
+    baseSha: SHA,
+    execute: async (command, args, options) => {
+      calls.push([command, args, options]);
+      if (command === 'git') {
+        if (args.includes('--show-current')) return { stdout: args[1] === '/repo' ? '\n' : 'codex/local-sha\n' };
+        if (args.includes('--porcelain=v1')) return { stdout: '\n' };
+        if (args.includes('--show-toplevel')) return { stdout: '/worktrees/local-sha\n' };
+        if (args.includes('--verify') || args.includes('HEAD')) return { stdout: `${SHA}\n` };
+        return { stdout: '\n' };
+      }
+      return { stdout: JSON.stringify({
+        task: 'local-sha',
+        branch: 'codex/local-sha',
+        start_sha: SHA,
+        worktree_path: '/worktrees/local-sha',
+        status: 'ready',
+      }) };
+    },
+    checkPath: async () => ({ isDirectory: () => true }),
+  });
+
+  assert.deepEqual(calls.find(([command]) => command === BUNDLED_WORKTREE_BOOTSTRAP)?.[1], [
+    'create', 'local-sha', '--repo', '/repo', '--base', SHA, '--local-only',
+  ]);
+  assert.equal(result.start_sha, SHA);
+  assert.equal(result.branch, 'codex/local-sha');
+});
+
+test('exact local SHA reports an actionable capability error when bootstrap is too old', async () => {
+  await assert.rejects(
+    createWriterWorkspace({
+      taskId: 'local-sha-old-bootstrap',
+      repo: '/repo',
+      baseSha: SHA,
+      execute: async (command, args) => {
+        if (command === 'git') {
+          if (args.includes('--show-current')) return { stdout: '\n' };
+          if (args.includes('--porcelain=v1')) return { stdout: '\n' };
+          if (args.includes('--verify')) return { stdout: `${SHA}\n` };
+        }
+        throw Object.assign(new Error('unknown option --local-only'), { stderr: 'unknown option --local-only' });
+      },
+    }),
+    (error) => error.code === 'worktree_bootstrap_exact_sha_unsupported',
+  );
 });
 
 test('invalid worktree receipt fails before dispatch', async () => {
@@ -77,6 +170,47 @@ test('invalid worktree receipt fails before dispatch', async () => {
     createWriterWorkspace({ taskId: 'bad', repo: '/repo', execute }),
     (error) => error.code === 'worktree_create_failed',
   );
+});
+
+test('incomplete installed runtime fails before local provisioning or cloud dispatch', async () => {
+  for (const provider of ['grok', 'cursor-cloud']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `co-engineer-runtime-preflight-${provider}-`));
+    const calls = [];
+    try {
+      await assert.rejects(
+        submitTask({
+          task_id: `runtime-preflight-${provider}`,
+          provider,
+          repo: '/repo',
+          prompt: 'PRIVATE_PROMPT',
+          expected_duration_ms: 10_000,
+        }, {
+          root,
+          preflightRuntime: async (selectedProvider) => {
+            calls.push(['runtime', selectedProvider]);
+            throw Object.assign(new Error('/deleted/cache/credential-handoff-loader.mjs'), { code: 'ENOENT' });
+          },
+          probeBoundary: async () => { calls.push(['boundary']); return readyBoundary(); },
+          createWorkspace: async () => { calls.push(['workspace']); throw new Error('must not provision'); },
+          execute: async () => { calls.push(['git']); throw new Error('must not inspect repository'); },
+          launch: async () => { calls.push(['launch']); throw new Error('must not launch'); },
+        }),
+        (error) => {
+          assert.equal(error.code, 'runtime_install_incomplete');
+          assert.equal(error.message, 'The installed Codex-Co-Engineer runtime is incomplete. Reinstall the plugin, then restart Codex.');
+          assert.doesNotMatch(error.message, /deleted|cache|credential/iu);
+          return true;
+        },
+      );
+      assert.deepEqual(calls, [['runtime', provider]]);
+      await assert.rejects(
+        readTask(root, `runtime-preflight-${provider}`),
+        (error) => error.code === 'ENOENT',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
 });
 
 test('managed delegation rejects a missing or invalid workspace before provider launch', async () => {
@@ -293,7 +427,7 @@ test('direct local mode uses the caller worktree and does not invoke bootstrap',
     assert.equal(value.task.branch, 'feature');
     assert.equal(value.task.start_sha, SHA);
     assert.equal(launches[0].writer, false);
-    assert.equal(calls.some(([command]) => command === 'worktree-bootstrap'), false);
+    assert.equal(calls.some(([command]) => command === BUNDLED_WORKTREE_BOOTSTRAP), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -388,7 +522,7 @@ test('DSH omission keeps the Muse config and credential as the stored default', 
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-dsh-muse-'));
   const repo = path.join(root, 'repo');
   const museConfig = path.join(root, 'dsh-acp.yml');
-  const museKey = path.join(root, 'model-api-key');
+  const museKey = path.join(root, 'openrouter-api-key');
   let launched;
   try {
     await mkdir(repo);
@@ -411,7 +545,7 @@ test('DSH omission keeps the Muse config and credential as the stored default', 
       root,
       env: {
         CODEX_CO_ENGINEER_DSH_ACP_CONFIG: museConfig,
-        CODEX_CO_ENGINEER_MODEL_API_KEY_FILE: museKey,
+        CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE: museKey,
       },
       execute,
       probeBoundary: readyBoundary,
@@ -420,10 +554,10 @@ test('DSH omission keeps the Muse config and credential as the stored default', 
         return { pid: 9003, process_group: 9003, process_start_ticks: '3' };
       },
     });
-    assert.equal(value.task.dsh_model, 'muse-spark-1.2-contributor');
+    assert.equal(value.task.dsh_model, 'meta/muse-spark-1.3-contributor');
     assert.deepEqual(value.task.agent_argv, ['dsh-acp-demo', '--config', museConfig]);
-    assert.equal(launched.env.MODEL_API_KEY, 'test-muse-value');
-    assert.equal(launched.env.OPENROUTER_API_KEY, undefined);
+    assert.equal(launched.env.OPENROUTER_API_KEY, 'test-muse-value');
+    assert.equal(launched.env.MODEL_API_KEY, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -464,9 +598,9 @@ test('status makes boundary health explicit and fails only local providers close
       installed: true,
       ready: true,
       transport: 'acpx',
-      default_model: 'muse-spark-1.2-contributor',
+      default_model: 'meta/muse-spark-1.3-contributor',
       model_options: {
-        'muse-spark-1.2-contributor': { ready: true },
+        'meta/muse-spark-1.3-contributor': { ready: true },
         'stealth/ox-alpha': { ready: true },
       },
     },
@@ -543,7 +677,7 @@ test('managed launch failure marks the task failed and cleans an abandoned write
     assert.equal(task.error.code, 'worker_failed');
     assert.doesNotMatch(task.error.message, /private|secret/iu);
     assert.deepEqual(calls.at(-1), [
-      'worktree-bootstrap',
+      BUNDLED_WORKTREE_BOOTSTRAP,
       ['lock', 'clean', 'launch-fail', '--repo', worktreePath, '--policy', 'dead-local', '--lock-id', 'dead-lock'],
     ]);
   } finally {
@@ -894,6 +1028,52 @@ test('exports identity-bound local lifecycle settlement without rewriting stored
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const [label, cleanup, expectedDrain] of [
+  ['grants the first grace after worker cleanup', { status: 'pending', acp_close: 'closed', wtb_handoff: 'recorded' }, 123],
+  ['skips repeated grace after supervisor cleanup', { status: 'unknown', boundary: 'unknown', lock: 'not_applicable' }, 0],
+]) {
+test(`reconciliation ${label}`, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-repeat-drain-'));
+  const boundary = {
+    version: 1,
+    boundary: 'systemd-user-service-cgroup',
+    unit: 'codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+    description: 'codex-co-engineer-task:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    invocation_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    control_group: '/user.slice/user-1000.slice/user@1000.service/app.slice/codex-co-engineer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service',
+  };
+  let slept = 0;
+  try {
+    await createTask({
+      root,
+      prompt: 'reconcile retained receipt',
+      record: {
+        id: 'repeat-drain',
+        status: 'completed',
+        provider: 'grok',
+        cwd: root,
+        workspace_kind: 'direct',
+        cleanup,
+      },
+    });
+    const task = (await readTask(root, 'repeat-drain')).task;
+    const settled = await settleLocalTaskLifecycle(root, task, {
+      process_boundary: boundary,
+    }, {
+      drainGraceMs: 123,
+      sleep: async (milliseconds) => { slept += milliseconds; },
+      inspectBoundary: async () => ({ state: 'inactive_empty', empty: true, stop_allowed: false }),
+    });
+
+    assert.equal(slept, expectedDrain);
+    assert.equal(settled.final, true);
+    assert.equal(settled.boundary, 'inactive_empty');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+}
 
 test('default run seams are durable P33/P34 authorities and cancel confirms', async () => {
   const source = await readFile(new URL('../mcp/v3/supervisor.mjs', import.meta.url), 'utf8');

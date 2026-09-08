@@ -1,16 +1,24 @@
 ---
 name: control-codex-co-engineer-agents
-description: Operate Codex-Co-Engineer through the five MCP tools for raw status, payload, cursor, deadline, worktree, and control-plane debugging. Use when the user asks to inspect MCP arguments, event cursors, diagnostics, or lifecycle internals. Do not use for ordinary Delegating to Co-Engineer, Chatting with Co-Engineer, or Using Grok, Cursor, or Muse Co-Engineer.
+description: Debug Co-Engineer MCP payloads, cursors, deadlines, worktrees, or lifecycle internals. Use for explicit troubleshooting; ordinary delegation and existing-run management use their dedicated skills.
 ---
 
 # Advanced Co-Engineer Control
 
 This is the raw MCP lifecycle skill, not the natural-language Co-Engineer experience. For ordinary outcomes use `$delegate-to-co-engineer`, `$chat-with-co-engineer`, `$use-grok-co-engineer`, `$use-cursor-co-engineer`, or `$use-muse-co-engineer`. Load this skill when the user asks to debug status, payloads, cursors, deadlines, worktrees, or other control-plane internals.
 
+For ordinary launch friction, first inspect the existing receipt and connected
+catalog. Do not repair an unselected provider, create a profile, or rewrite
+host configuration merely because a delegation skill was invoked. Prefer the
+advertised `run_request` path; a catalog mismatch is a version issue, not a
+reason to construct protected identities by hand.
+
 Use the five MCP tools for delegation and lifecycle control.
 
 1. Call `status` when provider or supervisor readiness is unknown. Prefer
-   `detail: "compact", include_tasks: false` for a readiness-only check. Require
+   `detail: "compact", include_tasks: false` for a readiness-only check; use
+   `refresh: true` only when an explicitly fresh probe is needed. Warm status
+   is cache-backed and cold status may return `unknown/probing`. Require
    `local_boundary.ready: true` before local dispatch; local provider readiness
    is forced false when the boundary is unavailable.
 2. Local dispatch requires Linux, a working `systemd --user` manager,
@@ -18,9 +26,47 @@ Use the five MCP tools for delegation and lifecycle control.
    CLI/worktree dependencies; `status`, dispatch preflight, and release/live
    acceptance validate the boundary from their actual MCP environment.
 3. Choose `grok`, `cursor-local`, `cursor-cloud`, or `dsh`.
-4. Call `delegate` with a stable task ID, the absolute Git worktree path in
-   the property named `repo`, a clear prompt, and `expected_duration_ms` or a
-   backwards-compatible `timeout_ms`. The argument shape is literal:
+4. For a new bounded run, call `delegate` with the small semantic
+   `run_request` body. The server derives the exact Git identity, manifest and
+   prompt digests, provider model, child/workspace/dispatch identities, task
+   IDs, and default managed-workspace policy. The argument shape is:
+
+   ```json
+   {
+     "run_request": {
+       "run_id": "auth-hardening",
+       "repo": "/absolute/path/to/git-worktree",
+       "objective": "Implement and review the auth hardening change.",
+       "assignments": [
+         {
+           "assignment_id": "auth-implementation",
+           "provider": "grok",
+           "role": "implement",
+           "access": "write",
+           "prompt": "Implement the auth hardening slice and commit it.",
+           "expected_duration_ms": 900000
+         }
+       ]
+     }
+   }
+   ```
+
+   Do not supply derived fields, hand-constructed digests, child IDs, or a
+   manually assembled full `run` envelope. The full 3.4.0 `run` envelope
+   remains accepted for compatibility, but skills do not construct it.
+
+   Repository exposure uses the host's native MCP form. Only the user's
+   accepted approval permits admission. If the receipt remains
+   `awaiting_consent` after dismissal or interruption, continue the same run
+   with `task` and `run_reply: {"request_consent": true}` to reopen the form.
+   This requests a decision; it does not grant consent. Status and waits never
+   reopen the form. Surface `consent_host_unavailable` as a host capability
+   blocker; do not invent an `approval_ref` or switch launch paths to bypass it.
+
+   Call `delegate` with a stable task ID for a legacy single task, the
+   absolute Git worktree path in the property named `repo`, a clear prompt,
+   and `expected_duration_ms` or a backwards-compatible `timeout_ms`. The
+   argument shape is literal:
 
    ```json
    {
@@ -40,7 +86,7 @@ Use the five MCP tools for delegation and lifecycle control.
    `extend_expected_duration_ms` and `extend_reason` before expiry, and only
    when the new deadline is strictly later.
 5. Use `role: "review"` for analysis and `role: "implement"` for changes.
-   DSH defaults to Muse Spark 1.2 Contributor. For the optional OpenRouter Ox
+   DSH defaults to Muse Spark 1.3 Contributor. For the optional OpenRouter Ox
    Alpha route, keep `provider: "dsh"` and add
    `dsh_model: "stealth/ox-alpha"`. Never send its API key in the task.
 6. For local tasks, use `workspace_mode: "managed"` by default. Use
@@ -56,7 +102,12 @@ Use the five MCP tools for delegation and lifecycle control.
    reachability before retrying.
 8. Set `create_pr` only for Cursor Cloud. Local tasks reject it; Codex
    decides whether local commits justify a PR after inspecting the handoff.
-9. Coordinate without polling:
+9. Coordinate without polling. For a bounded run use one run-scoped wait:
+   `task` or `tasks` with `run_id`, `wait_until: "decision_or_attention"`,
+   and the opaque run `cursor`. The adapter keeps legacy single-task and
+   wait-any behavior available, but skills should use the run path for a
+   bounded multi-lane submission. Routine progress does not wake the wait.
+   For legacy tasks:
    - For one task, call `task` with `view: "compact"`. For a durable wait, add
      `wait_until: "terminal"` and the previous `event_cursor`. Optional
      `wait_ms` caps the call; omission follows the recorded deadline within the
@@ -73,10 +124,11 @@ Use the five MCP tools for delegation and lifecycle control.
    - Inspect `view: "diagnostics"` only for needs-attention, failure, or a task
      that appears stuck. It is side-effect free and never waits. Deliver a
      same-session `reply` exactly once only when the capability allows it.
-10. Omit `response_mode` by default. Set `response_mode: "structured"` only
-    when the calling client consumes authoritative `structuredContent`; a
-    text-only client would receive only the bounded fallback. Omission retains
-    the exact legacy full JSON text response.
+10. Capable clients default to structured-first bounded responses. Set
+    `response_mode: "structured"` explicitly when the client advertises
+    structured-content support. Legacy/text-only clients may omit it to retain
+    the compatible full sanitized JSON text response. Compact status and run
+    receipts are bounded by the server.
 11. Use `cancel` for explicit cancellation or verified orphan recovery.
 12. Inspect commits, handoff, and receipts before Codex merges anything.
 
@@ -93,6 +145,10 @@ The manager-owned transient systemd user service used for local workers sets
 workers survive the launching client. It is not a sandbox and
 does not restrict environment, network, filesystem, credentials, or shell
 capabilities. Local dispatch fails closed if the boundary is unavailable.
+
+After a new run is admitted, the truthful public phase is `preparing` until
+every required lane has authoritative `prompt_dispatched` evidence. Only then
+may the UI or skill say that Co-Engineer is `running`.
 
 Use normal persistent provider authentication. Never put credentials in MCP
 arguments or prompts. Configured provider sessions are standing authorization

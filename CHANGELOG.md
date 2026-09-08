@@ -2,6 +2,100 @@
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-09-08
+
+### Fixed
+
+- Instruct providers to honor the requested answer format and omit routine
+  narration and unrequested evidence headings. Controller evidence requirements
+  remain intact and do not act as an answer template.
+- Return Grok's final response after a settled tool round on successful tasks.
+  Preserve progress in task events and retain aggregate output when framing is
+  ambiguous, incomplete, over limit, or includes inline web search.
+- Handle processes disappearing during verification cleanup scans and parse
+  parenthesized process names correctly, while preserving fail-closed errors.
+- Remember explicit native approval for the same repository and selected
+  providers, with a one-run option and local revocation. Remove the redundant
+  approval checkbox and allow more time to answer the native form.
+- Detect missing installed worker entrypoints before preparing workspaces or
+  dispatching providers, with actionable reinstall and restart guidance.
+- Direct provider workers to their assigned working directory and clarify
+  controller-owned receipts, reducing unnecessary setup and evidence searches.
+
+- Adapt Cursor Cloud SDK results before internal validation so documented
+  timing, model, and usage metadata does not prevent terminal result delivery.
+- Use ACPX's one-shot command for DSH, preserving bounded provider errors and
+  results without a nested flow or replaying a submitted prompt.
+
+- Deliver the compiled assignment instructions and pin local workspaces to
+  the recorded commit; reject unsupported provider model overrides instead
+  of silently launching another model.
+
+- Align semantic runs with the authoritative provider task lifecycle, including
+  result delivery, recoverable observation failures, cancellation, and restart.
+  Reuse event-driven task waits and keep unchanged run receipts stable.
+
+- Wire semantic launch consent to native MCP forms, with explicit unsupported
+  host handling and same-run consent retry. Preserve pending/terminal receipts
+  and cursors; distinguish planned review work from completed evidence.
+
+- Reject future-dated repository-exposure approvals and make consent-window
+  fixtures independent of today's date. Remove ambient Git/network and
+  fixed-sleep dependencies from affected regression tests.
+
+- Semantic `run_request` launches now satisfy the advertised MCP JSON Schema
+  without legacy single-task fields; ambiguous dual envelopes are rejected.
+- Valid disjoint writer globs use the authoritative overlap validator instead
+  of a duplicate check that rejected separate directories.
+- Repeated status checks no longer repeat terminal cleanup grace periods for
+  previously reconciled receipts; ownership inspection remains active.
+- Preserve structured Cursor permission options through grouped questions and
+  stop treating shell command punctuation as user input.
+- Distinguish explicit Grok login status from ancillary command errors during
+  readiness checks.
+- All-Cursor Cloud runs skip the irrelevant local systemd/cgroup prerequisite;
+  mixed and local runs still enforce it.
+- Assignment access can be derived from its explicit role, eliminating a
+  redundant launch field while rejecting explicit role/access conflicts.
+
+### Changed
+
+- Bundle MIT-licensed Worktree Bootstrap 1.1.0 with recorded source provenance.
+  Local setup no longer depends on a separately installed private tool; Python
+  3.11+ is required. Validate runtime prerequisites before installation.
+- Reorganize installation and first-use documentation, include detailed upgrade
+  notes, and keep Luna/Sol coordination explicitly optional.
+
+- Default Muse to `meta/muse-spark-1.3-contributor` through OpenRouter with
+  XHigh reasoning, using only the OpenRouter credential for that route.
+- Release checks honor the operator's configured npm cache and temporary
+  storage instead of forcing a machine-specific cache path.
+
+- Added evidence-qualified Luna / Terra / Sol / Astra task-selection guidance.
+  Prefer one owner with bounded workers; an extra coordinator and reasoning
+  effort changes require task-specific justification. Model choice stays host-owned.
+- Made the installed skill path use existing provider choices and semantic
+  admission directly, with setup and manager tasks outside routine launch.
+  Clarified continuation, typed approvals, dependent reviews, and verification.
+  Provider prompts stay focused on requested output, tests and brief evidence;
+  the controller creates managed worktrees while the worker wrapper owns
+  verification, hidden writer tokens, lifecycle and machine receipts.
+
+## [3.4.1] - 2026-09-01
+
+Reliability candidate for bounded Co-Engineer implementation lanes. Preserves
+the five public tools and 3.4.0 compatibility while adding a server-compiled
+`run_request`, atomic pre-prompt admission, truthful dispatch evidence,
+restart-safe session recovery, typed repository-exposure consent,
+capability-aware attention batching, idempotent cancellation, silence-aware
+handoffs, readiness caching, and bounded simple-run responses. See
+[`docs/releases/v3.4.1.md`](docs/releases/v3.4.1.md) and the exact baseline
+ledger in [`docs/releases/v3.4.1-baseline.md`](docs/releases/v3.4.1-baseline.md).
+
+The candidate still requires host consent integration, an official exact-SHA
+local-only `worktree-bootstrap` capability, the Codex Desktop history-bound
+regression, and live provider acceptance before release publication.
+
 ## [3.4.0] - 2026-08-28
 
 3.4.0 is the Co-Engineer experience and efficiency release. It keeps the

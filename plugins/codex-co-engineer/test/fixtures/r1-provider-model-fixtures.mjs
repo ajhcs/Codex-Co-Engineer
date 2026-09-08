@@ -25,7 +25,7 @@ export const PROVIDER_MODEL_FIXTURES = Object.freeze([
   Object.freeze({
     provider: 'dsh',
     models: Object.freeze([
-      'muse-spark-1.2-contributor',
+      'meta/muse-spark-1.3-contributor',
       'stealth/ox-alpha',
       'future-dsh-model',
       'unlisted-future/model.9',

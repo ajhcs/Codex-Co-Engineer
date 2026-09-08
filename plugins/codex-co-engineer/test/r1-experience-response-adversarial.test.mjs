@@ -113,7 +113,7 @@ test('unsupported same-session reply marks the lane unresolved and does not inve
       assignmentId: 'dsh-lane',
       taskId: 'task-dsh',
       provider: 'dsh',
-      model: 'muse-spark-1.2-contributor',
+      model: 'meta/muse-spark-1.3-contributor',
       writeScope: ['docs/**'],
     }),
   ];

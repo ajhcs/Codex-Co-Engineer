@@ -19,6 +19,7 @@ import {
   runAcpWorkerCli,
   workerSeamIncident,
 } from '../mcp/v3/acp-worker.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from '../mcp/v3/worktree-bootstrap-runtime.mjs';
 import { createTask, readTask, updateTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
 import {
   CONTENT_FREE,
@@ -59,8 +60,8 @@ function sanitizedWtbEnv() {
 function stubWtbRunFile(calls) {
   return async (command, argv = []) => {
     calls.push({ command, argv: [...argv] });
-    assert.equal(command, 'worktree-bootstrap');
-    assert.equal(path.basename(command), command);
+    assert.equal(command, BUNDLED_WORKTREE_BOOTSTRAP);
+    assert.equal(path.isAbsolute(command), true);
     return { stdout: '{}' };
   };
 }
@@ -73,7 +74,7 @@ function assertStubbedWtbOnly(calls, { env, cwd }) {
   if (env.WORKTREE_BOOTSTRAP_TASK) {
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0], {
-      command: 'worktree-bootstrap',
+      command: BUNDLED_WORKTREE_BOOTSTRAP,
       argv: ['verify', env.WORKTREE_BOOTSTRAP_TASK, '--repo', cwd, '--require-writer'],
     });
   } else {

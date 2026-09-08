@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const FIXTURE_MODES = new Set([
+  'framed-final',
   'normal',
   'raw-partial-frame',
   'silent-initialize',
@@ -93,6 +94,10 @@ function sessionUpdate(sessionId, text) {
       },
     },
   });
+}
+
+function toolUpdate(sessionId, update) {
+  send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update } });
 }
 
 function toolCallUpdate(sessionId, payload) {
@@ -198,6 +203,28 @@ async function handleRequest(message) {
       pendingPrompts.set(id, { sessionId: params.sessionId, timer: null, hostileTimeout: true });
       return;
     }
+    if (fixtureMode === 'framed-final') {
+      sessionUpdate(params.sessionId, 'fake-opening-preamble');
+      toolUpdate(params.sessionId, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'fake-read',
+        title: 'Read package.json',
+        kind: 'read',
+        status: 'pending',
+        rawInput: { variant: 'ReadFile', target_file: 'package.json' },
+      });
+      toolUpdate(params.sessionId, {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'fake-read',
+        title: 'Read package.json',
+        kind: 'read',
+        status: 'completed',
+        rawOutput: { text: '{"version":"3.4.2"}' },
+      });
+      sessionUpdate(params.sessionId, 'fake-final-answer');
+      await finishPrompt(id, params.sessionId);
+      return;
+    }
     sessionUpdate(
       params.sessionId,
       text.includes('terminal-verdict')
@@ -262,7 +289,10 @@ async function handleRequest(message) {
         method: 'session/request_permission',
         params: {
           sessionId: params.sessionId,
-          toolCall: { toolCallId: 'fake-permission', title: 'Fake permission' },
+          toolCall: {
+            toolCallId: 'fake-permission',
+            title: text.includes('title question') ? 'Which environment should I use?' : 'Fake permission',
+          },
           options: [
             { optionId: 'allow', kind: 'allow_once', name: 'Allow once' },
             { optionId: 'reject', kind: 'reject_once', name: 'Reject once' },

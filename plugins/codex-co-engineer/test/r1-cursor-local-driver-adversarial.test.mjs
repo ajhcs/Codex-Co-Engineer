@@ -198,7 +198,7 @@ test('the transport surface accepts only plain concrete methods', () => {
 
 test('provenance substitution and omitted-field derivation are refused on every surface', () => {
   const dshFixture = buildCursorLocalFixtureV1({
-    provider: 'dsh', model: 'muse-spark-1.2-contributor', run_id: 'substituted-dsh-run',
+    provider: 'dsh', model: 'meta/muse-spark-1.3-contributor', run_id: 'substituted-dsh-run',
   });
   const grokFixture = buildCursorLocalFixtureV1({
     provider: 'grok', model: 'grok-4', run_id: 'substituted-grok-run',

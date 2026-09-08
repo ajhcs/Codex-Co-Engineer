@@ -71,9 +71,13 @@ the closed vocabulary in manifest order.
 ## Merge authority
 
 The card never merges, pushes, rebases, creates a PR, tags, or releases.
-`merge.card_can_merge` is always false. Sol High/XHigh alone may
-regular-merge after exact-head, exact-tree, current-green-CI, and topology
-CAS checks. Those CAS results are recorded on `merge.cas`.
+`merge.card_can_merge` is always false. The compatibility fields
+`ready_for_sol_merge` and `sol_regular_merge_permitted` report typed
+readiness only; they do not select a model or grant authority. Codex remains
+the merge authority and may regular-merge only after exact-head, exact-tree,
+current-green-CI, and topology CAS checks and the user's authorization.
+Those CAS results are recorded on `merge.cas`. The user retains release,
+tag, version, and protected-ref authority.
 
 ## Non-goals
 

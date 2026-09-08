@@ -308,16 +308,17 @@ function assertDocsMatchFixture(contractText, journeysText, fixture) {
   assert.equal(folded(groupedBody).includes(fixture.codex_phrases.attention), true);
   assert.match(folded(groupedBody), /not a second delegation/u);
 
-  assert.match(contractText, /Luna Max project manager/u);
+  assert.match(contractText, /## Optional legacy Luna\/Sol host relay/u);
+  assert.match(folded(contractText), /Ordinary delegation stays in the current Codex task and uses the user's selected model/u);
   assert.match(contractText, /never silently substitutes Sol/u);
-  assert.match(contractText, /Normal completion never wakes Sol/u);
+  assert.match(folded(contractText), /normal completion never wakes Sol/iu);
   assert.match(contractText, /create_thread/u);
   assert.match(contractText, /send_message_to_thread/u);
   assert.match(contractText, /wait_threads/u);
   assert.match(contractText, /read_thread/u);
-  assert.match(journeysText, /## Project manager/u);
+  assert.match(journeysText, /## Optional legacy host relay/u);
   assert.match(journeysText, /does not substitute Sol/u);
-  assert.match(journeysText, /Luna Max is the default project manager/u);
+  assert.match(journeysText, /Luna Max becomes project manager for a run only/u);
 
   const askOnceBody = sectionBody(journeysText, JOURNEY_HEADINGS['no-profile-ask-once']);
   assert.match(folded(askOnceBody), /asks once/u);

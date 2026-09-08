@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   AGGREGATE_RUN_ANCHOR_SCHEMA_ID,
   AGGREGATE_STORAGE_ROOT_KIND,
+  MAX_AGGREGATE_TEMPORARIES,
   STORAGE_ROOT_SCHEMA_ID,
   initializeAggregateRunAnchorRoot,
   openAggregateRunAnchor,
@@ -121,6 +122,21 @@ test('initialize publishes an owner-only marker and open rejects unmarked empty 
     assert.equal(reopened.marker_digest, store.marker_digest);
     assert.equal((await errorOf(() => initializeAggregateRunAnchorRoot(root))).code,
       'aggregate_run_root_foreign');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('root audit tolerates the declared bounded lock-owner temporary allowance', async () => {
+  const root = await makePrivateRoot();
+  try {
+    await initializeAggregateRunAnchorRoot(root);
+    await writeFile(path.join(root, 'lock'), '{}\n', { mode: 0o600 });
+    for (let index = 0; index < MAX_AGGREGATE_TEMPORARIES; index += 1) {
+      await writeFile(path.join(root, `.lock-${index.toString(16).padStart(32, '0')}`), '{}\n', { mode: 0o600 });
+    }
+    const reopened = await openAggregateRunAnchor(root);
+    assert.equal(reopened.root, root);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -404,7 +420,7 @@ test('cross-process 13/13 submit and mutation keep one winner without ENOTEMPTY 
     const mutationCreated = mutationResults.filter((result) => result.ok && result.created);
     const mutationReplay = mutationResults.filter((result) => result.ok && result.created === false);
     assert.equal(mutationCreated.length, 1, JSON.stringify(mutationResults));
-    assert.equal(mutationCreated.length + mutationReplay.length, 13);
+    assert.equal(mutationCreated.length + mutationReplay.length, 13, JSON.stringify(mutationResults));
     for (const result of mutationResults) {
       assert.equal(result.ok, true, result.code);
       assert.notEqual(result.code, 'ENOTEMPTY');

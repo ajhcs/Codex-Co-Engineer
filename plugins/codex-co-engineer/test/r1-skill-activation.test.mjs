@@ -312,18 +312,7 @@ function assertGoalEntrypoint(skillId, files, catalog) {
   assert.match(packText, /same run cursor/u, `${skillId} missing same run cursor`);
   assert.match(files.skillMd, /Codex remains/u, `${skillId} missing Codex authority`);
   assert.match(files.skillMd, /External workers may commit/u, `${skillId} missing worker commit authority`);
-  assert.match(
-    files.skillMd,
-    /scoped publisher may non-force push only the task branch/u,
-    `${skillId} missing scoped publisher`,
-  );
-  assert.match(files.skillMd, /Sol High or Sol XHigh/u, `${skillId} missing Sol merge actor`);
-  assert.match(files.skillMd, /The user retains/u, `${skillId} missing retained user authority`);
-  assert.doesNotMatch(
-    files.skillMd,
-    /reviewer and merge authority/u,
-    `${skillId} still names Codex as merge authority`,
-  );
+  assert.match(files.skillMd, /Publication and merge require user authorization and Codex review/u);
   assert.match(files.skillMd, /Never ask the user to construct tool payloads/u, skillId);
   assert.match(files.skillMd, /\$control-codex-co-engineer-agents/u, skillId);
 }
@@ -596,7 +585,7 @@ test('activation contract rejects jargon entrypoints, sixth tools, and misrouted
   );
 });
 
-test('Delegating and Chatting teach Luna Max PM without a sixth public skill', async () => {
+test('Delegating and Chatting retain optional Luna relay without a sixth public skill', async () => {
   const bundle = await loadBundle();
   const skillDirs = (await readdir(SKILLS)).sort();
   assert.deepEqual(skillDirs, [...ALL_SKILLS].sort());
@@ -611,8 +600,10 @@ test('Delegating and Chatting teach Luna Max PM without a sixth public skill', a
     assert.equal(delegatePack.includes(phrase), true, `delegate pack missing ${phrase}`);
     assert.equal(chatPack.includes(phrase), true, `chat pack missing ${phrase}`);
   }
-  assert.match(bundle.skillFiles['delegate-to-co-engineer'].skillMd, /pin one Luna Max task/u);
-  assert.match(bundle.skillFiles['chat-with-co-engineer'].skillMd, /Normal completion does not wake Sol/u);
+  assert.match(bundle.skillFiles['delegate-to-co-engineer'].skillMd, /explicitly requested legacy Luna\/Sol relay/u);
+  assert.match(delegatePack, /pin one Luna Max task/u);
+  assert.match(bundle.skillFiles['chat-with-co-engineer'].skillMd, /explicitly requested legacy Luna\/Sol relay/u);
+  assert.match(chatPack, /Normal completion does not wake\s+Sol/u);
   assert.match(delegatePack, /I am not substituting Sol/u);
   assert.match(chatPack, /I am not substituting Sol/u);
 

@@ -656,35 +656,50 @@ function defaultKillProcessGroup(pid, signal) {
   }
 }
 
-async function defaultListDescendants(pid) {
+export async function listProcDescendants(pid, {
+  readDir = readdir,
+  readText = readFile,
+} = {}) {
   if (!NUMBER_IS_SAFE_INTEGER(pid) || pid <= 0) deny('cleanup_uncertain', 'execution');
+  if (typeof readDir !== 'function' || typeof readText !== 'function') deny('cleanup_uncertain', 'execution');
   let dir;
   try {
-    dir = await readdir('/proc');
+    dir = await readDir('/proc');
   } catch {
     deny('cleanup_uncertain', 'execution');
   }
+  if (!capturedIsArray(dir)) deny('cleanup_uncertain', 'execution');
   const leftover = [];
   for (let index = 0; index < dir.length; index += 1) {
     const name = dir[index];
-    if (!/^[0-9]+$/u.test(name)) continue;
+    if (typeof name !== 'string' || !/^[0-9]+$/u.test(name)) continue;
     const other = Number(name);
-    if (other === pid || !NUMBER_IS_SAFE_INTEGER(other)) continue;
+    if (other === pid || !NUMBER_IS_SAFE_INTEGER(other) || other <= 0) continue;
     let stat;
     try {
-      stat = await readFile(`/proc/${other}/stat`, 'utf8');
+      stat = await readText(`/proc/${other}/stat`, 'utf8');
     } catch (error) {
-      if (error && error.code === 'ENOENT') continue;
+      if (error && (error.code === 'ENOENT' || error.code === 'ESRCH')) continue;
       deny('cleanup_uncertain', 'execution');
     }
-    const close = stat.indexOf(')');
+    if (typeof stat !== 'string') deny('cleanup_uncertain', 'execution');
+    const close = stat.lastIndexOf(')');
     if (close < 0) deny('cleanup_uncertain', 'execution');
-    const rest = stat.slice(close + 2).split(' ');
+    const rest = stat.slice(close + 2).trim().split(/\s+/u);
+    if (!/^[A-Za-z]$/u.test(rest[0] ?? '')) deny('cleanup_uncertain', 'execution');
     const ppid = Number(rest[1]);
     const pgid = Number(rest[2]);
+    if (!NUMBER_IS_SAFE_INTEGER(ppid) || ppid < 0
+      || !NUMBER_IS_SAFE_INTEGER(pgid) || pgid < 0) {
+      deny('cleanup_uncertain', 'execution');
+    }
     if (ppid === pid || pgid === pid) ARRAY_PUSH.call(leftover, other);
   }
   return freezeList(leftover);
+}
+
+async function defaultListDescendants(pid) {
+  return listProcDescendants(pid);
 }
 
 async function collectChildOutput(child, timeoutMs) {

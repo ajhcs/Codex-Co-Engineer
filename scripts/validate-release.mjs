@@ -11,10 +11,11 @@ import {
   THREAT_MODEL_RELATIVE,
   assertR1FirstReleaseContract,
 } from './r1-first-release-contract.mjs';
+import { validatePackageDocs } from './validate-package-docs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
-const RELEASE_VERSION = '3.4.0';
+const RELEASE_VERSION = '3.4.2';
 
 function fail(message) { throw new Error(message); }
 const absolute = (relative) => path.join(ROOT, relative);
@@ -22,22 +23,51 @@ const text = (relative) => readFile(absolute(relative), 'utf8');
 const json = async (relative) => JSON.parse(await text(relative));
 
 const required = [
+  // Preserve published contracts: globbed test runs cannot detect missing suites.
+  'plugins/codex-co-engineer/test/r1-decision-reducer-lane-health-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-decision-reducer.test.mjs',
+  'plugins/codex-co-engineer/test/r1-final-decision-card-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-final-decision-card.test.mjs',
+  'plugins/codex-co-engineer/test/r1-grok-attention-bridge-truthfulness.test.mjs',
+  'plugins/codex-co-engineer/test/r1-lane-health.test.mjs',
+  'plugins/codex-co-engineer/test/r1-luna-pm-host-adapter-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-luna-pm-host-adapter.test.mjs',
+  'plugins/codex-co-engineer/test/r1-luna-pm-relay-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-luna-pm-relay.test.mjs',
+  'plugins/codex-co-engineer/test/r1-provider-event-rules-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-provider-event-rules-performance.test.mjs',
+  'plugins/codex-co-engineer/test/r1-provider-event-rules.test.mjs',
+  'plugins/codex-co-engineer/test/r1-usage-ledger-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-usage-ledger.test.mjs',
+  'plugins/codex-co-engineer/test/r1-worktree-cleanup-adapter.test.mjs',
+  'plugins/codex-co-engineer/test/r1-worktree-cleanup-planner-adversarial.test.mjs',
+  'plugins/codex-co-engineer/test/r1-worktree-cleanup-planner.test.mjs',
+
   'README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md',
   'docs/configuration.md', 'docs/data-handling.md', 'docs/efficient-dogfood.md', 'docs/release.md',
   'docs/future-work.md', 'docs/mcp-pending-call.md', 'docs/adr/0001-r1-bounded-run-architecture.md',
   'docs/threat-model.md', 'docs/releases/v3.1.0.md',
   'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md', 'docs/releases/v3.2.1.md',
-  'docs/releases/v3.3.0.md', 'docs/releases/v3.4.0.md',
+  'docs/releases/v3.3.0.md', 'docs/releases/v3.4.0.md', 'docs/releases/v3.4.1.md', 'docs/releases/v3.4.2.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',
   `${PLUGIN}/.codex-plugin/plugin.json`, `${PLUGIN}/.mcp.json`, `${PLUGIN}/package.json`,
   `${PLUGIN}/README.md`, `${PLUGIN}/bin/setup.mjs`,
+  `${PLUGIN}/mcp/v3/usage-ledger.mjs`,
+  `${PLUGIN}/mcp/v3/luna-pm-host-adapter.mjs`,
+  `${PLUGIN}/mcp/v3/final-decision-card.mjs`,
+  `${PLUGIN}/mcp/v3/provider-event-rules.mjs`,
+  `${PLUGIN}/mcp/v3/decision-reducer.mjs`,
+  `${PLUGIN}/mcp/v3/lane-health.mjs`,
+  `${PLUGIN}/mcp/v3/grok-question-bridge.mjs`,
+  `${PLUGIN}/mcp/v3/worktree-cleanup-planner.mjs`,
+  `${PLUGIN}/mcp/v3/worktree-cleanup-adapter.mjs`,
   `${PLUGIN}/mcp/v3/server.mjs`, `${PLUGIN}/mcp/v3/supervisor.mjs`,
   `${PLUGIN}/mcp/v3/task-store.mjs`, `${PLUGIN}/mcp/v3/acp-worker.mjs`,
   `${PLUGIN}/mcp/v3/contract.mjs`, `${PLUGIN}/mcp/v3/deadline.mjs`,
   `${PLUGIN}/mcp/v3/diagnostics.mjs`, `${PLUGIN}/mcp/v3/mailbox.mjs`,
-  `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`, `${PLUGIN}/mcp/v3/single-turn.flow.mjs`,
+  `${PLUGIN}/mcp/v3/cursor-cloud-worker.mjs`,
   `${PLUGIN}/mcp/v3/process-boundary.mjs`,
   `${PLUGIN}/mcp/v3/compact-task.mjs`, `${PLUGIN}/mcp/v3/provider-result.mjs`,
   `${PLUGIN}/mcp/v3/response.mjs`,
@@ -45,10 +75,14 @@ const required = [
   `${PLUGIN}/assets/acpx-third-party-notices.md`,
   `${PLUGIN}/vendor/dsh-acp-demo/LICENSE`, `${PLUGIN}/vendor/dsh-acp-demo/PROVENANCE.json`,
   `${PLUGIN}/vendor/dsh-acp-demo/package.json`,
+  `${PLUGIN}/vendor/worktree-bootstrap/LICENSE`, `${PLUGIN}/vendor/worktree-bootstrap/PROVENANCE.json`,
+  `${PLUGIN}/vendor/worktree-bootstrap/worktree-bootstrap`,
+  `${PLUGIN}/mcp/v3/worktree-bootstrap-runtime.mjs`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/SKILL.md`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/agents/openai.yaml`,
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/r1-first-release-contract.mjs',
-  'scripts/inspector-preflight.mjs', `${PLUGIN}/test/r1-first-release-non-goals.test.mjs`,
+  'scripts/inspector-preflight.mjs', 'scripts/validate-package-docs.mjs',
+  `${PLUGIN}/test/r1-first-release-non-goals.test.mjs`,
   'scripts/process-boundary-preflight.mjs', 'scripts/mcp-environment-preflight.mjs',
   'tools/acpx-vendor/package.json', 'tools/acpx-vendor/package-lock.json',
 ];
@@ -99,8 +133,10 @@ if (!serverText.includes('Required property named repo')
 }
 if (packageJson.scripts?.test !== 'node --no-warnings --test test/*.test.mjs') fail('Unexpected test script.');
 if (JSON.stringify(packageJson.files) !== JSON.stringify([
-  '.codex-plugin', '.mcp.json', 'README.md', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
+  '.codex-plugin', '.mcp.json', 'README.md', 'docs', 'assets', 'bin', 'mcp', 'skills', 'vendor', 'package.json',
 ])) fail('Co-Engineer package roots changed.');
+
+await validatePackageDocs(ROOT);
 
 const server = mcp.mcpServers?.['codex-co-engineer'];
 if (server?.command !== 'node'
@@ -129,11 +165,11 @@ if (!serverText.includes('dsh_model') || !serverText.includes('stealth/ox-alpha'
   fail('3.2.1 public contract must advertise the optional Ox Alpha DSH model selector.');
 }
 if (!serverText.includes('response_mode')
-  || !serverText.includes("enum: ['structured']")
+  || !serverText.includes("enum: ['structured', 'legacy']")
   || !serverText.includes("enum: ['summary', 'diagnostics', 'compact']")
   || !serverText.includes('task_ids')
   || !serverText.includes('cursors')) {
-  fail('3.2 public contract must advertise structured response_mode, compact task view, and wait-any task_ids/cursors.');
+  fail('3.2 public contract must advertise structured/legacy response_mode, compact task view, and wait-any task_ids/cursors.');
 }
 const compactTaskText = await text(`${PLUGIN}/mcp/v3/compact-task.mjs`);
 if (!compactTaskText.includes('WAIT_ANY_RESPONSE_STRUCTURED_BYTES_MAX')
@@ -183,6 +219,16 @@ const dshPackage = await json(`${PLUGIN}/vendor/dsh-acp-demo/package.json`);
 for (const file of ['LICENSE', 'PROVENANCE.json']) {
   if (!dshPackage.files?.includes(file)) fail(`DSH package omits ${file}.`);
 }
+
+const worktreeBootstrapProvenance = await json(`${PLUGIN}/vendor/worktree-bootstrap/PROVENANCE.json`);
+const worktreeBootstrap = await readFile(absolute(`${PLUGIN}/vendor/worktree-bootstrap/worktree-bootstrap`));
+if (worktreeBootstrapProvenance.version !== '1.1.0'
+  || worktreeBootstrapProvenance.license !== 'MIT'
+  || createHash('sha256').update(worktreeBootstrap).digest('hex') !== worktreeBootstrapProvenance.artifact_sha256) {
+  fail('Bundled worktree-bootstrap provenance/hash mismatch.');
+}
+const worktreeBootstrapMode = (await lstat(absolute(`${PLUGIN}/vendor/worktree-bootstrap/worktree-bootstrap`))).mode;
+if ((worktreeBootstrapMode & 0o111) === 0) fail('Bundled worktree-bootstrap must be executable.');
 
 async function releaseFiles(directory = ROOT) {
   const values = [];

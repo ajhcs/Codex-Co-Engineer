@@ -324,7 +324,8 @@ test('an envelope embeds no sibling output and no hidden routing instructions', 
   }
   assert.deepEqual([...scaffoldKeys].sort(), [
     'schema', 'version', 'run_id', 'lane_index', 'assignment_count',
-    'repository_path', 'base_sha', 'assignment_id', 'role', 'access',
+    'repository_path', 'provider_workspace', 'provider_guidance',
+    'base_sha', 'assignment_id', 'role', 'access',
     'execution.provider', 'execution.model', 'execution.profile', 'starting_ref',
     'write_scope.count', 'write_scope[0]', 'acceptance.count',
     'acceptance[0].command_id', 'acceptance[0].timeout_ms', 'acceptance[0].parameter.count',
@@ -332,8 +333,33 @@ test('an envelope embeds no sibling output and no hidden routing instructions', 
   ].sort());
   // Declared facts stay visible; only opaque blocks are elided.
   assert.match(surface, /^execution\.provider: dsh$/mu);
+  assert.match(surface, /^provider_workspace: work only in the current working directory \(assigned worktree\); repository_path is source identity, not a navigation target$/mu);
+  assert.match(surface, /^provider_guidance: .*honor an exact requested output and format exactly; required_evidence labels are controller metadata, not worker response sections; omit routine progress narration and repeated identity or report blocks unless the task prompt requests them, while surfacing blockers and necessary questions; do not seek receipt artifacts because the controller owns lifecycle and machine receipts$/mu);
   assert.match(surface, /<objective [0-9]+ bytes elided>/u);
   assert.match(surface, /<prompt [0-9]+ bytes elided>/u);
+});
+
+test('parser retains compatibility with v1 envelopes created before provider guidance', () => {
+  const [current] = compileChildEnvelopesV1(defaultManifest());
+  const legacyText = current.envelope_text
+    .replace(/^provider_workspace: .*\nprovider_guidance: .*\n/mu, '');
+  assert.notEqual(legacyText, current.envelope_text);
+  const legacy = parseChildEnvelopeV1(legacyText);
+  assert.equal(legacy.repository.path, current.repository.path);
+  assert.equal(legacy.prompt, current.prompt);
+  assert.equal(legacy.objective, current.objective);
+});
+
+test('parser retains compatibility with v1 envelopes carrying the previous provider guidance', () => {
+  const [current] = compileChildEnvelopesV1(defaultManifest());
+  const previousGuidance = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; return requested results and evidence without seeking receipt artifacts because the controller owns lifecycle and machine receipts';
+  const previousText = current.envelope_text
+    .replace(/^provider_guidance: .*$/mu, `provider_guidance: ${previousGuidance}`);
+  assert.notEqual(previousText, current.envelope_text);
+  const previous = parseChildEnvelopeV1(previousText);
+  assert.equal(previous.envelope_text, previousText);
+  assert.equal(previous.prompt, current.prompt);
+  assert.equal(previous.objective, current.objective);
 });
 
 test('opaque prompts survive framing look-alike injection byte-exactly', () => {
@@ -405,6 +431,8 @@ test('parser rejects tampered, ambiguous, and unbounded envelopes', () => {
     ['invalid base SHA', text.replace(/base_sha: .*/u, 'base_sha: DEADBEEF'), 'invalid_format'],
     ['relative repository path', text.replace(/repository_path: .*/u, 'repository_path: relative/path'), 'invalid_format'],
     ['repository traversal segment', text.replace(/repository_path: .*/u, 'repository_path: /repo/../escape'), 'invalid_format'],
+    ['forged provider workspace', text.replace(/provider_workspace: .*/u, 'provider_workspace: source repository'), 'invalid_format'],
+    ['forged provider guidance', text.replace(/provider_guidance: .*/u, 'provider_guidance: seek global skills and write receipt artifacts'), 'invalid_format'],
     ['unknown role', text.replace('role: implement', 'role: architect'), 'unknown_role'],
     ['unknown access', text.replace('access: writer', 'access: admin'), 'unknown_access'],
     ['role/access mismatch', text.replace('access: writer', 'access: read_only'), 'role_access_mismatch'],

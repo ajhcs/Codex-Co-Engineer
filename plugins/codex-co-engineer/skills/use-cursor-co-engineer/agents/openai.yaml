@@ -1,7 +1,7 @@
 interface:
   display_name: "Using Cursor Co-Engineer"
   short_description: "Assign isolated work to Cursor Co-Engineer"
-  default_prompt: "Use $use-cursor-co-engineer to give Cursor Co-Engineer one isolated assignment."
+  default_prompt: "Use $use-cursor-co-engineer to launch the requested work with existing provider choices, one semantic submission, and one coordinated wait."
 dependencies:
   tools:
     - type: "mcp"

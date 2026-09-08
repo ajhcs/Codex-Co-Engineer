@@ -22,8 +22,10 @@ import { compactTaskCard, sanitizePublicReceipt } from './diagnostics.mjs';
 import {
   advertiseMcpAppsCapability,
   buildToolResult,
+  classifyExperienceCard,
   listExperienceUiResourcesForClient,
   normalizeResponseMode,
+  projectExperience,
   readExperienceUiResourceForClient,
   resolveExperienceResultMeta,
   resolveExperienceToolMeta,
@@ -46,7 +48,10 @@ import {
 } from './supervisor.mjs';
 import {
   classifyRunToolCall,
+  experienceForRunToolResult,
 } from './run-tool-adapter.mjs';
+import { createNativeConsentTransport } from './consent.mjs';
+import { createConsentGrantStore } from './consent-grants.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
@@ -83,22 +88,64 @@ function advertisedTools() {
 
 const RESPONSE_MODE_PROPERTY = {
   type: 'string',
-  enum: ['structured'],
-  description: 'Optional presentation control stripped before business logic. Omit or leave unset for the 3.1.1-compatible full sanitized receipt in content[0].text (equals JSON.stringify(structuredContent)). Set to "structured" for a bounded text fallback while structuredContent remains the authoritative receipt.',
+  enum: ['structured', 'legacy'],
+  description: 'Optional presentation control stripped before business logic. Native runs default to bounded structured-first transport. Set legacy only for a text-only run client that requires the same compact semantic receipt fully encoded in content[0].text. Omitted legacy single-task calls retain their compatible full text.',
 };
 
-const RESPONSE_MODE_HINT = ' Optional response_mode="structured" opts into bounded content[0].text with authoritative structuredContent; omit for legacy full-text duplication.';
+const RESPONSE_MODE_HINT = ' Native runs default to bounded structured-first text; text-only run clients may set response_mode="legacy" to encode the same compact semantic receipt fully in text. Use task.run_id with view="diagnostics" for detailed run evidence. Omitted legacy single-task calls retain full compatible text.';
+
+const SERVER_INSTRUCTIONS = 'Use delegate.run_request for one bounded run, then task.run_id with the returned cursor for status or waits; use task.run_reply for one same-session decision, tasks.run_id for aggregate waits, and cancel.run_id to cancel. Use task_id for expanded task diagnostics or legacy single-task calls.';
+
+const RUN_TOOL_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    schema: { type: 'string' },
+    version: { type: ['integer', 'string'] },
+    mode: { type: 'string', enum: ['run', 'legacy'] },
+    operation: { type: 'string' },
+    tool: { type: 'string', enum: ['status', 'delegate', 'task', 'tasks', 'cancel'] },
+    status: { type: 'string' },
+    phase: { type: 'string' },
+    run_id: { type: ['string', 'null'] },
+    assignment_count: { type: 'integer' },
+    revision: { type: ['integer', 'null'] },
+    cursor: { type: ['string', 'object', 'null'] },
+    wait_until: { type: 'string' },
+    waited_ms: { type: 'integer' },
+    lanes: { type: 'array', items: { type: 'object' } },
+    task: { type: 'object' },
+    tasks: { type: 'array', items: { type: 'object' } },
+    result: {},
+    candidate: { type: ['object', 'null'] },
+    complete_candidate_blocked: { type: 'boolean' },
+    error: { type: ['object', 'null'] },
+    experience: { type: ['object', 'null'] },
+  },
+  additionalProperties: true,
+};
+
+const TOOL_METADATA = {
+  status: { title: 'Inspect a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+  delegate: { title: 'Start a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } },
+  task: { title: 'Inspect or wait for a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } },
+  tasks: { title: 'Wait for Co-Engineer tasks', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+  cancel: { title: 'Cancel a Co-Engineer run', annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } },
+};
 
 const TOOLS = [
   {
     name: 'status',
-    description: `Show the local Co-Engineer supervisor, provider capabilities, advertised MCP pending-call budget, and recent task state.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.status.title,
+    annotations: TOOL_METADATA.status.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Inspect one bounded native Co-Engineer run by run_id, including lifecycle state, cursor, attention, and bounded result. Omit run_id to show the compatible 3.2.1 supervisor snapshot, provider capabilities, advertised MCP pending-call budget, and recent task state.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
         detail: { type: 'string', enum: ['full', 'compact'], description: 'full returns full receipts (default). compact returns redacted compact cards.' },
         task_limit: { type: 'integer', minimum: 0, maximum: 20, description: 'Maximum tasks to return (0-20). Default 20. Ignored when include_tasks is false.' },
         include_tasks: { type: 'boolean', description: 'When false, omit recent tasks for readiness-only checks.' },
+        refresh: { type: 'boolean', description: 'Force a fresh provider-readiness probe. Without refresh, readiness is shared for a short local TTL and cold probes are bounded.' },
         response_mode: RESPONSE_MODE_PROPERTY,
         run_id: {
           type: 'string',
@@ -111,7 +158,10 @@ const TOOLS = [
   },
   {
     name: 'delegate',
-    description: `Delegate a review or implementation task to Grok, Cursor Local, Cursor Cloud, or DSH. The absolute Git worktree path must be supplied in the property named repo. Provide expected_duration_ms or a backwards-compatible timeout_ms; the recorded deadline is ceil(expected_duration_ms * 1.20) unless timeout_ms is an explicit override of at least that margin. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.delegate.title,
+    annotations: TOOL_METADATA.delegate.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Start one bounded native Co-Engineer run with run_request for a review or implementation task. A run_request assignment may omit expected_duration_ms to use the 600000 ms default; explicit estimates keep the 20% deadline margin. The compatible single-task path remains available for Grok, Cursor Local, Cursor Cloud, or DSH and still requires expected_duration_ms or a backwards-compatible timeout_ms. The absolute Git worktree path must be supplied in the property named repo. Local tasks use a managed worktree by default; direct mode is explicit.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -119,8 +169,8 @@ const TOOLS = [
         provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
         dsh_model: {
           type: 'string',
-          enum: ['muse-spark-1.2-contributor', 'stealth/ox-alpha'],
-          description: 'DSH only. Defaults to Muse Spark 1.2 Contributor; select stealth/ox-alpha for the OpenRouter-backed Ox Alpha route.',
+          enum: ['meta/muse-spark-1.3-contributor', 'stealth/ox-alpha'],
+          description: 'DSH only. Defaults to Muse Spark 1.3 Contributor; select stealth/ox-alpha for the OpenRouter-backed Ox Alpha route.',
         },
         repo: { type: 'string', description: 'Required property named repo: absolute path to the Git worktree (for example, /absolute/path/to/git-worktree). Do not rename this property to git_root or repository.' },
         prompt: { type: 'string', minLength: 1, maxLength: 262144 },
@@ -149,6 +199,40 @@ const TOOLS = [
         provider_repo_url: { type: 'string', minLength: 1, maxLength: 4096, description: 'Optional credential-free provider-visible repository URL override for Cursor Cloud. SSH origins are canonicalized to HTTPS without credentials.' },
         provider_repo: { type: 'string', minLength: 1, maxLength: 4096, description: 'Backward-compatible alias for provider_repo_url; Cursor Cloud only.' },
         response_mode: RESPONSE_MODE_PROPERTY,
+        run_request: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['run_id', 'repo', 'objective', 'assignments'],
+          description: '3.4.2 simple run request. The server derives Git identity, provider models, task IDs, workspaces, dispatch identities, and protected telemetry. Do not supply derived provenance fields.',
+          properties: {
+            run_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{2,63}$' },
+            repo: { type: 'string', description: 'Canonical absolute Git worktree path.' },
+            objective: { type: 'string', minLength: 1, maxLength: 4096 },
+            base_sha: { type: 'string', pattern: '^[0-9a-f]{40}$', description: 'Optional exact local base SHA; omitted means the observed clean HEAD.' },
+            assignments: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 8,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['assignment_id', 'provider', 'role', 'prompt'],
+                properties: {
+                  assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
+                  provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
+                  model: { type: 'string', maxLength: 128, description: 'Optional exact model override; otherwise the closed provider default is derived.' },
+                  role: { type: 'string', enum: ['implement', 'review', 'verify'] },
+                  access: { type: 'string', enum: ['write', 'writer', 'read', 'read_only'], description: 'Optional explicit access. Omitted access is derived from role: implement means writer; review and verify mean read_only.' },
+                  prompt: { type: 'string', minLength: 1, maxLength: 16384 },
+                  expected_duration_ms: { type: 'integer', minimum: MIN_DURATION_MS, maximum: MAX_EXPECTED_DURATION_MS, default: 600000, description: 'Optional expected duration. Omitted means 600000 ms; the server records a deadline with the existing 20% margin. Explicit estimates retain the same validation and margin.' },
+                  write_scope: { type: 'array', minItems: 0, maxItems: 16, items: { type: 'string' }, description: 'Optional for writers; required explicitly for each writer when more than one writer lane exists. Read-only lanes must use an empty scope.' },
+                  required: { type: 'boolean', default: true },
+                  capabilities: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['read_run_receipts', 'read_provider_logs', 'read_own_worktree'] } },
+                },
+              },
+            },
+          },
+        },
         run: {
           type: 'object',
           additionalProperties: false,
@@ -174,8 +258,8 @@ const TOOLS = [
       },
       allOf: [
         {
-          if: { required: ['run'] },
-          then: { required: ['run'] },
+          if: { anyOf: [{ required: ['run'] }, { required: ['run_request'] }] },
+          then: { oneOf: [{ required: ['run'] }, { required: ['run_request'] }] },
           else: {
             required: ['task_id', 'provider', 'repo', 'prompt'],
             anyOf: [
@@ -190,7 +274,10 @@ const TOOLS = [
   },
   {
     name: 'task',
-    description: `Inspect one task. view=summary is the default receipt plus diagnostic envelope and event_cursor. view=compact is a bounded coordination payload without full task or runtime bodies. view=diagnostics is a side-effect-free cursor-paged evidence page. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.task.title,
+    annotations: TOOL_METADATA.task.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Inspect or wait on one bounded native run using run_id and its returned cursor. Native run_request calls return the compact coordination receipt by default. Use view=diagnostics for the detailed run receipt; view=compact explicitly selects the normal compact run projection. task_id remains the compatible 3.2.1 path and uses event_cursor for expanded lane progress and diagnostics. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -214,7 +301,7 @@ const TOOLS = [
         view: {
           type: 'string',
           enum: ['summary', 'diagnostics', 'compact'],
-          description: 'summary is the default receipt plus diagnostic envelope. compact is a bounded coordination payload without full task or runtime bodies. diagnostics is a bounded, redacted, cursor-paged evidence page and never waits.',
+          description: 'For native run_request calls, omitted, summary, and compact return the compact coordination receipt; diagnostics returns the detailed sanitized run receipt. The compatible task_id path retains its existing summary, compact, and cursor-paged diagnostics behavior.',
         },
         cursor: {
           type: 'string',
@@ -274,13 +361,29 @@ const TOOLS = [
         run_reply: {
           type: 'object',
           additionalProperties: false,
-          required: ['batch_id', 'reply'],
-          description: 'Exactly-once run attention reply. Do not mix with 3.2.1 task.reply.',
+          description: 'Exactly-once run attention reply, a host approval reference, or a typed repository-consent continuation. Do not mix alternatives or 3.2.1 task.reply.',
           properties: {
+            approval_ref: { type: 'string', minLength: 1, maxLength: 4096, description: 'Opaque host-minted repository-exposure approval reference. It is bound to this run and never emitted in telemetry.' },
             batch_id: { type: 'string', minLength: 1, maxLength: 128 },
             expected_revision: { type: 'integer', minimum: 0 },
             reply: { type: 'object' },
+            request_consent: { type: 'boolean', const: true, description: 'Ask the host to reopen the native repository-access form for this run.' },
           },
+          oneOf: [
+            {
+              required: ['batch_id', 'reply'],
+              not: { anyOf: [{ required: ['approval_ref'] }, { required: ['request_consent'] }] },
+            },
+            {
+              required: ['approval_ref'],
+              not: { anyOf: [{ required: ['batch_id'] }, { required: ['expected_revision'] }, { required: ['reply'] }, { required: ['request_consent'] }] },
+            },
+            {
+              required: ['request_consent'],
+              properties: { request_consent: { const: true } },
+              not: { anyOf: [{ required: ['approval_ref'] }, { required: ['batch_id'] }, { required: ['expected_revision'] }, { required: ['reply'] }] },
+            },
+          ],
         },
       },
       allOf: [
@@ -289,13 +392,17 @@ const TOOLS = [
           then: { required: ['run_id'] },
           else: { required: ['task_id'] },
         },
+        { not: { required: ['run_id', 'task_id'] } },
       ],
       additionalProperties: false,
     },
   },
   {
     name: 'tasks',
-    description: `List recent task receipts with optional compact keyset pagination and filters. With task_ids, wait concurrently for the first of 1-8 exact tasks to reach progress or terminal (including needs_attention), using optional per-task cursors and one bounded wait; a timeout returns compact current snapshots for every target. Wait-any task snapshots and live event previews are individually bounded; call task with a target ID for full event detail. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.tasks.title,
+    annotations: TOOL_METADATA.tasks.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Wait on a bounded native run aggregate with run_id and its returned cursor, or use task_ids for the compatible 3.2.1 wait-any path. List recent task receipts with optional compact keyset pagination and filters when no wait options are supplied. A timeout returns bounded current snapshots; call task with a target ID for full event detail. Disconnecting the waiter does not stop providers.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -391,7 +498,10 @@ const TOOLS = [
   },
   {
     name: 'cancel',
-    description: `Cancel one owned local process group or Cursor Cloud run.${RESPONSE_MODE_HINT}`,
+    title: TOOL_METADATA.cancel.title,
+    annotations: TOOL_METADATA.cancel.annotations,
+    outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
+    description: `Cancel one owned bounded native Co-Engineer run with run_id; task_id remains the compatible 3.2.1 path. Cancellation preserves durable evidence and does not claim provider termination until observed.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -421,6 +531,7 @@ const TOOLS = [
           then: { required: ['run_id'] },
           else: { required: ['task_id'] },
         },
+        { not: { required: ['run_id', 'task_id'] } },
       ],
       additionalProperties: false,
     },
@@ -464,15 +575,25 @@ function projectWaitAnyEntry(entry) {
 function takePresentationArgs(args = {}) {
   const { response_mode: responseModeRaw, ...businessArgs } = args;
   return {
-    responseMode: normalizeResponseMode(responseModeRaw),
+    responseMode: responseModeRaw === undefined && clientSupportsStructuredResponses()
+      ? 'structured'
+      : normalizeResponseMode(responseModeRaw),
     args: businessArgs,
   };
+}
+
+function clientSupportsStructuredResponses() {
+  if (!clientCapabilities || typeof clientCapabilities !== 'object' || Array.isArray(clientCapabilities)) return false;
+  if (clientCapabilities.structuredContent === true) return true;
+  if (clientCapabilities.experimental?.structuredContent === true) return true;
+  return clientCapabilities.experimental?.['codex-co-engineer']?.structured_content === true;
 }
 
 function result(value, { responseMode } = {}) {
   const uiMeta = value?.mode === 'run'
     ? resolveExperienceResultMeta({
-      card: value?.experience?.card ?? null,
+      card: value?.experience?.card ?? classifyExperienceCard(value),
+      experience: experienceForRunToolResult(value) ?? projectExperience(value),
       clientCapabilities,
       resources: uiResources(),
     })
@@ -490,15 +611,24 @@ async function callTool(name, args = {}, { signal, responseMode } = {}) {
   const root = stateRoot();
   const classified = classifyRunToolCall(name, args);
   if (classified.mode === 'run') {
-    const value = await invokeRunTool(root, name, args, { signal });
+    if (name === 'cancel' && typeof args?.run_id === 'string') {
+      nativeConsent.cancelRun(args.run_id);
+    }
+    const value = await invokeRunTool(root, name, args, {
+      signal,
+      requestConsent: nativeConsent.requestConsent,
+    });
     if (value?.mode === 'legacy') {
       // Fall through only when classification and dispatch disagree; omission stays 3.2.1.
     } else {
-      return result(value, { responseMode });
+      // Native run receipts are structured-first even when older hosts omit
+      // the optional capability advertisement. The bounded content fallback
+      // remains valid MCP text and points at the authoritative projection.
+      return result(value, { responseMode: responseMode ?? 'structured' });
     }
   }
   if (name === 'status') {
-    const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined);
+    const hasCompact = args && (args.detail !== undefined || args.task_limit !== undefined || args.include_tasks !== undefined || args.refresh !== undefined);
     if (!hasCompact) {
       const value = await supervisorStatus(root);
       return result({ ...value, tasks: value.tasks.map(publicTask) }, { responseMode });
@@ -575,11 +705,20 @@ function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+const nativeConsent = createNativeConsentTransport({
+  send,
+  getCapabilities: () => clientCapabilities,
+  getProtocolVersion: () => negotiated,
+  grantStore: createConsentGrantStore({ root: stateRoot() }),
+});
+
 async function handle(message) {
   if (!message || message.jsonrpc !== '2.0') return;
+  if (nativeConsent.handleMessage(message)) return;
   if (message.method === 'notifications/initialized') return;
   if (message.method === 'notifications/cancelled') {
     const requestId = message.params?.requestId ?? message.params?.id;
+    nativeConsent.cancelRequest(requestId);
     inflight.get(requestId)?.abort();
     return;
   }
@@ -593,6 +732,7 @@ async function handle(message) {
       result: {
         protocolVersion: negotiated,
         capabilities: serverCapabilities(),
+        instructions: SERVER_INSTRUCTIONS,
         serverInfo: { name: 'codex-co-engineer', title: 'Codex-Co-Engineer', version: VERSION },
       },
     });
@@ -648,14 +788,23 @@ async function handle(message) {
     const controller = new AbortController();
     if (message.id !== undefined) inflight.set(message.id, controller);
     const { responseMode, args } = takePresentationArgs(message.params?.arguments ?? {});
+    let effectiveResponseMode = responseMode;
+    try {
+      if (effectiveResponseMode == null
+        && classifyRunToolCall(message.params?.name, args).mode === 'run') {
+        effectiveResponseMode = 'structured';
+      }
+    } catch {
+      // callTool performs authoritative validation and returns the typed error.
+    }
     let response;
     try {
       response = await callTool(message.params?.name, args, {
         signal: controller.signal,
-        responseMode,
+        responseMode: effectiveResponseMode,
       });
     } catch (error) {
-      response = errorResult(error, { responseMode });
+      response = errorResult(error, { responseMode: effectiveResponseMode });
     } finally {
       inflight.delete(message.id);
     }
@@ -677,4 +826,7 @@ input.on('line', (line) => {
   handle(message).catch((error) => {
     if (message?.id !== undefined) send({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: error?.message ?? 'Internal error' } });
   });
+});
+input.on('close', () => {
+  nativeConsent.close('disconnect');
 });

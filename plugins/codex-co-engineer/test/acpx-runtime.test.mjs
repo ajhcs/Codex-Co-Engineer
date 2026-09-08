@@ -111,6 +111,7 @@ test('kills hostile detached ACP descendants during runtime close', async () => 
   const value = await fixture('normal', 3_000);
   let descendantPid;
   let closed = false;
+  const originalPath = process.env.PATH;
   try {
     const turn = value.runtime.startTurn({
       handle: value.handle,
@@ -123,10 +124,14 @@ test('kills hostile detached ACP descendants during runtime close', async () => 
     assert.equal(result.status, 'completed');
     descendantPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-descendant.pid'), 'utf8'));
     assert.ok(processAlive(descendantPid), 'fixture descendant should still be running before close');
+    // Linux cleanup must not depend on an external process-list command.
+    if (process.platform === 'linux') process.env.PATH = path.join(value.root, 'no-process-list-command');
     await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
     closed = true;
     assert.equal(await waitForProcessExit(descendantPid), true);
   } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
     if (!closed) await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' }).catch(() => {});
     if (descendantPid && processAlive(descendantPid)) {
       try { process.kill(descendantPid, 'SIGKILL'); } catch {}

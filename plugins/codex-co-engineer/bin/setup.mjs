@@ -7,6 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { BUNDLED_WORKTREE_BOOTSTRAP } from '../mcp/v3/worktree-bootstrap-runtime.mjs';
+
 const run = promisify(execFile);
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const VENDOR = path.join(PLUGIN, 'vendor', 'dsh-acp-demo');
@@ -41,10 +43,11 @@ const commands = Object.freeze({
   dsh: env.CODEX_CO_ENGINEER_DSH_COMMAND?.trim() || 'dsh',
   acpx: env.CODEX_CO_ENGINEER_ACPX_COMMAND?.trim() || 'acpx',
   dshAcp: env.CODEX_CO_ENGINEER_DSH_ACP_COMMAND?.trim() || 'dsh-acp-demo',
-  worktreeBootstrap: 'worktree-bootstrap',
+  worktreeBootstrap: BUNDLED_WORKTREE_BOOTSTRAP,
 });
 const DSH_RC7 = '0.1.0-rc.7';
-const MUSE_MODEL = 'muse-spark-1.2-contributor';
+const WORKTREE_BOOTSTRAP_VERSION = '1.1.0';
+const MUSE_MODEL = 'meta/muse-spark-1.3-contributor';
 const OX_MODEL = 'stealth/ox-alpha';
 const vendorPackage = JSON.parse(await readFile(path.join(VENDOR, 'package.json'), 'utf8'));
 
@@ -134,12 +137,78 @@ async function validConfig(file, { provider, model, apiKeyEnv }) {
   }
 }
 
+function versionAtLeast(value, minimumMajor, minimumMinor = 0) {
+  const match = String(value ?? '').match(/(\d+)\.(\d+)/u);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > minimumMajor || (major === minimumMajor && minor >= minimumMinor);
+}
+
+async function runtimePrerequisites() {
+  const results = {
+    node: {
+      ok: versionAtLeast(process.versions.node, 24),
+      output: `Node.js ${process.versions.node}`,
+      required: '>=24.0.0',
+    },
+  };
+  try {
+    const { stdout, stderr } = await run('python3', ['--version'], {
+      cwd: tmpdir(),
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    const output = `${stdout}${stderr}`.trim().slice(0, 500);
+    results.python = {
+      ok: versionAtLeast(output, 3, 11),
+      output,
+      required: '>=3.11',
+    };
+  } catch (error) {
+    results.python = {
+      ok: false,
+      output: `${error?.stdout ?? ''}${error?.stderr ?? ''}`.trim().slice(0, 500) || 'python3 was not found on PATH.',
+      required: '>=3.11',
+    };
+  }
+  try {
+    const { stdout, stderr } = await run(commands.worktreeBootstrap, ['--version'], {
+      cwd: tmpdir(),
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    const output = `${stdout}${stderr}`.trim().slice(0, 500);
+    results.worktreeBootstrap = {
+      ok: output === `worktree-bootstrap ${WORKTREE_BOOTSTRAP_VERSION}`,
+      output,
+      expected: WORKTREE_BOOTSTRAP_VERSION,
+      source: 'bundled',
+    };
+  } catch (error) {
+    results.worktreeBootstrap = {
+      ok: false,
+      output: `${error?.stdout ?? ''}${error?.stderr ?? ''}`.trim().slice(0, 500),
+      source: 'bundled',
+    };
+  }
+  return results;
+}
+
+async function assertRuntimePrerequisites() {
+  const results = await runtimePrerequisites();
+  const failed = Object.entries(results).filter(([, result]) => !result.ok);
+  if (failed.length > 0) {
+    const details = failed.map(([name, result]) => `${name}: ${result.output || 'unavailable'}${result.required ? ` (requires ${result.required})` : ''}`).join('; ');
+    throw new Error(`Unsupported setup runtime: ${details}. Co-Engineer requires Node.js 24+ and Python 3.11+; reinstall the plugin if its bundled worktree-bootstrap is missing or has the wrong version.`);
+  }
+}
+
 async function check() {
-  const results = {};
+  const results = await runtimePrerequisites();
   for (const [name, command, args] of [
     ['dsh', commands.dsh, ['--version']],
     ['acpx', commands.acpx, ['--version']],
-    ['worktreeBootstrap', commands.worktreeBootstrap, ['--version']],
   ]) {
     try {
       const { stdout, stderr } = await run(command, args, { cwd: tmpdir(), encoding: 'utf8', timeout: 10_000 });
@@ -176,7 +245,7 @@ async function check() {
     results.packages = { ok: false, output: error?.message ?? String(error) };
   }
   results.config = {
-    ok: await validConfig(configFile, { provider: 'meta', model: MUSE_MODEL, apiKeyEnv: 'MODEL_API_KEY' }),
+    ok: await validConfig(configFile, { provider: 'openrouter', model: MUSE_MODEL, apiKeyEnv: 'OPENROUTER_API_KEY' }),
     path: configFile,
     model: MUSE_MODEL,
   };
@@ -196,6 +265,7 @@ async function check() {
 }
 
 async function install() {
+  await assertRuntimePrerequisites();
   const staging = await mkdtemp(path.join(tmpdir(), 'co-engineer-dsh-acp-'));
   try {
     await run('npm', ['pack', VENDOR, '--pack-destination', staging], {
@@ -229,17 +299,20 @@ async function install() {
   await chmod(persistenceRoot, 0o700);
   const museProviders = [
     '    providers:',
-    '      meta:',
-    '        displayName: Meta Model API',
-    '        apiKeyEnv: MODEL_API_KEY',
+    '      openrouter:',
+    '        displayName: OpenRouter',
+    '        apiKeyEnv: OPENROUTER_API_KEY',
     '        api: openai-completions',
-    '        baseURL: https://api.meta.ai/v1',
+    '        baseURL: https://openrouter.ai/api/v1',
+    '        reasoning: xhigh',
     '        models:',
     `          - id: ${MUSE_MODEL}`,
-    '            name: Muse Spark 1.2 Contributor',
+    '            name: Muse Spark 1.3 Contributor',
     '            contextWindow: 1048576',
     '            maxTokens: 131072',
     '            input: [text, image]',
+    '            reasoningEfforts:',
+    '              xhigh: xhigh',
   ];
   const oxProviders = [
     '    providers:',
@@ -286,10 +359,10 @@ async function install() {
   if (!await exists(configFile)) {
     await writeFile(
       configFile,
-      configYaml({ provider: 'meta', model: MUSE_MODEL, providers: museProviders }),
+      configYaml({ provider: 'openrouter', model: MUSE_MODEL, providers: museProviders }),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' },
     );
-  } else if (!await validConfig(configFile, { provider: 'meta', model: MUSE_MODEL, apiKeyEnv: 'MODEL_API_KEY' })) {
+  } else if (!await validConfig(configFile, { provider: 'openrouter', model: MUSE_MODEL, apiKeyEnv: 'OPENROUTER_API_KEY' })) {
     throw new Error(`Existing DSH ACP config is incompatible or not owner-only: ${configFile}`);
   }
   if (!await exists(oxConfigFile)) {

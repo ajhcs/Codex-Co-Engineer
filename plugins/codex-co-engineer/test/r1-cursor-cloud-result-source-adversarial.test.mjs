@@ -8,6 +8,7 @@ import {
   CURSOR_CLOUD_RESULT_SOURCE_IDENTITY_MISMATCH_CODES,
   CURSOR_CLOUD_RESULT_SOURCE_SCHEMA_ID,
   assertCursorCloudResultCorrelationV1,
+  adaptCursorCloudSdkResultV1,
   contentFreeCloudResultSourceFailureV1,
   cursorCloudResultSourceIdentityFromTaskV1,
   isCursorCloudResultIdentityMismatchV1,
@@ -40,6 +41,7 @@ import {
   makeStoreRoot,
   providerOutput,
   removeRoot,
+  sdkResultFor,
 } from './fixtures/r1-cursor-cloud-result-source-fixtures.mjs';
 
 async function expectCode(action, code, expectedPath) {
@@ -333,6 +335,41 @@ test('SDK projectors reject accessors, proxies, and extra keys without invoking 
     'unknown_key',
     'git_evidence.hidden',
   );
+});
+
+test('SDK adapter rejects unsafe declared fields while ignoring unknown metadata', async () => {
+  for (const key of ['durationMs', 'model', 'usage', 'requestId', 'error', 'git']) {
+    const input = sdkResultFor();
+    let getterRuns = 0;
+    Object.defineProperty(input, key, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error(`must not read ${SECRET}`);
+      },
+    });
+    const error = await expectCode(
+      () => adaptCursorCloudSdkResultV1(input),
+      'accessor_property_denied',
+      `result.${key}`,
+    );
+    assert.equal(getterRuns, 0);
+    assert.equal(String(error.message).includes(SECRET), false);
+  }
+
+  const input = sdkResultFor();
+  let unknownGetterRuns = 0;
+  Object.defineProperty(input, 'futureMetadata', {
+    enumerable: true,
+    get() {
+      unknownGetterRuns += 1;
+      throw new Error(`must not read ${SECRET}`);
+    },
+  });
+  const adapted = adaptCursorCloudSdkResultV1(input);
+  assert.equal(unknownGetterRuns, 0);
+  assert.equal(Object.hasOwn(adapted, 'futureMetadata'), false);
 });
 
 test('SDK projectors copy caller-owned output and never freeze the input', () => {

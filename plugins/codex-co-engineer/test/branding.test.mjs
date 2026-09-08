@@ -14,7 +14,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.4.0');
+  assert.equal(manifest.version, '3.4.2');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(
@@ -64,10 +64,14 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   const environment = mcp.mcpServers['codex-co-engineer'].env_vars;
   assert.ok(environment.includes('XDG_RUNTIME_DIR'));
   assert.ok(environment.includes('DBUS_SESSION_BUS_ADDRESS'));
+  assert.ok(environment.includes('OPENROUTER_API_KEY'));
+  assert.ok(environment.includes('CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE'));
+  assert.equal(environment.includes('MODEL_API_KEY'), false);
+  assert.equal(environment.includes('CODEX_CO_ENGINEER_MODEL_API_KEY_FILE'), false);
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.4.0');
+  assert.equal(packageJson.version, '3.4.2');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),
@@ -108,7 +112,7 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.ok(readme.includes(poster));
   assert.equal(readme.includes('docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4'), false);
   assert.equal(readme.includes('docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm'), false);
-  assert.match(readme, /static Co-Engineer architecture illustration is the authoritative/u);
+  assert.match(readme, /Architecture illustration, not a live screenshot/u);
   assert.match(readme, /There is no autoplay audio/u);
   assert.doesNotMatch(readme, /Optional silent architecture animation/u);
   assert.doesNotMatch(readme, /<video\b/iu);
@@ -164,35 +168,24 @@ test('visitor README leads with the product shot and copy/paste install', async 
     assert.equal(readme.includes(stale), false, stale);
   }
 
-  assert.match(readme, /git clone https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
+  assert.match(readme, /git clone --branch v3\.4\.2 --single-branch https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
   assert.match(readme, /codex plugin marketplace add "\$PWD"/u);
   assert.match(readme, /codex plugin add codex-co-engineer@codex-co-engineer/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup:check/u);
-  assert.match(readme, /wait_until": "terminal"/u);
-  assert.match(readme, /property `repo`/u);
-  assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
-  assert.match(readme, /docs\/releases\/v3\.4\.0\.md/u);
+
+
+
+  assert.match(readme, /docs\/releases\/v3\.4\.2\.md/u);
+  assert.match(readme, /historical\s+3\.3\.0\s+notes/u);
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
 });
 
-test('public README and quickstart keep Sol merge and retained user authority', async () => {
-  const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  const quickstart = await readFile(path.join(REPO, 'docs/co-engineer-quickstart.md'), 'utf8');
-  for (const [label, text] of [
-    ['README', readme],
-    ['quickstart', quickstart],
-  ]) {
-    assert.match(text, /External workers may commit/u, label);
-    assert.match(text, /scoped publisher may non-force push only the task branch/u, label);
-    assert.match(text, /Sol High or Sol XHigh/u, label);
-    assert.match(text, /exact-head\/tree/u, label);
-    assert.match(text, /current green CI/u, label);
-    assert.match(text, /verifier/u, label);
-    assert.match(text, /product-policy/u, label);
-    assert.doesNotMatch(text, /reviewer, and merge authority/u, label);
-    assert.doesNotMatch(text, /You remain(?: the)? merge authority/u, label);
-    assert.doesNotMatch(text, /Codex controls the final merge/u, label);
+test('public README and quickstart retain user publication authority', async () => {
+  for (const relative of ['README.md', 'docs/co-engineer-quickstart.md']) {
+    const text = await readFile(path.join(REPO, relative), 'utf8');
+    assert.match(text, /External workers may commit/u);
+    assert.match(text, /Publication and merge require user authorization and Codex review/u);
   }
 });
 
@@ -200,16 +193,14 @@ test('README information architecture maps safe final-art slots and keeps explic
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');
   const headings = [
-    '## Visual demo',
-    '## First 60 seconds',
-    '## How a run works',
-    '## Provider choices',
-    '## Codex authority and safety',
-    '## Chatting, grouped attention, and the final decision',
+    '## What makes it useful',
     '## Install and authentication',
-    '## Migrating from 3.2.1',
+    '## Your first delegation',
+    '## Provider choices',
+    '## Upgrade to 3.4.2',
     '## Troubleshooting',
-    '## Advanced Co-Engineer Control/API',
+    '## Control and data handling',
+    '## For integrators and contributors',
   ];
   let previous = -1;
   for (const heading of headings) {
@@ -246,29 +237,34 @@ test('README information architecture maps safe final-art slots and keeps explic
   assert.doesNotMatch(readme, /placeholder/iu);
 });
 
-test('every repository-relative README link resolves from the repository root', async () => {
-  const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  const targets = new Set();
-  for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
-    const target = match[1];
-    if (/^(?:https?:|mailto:|#)/iu.test(target)) continue;
-    targets.add(decodeURIComponent(target.split('#', 1)[0]));
-  }
-  for (const target of targets) {
-    if (target.startsWith('docs/assets/co-engineer-3.4.0/final/')) {
-      assert.match(target, /^docs\/assets\/co-engineer-3\.4\.0\/final\/[A-Za-z0-9./_-]+$/u);
-      try {
-        await access(path.resolve(REPO, target));
-      } catch (error) {
-        assert.equal(error?.code, 'ENOENT', target);
-      }
-      continue;
+test('every repository-relative README link resolves from its README location', async () => {
+  const readmes = [
+    path.join(REPO, 'README.md'),
+    path.join(ROOT, 'README.md'),
+  ];
+  for (const readmePath of readmes) {
+    const readme = await readFile(readmePath, 'utf8');
+    const readmeDirectory = path.dirname(readmePath);
+    const targets = new Set();
+    for (const match of readme.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/gu)) {
+      const target = match[1];
+      if (/^(?:https?:|mailto:)/iu.test(target)) continue;
+      targets.add(decodeURIComponent(target.split('#', 1)[0]));
     }
-    await access(path.resolve(REPO, target));
+    for (const target of targets) {
+      const resolved = path.resolve(readmeDirectory, target);
+      const relative = path.relative(readmeDirectory, resolved);
+      assert.equal(
+        relative.startsWith('..') || path.isAbsolute(relative),
+        false,
+        `${readmePath}: ${target}`,
+      );
+      await access(resolved);
+    }
   }
 });
 
-test('repository marketplace catalogs Codex-Co-Engineer 3.4.0', async () => {
+test('repository marketplace catalogs Codex-Co-Engineer 3.4.2', async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
@@ -276,7 +272,7 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.4.0', async () => {
   assert.equal(marketplace.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(marketplace.plugins.length, 1);
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
-  assert.equal(marketplace.plugins[0].version, '3.4.0');
+  assert.equal(marketplace.plugins[0].version, '3.4.2');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
   assert.equal(
     marketplace.interface.shortDescription,

@@ -5,6 +5,7 @@ export const TEXT_FALLBACK_SCHEMA = 'co_engineer.mcp_text_fallback.v1';
 export const TEXT_FALLBACK_MAX_BYTES = 2_048;
 export const TEXT_FALLBACK_TASK_PREVIEW = 5;
 export const RESPONSE_MODE_STRUCTURED = 'structured';
+export const RESPONSE_MODE_LEGACY = 'legacy';
 
 /** UX-04 experience projection: three semantic cards over sanitized run receipts. */
 export const EXPERIENCE_SCHEMA = 'codex-co-engineer.experience-projection.v1';
@@ -16,14 +17,18 @@ export const EXPERIENCE_QUESTION_BYTES = 320;
 export const EXPERIENCE_SCOPE_PATTERN_BYTES = 96;
 export const EXPERIENCE_MAX_LANES = 8;
 export const EXPERIENCE_MAX_QUESTIONS = 8;
+export const EXPERIENCE_RESULT_META_KEY = 'codex-co-engineer/experience';
 export const PUBLIC_MCP_TOOLS = Object.freeze([
   'status', 'delegate', 'task', 'tasks', 'cancel',
 ]);
 
 export const EXPERIENCE_PHRASES = Object.freeze({
   delegating: 'I am delegating this to Co-Engineer',
+  preparing_one: 'Co-Engineer is preparing 1 assignment',
+  preparing_template: 'Co-Engineer is preparing N assignments',
   running_one: 'Co-Engineer is running 1 independent assignment',
   running_template: 'Co-Engineer is running N independent assignments',
+  reconciling: 'Co-Engineer is reconciling an uncertain assignment',
   attention: 'Co-Engineer needs one decision from you',
   verified_final: 'Co-Engineer finished, and I verified the candidate.',
 });
@@ -58,6 +63,10 @@ export const EXPERIENCE_COORDINATION = Object.freeze({
   grouped_reply: 1,
 });
 
+// The values above describe the bounded-run contract.  A projection also
+// carries observed counts so an in-progress or unsuccessful receipt cannot
+// look like it already reached the contract's verified-final outcome.
+
 export const EXPERIENCE_DENIED_CONTROLS = Object.freeze({
   merge: false,
   push: false,
@@ -80,10 +89,32 @@ const TERMINAL_LANE_STATUSES = Object.freeze([
 ]);
 const ACCEPTED_LANE_STATUSES = Object.freeze(['completed']);
 const FAILED_LANE_STATUSES = Object.freeze([
-  'failed', 'timeout', 'transport_lost', 'environment_blocked',
+  'failed', 'failed_pre_prompt', 'timeout', 'transport_lost', 'environment_blocked',
 ]);
-const UNRESOLVED_LANE_STATUSES = Object.freeze(['unresolved']);
+const UNRESOLVED_LANE_STATUSES = Object.freeze([
+  'unresolved', 'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
+]);
+const RECONCILIATION_LANE_STATUSES = Object.freeze([
+  'partial_handoff', 'unrecoverable_post_prompt', 'lifecycle_pending',
+]);
+const ACTIVE_LANE_STATUSES = Object.freeze([
+  'accepted', 'starting', 'running', 'cancelling', 'dispatched',
+  'prompt_dispatched', 'needs_attention', 'session_ready',
+]);
+const RECONCILIATION_PHASES = Object.freeze([
+  'degraded', 'unresolved', 'partial_handoff', 'unrecoverable_post_prompt',
+  'lifecycle_pending',
+]);
 const ATTENTION_OPEN_STATUSES = Object.freeze(['open', 'needs_attention']);
+const RUN_LIFECYCLE_PHASES = Object.freeze([
+  'validating', 'awaiting_consent', 'preparing_workspaces', 'dispatching',
+  'running', 'needs_attention', 'degraded', 'unresolved', 'verifying', 'completed',
+  'failed', 'cancelled', 'partial_handoff', 'unrecoverable_post_prompt',
+  'lifecycle_pending',
+]);
+const RUN_NONTERMINAL_PHASES = Object.freeze([
+  'validating', 'preparing_workspaces', 'dispatching', 'running', 'verifying',
+]);
 const KNOWN_EVIDENCE_KINDS = Object.freeze([
   'acceptance_results', 'artifact_integrity', 'command_reported', 'files_changed',
   'git_diff', 'git_identity', 'head_reached', 'head_sha', 'model_attested',
@@ -357,7 +388,9 @@ export function sanitizeToolPayload(value) {
 }
 
 export function normalizeResponseMode(responseMode) {
-  return responseMode === RESPONSE_MODE_STRUCTURED ? RESPONSE_MODE_STRUCTURED : null;
+  if (responseMode === RESPONSE_MODE_STRUCTURED) return RESPONSE_MODE_STRUCTURED;
+  if (responseMode === RESPONSE_MODE_LEGACY) return RESPONSE_MODE_LEGACY;
+  return null;
 }
 
 /**
@@ -497,7 +530,9 @@ function laneId(lane) {
 }
 
 function laneStatus(lane) {
-  return typeof lane?.status === 'string' ? lane.status : null;
+  return typeof lane?.status === 'string'
+    ? lane.status
+    : (typeof lane?.phase === 'string' ? lane.phase : null);
 }
 
 function laneProvider(lane) {
@@ -525,6 +560,23 @@ export function runningPhrase(assignmentCount) {
   return null;
 }
 
+export function preparingPhrase(assignmentCount) {
+  if (assignmentCount === 1) return EXPERIENCE_PHRASES.preparing_one;
+  if (Number.isInteger(assignmentCount) && assignmentCount >= 2 && assignmentCount <= EXPERIENCE_MAX_LANES) {
+    return `Co-Engineer is preparing ${assignmentCount} assignments`;
+  }
+  return null;
+}
+
+function simpleRunHasAuthoritativeRequiredDispatch(receipt, lanes) {
+  if (receipt?.schema !== 'codex-co-engineer.run-admission.v1') return true;
+  if (receipt?.authoritative_required_dispatch !== true) return false;
+  const required = lanes.filter((lane) => lane.required !== false);
+  return required.length > 0 && required.every((lane) => (
+    lane.prompt_dispatched === true && lane.dispatch_confidence === 'authoritative'
+  ));
+}
+
 function attentionItems(receipt) {
   const direct = receipt?.attention;
   const fromRecord = Array.isArray(direct?.items) ? direct.items : [];
@@ -548,27 +600,85 @@ function isOpenAttention(receipt, lanes, items) {
 }
 
 function isTerminalLane(lane) {
+  if (typeof lane?.task_final === 'boolean') return lane.task_final;
   return TERMINAL_LANE_STATUSES.includes(laneStatus(lane));
 }
 
+function laneNeedsReconciliation(lane) {
+  if (lane?.task_final === true) return false;
+  const status = laneStatus(lane);
+  if (RECONCILIATION_LANE_STATUSES.includes(status)) return true;
+  return status === 'unresolved' && lane?.prompt_dispatched === true;
+}
+
+function laneBlocksTerminal(lane) {
+  if (lane?.task_final === false) return true;
+  if (lane?.task_final === true) return false;
+  const status = laneStatus(lane);
+  if (laneNeedsReconciliation(lane)) return true;
+  if (ACTIVE_LANE_STATUSES.includes(status)) return true;
+  return lane?.prompt_dispatched === true && !isTerminalLane(lane);
+}
+
+function receiptNeedsReconciliation(receipt, lanes) {
+  const phase = typeof receipt?.phase === 'string'
+    ? receipt.phase
+    : (typeof receipt?.status === 'string' ? receipt.status : null);
+  return RECONCILIATION_PHASES.includes(phase) || lanes.some(laneNeedsReconciliation);
+}
+
 function isFinalRun(receipt, lanes) {
+  if (lanes.some(laneBlocksTerminal)) return false;
   if (receipt?.journal?.terminal === true) return true;
   if (lanes.length === 0) return false;
   if (lanes.every(isTerminalLane)) return true;
-  if (receipt?.complete_candidate_blocked === true && !lanes.some((lane) => {
-    const status = laneStatus(lane);
-    return status === 'running' || status === 'needs_attention' || status === 'dispatched'
-      || status === 'starting' || status === 'accepted';
-  })) {
+  if (receipt?.complete_candidate_blocked === true && !lanes.some(laneBlocksTerminal)) {
     return true;
   }
   return false;
+}
+
+function explicitRunLifecycleCard(receipt, lanes, items) {
+  const phase = typeof receipt?.phase === 'string'
+    ? receipt.phase
+    : (typeof receipt?.status === 'string' ? receipt.status : null);
+  if (!RUN_LIFECYCLE_PHASES.includes(phase)) return null;
+  if (phase === 'awaiting_consent' || phase === 'needs_attention') return 'attention';
+  if (phase === 'completed' || phase === 'failed' || phase === 'cancelled') {
+    return lanes.some(laneBlocksTerminal) ? 'run' : 'final';
+  }
+  if (phase === 'degraded' || phase === 'unresolved') {
+    if (isOpenAttention(receipt, lanes, items)) return 'attention';
+    if (lanes.length === 0 || lanes.some(laneBlocksTerminal)) return 'run';
+    return 'final';
+  }
+  if (RECONCILIATION_PHASES.includes(phase) || RUN_NONTERMINAL_PHASES.includes(phase)) return 'run';
+  return null;
+}
+
+function consentObject(receipt) {
+  const consent = receipt?.consent;
+  if (!consent || typeof consent !== 'object' || Array.isArray(consent)) return null;
+  const request = consent.request && typeof consent.request === 'object' && !Array.isArray(consent.request)
+    ? consent.request
+    : null;
+  return { consent, request };
+}
+
+function consentNeedsDecision(receipt) {
+  const entry = consentObject(receipt);
+  const status = typeof entry?.consent?.status === 'string' ? entry.consent.status : null;
+  if (receipt?.phase === 'awaiting_consent') return true;
+  return (status === 'pending' || status === 'required') && entry?.request !== null;
 }
 
 export function classifyExperienceCard(receipt) {
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return 'run';
   const lanes = asLanes(receipt);
   const items = attentionItems(receipt);
+  const explicit = explicitRunLifecycleCard(receipt, lanes, items);
+  if (explicit) return explicit;
+  if (consentNeedsDecision(receipt)) return 'attention';
   if (isOpenAttention(receipt, lanes, items) && receipt?.attention?.status !== 'resolved'
     && receipt?.attention?.status !== 'reply_committed') {
     return 'attention';
@@ -794,6 +904,58 @@ function projectQuestions(items, lanes) {
   return questions;
 }
 
+const CONSENT_STATUSES = Object.freeze([
+  'pending', 'required', 'approved', 'blocked', 'declined', 'cancelled', 'timed_out',
+]);
+
+function publicProviderNames(providers) {
+  if (!Array.isArray(providers)) return [];
+  return providers
+    .filter((provider) => Object.hasOwn(PROVIDER_DISPLAY, provider))
+    .map((provider) => providerPhrase(provider))
+    .filter(Boolean);
+}
+
+function consentProviders(providers) {
+  if (!Array.isArray(providers)) return [];
+  return providers.filter((provider) => Object.hasOwn(PROVIDER_DISPLAY, provider));
+}
+
+function projectConsent(receipt) {
+  const entry = consentObject(receipt);
+  if (!entry && receipt?.phase !== 'awaiting_consent') return null;
+  const request = entry?.request ?? {};
+  const rawStatus = typeof entry?.consent?.status === 'string' ? entry.consent.status : null;
+  const status = CONSENT_STATUSES.includes(rawStatus)
+    ? rawStatus
+    : (receipt?.phase === 'awaiting_consent' ? 'required' : null);
+  const providers = consentProviders(request.providers);
+  const repositoryIdentity = digestValue(request.repository_identity);
+  const requestKind = request.kind === 'repository_exposure_consent'
+    ? request.kind
+    : null;
+  const pending = consentNeedsDecision(receipt);
+  if (!pending && status !== 'blocked' && status !== 'declined' && status !== 'cancelled') return null;
+  return {
+    kind: requestKind,
+    status,
+    decision_authority: 'host',
+    message: pending
+      ? 'This run needs your approval to share the full repository with the selected co-engineers for this run.'
+      : 'The host did not approve repository exposure for this run.',
+    request: {
+      kind: requestKind,
+      run_id: typeof request.run_id === 'string' ? request.run_id : null,
+      repository_identity: repositoryIdentity,
+      providers,
+      provider_phrases: publicProviderNames(providers),
+      scope: request.scope === 'full_repository' ? request.scope : null,
+      duration: request.duration === 'this_run_only' ? request.duration : null,
+      remote_mutation: request.remote_mutation === false ? false : null,
+    },
+  };
+}
+
 function projectEvidence(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { present: false, digest: null, fact_count: 0, claim_count: 0, kinds: [] };
@@ -882,8 +1044,14 @@ function experienceSummaryPhrases(card, receipt, lanes) {
   if (card === 'run') {
     phrases.push(EXPERIENCE_PHRASES.delegating);
     phrases.push(...uniqueProviderPhrases(lanes));
-    const running = runningPhrase(count);
-    if (running) phrases.push(running);
+    if (receiptNeedsReconciliation(receipt, lanes)) {
+      phrases.push(EXPERIENCE_PHRASES.reconciling);
+    } else {
+      const running = simpleRunHasAuthoritativeRequiredDispatch(receipt, lanes)
+        ? runningPhrase(count)
+        : preparingPhrase(count);
+      if (running) phrases.push(running);
+    }
   } else if (card === 'attention') {
     phrases.push(EXPERIENCE_PHRASES.attention);
   } else if (card === 'final' && verifiedFinalAllowed(receipt, lanes)) {
@@ -922,9 +1090,18 @@ function projectRunCard(receipt, lanes) {
 }
 
 function projectAttentionCard(receipt, lanes, items) {
-  const questions = projectQuestions(items, lanes);
+  const awaitingConsent = receipt?.phase === 'awaiting_consent';
+  const consent = projectConsent(receipt);
+  const consentOnly = awaitingConsent || (consent != null && consentNeedsDecision(receipt));
+  const questions = consentOnly ? [] : projectQuestions(items, lanes);
   const affected = [];
   const unsupportedLanes = [];
+  if (consentOnly) {
+    for (const lane of lanes) {
+      const id = laneId(lane);
+      if (id) affected.push(id);
+    }
+  }
   for (const question of questions) {
     if (question.assignment_id && !affected.includes(question.assignment_id)) {
       affected.push(question.assignment_id);
@@ -960,32 +1137,35 @@ function projectAttentionCard(receipt, lanes, items) {
   const batchId = typeof receipt.attention?.batch_id === 'string' ? receipt.attention.batch_id : null;
   const revision = Number.isInteger(receipt.attention?.revision) ? receipt.attention.revision : null;
   return {
+    ...(consent ? { consent } : {}),
     questions,
     affected_lanes: affected,
     unaffected_lanes: unaffected,
-    reply: {
-      structured: true,
-      rounds: 1,
-      cursor_resume: true,
-      event_cursor: cursor,
-      run_reply: {
-        batch_id: batchId,
-        expected_revision: revision,
-        reply: {
-          round: 1,
+    reply: consentOnly
+      ? null
+      : {
+        structured: true,
+        rounds: 1,
+        cursor_resume: true,
+        event_cursor: cursor,
+        run_reply: {
           batch_id: batchId,
-          answers: questions
-            .filter((question) => question.reply_capability === 'same_session')
-            .map((question) => ({
-              assignment_id: question.assignment_id,
-              question_id: question.question_id,
-              session_id: question.session_id,
-              task_id: question.task_id,
-              response: null,
-            })),
+          expected_revision: revision,
+          reply: {
+            round: 1,
+            batch_id: batchId,
+            answers: questions
+              .filter((question) => question.reply_capability === 'same_session')
+              .map((question) => ({
+                assignment_id: question.assignment_id,
+                question_id: question.question_id,
+                session_id: question.session_id,
+                task_id: question.task_id,
+                response: null,
+              })),
+          },
         },
       },
-    },
     unsupported: {
       lanes: unsupportedLanes,
       unresolved: unsupportedLanes.length > 0,
@@ -1001,15 +1181,32 @@ function bucketLanes(lanes, statuses) {
     .filter(Boolean);
 }
 
+function laneHasObservedOutcome(lane) {
+  const status = laneStatus(lane);
+  if (status === 'planned' || status === 'prepared' || status === 'session_ready') return false;
+  if (lane.prompt_dispatched === false || status === 'failed_pre_prompt') return false;
+  return TERMINAL_LANE_STATUSES.includes(status) || lane.prompt_dispatched === true;
+}
+
 function projectFinalCard(receipt, lanes) {
   const accepted = bucketLanes(lanes, ACCEPTED_LANE_STATUSES);
   const failed = bucketLanes(lanes, FAILED_LANE_STATUSES);
   const unresolved = bucketLanes(lanes, UNRESOLVED_LANE_STATUSES);
-  const reviews = lanes.filter((lane) => lane.role === 'review').map(laneId).filter(Boolean);
-  const tests = lanes.filter((lane) => {
+  const reviewLanes = lanes.filter((lane) => lane.role === 'review');
+  const testLanes = lanes.filter((lane) => {
     const scope = Array.isArray(lane.write_scope) ? lane.write_scope.join(' ') : '';
     return lane.role === 'verify' || /test/iu.test(scope);
-  }).map(laneId).filter(Boolean);
+  });
+  const reviews = reviewLanes.filter(laneHasObservedOutcome).map(laneId).filter(Boolean);
+  const plannedReviews = reviewLanes
+    .filter((lane) => !laneHasObservedOutcome(lane))
+    .map(laneId)
+    .filter(Boolean);
+  const tests = testLanes.filter(laneHasObservedOutcome).map(laneId).filter(Boolean);
+  const plannedTests = testLanes
+    .filter((lane) => !laneHasObservedOutcome(lane))
+    .map(laneId)
+    .filter(Boolean);
   const candidate = receipt.candidate && typeof receipt.candidate === 'object'
     ? {
       ref: typeof receipt.candidate.ref === 'string' ? receipt.candidate.ref : null,
@@ -1049,8 +1246,16 @@ function projectFinalCard(receipt, lanes) {
       scope: lane.scope,
       role: lane.role,
     })),
-    tests: { lanes: tests, present: tests.length > 0 },
-    reviews: { lanes: reviews, present: reviews.length > 0 },
+    tests: {
+      lanes: tests,
+      present: tests.length > 0,
+      planned_lanes: plannedTests,
+    },
+    reviews: {
+      lanes: reviews,
+      present: reviews.length > 0,
+      planned_lanes: plannedReviews,
+    },
     candidate,
     evidence,
     evidence_refs: evidenceRefs,
@@ -1085,6 +1290,18 @@ function projectFinalCard(receipt, lanes) {
   };
 }
 
+function projectCoordination(receipt, verified) {
+  const hasRun = typeof receipt?.run_id === 'string' && receipt.run_id !== '';
+  const operation = typeof receipt?.operation === 'string' ? receipt.operation : null;
+  return {
+    aggregate_wait: EXPERIENCE_COORDINATION.aggregate_wait,
+    submissions: operation === 'submit' || hasRun ? 1 : 0,
+    aggregate_wait_count: operation === 'wait' ? 1 : 0,
+    verified_final_decisions: verified === true ? 1 : 0,
+    grouped_reply: operation === 'reply' ? 1 : 0,
+  };
+}
+
 function boundProjection(projection) {
   let text = JSON.stringify(projection);
   if (byteLength(text) <= EXPERIENCE_MAX_BYTES) return projection;
@@ -1115,7 +1332,7 @@ function boundProjection(projection) {
       phrases: (projection.summary?.phrases ?? []).slice(0, 2),
     },
     truncated: true,
-    coordination: EXPERIENCE_COORDINATION,
+    coordination: projection.coordination,
     authority: EXPERIENCE_AUTHORITY,
   };
 }
@@ -1127,6 +1344,7 @@ export function projectExperience(receipt) {
   const items = bindProofBoundQuestions(attentionItems(safe), boundAttention);
   const card = classifyExperienceCard(safe);
   const phrases = experienceSummaryPhrases(card, safe, lanes);
+  const verifiedFinal = card === 'final' && verifiedFinalAllowed(safe, lanes);
   const projection = {
     schema: EXPERIENCE_SCHEMA,
     version: EXPERIENCE_VERSION,
@@ -1134,15 +1352,24 @@ export function projectExperience(receipt) {
     summary: {
       phrases,
       delegating: card === 'run' ? EXPERIENCE_PHRASES.delegating : null,
-      running: card === 'run' ? runningPhrase(
-        Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length,
-      ) : null,
+      running: card === 'run' && !receiptNeedsReconciliation(safe, lanes)
+        ? (simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
+          ? runningPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length)
+          : preparingPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length))
+        : null,
+      preparing: card === 'run' && !receiptNeedsReconciliation(safe, lanes)
+        && !simpleRunHasAuthoritativeRequiredDispatch(safe, lanes)
+        ? preparingPhrase(Number.isInteger(safe.assignment_count) ? safe.assignment_count : lanes.length)
+        : null,
+      reconciling: card === 'run' && receiptNeedsReconciliation(safe, lanes)
+        ? EXPERIENCE_PHRASES.reconciling
+        : null,
       attention: card === 'attention' ? EXPERIENCE_PHRASES.attention : null,
-      verified_final: card === 'final' && verifiedFinalAllowed(safe, lanes)
+      verified_final: verifiedFinal
         ? EXPERIENCE_PHRASES.verified_final
         : null,
     },
-    coordination: { ...EXPERIENCE_COORDINATION },
+    coordination: projectCoordination(safe, verifiedFinal),
     authority: { ...EXPERIENCE_AUTHORITY },
     run_id: typeof safe.run_id === 'string' ? safe.run_id : null,
     truncated: false,
@@ -1249,6 +1476,7 @@ export function resolveExperienceToolMeta(toolName, {
 
 export function resolveExperienceResultMeta({
   card = null,
+  experience = null,
   clientCapabilities = null,
   resources = experienceUiResourceRegistry(),
 } = {}) {
@@ -1260,7 +1488,11 @@ export function resolveExperienceResultMeta({
   for (const uri of candidates) {
     const resource = typeof resources?.get === 'function' ? resources.get(uri) : null;
     if (resource && resource.mimeType === MCP_APPS_MIME_TYPE && isMcpAppsResourceUri(uri)) {
-      return { ui: { resourceUri: uri } };
+      const safeExperience = normalizeExperienceResultMeta(experience);
+      return {
+        ui: { resourceUri: uri },
+        ...(safeExperience ? { [EXPERIENCE_RESULT_META_KEY]: safeExperience } : {}),
+      };
     }
   }
   return null;
@@ -1313,5 +1545,16 @@ function normalizeToolResultUiMeta(uiMeta) {
     ? uiMeta.ui.resourceUri
     : null;
   if (!isMcpAppsResourceUri(nested)) return null;
-  return { ui: { resourceUri: nested } };
+  const safeExperience = normalizeExperienceResultMeta(uiMeta[EXPERIENCE_RESULT_META_KEY]);
+  return {
+    ui: { resourceUri: nested },
+    ...(safeExperience ? { [EXPERIENCE_RESULT_META_KEY]: safeExperience } : {}),
+  };
+}
+
+function normalizeExperienceResultMeta(experience) {
+  if (!experience || typeof experience !== 'object' || Array.isArray(experience)) return null;
+  const safe = stripOwnerOnly(experience);
+  if (safe?.schema !== EXPERIENCE_SCHEMA || !EXPERIENCE_CARD_STATES.includes(safe?.card)) return null;
+  return byteLength(JSON.stringify(safe)) <= EXPERIENCE_MAX_BYTES ? safe : null;
 }

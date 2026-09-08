@@ -126,7 +126,7 @@ test('mixed-provider prepare isolates each closed route and never shares credent
     assert.equal(byId['lane-local'].provider, 'cursor-local');
     assert.equal(byId['lane-cloud'].provider, 'cursor-cloud');
     assert.equal(byId['lane-muse'].provider, 'dsh');
-    assert.equal(byId['lane-muse'].model, 'muse-spark-1.2-contributor');
+    assert.equal(byId['lane-muse'].model, 'meta/muse-spark-1.3-contributor');
     assert.equal(byId['lane-ox'].provider, 'dsh');
     assert.equal(byId['lane-ox'].model, 'stealth/ox-alpha');
     assert.equal(byId['lane-grok'].credential_present, true);
@@ -136,7 +136,8 @@ test('mixed-provider prepare isolates each closed route and never shares credent
     assert.equal(byId['lane-ox'].credential_present, true);
     assert.ok(byId['lane-grok'].projected_keys.includes('XAI_API_KEY'));
     assert.equal(byId['lane-grok'].projected_keys.includes('MODEL_API_KEY'), false);
-    assert.equal(byId['lane-muse'].projected_keys.includes('OPENROUTER_API_KEY'), false);
+    assert.ok(byId['lane-muse'].projected_keys.includes('OPENROUTER_API_KEY'));
+    assert.equal(byId['lane-muse'].projected_keys.includes('MODEL_API_KEY'), false);
     assert.equal(byId['lane-ox'].projected_keys.includes('MODEL_API_KEY'), false);
     assert.equal(byId['lane-local'].projected_keys.includes('CURSOR_API_KEY'), false);
     assertAlwaysFalse(receipt);
@@ -168,15 +169,15 @@ test('dispatch uses closed env, never puts secrets in argv, and still creates no
     const grok = byProvider['grok:grok-4'];
     const local = byProvider['cursor-local:composer-1'];
     const cloud = byProvider['cursor-cloud:claude-sonnet-4-5'];
-    const muse = byProvider['dsh:muse-spark-1.2-contributor'];
+    const muse = byProvider['dsh:meta/muse-spark-1.3-contributor'];
     const ox = byProvider['dsh:stealth/ox-alpha'];
     assert.equal(grok.env.XAI_API_KEY, HOSTILE_ENV.XAI_API_KEY);
     assert.equal(Object.hasOwn(grok.env, 'MODEL_API_KEY'), false);
     assert.equal(Object.hasOwn(local.env, 'XAI_API_KEY'), false);
     assert.equal(Object.hasOwn(local.env, 'CURSOR_API_KEY'), false);
     assert.equal(cloud.env.CURSOR_API_KEY, HOSTILE_ENV.CURSOR_API_KEY);
-    assert.equal(muse.env.MODEL_API_KEY, HOSTILE_ENV.MODEL_API_KEY);
-    assert.equal(Object.hasOwn(muse.env, 'OPENROUTER_API_KEY'), false);
+    assert.equal(muse.env.OPENROUTER_API_KEY, HOSTILE_ENV.OPENROUTER_API_KEY);
+    assert.equal(Object.hasOwn(muse.env, 'MODEL_API_KEY'), false);
     assert.equal(ox.env.OPENROUTER_API_KEY, HOSTILE_ENV.OPENROUTER_API_KEY);
     assert.equal(Object.hasOwn(ox.env, 'MODEL_API_KEY'), false);
     for (const call of dispatcher.calls) {

@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { readFileSync, watch as watchDirectory } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -34,12 +35,12 @@ import {
 import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
 import { boundedProviderResult, boundedProviderValue, createProviderResultAccumulator, providerCharCount } from './provider-result.mjs';
 import { RunContractV1Error } from './run-manifest.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from './worktree-bootstrap-runtime.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
 
 const RUNTIME_URL = new URL('../../assets/acpx-runtime.mjs', import.meta.url);
-const SINGLE_TURN_FLOW = fileURLToPath(new URL('./single-turn.flow.mjs', import.meta.url));
 const runFile = promisify(execFile);
 const PROVIDERS = Object.freeze({
   grok: { agent: 'grok-build' },
@@ -54,7 +55,11 @@ const MAX_EVENT_DEPTH = 6;
 const MAX_EVENT_KEYS = 64;
 const MAX_EVENT_ITEMS = 64;
 const MAX_CLI_OUTPUT = 1024 * 1024;
-const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
+const MAX_ACPX_EXEC_FRAME = 256 * 1024;
+const MAX_ACPX_EXEC_STDERR = 64 * 1024;
+const MAX_ACPX_EXEC_EVENTS = 256;
+const MAX_GROK_FINAL_TOOL_IDS = 512;
+const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
 
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
@@ -295,7 +300,7 @@ export async function boundedWtbHandoff({
   };
   try {
     const { stdout } = await withBound(
-      () => runFileImpl('worktree-bootstrap', [
+      () => runFileImpl(BUNDLED_WORKTREE_BOOTSTRAP, [
         'handoff',
         taskName,
         '--repo',
@@ -389,28 +394,41 @@ function taskTimeoutMs(task, now = Date.now()) {
   fail('invalid_timeout', 'Task is missing a recorded deadline.');
 }
 
-function isUserFacingPermission(params) {
-  const title = String(params?.raw?.toolCall?.title ?? params?.raw?.question ?? '');
-  const toolCallId = String(params?.raw?.toolCall?.toolCallId ?? params?.raw?.toolCall?.id ?? '');
-  if (isAskUserQuestionName(title) || isAskUserQuestionName(toolCallId)) return true;
-  return /\?|user input|needs? attention|confirm|approval required|fake permission/iu.test(title);
+export function isUserFacingPermission(params) {
+  const explicitQuestion = params?.raw?.question;
+  if (typeof explicitQuestion === 'string' && explicitQuestion.trim().length > 0) return true;
+  const questionTool = params?.raw?.toolCall;
+  if (isAskUserQuestionName(questionTool?.title) || isAskUserQuestionName(questionTool?.toolCallId ?? questionTool?.id)) return true;
+  const kind = params?.raw?.toolCall?.kind ?? params?.inferredKind;
+  if (typeof kind === 'string' && kind !== 'other') return false;
+  const title = String(params?.raw?.toolCall?.title ?? '').trim();
+  return /^(?:user input|needs? attention|approval required|fake permission|confirm(?:ation)?(?: required)?)(?:\b|:|\?)/iu.test(title)
+    || (title.endsWith('?') && !title.includes('$?'));
 }
 
-function safeQuestionId(value) {
-  const normalized = String(value ?? 'permission').replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, 'q');
-  return (normalized || 'permission').slice(0, 80);
+export function safeQuestionId(value) {
+  const source = String(value ?? 'permission');
+  const normalized = source.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, 'q') || 'permission';
+  if (source === normalized && normalized.length <= 80) return normalized;
+  const suffix = createHash('sha256').update(source, 'utf8').digest('hex').slice(0, 16);
+  return `${normalized.slice(0, 63)}-${suffix}`;
 }
 
-async function handlePermissionRequest(root, taskId, params, signal) {
+export async function handlePermissionRequest(root, taskId, params, signal) {
   if (!isUserFacingPermission(params)) return undefined;
   const { task } = await readTask(root, taskId);
   const sessionId = params.sessionId ?? task.acp_session_id;
   if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined;
   const questionId = safeQuestionId(params.raw?.toolCall?.toolCallId ?? randomUUID());
+  const explicitQuestion = params.raw?.question;
   await recordNeedsAttention(root, taskId, {
     session_id: sessionId,
     question_id: questionId,
-    prompt: typeof params.raw?.toolCall?.title === 'string' ? params.raw.toolCall.title : 'Provider requested approval.',
+    prompt: typeof explicitQuestion === 'string' && explicitQuestion.trim().length > 0
+      ? explicitQuestion
+      : typeof params.raw?.toolCall?.title === 'string'
+        ? params.raw.toolCall.title
+        : 'Provider requested approval.',
     options: Array.isArray(params.raw?.options) ? params.raw.options : null,
     stage: 'provider_feedback',
   });
@@ -567,6 +585,82 @@ export function boundedEvent(event, prompt = '') {
   if (!plainObject(event)) return { type: 'status', text: boundedText(String(event), prompt, budget) };
   const safe = boundedValue(event, prompt, budget);
   return plainObject(safe) ? safe : { type: 'status', text: boundedText(safe, prompt, budget) };
+}
+
+/**
+ * Follow Grok's native Messages reducer boundary: a completed client-tool
+ * round closes the assistant frame and the final frame becomes `result`.
+ * Source: https://github.com/xai-org/grok-build
+ * Grok pager: src/headless/reducer/messages/mod.rs
+ *
+ * This projection is deliberately more conservative than xAI's formatter:
+ * ambiguous/interleaved tool streams and every WebSearch fall back to the
+ * complete provider stream because ACPX does not forward Grok's `_meta.backend`.
+ */
+export function createGrokFinalResponseReducerV1({ sanitize = (text) => text } = {}) {
+  let currentOutput = createProviderResultAccumulator({ sanitize });
+  let currentComplete = createLocalProviderResultCollectorV1();
+  let currentHasNonWhitespace = false;
+  const pendingToolIds = new Set();
+  let sawSettledRound = false;
+  let reliable = true;
+
+  const resetCurrent = () => {
+    currentOutput = createProviderResultAccumulator({ sanitize });
+    currentComplete = createLocalProviderResultCollectorV1();
+    currentHasNonWhitespace = false;
+  };
+  const toolId = (event) => (
+    typeof event?.toolCallId === 'string' && event.toolCallId.length > 0 && event.toolCallId.length <= 512
+      ? event.toolCallId
+      : null
+  );
+
+  return {
+    append(event) {
+      if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
+        if (event.text.length > 0 && pendingToolIds.size > 0) reliable = false;
+        currentOutput.append(event.text);
+        currentComplete.append(event.text);
+        currentHasNonWhitespace ||= /\S/u.test(event.text);
+        return;
+      }
+      if (event?.type !== 'tool_call') return;
+      if (event?.rawInput?.variant === 'WebSearch') reliable = false;
+      const id = toolId(event);
+      if (event.tag === 'tool_call') {
+        if (id === null || pendingToolIds.has(id) || pendingToolIds.size >= MAX_GROK_FINAL_TOOL_IDS) {
+          reliable = false;
+          return;
+        }
+        pendingToolIds.add(id);
+        return;
+      }
+      if (event.tag !== 'tool_call_update' || !['completed', 'failed'].includes(event.status)) return;
+      if (id === null || !pendingToolIds.delete(id)) {
+        reliable = false;
+        return;
+      }
+      if (pendingToolIds.size > 0) {
+        return;
+      }
+      sawSettledRound = true;
+      resetCurrent();
+    },
+    finish({ turnResult, fullSnapshot }) {
+      const eligible = reliable
+        && sawSettledRound
+        && pendingToolIds.size === 0
+        && currentHasNonWhitespace
+        && turnResult?.status === 'completed'
+        && turnResult?.stopReason === 'end_turn'
+        && fullSnapshot?.overflow !== true;
+      if (!eligible) return null;
+      const snapshot = currentComplete.snapshot();
+      if (snapshot.overflow === true) return null;
+      return Object.freeze({ bounded: currentOutput.finish(), snapshot });
+    },
+  };
 }
 
 export function publicError(error, prompt = '') {
@@ -984,6 +1078,7 @@ export async function runCliFallback({ root, task, prompt, signal } = {}) {
       started_at: new Date().toISOString(),
     });
     await appendTaskEvent(root, task.id, { type: 'transport', state: 'prompt_dispatched', transport: 'cli', fallback_from: 'acp' });
+    await updateTask(root, task.id, { dispatch_evidence: 'authoritative' });
     stopDeadline = startDeadlineWatch(root, task.id, () => {
       timedOut = true;
       cancel();
@@ -1041,23 +1136,247 @@ function commandString(argv) {
   return argv.map((entry) => `'${entry.replaceAll("'", "'\\''")}'`).join(' ');
 }
 
-function parseFlowResult(stdout) {
-  const lines = stdout.trim().split(/\r?\n/u).filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    try {
-      const value = JSON.parse(lines[index]);
-      if (value?.action === 'flow_run_result') return value;
-    } catch {
-      // Ignore non-JSON progress; --json-strict should normally prevent it.
-    }
-  }
-  fail('acpx_invalid_result', 'ACPX did not return a flow result.');
+function acpRpcIdKey(value) {
+  if (typeof value === 'string' && value.length > 0 && value.length <= 128) return `string:${value}`;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return `number:${value}`;
+  return null;
 }
 
-async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal }) {
+const ACP_PROVIDER_ERROR_MESSAGES = Object.freeze({
+  provider_billing_required: 'The provider billing configuration is unavailable.',
+  authentication_required: 'The provider authentication failed.',
+  provider_rate_limited: 'The provider rate limit was reached.',
+  provider_failed: 'The provider request failed.',
+});
+
+function classifyAcpProviderError(error) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const detail = `${code} ${message}`.trim();
+  const normalized = detail.toLowerCase();
+  let stableCode = 'provider_failed';
+  if (/provider_billing_required|provider_billing|billing|payment|credit|quota|insufficient\s+funds|\b402\b/iu.test(normalized)) {
+    stableCode = 'provider_billing_required';
+  } else if (/authentication_required|provider_auth|auth(?:entication|orization)?|credential|api[_ -]?key|not\s+signed\s+in|needs?[_ -]?login|\b40[13]\b|forbidden|unauthori[sz]ed/iu.test(normalized)) {
+    stableCode = 'authentication_required';
+  } else if (/provider_rate_limited|rate[_ -]?limit|too\s+many\s+requests|throttl|\b429\b/iu.test(normalized)) {
+    stableCode = 'provider_rate_limited';
+  }
+  // Provider text is useful for local diagnostics but is not safe to expose
+  // through a native run receipt. Keep this error's public message fixed;
+  // callers can retain only the bounded, separately sanitized transport
+  // detail when they explicitly need it.
+  return new AcpWorkerError(stableCode, ACP_PROVIDER_ERROR_MESSAGES[stableCode]);
+}
+
+function acpTextValue(value) {
+  if (typeof value === 'string') return value;
+  if (!plainObject(value)) return null;
+  for (const key of ['text', 'delta', 'output', 'answer']) {
+    if (typeof value[key] === 'string') return value[key];
+  }
+  if (plainObject(value.content)) return acpTextValue(value.content);
+  if (Array.isArray(value.content)) {
+    const text = value.content
+      .filter((entry) => plainObject(entry) && (entry.type === 'text' || entry.type === 'text_delta'))
+      .map((entry) => acpTextValue(entry))
+      .filter((entry) => typeof entry === 'string')
+      .join('');
+    if (text.length > 0) return text;
+  }
+  if (plainObject(value.message)) return acpTextValue(value.message);
+  return null;
+}
+
+function acpStopReason(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  if (/^[A-Za-z0-9._-]{1,64}$/u.test(value)) return value;
+  return null;
+}
+
+/**
+ * Collect the JSON-RPC transcript produced by `acpx exec --file -`.
+ *
+ * ACPX's JSON formatter prints both directions of the protocol. Outbound
+ * frames are inspected only long enough to correlate their ids; their params
+ * are deliberately never retained, because the prompt is inside one of
+ * those params. Only bounded provider text and correlated response metadata
+ * leave this collector.
+ */
+function createAcpExecCollector({ prompt, onSession, onAuthoritative, onText } = {}) {
+  const pending = new Map();
+  const output = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
+  const decoder = new StringDecoder('utf8');
+  let lineBuffer = '';
+  let sessionId = null;
+  let promptRequestId = null;
+  let promptAttempted = false;
+  let promptResponded = false;
+  let authoritative = false;
+  let stopReason = 'end_turn';
+  let promptError = null;
+  let resultError = null;
+  let transportError = null;
+  let structuredResult;
+  let structuredResultSet = false;
+  let protocolError = null;
+  let textEventCount = 0;
+
+  const protocolFailure = (message) => {
+    const error = new AcpWorkerError('acpx_protocol_invalid', message);
+    protocolError ??= error;
+    throw error;
+  };
+  const markAuthoritative = () => {
+    if (authoritative) return;
+    authoritative = true;
+    try { onAuthoritative?.(); } catch { /* evidence is persisted by the caller */ }
+  };
+  const appendText = (text) => {
+    if (typeof text !== 'string' || text.length === 0) return;
+    output.append(text);
+    if (textEventCount >= MAX_ACPX_EXEC_EVENTS) return;
+    textEventCount += 1;
+    try { onText?.(text); } catch { /* output remains available in the bounded accumulator */ }
+  };
+  const processFrame = (frame) => {
+    if (!plainObject(frame) || frame.jsonrpc !== '2.0') protocolFailure('ACPX returned an invalid JSON-RPC frame.');
+    const idKey = acpRpcIdKey(frame.id);
+    if (typeof frame.method === 'string') {
+      if (frame.method === 'initialize' || frame.method === 'session/new' || frame.method === 'session/prompt') {
+        if (idKey === null) protocolFailure('ACPX returned an uncorrelatable outbound request.');
+        if (pending.has(idKey)) protocolFailure('ACPX reused an outstanding JSON-RPC request id.');
+        if (!pending.has(idKey) && pending.size >= MAX_ACPX_EXEC_EVENTS) {
+          protocolFailure('ACPX returned too many pending JSON-RPC requests.');
+        }
+        pending.set(idKey, frame.method);
+        if (frame.method === 'session/prompt') {
+          const outboundSessionId = frame.params?.sessionId;
+          if (typeof outboundSessionId !== 'string' || outboundSessionId.length === 0 || outboundSessionId !== sessionId) {
+            protocolFailure('ACPX prompt request did not match the established session.');
+          }
+          promptRequestId = idKey;
+          promptAttempted = true;
+        }
+        return;
+      }
+      if (frame.method === 'session/update') {
+        const incomingSessionId = frame.params?.sessionId;
+        if (typeof incomingSessionId !== 'string' || incomingSessionId.length === 0 || incomingSessionId !== sessionId) return;
+        if (!promptAttempted) return;
+        markAuthoritative();
+        if (frame.params?.update?.sessionUpdate !== 'agent_message_chunk') return;
+        const text = acpTextValue(frame.params?.update?.content);
+        if (text !== null) appendText(text);
+        return;
+      }
+      // Permission requests and formatter metadata are not provider output.
+      return;
+    }
+
+    const method = idKey === null ? null : pending.get(idKey);
+    if (method) pending.delete(idKey);
+    if (plainObject(frame.error)) {
+      if (method === 'session/prompt') {
+        promptResponded = true;
+        markAuthoritative();
+        promptError ??= classifyAcpProviderError(frame.error);
+      } else if (idKey === null || method) {
+        transportError ??= classifyAcpProviderError(frame.error);
+      }
+      return;
+    }
+    if (!method) return;
+    if (method === 'session/new') {
+      const candidate = frame.result?.sessionId;
+      if (typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 256) {
+        sessionId = candidate;
+        try { onSession?.(candidate); } catch { /* terminal receipt carries the session id */ }
+      }
+      return;
+    }
+    if (method === 'session/prompt') {
+      if (!plainObject(frame.result)) {
+        resultError ??= new AcpWorkerError('acpx_invalid_result', 'ACPX prompt response was missing a result.');
+        return;
+      }
+      const reason = acpStopReason(frame.result.stopReason);
+      if (reason === null) {
+        resultError ??= new AcpWorkerError('acpx_invalid_result', 'ACPX prompt response had no valid stop reason.');
+        return;
+      }
+      if (frame.result.sessionId !== undefined && frame.result.sessionId !== sessionId) {
+        resultError ??= new AcpWorkerError('acpx_invalid_result', 'ACPX prompt response did not match the established session.');
+        return;
+      }
+      promptResponded = true;
+      markAuthoritative();
+      stopReason = reason;
+      if (Object.hasOwn(frame.result, 'output') && frame.result.output !== null
+        && typeof frame.result.output === 'object') {
+        structuredResult = frame.result.output;
+        structuredResultSet = true;
+      }
+      const text = acpTextValue(frame.result);
+      if (text !== null) appendText(text);
+    }
+  };
+  const feed = (chunk) => {
+    if (protocolError) return;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''));
+    lineBuffer += decoder.write(buffer);
+    let newline;
+    while ((newline = lineBuffer.indexOf('\n')) >= 0) {
+      const line = lineBuffer.slice(0, newline).replace(/\r$/u, '');
+      lineBuffer = lineBuffer.slice(newline + 1);
+      if (line.length === 0) continue;
+      if (Buffer.byteLength(line, 'utf8') > MAX_ACPX_EXEC_FRAME) {
+        protocolFailure('ACPX returned an overlarge JSON-RPC frame.');
+      }
+      let frame;
+      try { frame = JSON.parse(line); } catch { protocolFailure('ACPX returned malformed JSON-RPC output.'); }
+      processFrame(frame);
+      if (protocolError) return;
+    }
+    if (Buffer.byteLength(lineBuffer, 'utf8') > MAX_ACPX_EXEC_FRAME) {
+      protocolFailure('ACPX returned an overlarge JSON-RPC frame.');
+    }
+  };
+  const finish = () => {
+    if (protocolError) throw protocolError;
+    lineBuffer += decoder.end();
+    if (lineBuffer.trim().length > 0) {
+      if (Buffer.byteLength(lineBuffer, 'utf8') > MAX_ACPX_EXEC_FRAME) {
+        protocolFailure('ACPX returned an overlarge JSON-RPC frame.');
+      }
+      let frame;
+      try { frame = JSON.parse(lineBuffer); } catch { protocolFailure('ACPX returned malformed JSON-RPC output.'); }
+      lineBuffer = '';
+      processFrame(frame);
+    }
+    if (protocolError) throw protocolError;
+    const streamed = output.finish();
+    return {
+      output: structuredResultSet
+        ? boundedProviderValue(structuredResult, { sanitize: (text) => sanitizeText(text, prompt) })
+        : streamed,
+      sessionId,
+      promptRequestId,
+      promptAttempted,
+      promptResponded,
+      authoritative,
+      stopReason,
+      promptError,
+      resultError,
+      transportError,
+    };
+  };
+  return { feed, finish };
+}
+
+async function runDshExec({ root, task, prompt, cwd, configuration, timeoutMs, signal }) {
   const taskDirectory = taskPaths(root, task.id).directory;
   const acpxHome = path.join(taskDirectory, 'acpx-home');
-  const inputFile = path.join(taskDirectory, `flow-input-${randomUUID()}.json`);
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   const argv = [
     '--agent', commandString(configuration.override),
@@ -1066,11 +1385,9 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     '--format', 'json',
     '--json-strict',
     '--timeout', String(timeoutSeconds),
-    'flow', 'run', SINGLE_TURN_FLOW,
-    '--input-file', inputFile,
+    'exec', '--file', '-',
   ];
   let child;
-  let stdout = '';
   let stderr = '';
   let termination;
   let timer;
@@ -1078,6 +1395,13 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   let timedOut = false;
   let cancel;
   let dispatchUncertain = false;
+  let evidenceReady = false;
+  let evidencePersisted = false;
+  let evidenceObserved = false;
+  let eventWrites = Promise.resolve();
+  let sessionObserved = null;
+  let parserError = null;
+  let collector;
   let closePromise;
   const closeOnce = () => {
     closePromise ??= closeRetainedAcpResources({
@@ -1086,6 +1410,7 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       extraClosers: [
         () => { clearTimeout(timer); },
         () => { if (cancel) signal?.removeEventListener('abort', cancel); },
+        () => { child?.stdin?.destroy(); },
       ],
     }).then((evidence) => {
       stopDeadline = undefined;
@@ -1098,13 +1423,48 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled before startup.');
     await mkdir(acpxHome, { recursive: true, mode: 0o700 });
     await chmod(acpxHome, 0o700);
-    await writeFile(inputFile, `${JSON.stringify({ prompt })}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     await updateTask(root, task.id, { status: 'starting', transport: 'acp', acp_client: 'acpx-cli', started_at: new Date().toISOString() });
+    const persistEvidence = () => {
+      if (!evidenceObserved || !evidenceReady || evidencePersisted) return;
+      evidencePersisted = true;
+      eventWrites = eventWrites.then(async () => {
+        await updateTask(root, task.id, {
+          prompt_dispatched: true,
+          dispatch_evidence: 'authoritative',
+          dispatch_uncertain: false,
+        });
+        await appendTaskEvent(root, task.id, {
+          type: 'transport',
+          state: 'prompt_dispatched',
+          transport: 'acp',
+          client: 'acpx-cli',
+          dispatch_evidence: 'authoritative',
+        });
+      });
+    };
+    collector = createAcpExecCollector({
+      prompt,
+      onSession: (value) => {
+        sessionObserved = value;
+        eventWrites = eventWrites.then(async () => {
+          await updateTask(root, task.id, { acp_session_id: value });
+          await appendTaskEvent(root, task.id, { type: 'transport', state: 'session_ready', transport: 'acp' });
+        });
+      },
+      onAuthoritative: () => {
+        evidenceObserved = true;
+        persistEvidence();
+      },
+      onText: (value) => {
+        const compact = { type: 'text_delta', text: boundedText(value, prompt, { remaining: MAX_EVENT_TEXT }) };
+        eventWrites = eventWrites.then(() => appendTaskEvent(root, task.id, { type: 'provider', event: compact }));
+      },
+    });
     child = spawn(process.env.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx', argv, {
       cwd,
       env: acpxTaskEnvironment(acpxHome, task),
       detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     const spawned = new Promise((resolve, reject) => {
       child.once('spawn', resolve);
@@ -1113,8 +1473,21 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
     const closed = new Promise((resolve) => {
       child.once('close', (code, childSignal) => resolve({ code, signal: childSignal }));
     });
-    child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-1024 * 1024); });
-    child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-256 * 1024); });
+    child.stdout.on('data', (chunk) => {
+      if (parserError) return;
+      try {
+        collector.feed(chunk);
+        persistEvidence();
+      } catch (error) {
+        parserError ??= error;
+        cancel?.();
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr = `${stderr}${chunk.toString('utf8')}`;
+      if (Buffer.byteLength(stderr, 'utf8') > MAX_ACPX_EXEC_STDERR) stderr = stderr.slice(-MAX_ACPX_EXEC_STDERR);
+    });
+    child.stdin.on('error', () => {});
     cancel = () => {
       termination ??= requestChildTreeTermination(child);
     };
@@ -1124,15 +1497,17 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       cancel();
     });
     await spawned;
-    // ACPX has spawned, but its JSON flow protocol does not acknowledge that
-    // the prompt was accepted. Treat all later failures as non-replayable.
+    // ACPX has spawned, but an outbound transcript frame only proves an
+    // attempt. Treat all later failures as non-replayable even before the
+    // correlated inbound session/update or prompt response arrives.
     dispatchUncertain = true;
+    const requestId = task.request_id ?? randomUUID();
     await updateTask(root, task.id, {
       status: 'running',
       dispatch_intent: true,
       dispatch_uncertain: true,
       fallback_safe: false,
-      request_id: randomUUID(),
+      request_id: requestId,
       provider_process_group: child.pid,
       provider_process_start_ticks: processStartTicks(child.pid),
     });
@@ -1143,53 +1518,64 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
       client: 'acpx-cli',
       reason: 'ACPX does not provide an authoritative prompt-sent acknowledgement.',
     });
+    evidenceReady = true;
+    persistEvidence();
+    if (parserError) throw parserError;
+    child.stdin.end(prompt);
     if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled before dispatch acknowledgement.');
     if (timedOut) fail('timeout', 'DSH ACP task exceeded its independent deadline.');
     const exit = await closed;
     const treeStopped = await (termination ??= terminateChildTree(child));
     signal?.removeEventListener('abort', cancel);
+    if (parserError) throw parserError;
+    const collected = collector.finish();
+    // finish() can consume a final frame without a trailing newline and thus
+    // enqueue the last evidence/event writes. Drain only after parsing it.
+    await eventWrites;
     if (signal?.aborted) fail('cancelled', 'DSH ACP task was cancelled.');
     if (timedOut) fail('timeout', 'DSH ACP task exceeded its independent deadline.');
     if (!treeStopped) fail('acpx_cleanup_incomplete', 'ACPX process tree remained after termination.');
+    if (collected.transportError) throw collected.transportError;
+    if (collected.resultError) throw collected.resultError;
+    if (collected.promptError) throw collected.promptError;
     if (exit.code !== 0) {
-      const detail = sanitizeText(stderr.trim() || stdout.trim() || `ACPX exited ${exit.code ?? exit.signal}`, prompt);
+      const detail = sanitizeText(stderr.trim(), prompt).replace(/[\r\n\t]+/gu, ' ').trim()
+        || `ACPX exited ${exit.code ?? exit.signal}`;
       fail('acpx_failed', detail.slice(-MAX_EVENT_TEXT));
     }
-    const flow = parseFlowResult(stdout);
-    if (flow.status !== 'completed') fail('acpx_failed', `ACPX flow ended in ${flow.status}.`);
-    const rawOutput = flow.outputs?.delegate;
-    const outputCandidates = [rawOutput?.text, rawOutput?.result, rawOutput?.output];
-    const outputValue = typeof rawOutput === 'string'
-      ? rawOutput
-      : outputCandidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0)
-        ?? outputCandidates.find((candidate) => typeof candidate === 'string')
-        ?? rawOutput;
-    const bounded = typeof outputValue === 'string'
-      ? boundedProviderResult(outputValue, { sanitize: (text) => sanitizeText(text, prompt) })
-      : boundedProviderValue(outputValue, { sanitize: (text) => sanitizeText(text, prompt) });
+    if (!collected.authoritative || !collected.promptResponded) {
+      fail('acpx_invalid_result', 'ACPX did not return a correlated prompt response.');
+    }
+    if (collected.stopReason === 'cancelled') fail('cancelled', 'DSH ACP task was cancelled by the provider.');
+    const bounded = collected.output;
     const output = bounded.value;
     const compact = { type: 'text_delta', text: typeof output === 'string' ? output : 'DSH ACP task completed.' };
-    await appendTaskEvent(root, task.id, { type: 'provider', event: compact });
     const closeEvidence = await closeOnce();
     const terminal = await persistWorkerTerminal(root, task.id, {
       status: 'completed',
       error: null,
-      stop_reason: 'end_turn',
+      stop_reason: collected.stopReason,
       last_event: compact,
       result: output,
       ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
       provider_process_group: null,
       provider_process_start_ticks: null,
-      acp_session_id: Object.values(flow.sessionBindings ?? {})[0]?.acpSessionId ?? null,
+      acp_session_id: collected.sessionId ?? sessionObserved,
+      prompt_dispatched: true,
+      dispatch_evidence: 'authoritative',
+      dispatch_uncertain: false,
+      dispatch_intent: true,
     }, closeEvidence, { wtb_handoff: 'not_applicable' });
-    return attachLocalProviderResultSink(root, terminal, outputValue, false);
+    return attachLocalProviderResultSink(root, terminal, output, bounded.result_truncated === true);
   } catch (error) {
     if (!dispatchUncertain && !authenticationFailure(error)) {
       const fallback = await fallbackToCliIfSafe({ root, task, prompt, signal, error });
       if (fallback) return fallback;
     }
+    await eventWrites.catch(() => {});
     const current = (await readTask(root, task.id)).task;
-    const status = signal?.aborted ? 'cancelled' : (error?.code === 'timeout' || timedOut ? 'timeout' : 'failed');
+    const status = signal?.aborted || error?.code === 'cancelled'
+      ? 'cancelled' : (error?.code === 'timeout' || timedOut ? 'timeout' : 'failed');
     const failure = publicError(error, prompt);
     const closeEvidence = await closeOnce();
     await persistWorkerTerminal(root, task.id, {
@@ -1203,7 +1589,6 @@ async function runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, s
   } finally {
     await closeOnce();
     await removeAcpxTaskHome(root, task.id, acpxHome);
-    await rm(inputFile, { force: true });
   }
 }
 
@@ -1227,6 +1612,64 @@ async function makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal
 }
 
 /**
+ * Reattach to an already acknowledged persistent ACP session. This path is
+ * intentionally observation-only: it calls ensureSession with the recorded
+ * session identity and never starts a new turn, so a worker restart cannot
+ * replay the acknowledged prompt.
+ */
+export async function reconnectAcpTask({ root, taskId, signal, runtimeFactory } = {}) {
+  if (typeof root !== 'string' || !path.isAbsolute(root)) fail('invalid_state_dir', 'root must be absolute.');
+  const { task } = await readTask(root, taskId);
+  if (!['grok', 'cursor-local'].includes(task.provider)
+    || task.prompt_dispatched !== true
+    || task.dispatch_evidence !== 'authoritative'
+    || typeof task.acp_session_id !== 'string'
+    || task.acp_session_id.length === 0
+    || ['cancelled', 'cancelling', 'completed', 'failed', 'timeout'].includes(task.status)) {
+    return Object.freeze({ reconnected: false, reason: 'session_resume_not_available' });
+  }
+  if (signal?.aborted) return Object.freeze({ reconnected: false, reason: 'cancelled' });
+  const cwd = requireAbsoluteDirectory(task.cwd);
+  const configuration = providerConfiguration(task);
+  const timeoutMs = taskTimeoutMs(task);
+  const childEnv = providerChildEnvironment(task);
+  const runtime = await (typeof runtimeFactory === 'function'
+    ? runtimeFactory({ root, task, cwd, configuration, timeoutMs, signal, env: childEnv })
+    : makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env: childEnv }));
+  let handle = null;
+  try {
+    handle = await runtime.ensureSession({
+      sessionKey: task.session_key ?? `${task.provider}:${task.id}`,
+      agent: configuration.agent,
+      mode: 'persistent',
+      cwd,
+      resumeSessionId: task.acp_session_id,
+    });
+    // getStatus is deliberately used only to prove that the attached session
+    // is observable. Its provider payload is not copied into the receipt.
+    if (typeof runtime.getStatus === 'function') await runtime.getStatus({ handle });
+    const sessionId = handle.backendSessionId ?? handle.agentSessionId ?? task.acp_session_id;
+    await updateTask(root, taskId, {
+      status: 'running',
+      transport: 'acp',
+      acp_session_id: sessionId,
+      runtime_recovery: 'same_session_reconnected',
+    });
+    await appendTaskEvent(root, taskId, {
+      type: 'transport',
+      state: 'session_reconnected',
+      transport: 'acp',
+      prompt_replayed: false,
+    });
+    return Object.freeze({ reconnected: true, session_id: sessionId, prompt_replayed: false });
+  } catch {
+    return Object.freeze({ reconnected: false, reason: 'session_reconnect_failed' });
+  } finally {
+    try { await runtime.close?.({ handle, discardPersistentState: false }); } catch { /* retain evidence for later reconciliation */ }
+  }
+}
+
+/**
  * Run one task through ACP. The task prompt is read from the owner-only task
  * store, so it never appears in argv or the public task record.
  */
@@ -1243,7 +1686,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) fail('invalid_timeout', 'timeout_ms must be at least 1000.');
 
   if (task.provider === 'dsh') {
-    return runDshFlow({ root, task, prompt, cwd, configuration, timeoutMs, signal });
+    return runDshExec({ root, task, prompt, cwd, configuration, timeoutMs, signal });
   }
 
   const childEnv = providerChildEnvironment(task);
@@ -1302,19 +1745,25 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     // From this point onward the provider may have accepted the prompt. A
     // supervisor must reconcile this task, never replay it through CLI.
     await updateTask(root, taskId, { prompt_dispatched: true });
+    await appendTaskEvent(root, taskId, { type: 'transport', state: 'prompt_dispatched', transport: 'acp' });
+    await updateTask(root, taskId, { dispatch_evidence: 'authoritative' });
     const cancel = () => turn.cancel({ reason: 'signal' }).catch(() => {});
     controller.signal.addEventListener('abort', cancel, { once: true });
     let lastEvent = null;
-    const observedEvents = [];
+    let observedUnsupportedQuestion = false;
     const output = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
     const complete = createLocalProviderResultCollectorV1();
+    const grokFinal = task.provider === 'grok'
+      ? createGrokFinalResponseReducerV1({ sanitize: (text) => sanitizeText(text, prompt) })
+      : null;
     try {
       for await (const event of turn.events) {
-        observedEvents.push(event);
+        observedUnsupportedQuestion ||= isStructuredAskUserQuestionUnsupported(event);
         if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
           output.append(event.text);
           complete.append(event.text);
         }
+        grokFinal?.append(event);
         const compact = boundedEvent(event, prompt);
         await appendTaskEvent(root, taskId, { type: 'provider', event: compact });
         lastEvent = compact;
@@ -1326,7 +1775,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     const result = await turn.result;
     const current = (await readTask(root, taskId)).task;
     const unsupportedQuestion = isStructuredAskUserQuestionUnsupported(lastEvent)
-      || eventsHaveUnsupportedAskUserQuestion(observedEvents);
+      || observedUnsupportedQuestion;
     const latchedQuestion = liveQuestionId(current.attention);
     let status = result.status === 'completed' ? 'completed' : result.status;
     let terminalError;
@@ -1336,7 +1785,10 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       status = 'failed';
       terminalError = questionBridgeUnavailableError();
     }
-    const bounded = output.finish();
+    const fullBounded = output.finish();
+    const fullSnapshot = complete.snapshot();
+    const reduced = grokFinal?.finish({ turnResult: { ...result, status }, fullSnapshot });
+    const bounded = reduced?.bounded ?? fullBounded;
     const closeEvidence = await closeOnce();
     const terminal = await persistWorkerTerminal(root, taskId, {
       status,
@@ -1347,9 +1799,10 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       ...(unsupportedQuestion && !latchedQuestion ? { question_bridge: 'unavailable' } : {}),
       ...(terminalError ? { error: terminalError, fallback_safe: false } : {}),
     }, closeEvidence, { wtb_handoff: 'not_applicable' });
-    const snapshot = complete.snapshot();
+    const snapshot = reduced?.snapshot ?? fullSnapshot;
     return attachLocalProviderResultSink(
-      root, terminal, snapshot.source, false, snapshot.overflow === true,
+      root, terminal, snapshot.source, false,
+      fullSnapshot.overflow === true || snapshot.overflow === true,
     );
   } catch (error) {
     const failure = publicError(error, prompt);
@@ -1416,7 +1869,7 @@ export async function runAcpWorkerCli(argv, {
     await awaitSupervisorRegistration(request.root, request.task_id, controller.signal);
     await removeStalePromptTransports(request.root, request.task_id);
     if (env.WORKTREE_BOOTSTRAP_TASK) {
-      await runFileImpl('worktree-bootstrap', [
+      await runFileImpl(BUNDLED_WORKTREE_BOOTSTRAP, [
         'verify',
         env.WORKTREE_BOOTSTRAP_TASK,
         '--repo',

@@ -32,6 +32,7 @@ import {
   readExperienceUiResourceForClient,
   resolveExperienceResultMeta,
   resolveExperienceToolMeta,
+  preparingPhrase,
   runningPhrase,
   sanitizeToolPayload,
 } from '../mcp/v3/response.mjs';
@@ -117,6 +118,34 @@ test('inline run card projects objective, repository SHA, lanes, and Codex autho
   assert.equal(Object.hasOwn(first.run.repository, 'repository_path'), false);
 });
 
+test('simple run cards say preparing until required prompt evidence is authoritative', () => {
+  const receipt = {
+    schema: 'codex-co-engineer.run-admission.v1',
+    run_id: 'simple-card',
+    assignment_count: 2,
+    authoritative_required_dispatch: false,
+    lanes: [
+      { assignment_id: 'one', provider: 'grok', role: 'implement', required: true, phase: 'prepared', prompt_dispatched: false, dispatch_confidence: 'not_sent' },
+      { assignment_id: 'two', provider: 'cursor-local', role: 'review', required: true, phase: 'session_ready', prompt_dispatched: false, dispatch_confidence: 'not_sent' },
+    ],
+  };
+  const preparing = projectExperience(receipt);
+  assert.equal(preparing.summary.running, preparingPhrase(2));
+  assert.equal(preparing.summary.phrases.includes('Co-Engineer is running 2 independent assignments'), false);
+
+  const running = projectExperience({
+    ...receipt,
+    authoritative_required_dispatch: true,
+    lanes: receipt.lanes.map((lane) => ({
+      ...lane,
+      phase: 'prompt_dispatched',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+    })),
+  });
+  assert.equal(running.summary.running, 'Co-Engineer is running 2 independent assignments');
+});
+
 test('grouped attention card collects questions once, marks lanes, and keeps one structured reply', async () => {
   const receipt = await loadJson('attention-receipt.json');
   const projection = projectExperience(receipt);
@@ -168,6 +197,22 @@ test('final card buckets lanes, git identity, and evidence without merge control
   assert.equal(projection.final.controls.push, false);
   assert.equal(projection.final.controls.rebase, false);
   assert.equal(projection.final.controls.create_pr, false);
+});
+
+test('final card reports failed_pre_prompt lanes as failures', async () => {
+  const receipt = await loadJson('final-receipt.json');
+  receipt.lanes.push({
+    assignment_id: 'startup-failure',
+    task_id: 'startup-failure-task',
+    provider: 'grok',
+    status: 'failed_pre_prompt',
+    required: true,
+    prompt_dispatched: false,
+  });
+  receipt.assignment_count = receipt.lanes.length;
+  const projection = projectExperience(receipt);
+  assert.equal(projection.card, 'final');
+  assert.deepEqual(projection.final.failed_lanes, ['docs', 'startup-failure']);
 });
 
 test('verified-final sentence is used only for an accepted complete candidate', async () => {

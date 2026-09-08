@@ -14,10 +14,11 @@ capability schema.
 
 - Provider slot: `dsh` exactly. Every other provider fails closed with
   `provider_slot_mismatch`.
-- Models: `muse-spark-1.2-contributor` or `stealth/ox-alpha` exactly. Any other
-  model fails closed with `dsh_model_denied`. The informational identity map
-  mirrors the shipped supervisor routing (`dsh-acp.yml` + `MODEL_API_KEY` /
-  `model-api-key`; `dsh-acp-ox-alpha.yml` + `OPENROUTER_API_KEY` /
+- Models: `meta/muse-spark-1.3-contributor` or `stealth/ox-alpha` exactly. Any
+  other model fails closed with `dsh_model_denied`. The Muse model uses
+  xhigh reasoning. The informational identity map mirrors the shipped
+  supervisor routing (`dsh-acp.yml` + `OPENROUTER_API_KEY` /
+  `openrouter-api-key`; `dsh-acp-ox-alpha.yml` + `OPENROUTER_API_KEY` /
   `openrouter-api-key`) but resolves nothing by itself.
 - Workspace: `workspace_mode: "managed"` at construction (required, no hidden
   default), local managed worktree semantics anchored at the immutable run base
@@ -125,11 +126,11 @@ A real-transport qualification harness must supply a production port that:
 
 1. resolves the exact config file and credential per model (env first, then the
    owner-only file), returning their sha256 digests and never the secret bytes;
-2. spawns `acpx flow run <single-turn>` one-shot with the exact envelope text as
-   the bounded input payload, returning a stable bounded `session_ref`;
-3. projects recorded ACPX flow output (session records, NDJSON traces, exit
-   status) into the closed evidence/page/cancel receipts above, including
-   needs-attention detection with a bounded question ref;
+2. spawns `acpx exec --file -` with JSON output and the exact envelope on
+   stdin, returning a stable bounded `session_ref`;
+3. correlates JSON-RPC responses and session updates, projecting only bounded
+   received output into the closed evidence/page/cancel receipts above;
+   outgoing prompt frames must never become receipt content;
 4. performs tree-scoped cancellation and reports `confirmed` only after the
    process group is observed stopped;
 5. keeps every receipt free of provider-authored content beyond the closed

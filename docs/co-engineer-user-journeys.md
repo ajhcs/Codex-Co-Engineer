@@ -18,7 +18,10 @@ The user wants one isolated assignment.
 User: Review the auth change with Grok Co-Engineer.
 
 Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-Co-Engineer is running 1 independent assignment.
+Co-Engineer is preparing 1 independent assignment.
+
+After every required lane has authoritative prompt-dispatch evidence, the
+run card may say that Co-Engineer is running 1 independent assignment.
 
 Codex waits once. When the work is complete, Codex inspects it.
 
@@ -35,8 +38,12 @@ The user wants several independent assignments in one run.
 User: Split this into three isolated independent assignments: API
 validation, the operator guide, and a review of both diffs.
 
-Codex: I am delegating this to Co-Engineer. Co-Engineer is running 3
+Codex: I am delegating this to Co-Engineer. Co-Engineer is preparing 3
 independent assignments.
+
+Only after all three required lanes have authoritative prompt-dispatch
+evidence does the run card say that Co-Engineer is running 3 independent
+assignments.
 
 Codex does not start three separate runs and does not poll each
 assignment. One coordinated wait covers the whole run. Independent
@@ -75,11 +82,11 @@ Co-Engineer finished, and I verified the candidate.
 
 Verification is Codex's review of the candidate, not itself a merge.
 External workers may commit. A scoped publisher may non-force push only
-the task branch and open a draft PR. Sol High or Sol XHigh alone
-performs regular merge after exact-head, current-green-CI, and topology
-checks. The user retains release, tag, version, and protected-ref
-authority. Downstream slices must not treat the sentence as a completed
-merge.
+the task branch and open a draft PR. Codex remains the merge authority
+and may merge only after exact-head, current-green-CI, and topology checks
+and the user's authorization. The user retains release, tag, version,
+and protected-ref authority. Downstream slices must not treat the
+sentence as a completed merge.
 
 ## Failure/unresolved
 
@@ -104,7 +111,10 @@ the docs. Keep the review on Cursor Co-Engineer.
 
 Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer.
 Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
-running 3 independent assignments.
+preparing 3 independent assignments.
+
+The card changes to running only after all three required lanes have
+authoritative prompt-dispatch evidence.
 
 Codex does not pick co-engineers by cost, speed, or a hidden router.
 Cursor on this computer and Cursor Cloud both stay Using Cursor
@@ -126,20 +136,24 @@ invent a default router, and does not submit before the choice exists.
 User: Grok for the validator. Muse for the docs.
 
 Codex: I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-Using Muse Co-Engineer. Co-Engineer is running 2 independent
+Using Muse Co-Engineer. Co-Engineer is preparing 2 independent
 assignments.
+
+After dispatch evidence is authoritative for both required lanes, the
+card may say that Co-Engineer is running 2 independent assignments.
 
 That is still one submission and one coordinated wait. The ask happens
 before delegation. Afterward, chatting with Co-Engineer can inspect,
 continue, answer grouped attention, or cancel.
 
-## Project manager
+## Optional legacy host relay
 
 The public phrases stay Delegating to Co-Engineer and Chatting with
-Co-Engineer. Luna Max is the default project manager for that same run
-when the user authorizes a pinned task, Luna Max is available, and the
-host can create a thread, send a message to that thread, and wait on or
-read it.
+Co-Engineer. Ordinary delegation stays in the current Codex task and uses
+the user's selected model. Luna Max becomes project manager for a run only
+when the user explicitly requests the legacy relay, authorizes a pinned
+task, Luna Max is available, and the host can create a thread, send a
+message to that thread, and wait on or read it.
 
 User: Delegating to Co-Engineer: pin Luna Max as the project manager
 for this isolated review.
@@ -153,8 +167,9 @@ when the work is completed, blocked, failed, asking a question, timed
 out, or carrying a user update. Routine progress does not wake it.
 Normal completion does not wake Sol. When the work is publication-ready
 and exact head, tree, verifier, current green CI, and topology facts
-pass, Codex may ask Sol High or Sol XHigh once to integrate the draft
-pull request.
+pass, the optional relay may notify Sol High or Sol XHigh once only when
+the user explicitly selected that target. The notification does not
+grant merge or release authority.
 
 If Luna Max or those host task tools are missing, Codex continues in
 this conversation and says so. It does not substitute Sol.
@@ -166,9 +181,10 @@ Across every journey:
 - Codex remains the chief engineer and reviewer.
 - External workers may commit. A scoped publisher may non-force push
   only the task branch and open a draft pull request. Luna Max does
-  not merge. Sol High or Sol XHigh alone performs regular merge after
-  exact-head, current-green-CI, and topology checks. The user retains
-  release, tag, version, and protected-ref authority.
+  not merge. Codex remains the merge authority and may merge only after
+  exact-head, current-green-CI, and topology checks and the user's
+  authorization. The user retains release, tag, version, and
+  protected-ref authority.
 - External co-engineers stay isolated.
 - One bounded run is in flight at a time for this work.
 - Chatting never becomes a second submission.

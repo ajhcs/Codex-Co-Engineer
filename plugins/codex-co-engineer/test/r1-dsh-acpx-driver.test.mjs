@@ -129,9 +129,9 @@ test('describe reports bounded vocabularies and only false non-claims', () => {
 test('model identity data stays an informational mirror of the supervisor routing', () => {
   assert.deepEqual({ ...DSH_MODEL_IDENTITIES[MUSE_MODEL] }, {
     config_file: 'dsh-acp.yml',
-    credential_env: 'MODEL_API_KEY',
-    credential_file_env: 'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
-    credential_file: 'model-api-key',
+    credential_env: 'OPENROUTER_API_KEY',
+    credential_file_env: 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+    credential_file: 'openrouter-api-key',
   });
   assert.deepEqual({ ...DSH_MODEL_IDENTITIES[OX_MODEL] }, {
     config_file: 'dsh-acp-ox-alpha.yml',

@@ -5,7 +5,19 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { boundedEvent, publicError, runAcpTask, runCliFallback, sanitizeText, workerSeamIncident } from '../mcp/v3/acp-worker.mjs';
+import {
+  boundedEvent,
+  createGrokFinalResponseReducerV1,
+  handlePermissionRequest,
+  isUserFacingPermission,
+  publicError,
+  reconnectAcpTask,
+  runAcpTask,
+  runCliFallback,
+  safeQuestionId,
+  sanitizeText,
+  workerSeamIncident,
+} from '../mcp/v3/acp-worker.mjs';
 import { installClosedProviderTestInjection } from '../mcp/v3/credential-boundary.mjs';
 import { submitReply } from '../mcp/v3/mailbox.mjs';
 import { createTask, readTask, updateTask } from '../mcp/v3/task-store.mjs';
@@ -55,6 +67,49 @@ async function withFakeAcpx(mode, callback, options = {}) {
   }
 }
 
+test('typed ACP tool permissions do not become user questions from command text', () => {
+  for (const title of [
+    'Run `echo "exit=$?"`',
+    'Execute confirm-release-state --dry-run',
+    'Approval required by the shell script',
+  ]) {
+    assert.equal(isUserFacingPermission({
+      inferredKind: 'execute',
+      raw: { toolCall: { kind: 'execute', title } },
+    }), false);
+  }
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { question: 'Which release channel should I use?', toolCall: { title: 'Ask operator' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Fake permission' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Confirm release to production?' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Which environment should I use?' } },
+  }), true);
+  assert.equal(isUserFacingPermission({
+    inferredKind: 'other',
+    raw: { toolCall: { title: 'Run `echo "exit=$?"`' } },
+  }), false);
+});
+
+test('long ACP permission ids retain a bounded collision-resistant identity', () => {
+  const shared = `call-${'a'.repeat(100)}`;
+  const first = safeQuestionId(`${shared}-one`);
+  const second = safeQuestionId(`${shared}-two`);
+  assert.match(first, /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u);
+  assert.equal(first.length, 80);
+  assert.notEqual(first, second);
+  assert.equal(safeQuestionId('fake-permission'), 'fake-permission');
+});
+
 async function processExited(pid, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -85,6 +140,77 @@ test('runs a prompt through ACP and persists a compact receipt', async () => {
   assert.match(events, /"type":"cleanup"/u);
 });
 
+test('Grok selects the final framed response while retaining pre-tool text in provider events', async () => {
+  for (const provider of ['grok', 'cursor-local']) {
+    const value = await fixture({
+      provider,
+      id: `${provider}-framed-final`,
+      prompt: 'review the framed result',
+      mode: 'framed-final',
+    });
+    const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+    assert.equal(
+      terminal.result,
+      provider === 'grok' ? 'fake-final-answer' : 'fake-opening-preamblefake-final-answer',
+    );
+    const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+    assert.match(events, /fake-opening-preamble/u);
+    assert.match(events, /fake-final-answer/u);
+  }
+});
+
+test('Grok final framing falls back when reduction could hide output', () => {
+  const text = (value) => ({ type: 'text_delta', stream: 'output', text: value });
+  const call = (id, rawInput = { variant: 'ReadFile' }) => ({
+    type: 'tool_call', tag: 'tool_call', toolCallId: id, rawInput,
+  });
+  const done = (id) => ({
+    type: 'tool_call', tag: 'tool_call_update', toolCallId: id, status: 'completed',
+  });
+  const completed = { status: 'completed', stopReason: 'end_turn' };
+  const finish = (events, options = {}) => {
+    const reducer = createGrokFinalResponseReducerV1();
+    for (const event of events) reducer.append(event);
+    return reducer.finish({
+      turnResult: options.turnResult ?? completed,
+      fullSnapshot: { overflow: options.overflow === true },
+    });
+  };
+
+  const selected = finish([text('preamble'), call('read'), done('read'), text('final')]);
+  assert.equal(selected.bounded.value, 'final');
+  assert.equal(selected.snapshot.source.toString('utf8'), 'final');
+
+  const parallel = finish([
+    text('preamble'), call('one'), call('two'), done('one'), done('two'), text('parallel-final'),
+  ]);
+  assert.equal(parallel.bounded.value, 'parallel-final');
+  const sequential = finish([
+    text('preamble'), call('one'), done('one'), text('between'), call('two'), done('two'),
+    text('final-'), text('chunks'),
+  ]);
+  assert.equal(sequential.bounded.value, 'final-chunks');
+
+  const fallbacks = [
+    ['whitespace final', [text('preamble'), call('read'), done('read'), text('   ')], {}],
+    ['full collector overflow', [text('preamble'), call('read'), done('read'), text('final')], { overflow: true }],
+    ['text while tool pending', [text('preamble'), call('read'), text('interleaved'), done('read'), text('final')], {}],
+    ['text after partial settle', [text('preamble'), call('one'), call('two'), done('one'), text('interleaved'), done('two'), text('final')], {}],
+    ['web search', [text('preamble'), call('search', { variant: 'WebSearch' }), done('search'), text('final')], {}],
+    ['unmatched terminal', [text('preamble'), done('missing'), text('final')], {}],
+    ['duplicate pending id', [text('preamble'), call('same'), call('same'), done('same'), text('final')], {}],
+    ['missing id', [text('preamble'), call(null), text('final')], {}],
+    ['overlong id', [text('preamble'), call('x'.repeat(513)), text('final')], {}],
+    ['pending tool', [text('partial'), call('pending')], {}],
+    ['pending after settled round', [text('preamble'), call('one'), done('one'), text('candidate'), call('pending')], {}],
+    ['failed turn', [text('preamble'), call('read'), done('read'), text('failure detail')], { turnResult: { status: 'failed', stopReason: 'error' } }],
+    ['non-end turn', [text('preamble'), call('read'), done('read'), text('partial')], { turnResult: { status: 'completed', stopReason: 'max_tokens' } }],
+  ];
+  for (const [name, events, options] of fallbacks) {
+    assert.equal(finish(events, options), null, name);
+  }
+});
+
 for (const provider of ['grok', 'cursor-local']) {
   test(`${provider} preserves a terminal verdict at the end of long ACP output`, async () => {
     const value = await fixture({
@@ -109,6 +235,53 @@ test('does not start a fresh ACP worker from transport_lost', async () => {
     runAcpTask({ root: value.root, taskId: value.taskId }),
     (error) => error.code === 'transport_lost',
   );
+});
+
+test('reconnects an acknowledged ACP session without replaying its prompt', async () => {
+  const value = await fixture({ id: 'same-session-reconnect' });
+  await updateTask(value.root, value.taskId, {
+    status: 'transport_lost',
+    transport: 'acp',
+    prompt_dispatched: true,
+    dispatch_evidence: 'authoritative',
+    acp_session_id: 'persisted-acp-session',
+  });
+  let ensureInput;
+  let startTurnCalled = false;
+  let closed = false;
+  const resumed = await reconnectAcpTask({
+    root: value.root,
+    taskId: value.taskId,
+    runtimeFactory: async () => ({
+      ensureSession: async (input) => {
+        ensureInput = input;
+        return {
+          backendSessionId: 'persisted-acp-session',
+          agentSessionId: 'persisted-agent-session',
+        };
+      },
+      getStatus: async () => ({ status: 'running' }),
+      startTurn: async () => {
+        startTurnCalled = true;
+        throw new Error('resume path must not start a turn');
+      },
+      close: async () => {
+        closed = true;
+      },
+    }),
+  });
+
+  assert.equal(resumed.reconnected, true);
+  assert.equal(resumed.prompt_replayed, false);
+  assert.equal(ensureInput.resumeSessionId, 'persisted-acp-session');
+  assert.equal(startTurnCalled, false);
+  assert.equal(closed, true);
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'running');
+  assert.equal(task.prompt_dispatched, true);
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.match(events, /session_reconnected/u);
+  assert.match(events, /prompt_replayed":false/u);
 });
 
 test('recursively bounds and redacts provider events and errors', () => {
@@ -237,7 +410,7 @@ test('provider failure after dispatch is never marked safe to replay', async () 
   assert.equal(workerSeamIncident(task), false);
 });
 
-test('DSH scopes ACPX artifacts to the task and removes them after persistence', async () => {
+test('DSH uses bounded ACPX exec stdin and scopes artifacts to the task', async () => {
   const value = await fixture({ provider: 'dsh', id: 'dsh-flow' });
   await updateTask(value.root, value.taskId, {
     error: { code: 'worker_boundary_uncertain', message: 'stale reconciliation marker' },
@@ -250,8 +423,14 @@ test('DSH scopes ACPX artifacts to the task and removes them after persistence',
     assert.equal(terminal.result, 'DSH_FAKE_OK');
     assert.equal(terminal.error, null);
     assert.equal(terminal.acp_session_id, 'dsh-fake-session');
-    assert.equal(terminal.dispatch_uncertain, true);
-    assert.equal(terminal.prompt_dispatched, undefined);
+    assert.equal(terminal.dispatch_uncertain, false);
+    assert.equal(terminal.prompt_dispatched, true);
+    assert.equal(terminal.dispatch_evidence, 'authoritative');
+    const observed = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-observed.json'), 'utf8'));
+    assert.ok(observed.argv.includes('exec'));
+    assert.ok(observed.argv.includes('--file'));
+    assert.ok(observed.argv.includes('-'));
+    assert.equal(observed.argv.includes('review this repository'), false);
     await access(artifactMarker);
     const entries = await readdir(path.join(value.root, 'tasks', value.taskId));
     assert.equal(entries.some((entry) => entry.startsWith('flow-input-')), false);
@@ -275,6 +454,141 @@ test('DSH ACPX preserves bounded nested output values', async () => {
   assert.match(terminal.result.nested.final, /VERDICT: DSH OBJECT PASS$/u);
   assert.equal(terminal.result_truncated, true);
   assert.equal(terminal.result_original_chars, 10_025);
+});
+
+test('DSH exposes a correlated provider billing failure without replay or prompt leakage', async () => {
+  const cliMarker = path.join((await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-dsh-billing-'))), 'cli-ran');
+  const prompt = 'private billing prompt';
+  const value = await fixture({
+    provider: 'dsh',
+    id: 'dsh-provider-billing',
+    prompt,
+    cliArgv: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(cliMarker)}, 'ran')`],
+  });
+  await assert.rejects(
+    withFakeAcpx('provider-error', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'provider_billing_required',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.error.code, 'provider_billing_required');
+  assert.equal(task.error.message, 'The provider billing configuration is unavailable.');
+  assert.equal(task.prompt_dispatched, true);
+  assert.equal(task.dispatch_evidence, 'authoritative');
+  assert.equal(task.dispatch_uncertain, false);
+  assert.equal(task.fallback_safe, false);
+  await assert.rejects(access(cliMarker));
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.doesNotMatch(events, new RegExp(prompt, 'u'));
+});
+
+test('DSH keeps an ACP authentication rejection pre-dispatch and does not fall back', async () => {
+  const cliMarker = path.join((await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-dsh-auth-'))), 'cli-ran');
+  const value = await fixture({
+    provider: 'dsh',
+    id: 'dsh-provider-auth',
+    cliArgv: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(cliMarker)}, 'ran')`],
+  });
+  await assert.rejects(
+    withFakeAcpx('auth-error', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'authentication_required',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.error.code, 'authentication_required');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.fallback_safe, false);
+  await assert.rejects(access(cliMarker));
+});
+
+test('DSH rejects an uncorrelated or incomplete ACP prompt result', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-invalid-result' });
+  await assert.rejects(
+    withFakeAcpx('invalid-result', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_invalid_result',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.dispatch_uncertain, true);
+  assert.equal(task.fallback_safe, false);
+});
+
+test('DSH rejects an unmatched terminal response instead of manufacturing success', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-unmatched-result' });
+  await assert.rejects(
+    withFakeAcpx('unmatched-result', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_invalid_result',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+  assert.equal(task.dispatch_uncertain, true);
+  assert.equal(task.fallback_safe, false);
+});
+
+test('DSH treats thought updates as dispatch evidence without persisting thought text', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-thought-first' });
+  const terminal = await withFakeAcpx('thought-first', () => runAcpTask({ root: value.root, taskId: value.taskId }));
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.result, 'THOUGHT_RESULT');
+  assert.equal(terminal.dispatch_evidence, 'authoritative');
+  const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+  assert.doesNotMatch(events, /PRIVATE_THOUGHT_SHOULD_NOT_BE_STORED/u);
+});
+
+test('DSH preserves split UTF-8 ACPX output while parsing correlated frames', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-utf8-output' });
+  const terminal = await withFakeAcpx('utf8', () => runAcpTask({ root: value.root, taskId: value.taskId }));
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.result, 'UTF8_OK 😀 café');
+});
+
+test('DSH fails closed on malformed ACPX JSON output', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-malformed-output' });
+  await assert.rejects(
+    withFakeAcpx('malformed', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_protocol_invalid',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+  assert.equal(task.fallback_safe, false);
+});
+
+test('DSH rejects a prompt request whose session differs from session/new', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-wrong-prompt-session' });
+  await assert.rejects(
+    withFakeAcpx('wrong-session', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_protocol_invalid',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.prompt_dispatched, undefined);
+  assert.equal(task.dispatch_uncertain, true);
+});
+
+test('DSH rejects duplicate outstanding ACPX request ids', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-duplicate-request-id' });
+  await assert.rejects(
+    withFakeAcpx('duplicate-id', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_protocol_invalid',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+});
+
+test('DSH rejects a terminal response with a mismatched session id', async () => {
+  const value = await fixture({ provider: 'dsh', id: 'dsh-wrong-result-session' });
+  await assert.rejects(
+    withFakeAcpx('wrong-result-session', () => runAcpTask({ root: value.root, taskId: value.taskId })),
+    (error) => error.code === 'acpx_invalid_result',
+  );
+  const { task } = await readTask(value.root, value.taskId);
+  assert.equal(task.status, 'failed');
+  assert.equal(task.result, undefined);
+  assert.equal(task.dispatch_uncertain, true);
 });
 
 test('DSH does not fall back after ACPX has spawned without an acknowledgement', async () => {
@@ -330,7 +644,7 @@ test('DSH Ox Alpha fails closed instead of using a model-blind pre-spawn CLI fal
 test('DSH Muse still allows pre-spawn CLI fallback when ACPX cannot start', async () => {
   const value = await fixture({
     provider: 'dsh',
-    dshModel: 'muse-spark-1.2-contributor',
+    dshModel: 'meta/muse-spark-1.3-contributor',
     id: 'dsh-muse-pre-spawn-fallback',
     cliArgv: [process.execPath, '-e', 'process.stdout.write("MUSE_CLI_FALLBACK_OK")'],
   });
@@ -347,7 +661,7 @@ test('DSH Muse still allows pre-spawn CLI fallback when ACPX cannot start', asyn
   const { task } = await readTask(value.root, value.taskId);
   assert.equal(task.status, 'completed');
   assert.equal(task.transport, 'cli');
-  assert.equal(task.dsh_model, 'muse-spark-1.2-contributor');
+  assert.equal(task.dsh_model, 'meta/muse-spark-1.3-contributor');
   assert.equal(task.fallback_from, 'acp');
   assert.equal(task.prompt_dispatched, true);
   assert.equal(task.fallback_safe, false);
@@ -373,28 +687,89 @@ test('DSH deadline kills a detached ACPX descendant before terminalizing', async
   assert.equal((await readdir(path.join(value.root, 'tasks', value.taskId))).includes('acpx-home'), false);
 });
 
-test('user-facing ACP permission requests persist needs_attention and accept one same-session reply', async () => {
-  const value = await fixture({ prompt: 'need permission please', id: 'perm-one', timeoutMs: 8_000 });
-  const running = runAcpTask({ root: value.root, taskId: value.taskId });
-  const deadline = Date.now() + 5_000;
-  let attention;
-  while (Date.now() < deadline) {
-    const current = (await readTask(value.root, value.taskId)).task;
-    if (current.status === 'needs_attention') {
-      attention = current;
-      break;
+test('worker permission handling persists question text and resumes through the mailbox reply', async () => {
+  const value = await fixture({ id: 'perm-question' });
+  const controller = new AbortController();
+  const question = 'Which environment should I use?';
+  const options = [
+    { optionId: 'allow', kind: 'allow_once', name: 'Allow once' },
+    { optionId: 'reject', kind: 'reject_once', name: 'Reject' },
+  ];
+  const pending = handlePermissionRequest(value.root, value.taskId, {
+    sessionId: 'fake-session-question',
+    inferredKind: 'other',
+    raw: {
+      question,
+      toolCall: { toolCallId: 'question-environment', title: 'Ask operator' },
+      options,
+    },
+  }, controller.signal);
+  try {
+    const deadline = Date.now() + 1_000;
+    let attention;
+    while (Date.now() < deadline) {
+      const current = (await readTask(value.root, value.taskId)).task;
+      if (current.status === 'needs_attention') {
+        attention = current;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(attention?.status, 'needs_attention');
+    const stored = JSON.parse(await readFile(
+      path.join(value.root, 'tasks', value.taskId, 'attention.json'),
+      'utf8',
+    ));
+    assert.equal(stored.prompt, question);
+    assert.deepEqual(stored.options, options);
+    await submitReply(value.root, value.taskId, {
+      session_id: attention.attention.session_id,
+      question_id: attention.attention.question_id,
+      response: { optionId: 'allow' },
+    });
+    assert.deepEqual(await pending, { outcome: 'allow_once', optionId: 'allow' });
+    assert.equal((await readTask(value.root, value.taskId)).task.status, 'running');
+  } finally {
+    controller.abort();
+    await pending.catch(() => {});
   }
-  assert.equal(attention?.status, 'needs_attention');
-  assert.ok(attention.attention?.session_id);
-  assert.ok(attention.attention?.question_id);
-  await submitReply(value.root, value.taskId, {
-    session_id: attention.attention.session_id,
-    question_id: attention.attention.question_id,
-    response: 'allow_once',
-  });
-  const terminal = await running;
-  assert.equal(terminal.status, 'completed');
-  assert.equal((await readTask(value.root, value.taskId)).task.status, 'completed');
+});
+
+test('title-only ACP questions persist and continue the real worker session', async () => {
+  const controller = new AbortController();
+  let running;
+  try {
+    const question = 'Which environment should I use?';
+    const value = await fixture({
+      prompt: 'need permission title question please',
+      id: 'perm-title-question',
+      timeoutMs: 8_000,
+    });
+    running = runAcpTask({ root: value.root, taskId: value.taskId, signal: controller.signal });
+    const deadline = Date.now() + 5_000;
+    let attention;
+    while (Date.now() < deadline) {
+      const current = (await readTask(value.root, value.taskId)).task;
+      if (current.status === 'needs_attention') {
+        attention = current;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(attention?.status, 'needs_attention');
+    const stored = JSON.parse(await readFile(
+      path.join(value.root, 'tasks', value.taskId, 'attention.json'),
+      'utf8',
+    ));
+    assert.equal(stored.prompt, question);
+    await submitReply(value.root, value.taskId, {
+      session_id: attention.attention.session_id,
+      question_id: attention.attention.question_id,
+      response: { optionId: 'allow' },
+    });
+    assert.equal((await running).status, 'completed');
+  } finally {
+    controller.abort();
+    await running?.catch(() => {});
+  }
 });

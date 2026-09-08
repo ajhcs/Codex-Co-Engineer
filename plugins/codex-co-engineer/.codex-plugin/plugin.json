@@ -1,6 +1,6 @@
 {
   "name": "codex-co-engineer",
-  "version": "3.4.0",
+  "version": "3.4.2",
   "description": "Give Codex a team of external co-engineers without giving up control. Delegating to Co-Engineer starts one bounded run. The honest shape is up to eight isolated external co-engineers, one bounded run, one coordinated wait, one verified decision.",
   "author": {
     "name": "Codex-Co-Engineer"

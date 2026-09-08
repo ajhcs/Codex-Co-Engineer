@@ -4,13 +4,11 @@ Give Codex a team of external co-engineers without giving up control.
 
 This is the public-language contract later UX slices consume. It freezes
 terminology, Codex speech, activation, the five-tool catalog, and the
-one-submission coordination shape. The Luna Max TaskPort skill guarantees
-policy and is the host executor for Desktop task tools. The JS adapter
-plans and validates those call shapes; it does not invoke host callbacks.
-Co-Engineer MCP still does not invoke those host-only tools and must not
-add a sixth tool to simulate the Desktop host. This slice does not change
-README, manifest, marketplace, asset, version, changelog, or release
-surfaces.
+one-submission coordination shape. The run card now distinguishes preparation
+from execution: it does not claim `running` until every required lane has
+authoritative prompt-dispatch evidence.
+The optional Luna TaskPort adapter plans and validates host call shapes;
+Co-Engineer MCP does not invoke host-only task tools.
 
 Owned files:
 
@@ -37,10 +35,10 @@ Exact sentence:
 
 Codex remains chief engineer and reviewer. External co-engineers do
 isolated assigned work. External workers may commit. A scoped publisher
-may non-force push only the task branch and open a draft PR. Sol High
-or Sol XHigh alone performs regular merge after deterministic
-exact-head, current-green-CI, and topology checks. The user retains
-release, tag, version, and protected-ref authority.
+may non-force push only the task branch and open a draft PR. Codex remains
+the merge authority and may merge only after deterministic exact-head,
+current-green-CI, and topology checks and the user's authorization. The
+user retains release, tag, version, and protected-ref authority.
 
 ## Canonical phrases
 
@@ -63,6 +61,8 @@ Exact Codex speech. Substitute `N` with an integer from 1 through 8.
 Use `assignment` when `N` is 1 and `assignments` when `N` is 2 through 8.
 
 - `I am delegating this to Co-Engineer`
+- `Co-Engineer is preparing N assignments`
+- `Co-Engineer is preparing 1 independent assignment`
 - `Co-Engineer is running N independent assignments`
 - `Co-Engineer is running 1 independent assignment`
 - `Co-Engineer needs one decision from you`
@@ -120,21 +120,23 @@ Every bounded-run journey is one submission, one aggregate
 progress never wakes that wait. Codex does not poll each assignment and
 does not add a second submission to continue, inspect, or answer.
 
-## Luna Max project manager
+## Optional legacy Luna/Sol host relay
 
-Luna Max is the default routine project manager when the user authorizes
-it and Luna Max is actually available. It is not a sixth public phrase
-or sixth tool. The Co-Engineer run/event transport stays available and
-performs no model polling. Co-Engineer MCP cannot invoke host-only Codex
-task tools. The skill guarantees policy and executes the host tools. The
-JS adapter plans and validates those call shapes. The Co-Engineer event
-store remains source of truth. A user-authorized
-pinned Luna Max task wakes on completed, blocked, failed, question,
-timeout, or user_update envelopes. Routine progress does not wake a
-model. A distinct `merge_ready` envelope may wake Sol High or Sol XHigh
-exactly once, and only when exact head and tree, verifier acceptance,
-current green CI, zero failed or hidden checks, and topology facts all
-pass.
+Ordinary delegation stays in the current Codex task and uses the user's
+selected model. When the user explicitly requests the legacy host relay
+and Luna Max is available, Codex may pin one Luna Max project-manager
+task for that run. It is not a sixth public phrase or sixth tool. The
+Co-Engineer run/event transport stays available and performs no model
+polling. Co-Engineer MCP cannot invoke host-only Codex task tools. The
+skill guarantees policy and executes the host tools. The JS adapter
+plans and validates those call shapes. The Co-Engineer event store
+remains source of truth. The explicitly requested pinned Luna Max task
+wakes on completed, blocked, failed, question, timeout, or user_update
+envelopes. Routine progress does not wake a model. A distinct
+`merge_ready` envelope may notify Sol High or Sol XHigh exactly once only
+when the user explicitly selected that optional relay target and exact
+head and tree, verifier acceptance, current green CI, zero failed or
+hidden checks, and topology facts all pass.
 
 This skill layer can guarantee that policy, identity binding, monotonic
 cursor resume, sanitized evidence references, and honest degraded
@@ -153,19 +155,20 @@ actual thread id, host id, and cursor the host returns. If those tools
 or Luna Max are unavailable, Codex continues in the current Codex task
 and says so. It never silently substitutes Sol or invents another model.
 
-Sol Medium is not a mandatory layer. External workers may commit. A
+No Luna or Sol model is a mandatory layer. External workers may commit. A
 scoped publisher may non-force push only the task-owned unprotected Codex
 branch and open or update a draft pull request after the user authorizes
-publication. Sol High or Sol XHigh alone performs regular merge after
-deterministic exact-head, current-green-CI, and topology checks, and
-remains an on-demand exception adjudicator. The user retains release,
-tag, version, and protected-ref authority. No worker or message can
-force-push, merge, rebase, tag, release, delete refs, or override
-verification. Normal completion never wakes Sol. Sol escalation
-is exactly: a verified `merge_ready` packet, conflicting exact evidence or
-reviewer verdicts, security or protected-ref risk, composition
-ambiguity, repeated deterministic rejection, a release-authority
-decision, or explicit user escalation.
+publication. Codex remains the merge authority and may regular-merge only
+after deterministic exact-head, current-green-CI, and topology checks and
+the user's authorization.
+The user retains release, tag, version, and protected-ref authority. No
+worker or message can force-push, merge, rebase, tag, release, delete
+refs, or override verification. In an explicitly requested relay, normal
+completion never wakes Sol. Sol notification is limited to a verified
+`merge_ready` packet, conflicting exact evidence or reviewer verdicts,
+security or protected-ref risk, composition ambiguity, repeated
+deterministic rejection, a release-authority decision, or explicit user
+escalation. Notification does not grant merge or release authority.
 
 Luna may use bounded native read-only subagents for local analysis with
 inherited capabilities, depth at most 2, counted against the eight-lane

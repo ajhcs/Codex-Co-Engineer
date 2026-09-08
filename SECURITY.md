@@ -87,16 +87,28 @@ The 3.3.0 authority split and honest threat model are
   commits are handed off for Codex to inspect and push or turn into a PR.
   Codex remains the merge authority.
 
+## Remembered repository consent
+
+Native form acceptance can authorize this run only or remember access for the
+repository and selected providers. Remembered grants are owner-only local state,
+shared across linked worktrees of the same repository. They do not authorize new
+providers, changed origins, or replacement repositories. Earlier one-run approvals
+are not automatically converted into remembered grants.
+
+Use the packaged `bin/consent-grants.mjs` command to inspect or revoke grants;
+see the [plugin README](plugins/codex-co-engineer/README.md) for invocation and
+command arguments. Revocation affects later admissions, not already authorized
+running tasks; cancel those tasks separately when required.
+
 ## Credentials and persistent sessions
 
 Provider authentication is normal, persistent user authentication:
 
 - Grok and Cursor Local use their CLI-managed login/session state.
 - Cursor Cloud uses `CURSOR_API_KEY` or its owner-only key file.
-- DSH Muse uses `MODEL_API_KEY` or the owner-only model-key file created by
-  `bin/set-model-api-key`. The optional Ox Alpha route uses the separate
-  `OPENROUTER_API_KEY` or owner-only OpenRouter key file; selecting one route
-  never substitutes the other route's credential.
+- DSH Muse and the optional Ox Alpha route use `OPENROUTER_API_KEY` or the
+  owner-only OpenRouter key file created by `bin/set-model-api-key`; their
+  ACP configuration and model selection remain separate.
 
 Credentials are not MCP arguments, prompts, task records, or committed files.
 The supervisor may inherit the user's normal provider environment because

@@ -64,7 +64,7 @@ try {
   });
   descendantPid = Number(await waitFor(
     () => readFile(pidFile, 'utf8'),
-    (value) => Number.isInteger(Number(value.trim())),
+    (value) => Number.isSafeInteger(Number(value.trim())) && Number(value.trim()) > 1,
   ));
   const observed = await observeExactProcessIdentity(descendantPid);
   descendantIdentity = freezeExactProcessIdentity(observed);

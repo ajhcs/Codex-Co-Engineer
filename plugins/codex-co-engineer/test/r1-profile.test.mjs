@@ -397,7 +397,7 @@ test('provider, model, and role fields validate against one bounded run grammar'
     const providerModels = new Map([
       // Opaque grammar-valid identifiers load like any other model: model IDs
       // are not paths, refs, commands, or credentials.
-      ['dsh', ['muse-spark-1.2-contributor', 'stealth/ox-alpha', 'a..b', 'sk-abcdefghijklmnop']],
+      ['dsh', ['meta/muse-spark-1.3-contributor', 'stealth/ox-alpha', 'a..b', 'sk-abcdefghijklmnop']],
       ['grok', ['grok-4', 'grok-code-fast-1', 'refs/heads/model']],
       ['cursor-local', ['composer-1', 'cursor_smoke_model', 'cmd:model']],
       ['cursor-cloud', ['claude-sonnet-4-5', 'origin/model']],

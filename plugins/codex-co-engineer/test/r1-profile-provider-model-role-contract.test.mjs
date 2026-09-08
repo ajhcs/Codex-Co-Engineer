@@ -118,7 +118,7 @@ test('profile vocabulary mirrors the shared run grammar without importing it', (
 
 test('PROFILE_DSH_MODELS stays deprecated informational data that never authorizes a model', () => {
   assert.ok(Object.isFrozen(PROFILE_DSH_MODELS));
-  assert.deepEqual([...PROFILE_DSH_MODELS], ['muse-spark-1.2-contributor', 'stealth/ox-alpha']);
+  assert.deepEqual([...PROFILE_DSH_MODELS], ['meta/muse-spark-1.3-contributor', 'stealth/ox-alpha']);
   const declaration = profileSource.indexOf('export const PROFILE_DSH_MODELS');
   assert.ok(declaration > 0, 'deprecated export must survive');
   const docblock = profileSource.lastIndexOf('/**', declaration);

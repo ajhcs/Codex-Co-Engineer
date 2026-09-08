@@ -12,6 +12,7 @@ import {
   ATTENTION_BATCH_DISPOSITIONS,
   ATTENTION_BATCH_FILE_NAME,
   ATTENTION_BATCH_ITEM_KEYS,
+  ATTENTION_BATCH_OPTION_KEYS,
   ATTENTION_BATCH_PROVIDERS,
   ATTENTION_BATCH_RECORD_KEYS,
   ATTENTION_BATCH_REPLY_CAPABILITIES,
@@ -21,10 +22,17 @@ import {
   ATTENTION_BATCH_TASK_CURSOR_KEYS,
   ATTENTION_BATCH_UNRESOLVED_CODES,
   ATTENTION_BATCH_VERSION,
+  attentionQuestionDigestV1,
   describeAttentionBatchV1,
   openAttentionRoot,
 } from '../mcp/v3/attention-batch.mjs';
 import { canonicalJsonStringify } from '../mcp/v3/identity.mjs';
+import {
+  consumeReply,
+  recordNeedsAttention,
+  replyDecision,
+  submitReply,
+} from '../mcp/v3/mailbox.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import {
   RUN_JOURNAL_EVENT_KINDS,
@@ -32,6 +40,7 @@ import {
 } from '../mcp/v3/run-reducer.mjs';
 import { createRunJournal } from '../mcp/v3/run-journal.mjs';
 import { openRunStore } from '../mcp/v3/run-store.mjs';
+import { createTask } from '../mcp/v3/task-store.mjs';
 import {
   makePrivateRoot as makeStoreRoot,
   makeSubmission,
@@ -102,6 +111,9 @@ test('AttentionBatchV1 is the frozen v1 contract with exact record keys', () => 
     'assignment_id', 'task_id', 'provider', 'required', 'session_id',
     'question_id', 'event_cursor', 'question_digest', 'prompt', 'options',
     'reply_capability', 'disposition', 'deadline_at',
+  ]);
+  assert.deepEqual([...ATTENTION_BATCH_OPTION_KEYS], [
+    'optionId', 'kind', 'name', 'label', 'description',
   ]);
   assert.deepEqual([...ATTENTION_BATCH_PROVIDERS], [
     'grok', 'cursor-local', 'cursor-cloud', 'dsh',
@@ -246,6 +258,68 @@ test('one reply round is durable before delivery and resolves exact same-session
     assert.equal(calls[0].task_id, grok.task_id);
     assert.equal(calls[0].response, 'continue');
   });
+});
+
+test('structured option id survives restart and reaches the real mailbox reply decision', async () => {
+  const attentionRoot = await makePrivateRoot('r1-p34-typed-options-');
+  const mailboxRoot = await makeStoreRoot('r1-p34-typed-options-mailbox-');
+  try {
+    const structuredOptions = [{
+      optionId: 'allow-once-id',
+      kind: 'allow_once',
+      name: 'Allow once',
+      description: 'Approve this request once.',
+    }];
+    const grok = grokItem({ options: structuredOptions });
+    await createTask({
+      root: mailboxRoot,
+      prompt: 'ask a typed question',
+      record: {
+        id: grok.task_id,
+        status: 'running',
+        provider: 'grok',
+        transport: 'acp',
+        acp_session_id: grok.session_id,
+      },
+    });
+    const recorded = await recordNeedsAttention(mailboxRoot, grok.task_id, {
+      session_id: grok.session_id,
+      question_id: grok.question_id,
+      prompt: grok.prompt,
+      options: structuredOptions,
+    });
+    grok.options = recorded.attention.options;
+    grok.question_digest = attentionQuestionDigestV1(grok);
+    const { items, source } = itemsAndSource([grok]);
+    const firstHandle = await openAttentionRoot(attentionRoot);
+    const latched = await firstHandle.latch({
+      run_id: RUN_ID, source, items, expected_revision: 0,
+    });
+
+    const restartedHandle = await openAttentionRoot(attentionRoot);
+    const reopened = await restartedHandle.get(RUN_ID);
+    assert.deepEqual(reopened.record.items[0].options, structuredOptions);
+    const replied = await restartedHandle.reply({
+      run_id: RUN_ID,
+      batch_id: latched.record.batch_id,
+      expected_revision: reopened.record.revision,
+      reply: makeReply(latched.record.batch_id, [grok], 'allow-once-id'),
+      deliver: async (identity) => {
+        await submitReply(mailboxRoot, identity.task_id, identity);
+        return { outcome: 'delivered' };
+      },
+    });
+    assert.equal(replied.record.status, 'resolved');
+    const delivered = await consumeReply(mailboxRoot, grok.task_id, grok.question_id);
+    assert.equal(delivered.response, 'allow-once-id');
+    assert.deepEqual(replyDecision(delivered, reopened.record.items[0].options), {
+      outcome: 'allow_once',
+      optionId: 'allow-once-id',
+    });
+  } finally {
+    await rm(attentionRoot, { recursive: true, force: true });
+    await rm(mailboxRoot, { recursive: true, force: true });
+  }
 });
 
 test('restart retries only the exact latched identities after a durable reply', async () => {

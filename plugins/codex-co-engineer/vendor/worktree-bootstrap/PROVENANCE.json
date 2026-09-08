@@ -1,0 +1,11 @@
+{
+  "name": "worktree-bootstrap",
+  "version": "1.1.0",
+  "artifact": "worktree-bootstrap",
+  "artifact_sha256": "4138a49e42148db9e5c63dfd5386fdac235f19e445453e702f342b1a7002b813",
+  "runtime": "Python 3.11 or newer (standard library only)",
+  "license": "MIT",
+  "license_file": "LICENSE",
+  "source": "Maintainer-authored Worktree Bootstrap skill, bundled with the copyright holder's permission.",
+  "note": "The executable is preserved byte-for-byte from the qualified 1.1.0 source."
+}

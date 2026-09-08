@@ -60,9 +60,8 @@ their branch/handoff for Codex to inspect before any push or PR creation.
 ## Credentials
 
 Grok and Cursor Local use their normal persistent CLI login/session state.
-Cursor Cloud uses its normal API key. DSH Muse uses its normal owner-only
-model-key file, while DSH Ox Alpha uses a separate owner-only OpenRouter key
-file. Credentials are never accepted as MCP arguments and are not
+Cursor Cloud uses its normal API key. DSH Muse and DSH Ox Alpha use the
+owner-only OpenRouter key file. Credentials are never accepted as MCP arguments and are not
 written to task records. Provider workers inherit the trusted user's normal
 environment; use a dedicated account or narrower environment if that trust
 model is not appropriate.

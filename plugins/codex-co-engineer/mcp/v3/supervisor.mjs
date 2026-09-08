@@ -24,7 +24,7 @@ import { COMPACT_VIEW, projectCompactTask, resolveTaskView } from './compact-tas
 import { deadlineReached, nextDeadlineExtension, resolveTaskDeadline } from './deadline.mjs';
 import { compactSummary, compactTaskCard, diagnosticEnvelope, projectCompactStatus, readTaskDiagnostics } from './diagnostics.mjs';
 import { completedWithoutLiveQuestionIdentity } from './grok-question-bridge.mjs';
-import { submitReply } from './mailbox.mjs';
+import { readAttention, submitReply } from './mailbox.mjs';
 import {
   appendTaskEvent,
   clearTaskLaunchReservation,
@@ -43,6 +43,7 @@ import {
   stateRoot,
   taskPaths,
   updateTask,
+  waitForAnyTaskProgress,
   waitForTaskProgress,
   writeRuntimeRecord,
 } from './task-store.mjs';
@@ -53,6 +54,7 @@ import {
   preflightCursorCloudOrigin,
   reconcileCursorCloudTask,
 } from './cursor-cloud-worker.mjs';
+import { reconnectAcpTask } from './acp-worker.mjs';
 import {
   inspectExactProcessBoundary,
   launchProcessBoundary,
@@ -69,20 +71,30 @@ import {
   deliverSupervisorSameSessionReplyV1,
   cancelSupervisorSameSessionReplyV1,
 } from './run-tool-adapter.mjs';
+import { createRunAdmissionRuntime } from './run-admission.mjs';
+import { createRunAdmissionStore } from './run-admission-store.mjs';
+import {
+  compileRunRequestV1,
+  RUN_REQUEST_DEFAULT_MODELS,
+} from './run-request-compiler.mjs';
+import { loadReadinessSnapshot, saveReadinessSnapshot } from './readiness-snapshot.mjs';
+import { buildGitIdentityV1, buildWorkspaceIdentityV1 } from './protected-identity.mjs';
+import { assertRuntimeEntrypoints } from './runtime-entrypoints.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from './worktree-bootstrap-runtime.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
 const CLOUD_WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cursor-cloud-worker.mjs');
 const ACTIVE = new Set(ACTIVE_STATUSES);
 const PROVIDERS = new Set(['grok', 'cursor-local', 'cursor-cloud', 'dsh']);
-const DEFAULT_DSH_MODEL = 'muse-spark-1.2-contributor';
+const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
 const DSH_MODELS = Object.freeze({
   [DEFAULT_DSH_MODEL]: Object.freeze({
     configEnv: 'CODEX_CO_ENGINEER_DSH_ACP_CONFIG',
     configFile: 'dsh-acp.yml',
-    credentialEnv: 'MODEL_API_KEY',
-    credentialFileEnv: 'CODEX_CO_ENGINEER_MODEL_API_KEY_FILE',
-    credentialFile: 'model-api-key',
+    credentialEnv: 'OPENROUTER_API_KEY',
+    credentialFileEnv: 'CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE',
+    credentialFile: 'openrouter-api-key',
   }),
   'stealth/ox-alpha': Object.freeze({
     configEnv: 'CODEX_CO_ENGINEER_DSH_OX_ACP_CONFIG',
@@ -94,6 +106,10 @@ const DSH_MODELS = Object.freeze({
 });
 const WORKSPACE_MODES = new Set(['managed', 'direct']);
 const WORKTREE_CREATE_MAX_BUFFER = 16 * 1024 * 1024;
+const SIMPLE_DISPATCH_EVIDENCE_TIMEOUT_MS = 5_000;
+const SIMPLE_DISPATCH_EVIDENCE_POLL_MS = 25;
+const PROVIDER_READINESS_TTL_MS = 30_000;
+const PROVIDER_READINESS_PROBE_TIMEOUT_MS = 2_000;
 const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   credential_permissions: 'Provider credential configuration is invalid.',
   dsh_acp_not_configured: 'DSH ACP configuration is invalid.',
@@ -111,6 +127,7 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   workspace_root_mismatch: 'The requested workspace path is not its Git worktree root.',
   workspace_dirty: 'The source worktree has uncommitted changes; clean it before managed delegation.',
   worktree_create_failed: 'The managed worktree could not be prepared.',
+  worktree_bootstrap_exact_sha_unsupported: 'The installed worktree-bootstrap does not support exact local-SHA creation; upgrade worktree-bootstrap before retrying.',
   worker_boundary_uncertain: 'The worker boundary could not be stopped; reconcile or cancel this task.',
   worker_boundary_pending: 'The worker process boundary is not yet final.',
   worker_boundary_missing: 'The worker process boundary receipt is missing.',
@@ -134,6 +151,8 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   cgroup_not_empty: 'Owned systemd process boundary still has descendants after exact unit stop.',
   cancelled: 'The task was cancelled before worker startup.',
   provider_startup_failed: 'Provider startup could not be prepared.',
+  model_unattested: 'The configured provider route cannot select the requested model.',
+  prompt_envelope_missing: 'The compiled child prompt envelope is missing.',
   task_launch_busy: 'Another worker already owns this task launch.',
   local_boundary_unavailable: 'The local systemd/cgroup process boundary is unavailable.',
   systemd_user_manager_unavailable: 'The local systemd user manager is unavailable.',
@@ -162,6 +181,7 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   cursor_cloud_start_ref_unavailable: 'Cursor Cloud requires an immutable starting commit.',
   cursor_cloud_start_ref_invalid: 'Cursor Cloud requires a full 40-character commit starting reference.',
   invalid_provider_repo: 'provider_repo_url is supported only for Cursor Cloud tasks.',
+  runtime_install_incomplete: 'The installed Codex-Co-Engineer runtime is incomplete. Reinstall the plugin, then restart Codex.',
 });
 
 export class SupervisorError extends Error {
@@ -200,6 +220,34 @@ function resolveDshModel(value) {
   if (!Object.hasOwn(DSH_MODELS, model)) {
     fail('invalid_dsh_model', `dsh_model must be one of ${Object.keys(DSH_MODELS).join(', ')}.`);
   }
+  return model;
+}
+
+// The live Grok, Cursor Local, and Cursor Cloud transports currently expose
+// only their configured provider defaults. Keep semantic model overrides from
+// being presented as effective selections until a provider-specific control
+// can select and attest them. DSH is routed through its existing config
+// selection below.
+function assertProviderModelDispatchable(provider, model) {
+  if (provider === 'dsh') {
+    resolveDshModel(model);
+    return;
+  }
+  if (model !== RUN_REQUEST_DEFAULT_MODELS[provider]) {
+    fail('model_unattested', 'The configured provider route cannot select the requested model.');
+  }
+}
+
+function resolveTaskModel(provider, model, dshModel) {
+  if (model === undefined) return undefined;
+  if (provider === 'dsh') {
+    const resolved = resolveDshModel(model);
+    if (dshModel !== undefined && dshModel !== resolved) {
+      fail('invalid_dsh_model', 'The DSH model selections do not agree.');
+    }
+    return resolved;
+  }
+  assertProviderModelDispatchable(provider, model);
   return model;
 }
 
@@ -300,13 +348,20 @@ function missingWorkspaceError(error) {
   return /(?:no such file|cannot change to|does not exist)/iu.test(`${error?.message ?? ''} ${error?.stderr ?? ''}`);
 }
 
-async function validateManagedSource({ repo, execute = execFile }) {
+async function validateManagedSource({ repo, baseSha, execute = execFile }) {
   normalizedAbsolute(repo, 'repo');
   let branchOutput;
   let statusOutput;
+  let headOutput;
   try {
-    ({ stdout: branchOutput } = await execute('git', ['-C', repo, 'branch', '--show-current'], { encoding: 'utf8' }));
-    ({ stdout: statusOutput } = await execute('git', ['-C', repo, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' }));
+    const checks = await Promise.all([
+      execute('git', ['-C', repo, 'branch', '--show-current'], { encoding: 'utf8' }),
+      execute('git', ['-C', repo, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' }),
+      ...(baseSha ? [execute('git', ['-C', repo, 'rev-parse', '--verify', `${baseSha}^{commit}`], { encoding: 'utf8' })] : []),
+    ]);
+    ({ stdout: branchOutput } = checks[0]);
+    ({ stdout: statusOutput } = checks[1]);
+    if (baseSha) ({ stdout: headOutput } = checks[2]);
   } catch (error) {
     const code = missingWorkspaceError(error) ? 'workspace_missing' : 'workspace_invalid';
     throw new SupervisorError(code, code === 'workspace_missing'
@@ -314,16 +369,23 @@ async function validateManagedSource({ repo, execute = execFile }) {
       : 'The source workspace is not a valid Git worktree.', { cause: error });
   }
   const branch = String(branchOutput ?? '').trim();
-  if (!branch) fail('workspace_branch_missing', 'The source workspace must be attached to a branch.');
+  if (!branch && !baseSha) fail('workspace_branch_missing', 'The source workspace must be attached to a branch.');
   if (managedSourceDirty(statusOutput)) {
     fail('workspace_dirty', 'The source worktree must be clean before managed delegation.');
   }
-  return { branch };
+  if (baseSha) {
+    if (!/^[0-9a-f]{40}$/iu.test(baseSha)) fail('workspace_start_ref_invalid', 'The exact local base must be a full commit SHA.');
+    if (String(headOutput ?? '').trim().toLowerCase() !== baseSha.toLowerCase()) {
+      fail('workspace_start_ref_invalid', 'The exact local base could not be resolved to the requested commit.');
+    }
+  }
+  return { branch, base_sha: baseSha ?? null };
 }
 
 async function validateWorkspaceContract(workspace, taskId, {
   execute = execFile,
   checkPath = stat,
+  expectedStartSha,
 } = {}) {
   if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) {
     fail('workspace_missing', 'Managed delegation did not return a workspace.');
@@ -347,6 +409,9 @@ async function validateWorkspaceContract(workspace, taskId, {
   }
   if (!/^[0-9a-f]{40}$/iu.test(workspace.start_sha)) {
     fail('workspace_start_ref_invalid', 'Managed delegation returned an invalid starting commit.');
+  }
+  if (expectedStartSha !== undefined && workspace.start_sha.toLowerCase() !== String(expectedStartSha).toLowerCase()) {
+    fail('workspace_start_ref_invalid', 'Managed delegation returned a workspace at the wrong exact starting commit.');
   }
   let metadata;
   try {
@@ -396,17 +461,35 @@ async function validateWorkspaceContract(workspace, taskId, {
   };
 }
 
-export async function createWriterWorkspace({ taskId, repo, execute = execFile, checkPath = stat }) {
+export async function createWriterWorkspace({ taskId, repo, baseSha, execute = execFile, checkPath = stat }) {
   requireTaskId(taskId);
-  const source = await validateManagedSource({ repo, execute });
+  const source = await validateManagedSource({ repo, baseSha, execute });
   try {
-    const base = source.branch;
+    const exactSha = baseSha ?? null;
+    const base = exactSha ?? source.branch;
     if (!base) fail('workspace_branch_missing', 'Writer source must be attached to a branch.');
-    const { stdout } = await execute('worktree-bootstrap', ['create', taskId, '--repo', repo, '--base', base], {
+    const argv = ['create', taskId, '--repo', repo, '--base', base];
+    // Exact-SHA creation is deliberately delegated to the official
+    // worktree-bootstrap capability. There is no raw `git worktree` fallback:
+    // the bootstrap owns locks, branch identity, and handoff semantics.
+    if (exactSha) argv.push('--local-only');
+    let result;
+    try {
+      result = await execute(BUNDLED_WORKTREE_BOOTSTRAP, argv, {
       encoding: 'utf8',
       maxBuffer: WORKTREE_CREATE_MAX_BUFFER,
+      });
+    } catch (error) {
+      if (exactSha && /(?:unknown option|unrecognized option|invalid option|local-only)/iu.test(`${error?.message ?? ''} ${error?.stderr ?? ''}`)) {
+        throw new SupervisorError('worktree_bootstrap_exact_sha_unsupported', 'The installed worktree-bootstrap does not support exact local-SHA creation.', { cause: error });
+      }
+      throw error;
+    }
+    return await validateWorkspaceContract(parseWorktreeResult(result.stdout, taskId), taskId, {
+      execute,
+      checkPath,
+      ...(exactSha ? { expectedStartSha: exactSha } : {}),
     });
-    return await validateWorkspaceContract(parseWorktreeResult(stdout, taskId), taskId, { execute, checkPath });
   } catch (error) {
     if (error instanceof SupervisorError) throw error;
     throw new SupervisorError('worktree_create_failed', error?.stderr?.trim() || error?.message || 'worktree-bootstrap failed.', { cause: error });
@@ -475,7 +558,7 @@ export async function cleanupManagedWorkspace({ workspace, taskId, execute = exe
   const reference = workspaceReference(workspace, taskId);
   if (!reference) return { state: 'unavailable', cleaned: false };
   try {
-    const { stdout } = await execute('worktree-bootstrap', [
+    const { stdout } = await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
     ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     const lock = parseJsonSuffix(stdout);
@@ -494,7 +577,7 @@ export async function cleanupManagedWorkspace({ workspace, taskId, execute = exe
     if (health.state !== 'abandoned' || typeof lock.lock_id !== 'string' || lock.lock_id.length === 0) {
       return { state: health.state ?? lock.state ?? 'unknown', cleaned: false };
     }
-    await execute('worktree-bootstrap', [
+    await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'clean', reference.task,
       '--repo', reference.worktree_path,
       '--policy', 'dead-local',
@@ -597,7 +680,7 @@ export async function launchWorker({
   const log = await open(paths.log, 'a', 0o600);
   const worker = provider === 'cursor-cloud' ? CLOUD_WORKER : WORKER;
   const workerArgv = [process.execPath, '--no-warnings', worker, '--request', paths.request];
-  const command = writer ? 'worktree-bootstrap' : workerArgv.shift();
+  const command = writer ? BUNDLED_WORKTREE_BOOTSTRAP : workerArgv.shift();
   const args = writer
     ? ['launch', taskId, '--repo', cwd, '--', ...workerArgv]
     : workerArgv;
@@ -642,7 +725,7 @@ export async function launchWorker({
       pid: child.pid,
       process_group: boundary ? null : child.pid,
       process_start_ticks: processStartTicks(child.pid),
-      command: writer ? 'worktree-bootstrap' : process.execPath,
+      command: writer ? BUNDLED_WORKTREE_BOOTSTRAP : process.execPath,
       ...(boundary ? { process_boundary: boundary.receipt } : {}),
     });
     await appendTaskEvent(root, taskId, { type: 'worker', state: 'spawned', pid: child.pid });
@@ -658,7 +741,7 @@ export async function launchWorker({
           pid: child.pid,
           process_group: null,
           process_start_ticks: processStartTicks(child.pid),
-          command: writer ? 'worktree-bootstrap' : process.execPath,
+          command: writer ? BUNDLED_WORKTREE_BOOTSTRAP : process.execPath,
           process_boundary: boundary.receipt,
           updated_at: new Date().toISOString(),
         };
@@ -693,6 +776,7 @@ export async function submitTask(input, dependencies = {}) {
     fail('invalid_dsh_model', 'dsh_model is supported only for DSH tasks.');
   }
   const dshModel = input.provider === 'dsh' ? resolveDshModel(input.dsh_model) : undefined;
+  const taskModel = resolveTaskModel(input.provider, input.model, dshModel);
   if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) fail('invalid_prompt', 'prompt must be non-empty text.');
   const role = input.role ?? 'implement';
   if (!['review', 'implement'].includes(role)) fail('invalid_role', 'role must be review or implement.');
@@ -724,6 +808,14 @@ export async function submitTask(input, dependencies = {}) {
     if (error instanceof SupervisorError) throw error;
     if (error?.code !== 'ENOENT') throw error;
   }
+  try {
+    await (dependencies.preflightRuntime ?? assertRuntimeEntrypoints)(input.provider);
+  } catch {
+    throw publicStartupError(
+      new SupervisorError('runtime_install_incomplete', 'The installed runtime is incomplete.'),
+      'runtime_install_incomplete',
+    );
+  }
   if (input.provider !== 'cursor-cloud') {
     requireLocalBoundary(await localBoundaryReadiness(dependencies.probeBoundary));
   }
@@ -739,13 +831,33 @@ export async function submitTask(input, dependencies = {}) {
   let cloudPreflight = null;
   let taskCreated = false;
   try {
-    workspace = managed
-      ? await (dependencies.createWorkspace ?? createWriterWorkspace)({
-        taskId: id,
-        repo: input.repo,
-        ...(dependencies.createWorkspace ? {} : { execute: dependencies.execute, checkPath: dependencies.checkPath }),
-      })
-      : await readerWorkspace(input.repo, dependencies.execute);
+    const preparedWorkspace = dependencies.preparedWorkspace;
+    if (preparedWorkspace !== undefined) {
+      workspace = preparedWorkspace;
+      if (managed) {
+        workspace = await validateWorkspaceContract(workspace, id, {
+          execute: dependencies.execute,
+          checkPath: dependencies.checkPath,
+          expectedStartSha: dependencies.baseSha,
+        });
+      } else {
+        const verified = await readerWorkspace(input.repo, dependencies.execute);
+        if (workspace?.worktree_path !== verified.worktree_path
+          || workspace?.start_sha?.toLowerCase() !== verified.start_sha?.toLowerCase()) {
+          fail('workspace_invalid', 'The prepared provider workspace changed before launch.');
+        }
+        workspace = verified;
+      }
+    } else {
+      workspace = managed
+        ? await (dependencies.createWorkspace ?? createWriterWorkspace)({
+          taskId: id,
+          repo: input.repo,
+          ...(dependencies.baseSha !== undefined ? { baseSha: dependencies.baseSha } : {}),
+          ...(dependencies.createWorkspace ? {} : { execute: dependencies.execute, checkPath: dependencies.checkPath }),
+        })
+        : await readerWorkspace(input.repo, dependencies.execute);
+    }
     // The built-in bootstrap already returns a verified contract. Re-verify
     // only injected workspace factories so normal dispatch does not repeat a
     // stat plus three Git subprocesses on every managed task.
@@ -779,6 +891,15 @@ export async function submitTask(input, dependencies = {}) {
         status: 'accepted',
         provider: input.provider,
         ...(dshModel ? { dsh_model: dshModel } : {}),
+        ...(taskModel ? { model: taskModel } : {}),
+        ...(typeof input.run_id === 'string' ? { run_id: input.run_id } : {}),
+        ...(typeof input.assignment_id === 'string' ? { assignment_id: input.assignment_id } : {}),
+        ...(typeof input.access === 'string' ? { access: input.access } : {}),
+        ...(Array.isArray(input.write_scope) ? { write_scope: [...input.write_scope] } : {}),
+        ...(Array.isArray(input.capabilities) ? { capabilities: [...input.capabilities] } : {}),
+        ...(typeof input.child_envelope_digest === 'string'
+          ? { child_envelope_digest: input.child_envelope_digest }
+          : {}),
         role,
         source_repo: input.repo,
         cwd: workspace.worktree_path,
@@ -1142,7 +1263,7 @@ async function inspectManagedLockState(task, runtime, dependencies = {}) {
   if (!reference) return { lock: 'unknown', code: 'worktree_lock_inspect_failed', cleaned: false };
   const execute = dependencies.execute ?? execFile;
   try {
-    const { stdout } = await execute('worktree-bootstrap', [
+    const { stdout } = await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
     ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     const lock = parseJsonSuffix(stdout);
@@ -1166,7 +1287,7 @@ async function cleanManagedLockAfterBoundary(task, runtime, dependencies = {}) {
   const reference = workspaceReference(task, task.worktree_task ?? task.id);
   const execute = dependencies.execute ?? execFile;
   try {
-    await execute('worktree-bootstrap', [
+    await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'clean', reference.task,
       '--repo', reference.worktree_path,
       '--policy', 'dead-local',
@@ -1231,9 +1352,18 @@ export async function settleLocalTaskLifecycle(root, task, runtime, dependencies
   }
 
   const sleep = dependencies.sleep ?? wait;
-  const drainMs = Number.isFinite(dependencies.drainGraceMs)
-    ? dependencies.drainGraceMs
-    : PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.natural_boundary_and_lock_drain;
+  // Grant the natural worker/lock drain once, on the first terminal
+  // reconciliation. Only supervisor boundary/lock evidence proves that a
+  // prior reconciliation already waited; worker ACP/handoff cleanup does not. Repeating the grace on every
+  // readiness/status call made retained unknown receipts add two seconds
+  // apiece before any fresh inspection.
+  const reconciled = Object.hasOwn(current.cleanup ?? {}, 'boundary')
+    && Object.hasOwn(current.cleanup ?? {}, 'lock');
+  const drainMs = reconciled
+    ? 0
+    : Number.isFinite(dependencies.drainGraceMs)
+      ? dependencies.drainGraceMs
+      : PROCESS_BOUNDARY_LIFECYCLE_BOUNDS_MS.natural_boundary_and_lock_drain;
   if (drainMs > 0) await sleep(drainMs);
 
   let inspection = await inspectRuntimeBoundary(boundRuntime, dependencies);
@@ -1745,20 +1875,554 @@ export function projectSupervisorTaskRecords(tasks) {
   return tasks.map((task) => projectSupervisorTerminalReceipt(task));
 }
 
-async function probeCommand(command, args, authenticatedPattern, env) {
+async function verifySimpleRunRepository({ git, execute = execFile } = {}) {
+  const repository = git?.repository_path;
+  if (typeof repository !== 'string' || !path.isAbsolute(repository) || path.resolve(repository) !== repository) {
+    return { verified: false, reason: 'repository_invalid' };
+  }
   try {
-    const { stdout, stderr } = await execFile(command, args, {
-      cwd: '/tmp', encoding: 'utf8', timeout: 5_000, maxBuffer: 256 * 1024,
+    const read = (args) => execute('git', ['-C', repository, ...args], { encoding: 'utf8' });
+    const [root, head, tree, base, status] = await Promise.all([
+      read(['rev-parse', '--show-toplevel']),
+      read(['rev-parse', '--verify', 'HEAD^{commit}']),
+      read(['rev-parse', '--verify', 'HEAD^{tree}']),
+      read(['rev-parse', '--verify', `${git.base_sha}^{commit}`]),
+      read(['status', '--porcelain=v1', '--untracked-files=all']),
+    ]);
+    const rootValue = String(root?.stdout ?? '').trim();
+    const headValue = String(head?.stdout ?? '').trim().toLowerCase();
+    const treeValue = String(tree?.stdout ?? '').trim().toLowerCase();
+    const baseValue = String(base?.stdout ?? '').trim().toLowerCase();
+    const clean = String(status?.stdout ?? '').trim() === '';
+    const verified = rootValue === repository
+      && clean
+      && headValue === String(git.head_sha ?? '').toLowerCase()
+      && treeValue === String(git.tree_sha ?? '').toLowerCase()
+      && baseValue === String(git.base_sha ?? '').toLowerCase();
+    return {
+      verified,
+      ...(verified ? {} : { reason: clean ? 'repository_identity_changed' : 'repository_dirty' }),
+    };
+  } catch {
+    return { verified: false, reason: 'repository_invalid' };
+  }
+}
+
+function simpleChangedFiles(status) {
+  return String(status ?? '').split(/\r?\n/u)
+    .filter((line) => line.length > 2)
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean)
+    .slice(0, 64);
+}
+
+function simpleSilenceTimeout(role) {
+  return role === 'implement' ? 600_000 : 300_000;
+}
+
+async function inspectSimpleWorkspace({ root, task_id: taskId, workspace, execute = execFile } = {}) {
+  const cwd = workspace?.worktree_path;
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || path.resolve(cwd) !== cwd) return {};
+  const read = (args) => execute('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+  try {
+    const startSha = typeof workspace.start_sha === 'string' ? workspace.start_sha : null;
+    const [head, branch, status, commits] = await Promise.all([
+      read(['rev-parse', 'HEAD']),
+      read(['branch', '--show-current']),
+      read(['status', '--porcelain=v1', '--untracked-files=all']),
+      startSha ? read(['log', '--format=%H', `${startSha}..HEAD`]).catch(() => ({ stdout: '' })) : Promise.resolve({ stdout: '' }),
+    ]);
+    const currentHead = String(head?.stdout ?? '').trim();
+    const changed = simpleChangedFiles(status?.stdout);
+    const commitValues = String(commits?.stdout ?? '').split(/\r?\n/u).filter(Boolean).slice(0, 64);
+    const task = typeof taskId === 'string'
+      ? await readTask(root ?? stateRoot(), taskId).then((result) => result.task).catch(() => null)
+      : null;
+    return {
+      current_head: currentHead || null,
+      branch: String(branch?.stdout ?? '').trim() || (workspace.branch ?? null),
+      clean: changed.length === 0,
+      changed_files: changed,
+      commits: commitValues,
+      partial_diff: changed.length > 0 || (startSha !== null && currentHead.toLowerCase() !== startSha.toLowerCase()),
+      last_acknowledged_provider_event: task?.dispatch_evidence === 'authoritative'
+        ? 'prompt_dispatched'
+        : (typeof task?.last_event === 'string' ? task.last_event : null),
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function workspaceLockId(workspace, execute) {
+  if (typeof workspace?.task !== 'string' || typeof workspace?.worktree_path !== 'string') return null;
+  try {
+    const result = await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
+      'lock', 'inspect', workspace.task, '--repo', workspace.worktree_path,
+    ], { encoding: 'utf8', maxBuffer: 64 * 1024 });
+    const lock = parseJsonSuffix(result?.stdout);
+    if (lock?.state !== 'active' || typeof lock.lock_id !== 'string' || lock.lock_id.length < 8) return null;
+    return lock.lock_id;
+  } catch {
+    return null;
+  }
+}
+
+async function buildSimpleWorkspaceIdentity({ run_id: runId, assignment, git, workspace, execute }) {
+  try {
+    const cloud = assignment.provider === 'cursor-cloud';
+    const lockId = cloud ? null : await workspaceLockId(workspace, execute);
+    if (!cloud && lockId === null) return null;
+    return buildWorkspaceIdentityV1({
+      run_id: runId,
+      assignment_id: assignment.assignment_id,
+      git,
+      semantics: cloud ? 'remote_provider_managed' : 'local_managed_worktree',
+      starting_point: cloud ? 'pinned_pushed_sha' : 'run_base_sha',
+      worktree_path: cloud ? null : workspace?.worktree_path,
+      branch: cloud ? null : workspace?.branch,
+      lock_id: cloud ? null : lockId,
+      starting_ref: cloud ? (assignment.starting_ref ?? git.base_sha) : null,
+    });
+  } catch {
+    // Workspace identity is protected telemetry. The launch path has already
+    // re-verified the worktree contract; an unavailable lock observation must
+    // not fabricate an identity or replay a prompt.
+    return null;
+  }
+}
+
+async function waitForSimpleDispatchEvidence(root, taskId, {
+  timeoutMs = SIMPLE_DISPATCH_EVIDENCE_TIMEOUT_MS,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now = Date.now,
+} = {}) {
+  const deadline = now() + Math.max(0, timeoutMs);
+  let current = null;
+  while (true) {
+    current = (await readTask(root, taskId)).task;
+    const sessionId = current.acp_session_id ?? current.provider_run_id ?? current.provider_agent_id ?? null;
+    if (current.dispatch_evidence === 'authoritative') {
+      return {
+        dispatched: true,
+        prompt_dispatched: true,
+        confidence: 'authoritative',
+        session_ready: true,
+        session_id: typeof sessionId === 'string' ? sessionId : null,
+        cursor: '0',
+      };
+    }
+    if (['failed', 'timeout', 'cancelled', 'transport_lost'].includes(current.status)
+      && current.dispatch_intent !== true && current.prompt_dispatched !== true) {
+      return {
+        dispatched: false,
+        confidence: 'authoritative',
+        error: current.error ?? { code: 'provider_start_failed' },
+      };
+    }
+    if (['completed', 'succeeded', 'failed', 'timeout', 'cancelled', 'transport_lost'].includes(current.status)) {
+      return {
+        dispatched: false,
+        dispatch_uncertain: true,
+        terminal: true,
+        confidence: 'uncertain',
+        sent: current.dispatch_intent === true || current.prompt_dispatched === true,
+        session_ready: Boolean(sessionId),
+        session_id: typeof sessionId === 'string' ? sessionId : null,
+        ...(typeof current.error?.code === 'string' ? { error: { code: current.error.code } } : {}),
+      };
+    }
+    if (now() >= deadline) {
+      const active = ['running', 'starting', 'accepted', 'needs_attention'].includes(current.status);
+      return {
+        dispatched: false,
+        ...(active ? { dispatch_pending: true } : { terminal: true }),
+        dispatch_uncertain: true,
+        confidence: 'uncertain',
+        sent: current.dispatch_intent === true || current.prompt_dispatched === true,
+        session_ready: Boolean(sessionId),
+        session_id: typeof sessionId === 'string' ? sessionId : null,
+      };
+    }
+    await sleep(Math.min(SIMPLE_DISPATCH_EVIDENCE_POLL_MS, Math.max(1, deadline - now())));
+  }
+}
+
+function childEnvelopePrompt(assignment) {
+  const envelopeText = assignment?.child_envelope?.envelope_text;
+  if (typeof envelopeText !== 'string' || envelopeText.length === 0) {
+    fail('prompt_envelope_missing', 'The compiled child prompt envelope is missing.');
+  }
+  return envelopeText;
+}
+
+function stalledTaskAttention(task) {
+  const sessionId = task?.acp_session_id ?? task?.provider_run_id ?? task?.provider_agent_id ?? `local-${task?.id}`;
+  return {
+    session_id: String(sessionId).slice(0, 128),
+    question_id: `stalled-${task.id}`,
+    stage: 'stalled',
+    prompt: 'No meaningful provider event was observed before the configured silence threshold.',
+    required: true,
+  };
+}
+
+async function waitForSupervisorRunProgress(root, { task_ids, cursors, wait_ms, wait_until, signal } = {}) {
+  if (!Array.isArray(task_ids) || task_ids.length === 0) {
+    const delayMs = Number.isFinite(wait_ms) && wait_ms > 0 ? wait_ms : 0;
+    await new Promise((resolve) => {
+      let timer = null;
+      const finish = () => {
+        if (timer !== null) clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      if (signal?.aborted || delayMs === 0) {
+        finish();
+        return;
+      }
+      timer = setTimeout(finish, delayMs);
+      signal?.addEventListener('abort', finish, { once: true });
+    });
+    return { wait_reason: signal?.aborted ? 'disconnected' : 'timeout' };
+  }
+  try {
+    return await waitForAnyTaskProgress(root, {
+      task_ids,
+      cursors,
+      wait_ms,
+      wait_until: wait_until === 'terminal' ? 'terminal' : 'progress',
+      signal,
+    });
+  } catch (error) {
+    return { wait_reason: 'observation_uncertain', error: { code: error?.code ?? 'task_observation_unavailable' } };
+  }
+}
+
+async function inspectSupervisorLane(root, taskId) {
+  // The run bridge needs the authoritative task result and lifecycle overlay.
+  // Compact task projection intentionally omits legacy `completed` results.
+  const result = await inspectTask(root, { task_id: taskId, view: 'summary', wait_ms: 0 });
+  let task = result.task ?? result;
+  const waitReason = result.progress?.wait_reason;
+  if (waitReason === 'silence' && task.status !== 'needs_attention'
+    && !['completed', 'succeeded', 'failed', 'timeout', 'timed_out', 'cancelled',
+      'transport_lost', 'environment_blocked', 'cancelling'].includes(task.status)) {
+    const attention = stalledTaskAttention(task);
+    task = await updateTask(root, taskId, { status: 'needs_attention', attention });
+    await appendTaskEvent(root, taskId, {
+      type: 'stalled',
+      session_id: attention.session_id,
+      question_id: attention.question_id,
+      silence_threshold: task.silence_timeout_ms ?? null,
+    }).catch(() => {});
+  }
+  let attention = null;
+  if (task.status === 'needs_attention') {
+    attention = await readAttention(root, taskId).catch(() => null) ?? task.attention ?? null;
+  }
+  return { result, task, waitReason, attention };
+}
+
+function createSupervisorRunAdmissionRuntime(options = {}) {
+  const root = options.root ?? stateRoot();
+  const execute = options.execute ?? execFile;
+  const env = options.env ?? process.env;
+  const checkPath = options.checkPath ?? stat;
+  const admissionStore = options.admissionStore ?? createRunAdmissionStore(root);
+  const submitTaskFn = options.submitTask ?? submitTask;
+  const waitForDispatchEvidence = options.waitForDispatchEvidence
+    ?? ((stateRootValue, taskId) => waitForSimpleDispatchEvidence(stateRootValue, taskId, {
+      ...(options.dispatchEvidenceTimeoutMs !== undefined
+        ? { timeoutMs: options.dispatchEvidenceTimeoutMs } : {}),
+      ...(options.dispatchEvidenceSleep ? { sleep: options.dispatchEvidenceSleep } : {}),
+      ...(options.dispatchEvidenceNow ? { now: options.dispatchEvidenceNow } : {}),
+    }));
+  const simpleDeps = {
+    compile: options.compile ?? compileRunRequestV1,
+    ...(options.requestConsent ? { requestConsent: options.requestConsent } : {}),
+    ...(options.verifyConsent ? { verifyConsent: options.verifyConsent } : {}),
+    providerReady: options.providerReady ?? (async ({ assignment }) => {
+      assertProviderModelDispatchable(assignment.provider, assignment.model);
+      await (options.preflightRuntime ?? assertRuntimeEntrypoints)(assignment.provider);
+      try {
+        await workerEnvironment(assignment.provider, env, assignment.provider === 'dsh' ? assignment.model : undefined);
+        return { ready: true };
+      } catch (error) {
+        return { ready: false, reason: error?.code ?? 'provider_not_ready' };
+      }
+    }),
+    processBoundaryReady: options.processBoundaryReady ?? (() => localBoundaryReadiness(options.probeBoundary)),
+    verifyRepository: options.verifyRepository ?? ((request) => verifySimpleRunRepository({ ...request, execute })),
+    prepareWorkspace: options.prepareWorkspace ?? (async ({ assignment, git }) => {
+      try {
+        const repository = git.repository_path;
+        if (assignment.provider === 'cursor-cloud') {
+          return { prepared: true, workspace: await readerWorkspace(repository, execute) };
+        }
+        const baseSha = git.base_sha;
+        const workspace = await createWriterWorkspace({
+          taskId: assignment.task_id,
+          repo: repository,
+          ...(baseSha ? { baseSha } : {}),
+          execute,
+          checkPath,
+        });
+        return { prepared: true, workspace };
+      } catch (error) {
+        return { prepared: false, error };
+      }
+    }),
+    cleanupWorkspace: options.cleanupWorkspace ?? (({ workspace, assignment_id: assignmentId }) => cleanupManagedWorkspace({
+      workspace,
+      taskId: workspace?.task ?? assignmentId,
+      execute,
+    })),
+    // The current provider workers create/attach the persistent session as
+    // part of launch. The dispatch barrier still records this reservation,
+    // then replaces the placeholder with the worker's session identity once
+    // authoritative prompt evidence is durable.
+    createSession: options.createSession ?? (async () => ({ ready: true, session_id: null })),
+    dispatchPrompt: options.dispatchPrompt ?? (async ({ run_id: runId, assignment, workspace, git }) => {
+      const input = {
+        task_id: assignment.task_id,
+        run_id: runId,
+        assignment_id: assignment.assignment_id,
+        provider: assignment.provider,
+        model: assignment.model,
+        repo: git.repository_path,
+        prompt: childEnvelopePrompt(assignment),
+        role: assignment.role === 'verify' ? 'review' : assignment.role,
+        access: assignment.access,
+        write_scope: [...assignment.write_scope],
+        capabilities: [...assignment.capabilities],
+        child_envelope_digest: assignment.prompt_envelope_digest,
+        expected_duration_ms: assignment.expected_duration_ms,
+        silence_timeout_ms: simpleSilenceTimeout(assignment.role),
+        workspace_mode: assignment.provider === 'cursor-cloud' ? 'direct' : 'managed',
+      };
+      assertProviderModelDispatchable(assignment.provider, assignment.model);
+      if (assignment.provider === 'dsh') input.dsh_model = assignment.model;
+      if (assignment.provider === 'cursor-cloud' && assignment.starting_ref) input.starting_ref = assignment.starting_ref;
+      const submitted = await submitTaskFn(input, {
+        root,
+        env,
+        execute,
+        checkPath,
+        preparedWorkspace: workspace,
+        ...(assignment.provider !== 'cursor-cloud' ? { baseSha: git.base_sha } : {}),
+      });
+      const evidence = await waitForDispatchEvidence(root, submitted.task.id);
+      const workspaceIdentity = await buildSimpleWorkspaceIdentity({
+        run_id: runId,
+        assignment,
+        git: buildGitIdentityV1({
+          repository_path: git.repository_path,
+          base_sha: git.base_sha,
+        }),
+        workspace,
+        execute,
+      });
+      return {
+        ...evidence,
+        ...(workspaceIdentity ? { workspace_identity: workspaceIdentity } : {}),
+      };
+    }),
+    replyAttention: options.replyAttention ?? (async ({ task_id: taskId, attention, reply, capability_satisfied: capabilitySatisfied }) => {
+      const items = Array.isArray(attention?.items)
+        ? attention.items
+        : (attention ? [attention] : []);
+      const answers = Array.isArray(reply?.answers)
+        ? reply.answers
+        : (Array.isArray(reply?.reply?.answers)
+          ? reply.reply.answers
+          : (reply?.question_id ? [reply] : []));
+      let delivered = 0;
+      const deliveredQuestions = new Set();
+      for (const item of items) {
+        const targets = Array.isArray(item?.targets) && item.targets.length > 0
+          ? item.targets
+          : [item];
+        const canonicalAnswer = answers.find((candidate) => (
+          (candidate?.task_id === item?.task_id && candidate?.question_id === item?.question_id)
+          || (candidate?.assignment_id === item?.assignment_id && candidate?.question_id === item?.question_id)
+        ));
+        for (const target of targets) {
+          const answer = answers.find((candidate) => (
+            (candidate?.task_id === target?.task_id && candidate?.question_id === target?.question_id)
+            || (candidate?.assignment_id === target?.assignment_id && candidate?.question_id === target?.question_id)
+          )) ?? canonicalAnswer;
+          if (!answer || typeof target?.task_id !== 'string') continue;
+          const sessionId = answer.session_id ?? target.session_id ?? item.session_id;
+          const questionId = answer.question_id ?? target.question_id ?? item.question_id;
+          const response = answer.response
+            ?? (capabilitySatisfied === true ? {
+              outcome: 'allow_once',
+              capability: item.capability,
+              resource: item.resource,
+              action: item.action,
+            } : undefined);
+          if (typeof sessionId !== 'string' || typeof questionId !== 'string' || response === undefined) continue;
+          const key = `${target.task_id}\u0000${questionId}`;
+          if (deliveredQuestions.has(key)) continue;
+          deliveredQuestions.add(key);
+          try {
+            await submitReply(root, target.task_id, {
+              session_id: sessionId,
+              question_id: questionId,
+              response,
+            });
+            delivered += 1;
+          } catch (error) {
+            if (error?.code === 'reply_already_recorded') delivered += 1;
+          }
+        }
+      }
+      const expected = items.reduce((count, item) => count + (
+        Array.isArray(item?.targets) && item.targets.length > 0 ? item.targets.length : 1
+      ), 0);
+      return { delivered: expected > 0 && delivered === expected };
+    }),
+    waitForProgress: options.waitForProgress ?? ((request) => waitForSupervisorRunProgress(root, request)),
+    inspectLane: options.inspectLane ?? (async ({ task_id: taskId }) => {
+      const inspected = await inspectSupervisorLane(root, taskId);
+      const { result, task } = inspected;
+      const status = task?.status;
+      if (typeof status !== 'string') {
+        throw Object.assign(new Error('Supervisor task observation is malformed.'), { code: 'task_observation_invalid' });
+      }
+      const cursor = typeof result?.progress?.event_cursor === 'string'
+        ? result.progress.event_cursor : '0';
+      const observedTaskId = task.id ?? task.task_id;
+      if (observedTaskId !== undefined && observedTaskId !== taskId) {
+        throw Object.assign(new Error('Supervisor task observation identity did not match the requested task.'), {
+          code: 'task_observation_identity_mismatch',
+        });
+      }
+      const observed = {
+        task_id: observedTaskId ?? taskId,
+        cursor,
+        ...(task.dispatch_evidence === 'authoritative'
+          ? { dispatch_evidence: 'authoritative' } : {}),
+        ...(task.prompt_dispatched === true ? { prompt_dispatched: true } : {}),
+        ...(task.dispatch_uncertain === true ? { dispatch_uncertain: true } : {}),
+        ...((task.acp_session_id ?? task.provider_run_id ?? task.provider_agent_id) !== undefined
+          ? { session_id: task.acp_session_id ?? task.provider_run_id ?? task.provider_agent_id } : {}),
+        ...(typeof task.last_event === 'string' ? { last_event: task.last_event } : {}),
+        ...(task.result !== undefined && task.result !== null
+          ? { result: task.result } : {}),
+      };
+      if (status === 'completed' || status === 'succeeded') return { ...observed, status: 'completed' };
+      if (status === 'needs_attention') return { ...observed, status: 'needs_attention', attention: inspected.attention };
+      if (status === 'cancelled') return { ...observed, status: 'cancelled' };
+      if (status === 'timeout' || status === 'timed_out') return { ...observed, status: 'timeout' };
+      if (status === 'transport_lost') return { ...observed, status: 'transport_lost' };
+      if (status === 'environment_blocked') return { ...observed, status: 'environment_blocked' };
+      if (status === 'failed') return { ...observed, status: 'failed', error: { code: task.error?.code } };
+      if (status === 'running' || status === 'starting' || status === 'accepted' || status === 'cancelling') return { ...observed, status: 'running' };
+      throw Object.assign(new Error('Supervisor task observation has an unknown status.'), { code: 'task_observation_invalid' });
+    }),
+    reconnectLane: options.reconnectLane ?? (async ({ task_id: taskId }) => {
+      const { task } = await readTask(root, taskId);
+      if (task.provider === 'grok' || task.provider === 'cursor-local') {
+        return reconnectAcpTask({ root, taskId });
+      }
+      if (task.provider === 'cursor-cloud' && task.provider_agent_id) {
+        try {
+          const current = await reconcileCursorCloudTask({ root, taskId });
+          return {
+            reconnected: !['failed', 'timeout', 'cancelled', 'transport_lost'].includes(current?.status),
+            session_id: task.provider_agent_id,
+          };
+        } catch {
+          return { reconnected: false, reason: 'provider_run_reconnect_failed' };
+        }
+      }
+      return { reconnected: false, reason: 'provider_transport_no_resume' };
+    }),
+    cancelLane: options.cancelLane ?? (async ({ task_id: taskId }) => {
+      const task = await cancelTask(root, taskId);
+      return {
+        confirmed: task?.status === 'cancelled',
+        cancelled: task?.status === 'cancelled',
+        task_id: task?.id ?? taskId,
+        status: task?.status ?? null,
+      };
+    }),
+    inspectWorkspace: options.inspectWorkspace ?? ((request) => inspectSimpleWorkspace({ ...request, execute })),
+    buildHandoff: options.buildHandoff ?? (async ({ fallback }) => fallback),
+    verifyRun: options.verifyRun ?? (async ({ lanes }) => ({
+      verified: Array.isArray(lanes) && lanes.length > 0
+        && lanes.every((lane) => lane.phase === 'completed' || lane.phase === 'cancelled')
+        && lanes.filter((lane) => lane.required !== false).every((lane) => lane.phase === 'completed'),
+    })),
+    loadRecord: options.loadRecord ?? admissionStore.load,
+    persistRecord: options.persistRecord ?? admissionStore.save,
+  };
+  return createRunAdmissionRuntime(simpleDeps);
+}
+
+const AUTHENTICATION_FAILURE_PATTERN = /not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu;
+const GROK_EXPLICIT_LOGGED_IN_PATTERN = /(?:^|\r?\n)\s*you are logged in(?:\s+with [^\r\n]+)?\.?\s*(?=\r?\n|$)/iu;
+const GROK_EXPLICIT_LOGGED_OUT_PATTERN = /(?:^|\r?\n)\s*(?:you are\s+)?(?:not logged in|not signed in|not authenticated|log ?in required|login required|authentication required)\b/iu;
+
+export function classifyGrokReadinessOutput(stdout = '', stderr = '') {
+  const standardOutput = String(stdout);
+  const standardError = String(stderr);
+  const output = `${standardOutput}\n${standardError}`;
+  if (GROK_EXPLICIT_LOGGED_OUT_PATTERN.test(output)
+    || AUTHENTICATION_FAILURE_PATTERN.test(standardOutput)) {
+    return { ready: false, reason: 'needs_login' };
+  }
+  if (GROK_EXPLICIT_LOGGED_IN_PATTERN.test(standardOutput)) return { ready: true };
+  if (AUTHENTICATION_FAILURE_PATTERN.test(standardError)) {
+    return { ready: false, reason: 'needs_login' };
+  }
+  return { ready: true };
+}
+
+function classifyReadinessProbeFailure(error) {
+  return {
+    installed: error?.code !== 'ENOENT',
+    ready: false,
+    reason: error?.code === 'ENOENT' ? 'not_installed' : 'probe_failed',
+  };
+}
+
+async function probeCommand(command, args, authenticatedPattern, env, timeoutMs = PROVIDER_READINESS_PROBE_TIMEOUT_MS, outputClassifier = null, execute = execFile) {
+  const started = Date.now();
+  try {
+    const { stdout, stderr } = await execute(command, args, {
+      cwd: '/tmp', encoding: 'utf8', timeout: timeoutMs, maxBuffer: 256 * 1024,
       env,
     });
-    const output = `${stdout}${stderr}`;
-    if (/not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu.test(output)) {
-      return { installed: true, ready: false, reason: 'needs_login' };
+    if (outputClassifier) {
+      return {
+        installed: true,
+        ...outputClassifier(stdout, stderr),
+        probe_duration_ms: Date.now() - started,
+      };
     }
-    return { installed: true, ready: authenticatedPattern ? authenticatedPattern.test(output) : true };
+    const output = `${stdout}${stderr}`;
+    if (AUTHENTICATION_FAILURE_PATTERN.test(output)) {
+      return { installed: true, ready: false, reason: 'needs_login', probe_duration_ms: Date.now() - started };
+    }
+    return { installed: true, ready: authenticatedPattern ? authenticatedPattern.test(output) : true, probe_duration_ms: Date.now() - started };
   } catch (error) {
-    return { installed: error?.code !== 'ENOENT', ready: false, reason: error?.code === 'ENOENT' ? 'not_installed' : 'probe_failed' };
+    return { ...classifyReadinessProbeFailure(error), probe_duration_ms: Date.now() - started };
   }
+}
+
+export async function probeGrokReadiness(command, env, options = {}) {
+  return probeCommand(
+    command,
+    ['models'],
+    undefined,
+    env,
+    options.timeoutMs ?? PROVIDER_READINESS_PROBE_TIMEOUT_MS,
+    classifyGrokReadinessOutput,
+    options.execute ?? execFile,
+  );
 }
 
 async function providerReadiness(env = process.env) {
@@ -1771,7 +2435,7 @@ async function providerReadiness(env = process.env) {
   const acpxCommand = dshProbeEnv.CODEX_CO_ENGINEER_ACPX_COMMAND ?? 'acpx';
   const dshAcpCommand = dshProbeEnv.CODEX_CO_ENGINEER_DSH_ACP_COMMAND ?? 'dsh-acp-demo';
   const [grok, cursorLocal, dshCli, acpx, dshAcp, dshMuseCredential, dshOxCredential, cursorCloud] = await Promise.all([
-    probeCommand(grokCommand, ['models'], undefined, grokEnv),
+    probeGrokReadiness(grokCommand, grokEnv),
     probeCommand(cursorCommand, ['status'], /logged in|authenticated|access token/iu, cursorLocalEnv),
     probeCommand(dshCommand, ['--version'], undefined, dshProbeEnv),
     probeCommand(acpxCommand, ['--version'], undefined, dshProbeEnv),
@@ -1798,6 +2462,57 @@ async function providerReadiness(env = process.env) {
     },
     'cursor-cloud': { ...cursorCloud, transport: 'cursor-sdk' },
   };
+}
+
+let providerReadinessCache = null;
+let providerReadinessCacheExpiresAt = 0;
+let providerReadinessInFlight = null;
+let providerReadinessCacheRoot = null;
+
+function cloneReadiness(value) {
+  return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : value;
+}
+
+async function cachedProviderReadiness(env = process.env, { refresh = false, root = null } = {}) {
+  const now = Date.now();
+  if (providerReadinessCacheRoot !== root) {
+    providerReadinessCache = null;
+    providerReadinessCacheExpiresAt = 0;
+    providerReadinessInFlight = null;
+    providerReadinessCacheRoot = root;
+  }
+  if (!refresh && providerReadinessCache !== null && providerReadinessCacheExpiresAt > now) {
+    return cloneReadiness(providerReadinessCache);
+  }
+  if (!refresh && root) {
+    const snapshot = await loadReadinessSnapshot(root);
+    const observedAt = Date.parse(snapshot?.observed_at ?? '');
+    if (snapshot && Number.isFinite(observedAt) && observedAt + PROVIDER_READINESS_TTL_MS > now) {
+      providerReadinessCache = cloneReadiness(snapshot.readiness);
+      providerReadinessCacheExpiresAt = observedAt + PROVIDER_READINESS_TTL_MS;
+      return cloneReadiness(providerReadinessCache);
+    }
+  }
+  if (providerReadinessInFlight !== null) {
+    return cloneReadiness(await providerReadinessInFlight);
+  }
+  const started = Date.now();
+  const pending = providerReadiness(env);
+  providerReadinessInFlight = pending;
+  try {
+    const value = await pending;
+    providerReadinessCache = cloneReadiness(value);
+    providerReadinessCacheExpiresAt = Date.now() + PROVIDER_READINESS_TTL_MS;
+    if (root) {
+      await saveReadinessSnapshot(root, value, {
+        observed_at: new Date().toISOString(),
+        probe_duration_ms: Date.now() - started,
+      }).catch(() => {});
+    }
+    return cloneReadiness(value);
+  } finally {
+    if (providerReadinessInFlight === pending) providerReadinessInFlight = null;
+  }
 }
 
 export async function cancelTask(root, taskId, dependencies = {}) {
@@ -1971,12 +2686,18 @@ export async function inspectTask(root, args = {}, options = {}) {
 export async function supervisorStatus(root = stateRoot(), dependencies = {}, options = {}) {
   // Allow calling as supervisorStatus(root, opts) for backward compat in tests.
   const hasDepsShape = dependencies && typeof dependencies === 'object' && ('probeBoundary' in dependencies || 'readProviderReadiness' in dependencies);
-  const looksLikeOpts = dependencies && typeof dependencies === 'object' && ('detail' in dependencies || 'task_limit' in dependencies || 'include_tasks' in dependencies || 'taskLimit' in dependencies || 'includeTasks' in dependencies);
+  const looksLikeOpts = dependencies && typeof dependencies === 'object' && ('detail' in dependencies || 'task_limit' in dependencies || 'include_tasks' in dependencies || 'taskLimit' in dependencies || 'includeTasks' in dependencies || 'refresh' in dependencies);
   if (!hasDepsShape && looksLikeOpts) {
     options = dependencies;
     dependencies = {};
   }
-  const hasOptions = options && typeof options === 'object' && (options.detail !== undefined || options.task_limit !== undefined || options.taskLimit !== undefined || options.include_tasks !== undefined || options.includeTasks !== undefined);
+  const hasOptions = options && typeof options === 'object' && (options.detail !== undefined || options.task_limit !== undefined || options.taskLimit !== undefined || options.include_tasks !== undefined || options.includeTasks !== undefined || options.refresh !== undefined);
+  const readReadiness = dependencies.readProviderReadiness
+    ? () => dependencies.readProviderReadiness()
+    : () => cachedProviderReadiness(process.env, {
+      refresh: options.refresh === true,
+      root,
+    });
   // Legacy no-arg path: must preserve exact 3.2 shape and reconcile ALL tasks before slicing (active/task values are durable truth).
   if (!hasOptions) {
     const tasksAll = await listTasks(root);
@@ -1987,7 +2708,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
       tasksAll[index] = await reconcileInactiveTask(root, task, runtime, dependencies);
     }
     const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
-    const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
+    const readiness = await readReadiness();
     for (const provider of ['grok', 'cursor-local', 'dsh']) {
       if (!boundary.ready) readiness[provider] = {
         ...readiness[provider],
@@ -2039,7 +2760,7 @@ export async function supervisorStatus(root = stateRoot(), dependencies = {}, op
     allTasks[index] = await reconcileInactiveTask(root, task, runtime, dependencies);
   }
   const boundary = await localBoundaryReadiness(dependencies.probeBoundary);
-  const readiness = await (dependencies.readProviderReadiness ?? providerReadiness)();
+  const readiness = await readReadiness();
   for (const provider of ['grok', 'cursor-local', 'dsh']) {
     if (!boundary.ready) readiness[provider] = {
       ...readiness[provider],
@@ -2098,6 +2819,9 @@ function liveTaskFns(root, contextByRun) {
       const input = {
         task_id: plan.task_id,
         provider: plan.provider,
+        model: plan.model,
+        run_id: plan.run_id,
+        assignment_id: plan.assignment_id,
         repo: ctx.repository_path,
         prompt,
         role,
@@ -2113,7 +2837,7 @@ function liveTaskFns(root, contextByRun) {
       if (plan.provider === 'cursor-cloud' && typeof plan.starting_ref === 'string') {
         input.starting_ref = plan.starting_ref;
       }
-      const result = await submitTask(input, { root });
+      const result = await submitTask(input, { root, ...(ctx.base_sha ? { baseSha: ctx.base_sha } : {}) });
       return {
         task_id: result.task.id,
         status: result.task.status,
@@ -2189,8 +2913,44 @@ export async function createSupervisorRunToolAdapter(options = {}) {
       }),
     }
     : seams.attention;
+  const simpleRuntime = options.simpleRuntime
+    ?? createSupervisorRunAdmissionRuntime({
+      root,
+      env: options.env,
+      execute: options.execute,
+      checkPath: options.checkPath,
+      probeBoundary: options.probeBoundary,
+      requestConsent: options.requestConsent,
+      verifyConsent: options.verifyConsent,
+      providerReady: options.providerReady,
+      processBoundaryReady: options.processBoundaryReady,
+      preflightRuntime: options.preflightRuntime,
+      verifyRepository: options.verifyRepository,
+      prepareWorkspace: options.prepareWorkspace,
+      cleanupWorkspace: options.cleanupWorkspace,
+      createSession: options.createSession,
+      dispatchPrompt: options.dispatchPrompt,
+      replyAttention: options.replyAttention,
+      inspectLane: options.inspectLane,
+      reconnectLane: options.reconnectLane,
+      cancelLane: options.cancelLane,
+      inspectWorkspace: options.inspectWorkspace,
+      buildHandoff: options.buildHandoff,
+      verifyRun: options.verifyRun,
+      submitTask: options.submitTask,
+      waitForDispatchEvidence: options.waitForDispatchEvidence,
+      dispatchEvidenceTimeoutMs: options.dispatchEvidenceTimeoutMs,
+      dispatchEvidenceSleep: options.dispatchEvidenceSleep,
+      dispatchEvidenceNow: options.dispatchEvidenceNow,
+      compile: options.compile,
+      admissionStore: options.admissionStore,
+      loadRecord: options.loadRecord,
+      persistRecord: options.persistRecord,
+      waitForProgress: options.waitForProgress,
+    });
   return createRunToolAdapter({
     runtime: seams.runtime,
+    simpleRuntime,
     attention,
     projectLaneTask: projectSupervisorTerminalReceipt,
     classifyLaneTask: classifySupervisorTerminalReceipt,

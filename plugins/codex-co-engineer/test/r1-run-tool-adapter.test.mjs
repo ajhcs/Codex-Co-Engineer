@@ -25,6 +25,8 @@ import {
   PUBLIC_MCP_CATALOG,
   RUN_TOOL_ADAPTER_ALWAYS_FALSE_SIDE_EFFECTS,
   RUN_TOOL_ADAPTER_SCHEMA_ID,
+  SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX,
+  SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX,
   RUN_TOOL_OPERATIONS,
   classifyDeniedGitOperationV1,
   classifyRunToolCall,
@@ -32,6 +34,7 @@ import {
   createRunToolAdapter,
   denyRunToolRemoteMutationV1,
   describeRunToolAdapterV1,
+  experienceForRunToolResult,
 } from '../mcp/v3/run-tool-adapter.mjs';
 import {
   ASSIGNMENT_ID,
@@ -130,6 +133,75 @@ test('submit maps delegate.run onto one 1-8 lane runtime submission', async () =
   assert.equal(isRunOwnedCandidateRefV1(receipt.candidate.ref, RUN_ID), true);
   assert.equal(receipt.candidate.ref, expectedCandidateRefV1({ run_id: RUN_ID }));
   assert.match(receipt.candidate.ref, new RegExp(`^${CANDIDATE_REF_NAMESPACE}`));
+});
+
+test('simple run status and receipts remain within their structured byte caps', async () => {
+  const legacy = createAdapter();
+  const handoff = {
+    schema: 'codex-co-engineer.partial-handoff.v1',
+    worktree: '/tmp/worktree',
+    branch: 'codex/very-long-branch',
+    starting_sha: 'a'.repeat(40),
+    current_head: 'b'.repeat(40),
+    clean: false,
+    changed_files: Array.from({ length: 64 }, (_, index) => `${'src/'.padEnd(1000, 'x')}${index}`),
+    commits: Array.from({ length: 64 }, () => 'c'.repeat(40)),
+    no_commit: false,
+    partial_diff: true,
+    last_acknowledged_provider_event: 'file_changed',
+    recovery_classification: 'timed_out_with_partial_work',
+    safe_next_actions: Array.from({ length: 8 }, () => 'Review the retained worktree and handoff evidence.'.repeat(100)),
+  };
+  const simpleReceipt = {
+    schema: 'codex-co-engineer.run-admission.v1',
+    run_id: 'bounded-receipt',
+    phase: 'degraded',
+    status: 'degraded',
+    assignment_count: 8,
+    lanes: Array.from({ length: 8 }, (_, index) => ({
+      assignment_id: `lane-${index}`,
+      task_id: `task-${index}`,
+      provider: 'grok',
+      model: 'grok-4',
+      role: 'implement',
+      access: 'writer',
+      required: true,
+      phase: 'partial_handoff',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      handoff,
+    })),
+    attention: null,
+    telemetry: { noisy: 'z'.repeat(50_000) },
+  };
+  const simpleRuntime = {
+    submitRunRequest: async () => simpleReceipt,
+    inspectRun: async () => simpleReceipt,
+    resumeRun: async () => simpleReceipt,
+    replyRun: async () => simpleReceipt,
+    cancelRun: async () => simpleReceipt,
+    waitRun: async () => simpleReceipt,
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+  const request = {
+    run_request: {
+      run_id: 'bounded-receipt',
+      repo: '/tmp/repo',
+      objective: 'Bound the receipt.',
+      assignments: [{
+        assignment_id: 'lane-one',
+        provider: 'grok',
+        role: 'implement',
+        access: 'write',
+        prompt: 'Implement the bounded slice.',
+        expected_duration_ms: 60_000,
+      }],
+    },
+  };
+  const submitted = await adapter.dispatch('delegate', request);
+  assert.ok(Buffer.byteLength(JSON.stringify(submitted), 'utf8') <= SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX);
+  const status = await adapter.dispatch('status', { run_id: 'bounded-receipt' });
+  assert.ok(Buffer.byteLength(JSON.stringify(status), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
 });
 
 test('eight-lane submit aggregates and a required unresolved lane blocks the candidate', async () => {
@@ -296,7 +368,7 @@ test('unsupported same-session providers cancel only the affected lane', async (
     assignmentId: 'dsh-lane',
     taskId: 'task-dsh',
     provider: 'dsh',
-    model: 'muse-spark-1.2-contributor',
+    model: 'meta/muse-spark-1.3-contributor',
     writeScope: ['docs/**'],
   });
   const writer = makeAssignment();
@@ -382,7 +454,7 @@ test('explicit provider/model plus a conflicting named profile fails closed', as
     const definition = {
       schema: PROFILE_SCHEMA,
       provider: 'dsh',
-      model: 'muse-spark-1.2-contributor',
+      model: 'meta/muse-spark-1.3-contributor',
     };
     const name = 'writer-profile';
     const catalog = {
@@ -591,7 +663,7 @@ test('named profile snapshot is bound once and survives catalog mutation after s
       [name]: {
         schema: PROFILE_SCHEMA,
         provider: 'dsh',
-        model: 'muse-spark-1.2-contributor',
+        model: 'meta/muse-spark-1.3-contributor',
       },
     }));
     const inspected = await adapter.dispatch('status', { run_id: RUN_ID });
@@ -625,4 +697,366 @@ test('durable restart fallback keeps unconfirmed cancel unresolved/unsafe', asyn
   } finally {
     await rm(first.root, { recursive: true, force: true });
   }
+});
+
+
+test('simple receipts preserve cursor/revision and wait metadata through the bounded adapter', async () => {
+  const runId = 'adapter-continuity';
+  const makeReceipt = ({
+    status = 'running',
+    phase = status,
+    revision = 11,
+    cursor = '11',
+    wait_until,
+    waited_ms,
+  } = {}) => ({
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: runId,
+    phase,
+    status,
+    revision,
+    cursor,
+    assignment_count: 1,
+    lanes: [{
+      assignment_id: 'adapter-lane',
+      task_id: 'adapter-task',
+      provider: 'grok',
+      model: 'grok-4',
+      role: 'implement',
+      access: 'write',
+      required: true,
+      phase,
+      status,
+      prompt_dispatched: true,
+    }],
+    complete_candidate_blocked: false,
+    attention: null,
+    consent: null,
+    admission: null,
+    dispatched_assignment_ids: ['adapter-lane'],
+    undispatched_assignment_ids: [],
+    dispatch_uncertain_assignment_ids: [],
+    authoritative_required_dispatch: true,
+    ...(wait_until === undefined ? {} : { wait_until }),
+    ...(waited_ms === undefined ? {} : { waited_ms }),
+  });
+  const replyCalls = [];
+  const legacy = createAdapter();
+  const simpleRuntime = {
+    hasRun: (value) => value === runId,
+    submitRunRequest: async () => makeReceipt(),
+    inspectRun: async () => makeReceipt(),
+    resumeRun: async () => makeReceipt(),
+    replyRun: async (value, options) => {
+      replyCalls.push({ value, options });
+      return makeReceipt();
+    },
+    cancelRun: async () => makeReceipt({ status: 'cancelled', phase: 'cancelled' }),
+    waitRun: async (value) => makeReceipt({
+      wait_until: value.wait_until,
+      waited_ms: 17,
+    }),
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+
+  const status = await adapter.dispatch('status', { run_id: runId });
+  assert.equal(status.revision, 11);
+  assert.equal(status.cursor, '11');
+  assert.equal(Object.hasOwn(status, 'blockers'), false);
+
+  const waited = await adapter.dispatch('task', {
+    run_id: runId,
+    cursor: '10',
+    wait_until: 'terminal',
+    wait_ms: 0,
+  });
+  assert.equal(waited.revision, 11);
+  assert.equal(waited.cursor, '11');
+  assert.equal(waited.wait_until, 'terminal');
+  assert.equal(waited.waited_ms, 17);
+
+  const controller = new AbortController();
+  await adapter.dispatch('task', {
+    run_id: runId,
+    run_reply: { request_consent: true },
+  }, { signal: controller.signal });
+  assert.deepEqual(replyCalls[0].value, {
+    run_id: runId,
+    request_consent: true,
+  });
+  assert.equal(replyCalls[0].options.signal, controller.signal);
+
+  const invalid = await errorOf(() => adapter.dispatch('task', {
+    run_id: runId,
+    run_reply: { request_consent: false },
+  }));
+  assert.equal(invalid.code, 'invalid_format');
+
+  const mixed = await errorOf(() => adapter.dispatch('task', {
+    run_id: runId,
+    run_reply: { request_consent: true, approval_ref: 'ambiguous' },
+  }));
+  assert.equal(mixed.code, 'mixed_run_operation');
+});
+
+test('undefined simple runtime receipts fail closed as blocked unresolved output', async () => {
+  const runId = 'malformed-runtime-receipt';
+  const legacy = createAdapter();
+  const simpleRuntime = {
+    hasRun: (value) => value === runId,
+    submitRunRequest: async () => undefined,
+    inspectRun: async () => undefined,
+    resumeRun: async () => undefined,
+    replyRun: async () => undefined,
+    cancelRun: async () => undefined,
+    waitRun: async () => undefined,
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+  const submitted = await adapter.dispatch('delegate', {
+    run_request: {
+      run_id: runId,
+      repo: '/tmp/repo',
+      objective: 'Defend malformed receipts.',
+      assignments: [{
+        assignment_id: 'malformed-lane',
+        provider: 'grok',
+        role: 'implement',
+        access: 'read',
+        prompt: 'Synthetic only.',
+      }],
+    },
+  });
+  const inspected = await adapter.dispatch('status', { run_id: runId });
+
+  for (const receipt of [submitted, inspected]) {
+    assert.equal(receipt.run_id, runId);
+    assert.equal(receipt.status, 'unresolved');
+    assert.equal(receipt.phase, 'unresolved');
+    assert.equal(receipt.blockers.verification, true);
+    assert.equal(receipt.error.code, 'durable_state_mismatch');
+    assert.deepEqual(receipt.lanes, []);
+    assert.deepEqual(receipt.diagnostics, { view: 'diagnostics' });
+  }
+});
+
+test('large multi-assignment results retain bounded useful previews without inventing acceptance', async () => {
+  const runId = 'bounded-answer-results';
+  const lanes = Array.from({ length: 8 }, (_, index) => ({
+    assignment_id: `lane-${index}`, task_id: `task-${index}`, provider: 'grok',
+    phase: 'completed', status: 'completed', required: true, prompt_dispatched: true,
+    dispatch_confidence: 'authoritative', result: `Answer ${index}: ` + '🙂'.repeat(5000),
+  }));
+  const receipt = { schema: 'codex-co-engineer.run-admission.v1', run_id: runId,
+    phase: 'completed', status: 'completed', lanes, assignment_count: 8, cursor: '9', revision: 9 };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => receipt;
+  }
+  const { runtime } = createAdapter();
+  const adapter = createRunToolAdapter({ runtime, simpleRuntime });
+  for (const [tool, cap] of [['status', SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX], ['task', SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX]]) {
+    const result = await adapter.dispatch(tool, { run_id: runId, wait_ms: 0 });
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= cap);
+    assert.equal(result.lanes.length, 8);
+    for (let index = 0; index < 8; index += 1) {
+      assert.ok(JSON.stringify(result.lanes[index].result).includes(`Answer ${index}`));
+      assert.equal(result.lanes[index].result_truncated, true);
+    }
+    for (const omitted of ['candidate', 'checks', 'telemetry', 'experience', 'side_effects', 'admission']) {
+      assert.equal(Object.hasOwn(result, omitted), false, `compact receipt included ${omitted}`);
+    }
+    assert.equal(Object.hasOwn(result, 'blockers'), false);
+    assert.deepEqual(result.diagnostics, { view: 'diagnostics' });
+  }
+});
+
+test('adversarial semantic metadata stays within caps and marks retrievable omissions', async () => {
+  const runId = 'bounded-adversarial-metadata';
+  const huge = '🙂'.repeat(30_000);
+  const lanes = Array.from({ length: 8 }, (_, index) => ({
+    assignment_id: `lane-${index}`,
+    task_id: `task-${index}`,
+    provider: 'grok',
+    role: index === 0 ? 'review' : 'implement',
+    phase: 'needs_attention',
+    status: 'needs_attention',
+    required: true,
+    prompt_dispatched: true,
+    dispatch_confidence: 'authoritative',
+    result: `result-${index}-${huge}`,
+    error: { code: 'provider_error', message: huge, detail: huge },
+    handoff: { worktree: `/workspace/${huge}`, branch: `codex/${huge}` },
+  }));
+  const items = lanes.map((lane, index) => ({
+    assignment_id: lane.assignment_id,
+    task_id: lane.task_id,
+    question_id: `question-${index}`,
+    session_id: `session-${index}`,
+    question: `Choose for lane ${index}: ${huge}`,
+    options: Array.from({ length: 8 }, (_, option) => `choice-${index}-${option}-${huge}`),
+    event_cursor: String(index + 1),
+  }));
+  const receipt = {
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: runId,
+    phase: 'needs_attention',
+    status: 'needs_attention',
+    cursor: '9',
+    revision: 9,
+    assignment_count: 8,
+    lanes,
+    attention: { status: 'open', batch_id: 'batch-adversarial', revision: 9, items },
+    cleanup: { cleaned: false, proof_bound: false, unresolved: [huge], remaining: 8 },
+    error: { code: 'run_error', message: huge, detail: huge },
+  };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => receipt;
+  }
+  const { runtime } = createAdapter();
+  const adapter = createRunToolAdapter({ runtime, simpleRuntime });
+  for (const [tool, cap] of [
+    ['status', SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX],
+    ['task', SIMPLE_RUN_RECEIPT_STRUCTURED_BYTES_MAX],
+  ]) {
+    const result = await adapter.dispatch(tool, { run_id: runId });
+    assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') <= cap, tool);
+    assert.equal(result.diagnostics.view, 'diagnostics');
+    assert.equal(result.diagnostics.details_omitted, true);
+    assert.equal(result.diagnostics.reason, 'response_size_limit');
+    assert.equal(result.attention.details_omitted, true);
+    assert.equal(result.attention.reply_blocked, true);
+    assert.equal(Object.hasOwn(result.attention, 'items'), false);
+    assert.equal(result.lanes.every((lane) => lane.result_omitted === true), true);
+    assert.equal(result.error.code, 'run_error');
+    assert.equal(result.blockers.cleanup, true);
+    assert.equal(Object.hasOwn(result, 'cleanup'), false);
+    assert.match(result.diagnostics.instruction, /view="diagnostics"/u);
+  }
+
+  const topReceipt = {
+    ...receipt,
+    phase: 'completed',
+    status: 'completed',
+    lanes: lanes.map(({ result: _result, error: _error, ...lane }) => ({
+      ...lane, phase: 'completed', status: 'completed',
+    })),
+    attention: null,
+    cleanup: { cleaned: true, proof_bound: true, unresolved: [], remaining: 0 },
+    error: null,
+    result: huge,
+  };
+  const topRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    topRuntime[name] = async () => topReceipt;
+  }
+  const top = await createRunToolAdapter({ runtime, simpleRuntime: topRuntime })
+    .dispatch('status', { run_id: runId });
+  assert.ok(Buffer.byteLength(JSON.stringify(top), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
+  assert.equal(top.result_truncated, true);
+
+  const overflowReceipt = { ...receipt, status: huge, phase: huge };
+  const overflowRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    overflowRuntime[name] = async () => overflowReceipt;
+  }
+  const overflow = await createRunToolAdapter({ runtime, simpleRuntime: overflowRuntime })
+    .dispatch('status', { run_id: runId });
+  assert.ok(Buffer.byteLength(JSON.stringify(overflow), 'utf8') <= SIMPLE_RUN_STATUS_STRUCTURED_BYTES_MAX);
+  assert.equal(overflow.status, 'unresolved');
+  assert.equal(overflow.phase, 'unresolved');
+  assert.equal(overflow.error.code, 'response_projection_overflow');
+});
+
+test('simple run defaults to compact semantics and exposes detailed diagnostics explicitly', async () => {
+  const runId = 'compact-with-diagnostics';
+  const runtimeReceipt = {
+    schema: 'codex-co-engineer.run-admission.v1', version: 1, run_id: runId,
+    phase: 'running', status: 'running', cursor: '7', revision: 7,
+    assignment_count: 1, authoritative_required_dispatch: true,
+    lanes: [{
+      assignment_id: 'worker', task_id: 'worker-task', provider: 'grok',
+      status: 'running', phase: 'running', required: true,
+      prompt_dispatched: true, dispatch_confidence: 'authoritative',
+    }],
+    telemetry: { admission_duration_ms: 123 },
+    checks: { catalog_five_tools: true },
+  };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => runtimeReceipt;
+  }
+  const { runtime } = createAdapter();
+  const adapter = createRunToolAdapter({ runtime, simpleRuntime });
+
+  const compact = await adapter.dispatch('task', { run_id: runId });
+  assert.deepEqual(Object.keys(compact), [
+    'schema', 'version', 'mode', 'tool', 'operation', 'run_id', 'status', 'phase',
+    'cursor', 'revision', 'assignment_count', 'authoritative_required_dispatch',
+    'lanes', 'diagnostics',
+  ]);
+  assert.equal(compact.lanes[0].prompt_dispatched, true);
+  assert.equal(compact.diagnostics.view, 'diagnostics');
+
+  const detailed = await adapter.dispatch('task', { run_id: runId, view: 'diagnostics' });
+  assert.equal(detailed.telemetry.admission_duration_ms, 123);
+  assert.equal(detailed.checks.catalog_five_tools, true);
+  assert.equal(detailed.experience.schema, 'codex-co-engineer.experience-projection.v1');
+});
+
+test('compact semantic finals retain actual candidate, verification, and top-level-only result', async () => {
+  const runId = 'compact-review-artifact';
+  const runtimeReceipt = {
+    schema: 'codex-co-engineer.run-admission.v1', version: 1, run_id: runId,
+    phase: 'completed', status: 'completed', cursor: '8', revision: 8,
+    assignment_count: 1, authoritative_required_dispatch: true,
+    complete_candidate_blocked: false,
+    lanes: [{
+      assignment_id: 'worker', task_id: 'worker-task', provider: 'grok',
+      role: 'review', status: 'completed', phase: 'completed', required: true,
+      prompt_dispatched: true, dispatch_confidence: 'authoritative', task_final: true,
+      handoff: {
+        branch: 'codex/compact-review-artifact',
+        current_head: 'b'.repeat(40),
+        tree_sha: 'c'.repeat(40),
+      },
+    }],
+    result: { summary: 'Integrated candidate is ready.' },
+    candidate: {
+      ref: expectedCandidateRefV1({ run_id: runId }),
+      head: 'b'.repeat(40), tree: 'c'.repeat(40),
+      ready_for_codex_review: true, accepted: true, authority: 'p35',
+    },
+    verification: { status: 'passed', authority: 'p35', tests: ['node --test'] },
+    evidence: {
+      facts: [{ fact_kind: 'git_identity' }],
+      claims: [{ claim_kind: 'tests_passed' }],
+      digest: `sha256:${'d'.repeat(64)}`,
+    },
+  };
+  const simpleRuntime = { hasRun: () => true };
+  for (const name of ['submitRunRequest', 'inspectRun', 'resumeRun', 'replyRun', 'cancelRun', 'waitRun']) {
+    simpleRuntime[name] = async () => runtimeReceipt;
+  }
+  const { runtime } = createAdapter();
+  const compact = await createRunToolAdapter({ runtime, simpleRuntime })
+    .dispatch('task', { run_id: runId });
+
+  assert.deepEqual(compact.result, { summary: 'Integrated candidate is ready.' });
+  assert.equal(compact.candidate.ref, expectedCandidateRefV1({ run_id: runId }));
+  assert.equal(compact.candidate.head, 'b'.repeat(40));
+  assert.equal(compact.candidate.tree, 'c'.repeat(40));
+  assert.equal(compact.candidate.ready_for_codex_review, true);
+  assert.deepEqual(compact.verification, {
+    status: 'passed', authority: 'p35', tests: ['node --test'],
+  });
+  const uiExperience = experienceForRunToolResult(compact);
+  assert.equal(uiExperience.final.reviews.present, true);
+  assert.deepEqual(uiExperience.final.reviews.lanes, ['worker']);
+  assert.equal(uiExperience.final.git.head, 'b'.repeat(40));
+  assert.deepEqual(uiExperience.final.evidence.kinds, ['git_identity', 'tests_passed']);
+  assert.equal(Object.hasOwn(compact, 'experience'), false);
+  assert.equal(Object.hasOwn(compact, 'blockers'), false);
 });

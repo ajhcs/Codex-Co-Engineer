@@ -315,24 +315,37 @@ test('watcher failure uses a low-frequency fallback instead of model-driven poll
     });
     const delays = [];
     const { watch, state } = createMockWatch();
-    const pending = waitForTaskProgress(root, 'fallback-one', {
+    let clock = 0;
+    const timedOut = await waitForTaskProgress(root, 'fallback-one', {
       wait_until: 'terminal',
-      wait_ms: 80,
-      watch,
+      wait_ms: 5_000,
+      now: () => clock,
+      watch: (...args) => {
+        const watcher = watch(...args);
+        const on = watcher.on.bind(watcher);
+        watcher.on = (event, handler) => {
+          on(event, handler);
+          // Fail only after the handler is registered. Fixed sleeps could
+          // fire before filesystem setup completed under parallel test load.
+          if (event === 'error') queueMicrotask(() => handler(new Error('watch failed')));
+          return watcher;
+        };
+        return watcher;
+      },
       delay: (milliseconds, signal) => {
         delays.push(milliseconds);
+        if (state.closed === 2) {
+          clock = 5_000;
+          return Promise.resolve('timeout');
+        }
         return waitDelay(milliseconds, signal);
       },
       fallback_ms: 1_000,
     });
-    const firstErrorHandler = await waitForMockErrorHandler(state);
-    firstErrorHandler(new Error('watch failed'));
-    const secondErrorHandler = await waitForMockErrorHandler(state, firstErrorHandler);
-    secondErrorHandler(new Error('watch failed again'));
-    const timedOut = await pending;
     assert.equal(timedOut.progress.wait_reason, 'timeout');
-    assert.equal(state.closed, state.opened);
-    assert.ok(state.opened >= 2);
+    assert.equal(state.closed, 2);
+    assert.equal(state.opened, 2);
+    assert.ok(delays.includes(1_000));
     assert.equal(delays.filter((value) => value > 0 && value <= 20).length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });

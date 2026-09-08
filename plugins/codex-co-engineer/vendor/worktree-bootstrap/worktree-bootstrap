@@ -1,0 +1,1131 @@
+#!/usr/bin/env python3
+"""Create, validate, lock, and report isolated Git writer worktrees."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fnmatch
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+import tomllib
+import uuid
+from pathlib import Path
+from typing import Any, Sequence
+
+
+SCHEMA = "worktree-bootstrap/v1"
+HANDOFF_SCHEMA = "worktree-bootstrap-handoff/v1"
+VERSION = "1.1.0"
+CONFIG_PATH = Path(".codex/worktree-bootstrap.toml")
+TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+class ToolError(RuntimeError):
+    def __init__(self, message: str, *, exit_code: int = 3, details: Any = None):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.details = details
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def eprint(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def run(
+    argv: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    check: bool = True,
+    text: bool = True,
+) -> subprocess.CompletedProcess[Any]:
+    try:
+        completed = subprocess.run(
+            [str(value) for value in argv],
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=text,
+        )
+    except FileNotFoundError as exc:
+        raise ToolError(f"required command not found: {argv[0]}", exit_code=4) from exc
+    if check and completed.returncode != 0:
+        stderr = completed.stderr.strip() if text else completed.stderr.decode(errors="replace").strip()
+        stdout = completed.stdout.strip() if text else completed.stdout.decode(errors="replace").strip()
+        detail = stderr or stdout or f"exit {completed.returncode}"
+        raise ToolError(f"command failed: {shlex.join(argv)}: {detail}", exit_code=4)
+    return completed
+
+
+def git(repo: Path, *args: str, check: bool = True, text: bool = True) -> subprocess.CompletedProcess[Any]:
+    return run(["git", "-C", str(repo), *args], check=check, text=text)
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def implementation_sha256() -> str:
+    return sha256_bytes(Path(__file__).resolve().read_bytes())
+
+
+def json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def atomic_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json_bytes(value)
+    if exclusive:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    with temporary.open("wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise ToolError(f"record not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"invalid JSON record: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ToolError(f"invalid record shape: {path}")
+    return value
+
+
+def validate_task(task: str) -> str:
+    if not TASK_RE.fullmatch(task):
+        raise ToolError("task must match [A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+    return task
+
+
+def repo_root(candidate: str | Path) -> Path:
+    path = Path(candidate).expanduser().resolve()
+    completed = git(path, "rev-parse", "--show-toplevel", check=False)
+    if completed.returncode != 0:
+        raise ToolError(f"not a Git working tree: {path}")
+    return Path(completed.stdout.strip()).resolve(strict=True)
+
+
+def common_git_dir(repo: Path) -> Path:
+    value = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
+    path = Path(value)
+    if not path.is_absolute():
+        path = repo / path
+    return path.resolve(strict=True)
+
+
+def state_root() -> Path:
+    configured = os.environ.get("WORKTREE_BOOTSTRAP_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local/state"
+    return (base / "worktree-bootstrap").resolve()
+
+
+def repo_identity(repo: Path) -> tuple[str, Path]:
+    common = common_git_dir(repo)
+    digest = sha256_bytes(str(common).encode())[:16]
+    source_name = common.parent.name if common.name == ".git" else common.stem
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", source_name).strip("-") or "repo"
+    return f"{name}-{digest}", common
+
+
+def task_dir(repo: Path, task: str) -> Path:
+    identity, _ = repo_identity(repo)
+    return state_root() / "repositories" / identity / "tasks" / validate_task(task)
+
+
+def manifest_path(repo: Path, task: str) -> Path:
+    return task_dir(repo, task) / "manifest.json"
+
+
+def lock_path(repo: Path, task: str) -> Path:
+    return task_dir(repo, task) / "writer.lock.json"
+
+
+def load_config(repo: Path) -> tuple[dict[str, Any], str | None]:
+    path = repo / CONFIG_PATH
+    if not path.exists():
+        return {}, None
+    raw = path.read_bytes()
+    try:
+        value = tomllib.loads(raw.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ToolError(f"invalid {CONFIG_PATH}: {exc}") from exc
+    if value.get("version", 1) != 1:
+        raise ToolError(f"unsupported {CONFIG_PATH} version: {value.get('version')}")
+    return value, sha256_bytes(raw)
+
+
+def worktree_entries(repo: Path) -> list[dict[str, str]]:
+    raw = git(repo, "worktree", "list", "--porcelain").stdout
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in raw.splitlines() + [""]:
+        if not line:
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value
+    return entries
+
+
+def detect_base_branch(repo: Path, configured: str | None) -> str:
+    if configured:
+        return configured.removeprefix("refs/heads/")
+    symbolic = git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", check=False)
+    if symbolic.returncode == 0 and symbolic.stdout.strip():
+        return symbolic.stdout.strip().split("/", 1)[-1]
+    for candidate in ("main", "master"):
+        if git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{candidate}", check=False).returncode == 0:
+            return candidate
+    raise ToolError("cannot determine base branch; pass --base or set base_branch in the policy")
+
+
+def locate_base_worktree(repo: Path, base: str) -> Path:
+    expected = f"refs/heads/{base}"
+    for entry in worktree_entries(repo):
+        if entry.get("branch") == expected:
+            return Path(entry["worktree"]).resolve(strict=True)
+    raise ToolError(f"base branch {base!r} is not attached to a working tree")
+
+
+def require_clean(path: Path, label: str) -> None:
+    raw = git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", text=False).stdout
+    if raw:
+        preview = git(path, "status", "--short").stdout.strip()
+        raise ToolError(
+            f"{label} is dirty; refusing writer workspace creation\n{preview}"
+        )
+
+
+def upstream_for(repo: Path, base: str) -> str | None:
+    result = git(repo, "for-each-ref", "--format=%(upstream:short)", f"refs/heads/{base}")
+    value = result.stdout.strip()
+    return value or None
+
+
+def synchronize_base(base_worktree: Path, base: str, *, fetch: bool) -> tuple[str, str | None, str]:
+    local_sha = git(base_worktree, "rev-parse", f"refs/heads/{base}^{{commit}}").stdout.strip()
+    upstream = upstream_for(base_worktree, base)
+    if upstream is None:
+        remotes = [
+            value
+            for value in git(base_worktree, "remote").stdout.splitlines()
+            if value
+        ]
+        if remotes:
+            raise ToolError(
+                f"base branch {base!r} has configured remotes but no upstream; "
+                "configure its tracking branch before launching a writer"
+            )
+        return local_sha, None, "local"
+    if not fetch:
+        raise ToolError("an upstream exists, so --no-fetch cannot establish a fresh base")
+    remote, upstream_branch = upstream.split("/", 1)
+    eprint(f"preflight: fetching {remote} for authoritative base comparison")
+    fetched = git(
+        base_worktree,
+        "fetch",
+        "--prune",
+        remote,
+        upstream_branch,
+        check=False,
+    )
+    if fetched.returncode != 0:
+        detail = fetched.stderr.strip() or fetched.stdout.strip()
+        raise ToolError(f"cannot refresh {upstream}; base freshness is unknown: {detail}", exit_code=4)
+    upstream_sha = git(base_worktree, "rev-parse", f"{upstream}^{{commit}}").stdout.strip()
+    local_sha = git(base_worktree, "rev-parse", f"refs/heads/{base}^{{commit}}").stdout.strip()
+    counts = git(base_worktree, "rev-list", "--left-right", "--count", f"{local_sha}...{upstream_sha}").stdout.split()
+    ahead, behind = (int(counts[0]), int(counts[1]))
+    if ahead or behind:
+        if behind and not ahead:
+            condition = "stale (behind upstream)"
+        elif ahead and not behind:
+            condition = "diverged (local base is ahead of upstream)"
+        else:
+            condition = "diverged (both sides contain unique commits)"
+        raise ToolError(
+            f"base branch {base!r} is {condition}; local={local_sha} upstream={upstream_sha}"
+        )
+    return local_sha, upstream_sha, "remote-tracking"
+
+
+def resolve_local_exact_base(source: Path, base: str | None) -> str:
+    if not base:
+        raise ToolError("--local-only requires --base with a full 40-character commit SHA")
+    if not EXACT_SHA_RE.fullmatch(base):
+        raise ToolError("--local-only requires --base to be a full 40-character commit SHA")
+    resolved = git(source, "rev-parse", "--verify", f"{base}^{{commit}}", check=False)
+    if resolved.returncode != 0:
+        raise ToolError(f"exact local base is not an available commit: {base}")
+    commit = resolved.stdout.strip().lower()
+    if commit != base.lower():
+        raise ToolError(f"exact local base resolved unexpectedly: requested={base} resolved={commit}")
+    return commit
+
+
+def validate_branch(repo: Path, branch: str) -> None:
+    if git(repo, "check-ref-format", "--branch", branch, check=False).returncode != 0:
+        raise ToolError(f"invalid branch name: {branch}")
+    if git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0:
+        raise ToolError(f"branch already exists: {branch}")
+
+
+def command_list(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ToolError(f"{label} must be a non-empty TOML string array")
+    return list(value)
+
+
+def bootstrap_plan(repo: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    section = config.get("bootstrap", {})
+    declared = section.get("commands") if isinstance(section, dict) else None
+    plan: list[dict[str, Any]] = []
+    if declared is not None:
+        if not isinstance(declared, list):
+            raise ToolError("bootstrap.commands must be an array of command arrays")
+        for index, item in enumerate(declared):
+            argv = command_list(item, f"bootstrap.commands[{index}]")
+            plan.append({"argv": argv, "source": "declared"})
+    else:
+        if (repo / "package-lock.json").exists() or (repo / "npm-shrinkwrap.json").exists():
+            plan.append({"argv": ["npm", "ci"], "source": "package-lock"})
+        elif (repo / "pnpm-lock.yaml").exists():
+            plan.append({"argv": ["corepack", "pnpm", "install", "--frozen-lockfile"], "source": "pnpm-lock"})
+        elif (repo / "yarn.lock").exists():
+            plan.append({"argv": ["corepack", "yarn", "install", "--immutable"], "source": "yarn-lock"})
+        elif (repo / "bun.lock").exists() or (repo / "bun.lockb").exists():
+            plan.append({"argv": ["bun", "install", "--frozen-lockfile"], "source": "bun-lock"})
+        if (repo / "uv.lock").exists() and (repo / "pyproject.toml").exists():
+            plan.append({"argv": ["uv", "sync", "--locked"], "source": "uv-lock"})
+        elif (repo / "poetry.lock").exists() and (repo / "pyproject.toml").exists():
+            plan.append({"argv": ["poetry", "install", "--sync"], "source": "poetry-lock"})
+        if (repo / "go.sum").exists() and (repo / "go.mod").exists():
+            plan.append({"argv": ["go", "mod", "download"], "source": "go-sum"})
+        if (repo / "Cargo.lock").exists() and (repo / "Cargo.toml").exists():
+            plan.append({"argv": ["cargo", "fetch", "--locked"], "source": "cargo-lock"})
+    for entry in plan:
+        argv = entry["argv"]
+        executable = Path(argv[0]).name
+        joined = " ".join(argv).lower()
+        if "node_modules" in joined and executable in {"cp", "rsync", "ln", "install"}:
+            raise ToolError("bootstrap policy may not copy or symlink node_modules")
+        if executable == "npm" and len(argv) > 1 and argv[1] == "install":
+            raise ToolError("use npm ci, not npm install, for locked bootstrap")
+        if executable == "uv" and argv[1:2] == ["sync"] and "--locked" not in argv:
+            raise ToolError("uv sync bootstrap must include --locked")
+    return plan
+
+
+def node_module_roots(worktree: Path) -> list[Path]:
+    roots: list[Path] = []
+    for current, directories, _files in os.walk(worktree, followlinks=False):
+        retained: list[str] = []
+        for directory in directories:
+            candidate = Path(current) / directory
+            if directory == "node_modules":
+                roots.append(candidate)
+            elif directory != ".git":
+                retained.append(directory)
+        directories[:] = retained
+    return roots
+
+
+def guard_node_modules(worktree: Path, *, allow_unmarked: bool, task: str) -> list[str]:
+    records: list[str] = []
+    for root in node_module_roots(worktree):
+        if root.is_symlink():
+            raise ToolError(f"node_modules symlink is forbidden: {root}")
+        resolved = root.resolve(strict=True)
+        try:
+            resolved.relative_to(worktree)
+        except ValueError as exc:
+            raise ToolError(f"node_modules resolves outside the worktree: {root} -> {resolved}") from exc
+        marker = root / ".worktree-bootstrap-owner.json"
+        if marker.exists():
+            owner = read_json(marker)
+            expected = str(worktree)
+            if owner.get("worktree_path") != expected or owner.get("task") != task:
+                raise ToolError(
+                    f"node_modules ownership mismatch (likely copied from another worktree): {root}"
+                )
+        elif not allow_unmarked:
+            raise ToolError(f"unowned node_modules is forbidden in a writer worktree: {root}")
+        records.append(str(resolved))
+    return records
+
+
+def mark_node_modules(worktree: Path, task: str, start_sha: str) -> list[str]:
+    roots = guard_node_modules(worktree, allow_unmarked=True, task=task)
+    for value in roots:
+        marker = Path(value) / ".worktree-bootstrap-owner.json"
+        atomic_json(marker, {
+            "schema": SCHEMA,
+            "task": task,
+            "worktree_path": str(worktree),
+            "start_sha": start_sha,
+            "recorded_at": utc_now(),
+        })
+    return roots
+
+
+def execute_bootstrap(worktree: Path, plan: list[dict[str, Any]], task: str, start_sha: str) -> list[dict[str, Any]]:
+    guard_node_modules(worktree, allow_unmarked=False, task=task)
+    results: list[dict[str, Any]] = []
+    for entry in plan:
+        argv = entry["argv"]
+        eprint(f"bootstrap: {shlex.join(argv)}")
+        started = time.monotonic()
+        try:
+            process = subprocess.Popen(argv, cwd=worktree)
+        except FileNotFoundError as exc:
+            raise ToolError(f"bootstrap command not found: {argv[0]}", exit_code=4) from exc
+        return_code = process.wait()
+        result = {
+            **entry,
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "exit_code": return_code,
+        }
+        results.append(result)
+        if return_code != 0:
+            raise ToolError(f"bootstrap failed ({return_code}): {shlex.join(argv)}", exit_code=4, details=results)
+    mark_node_modules(worktree, task, start_sha)
+    return results
+
+
+def default_worktree_path(base_worktree: Path, task: str) -> Path:
+    return base_worktree.parent / f".{base_worktree.name}-worktrees" / task
+
+
+def create_command(args: argparse.Namespace) -> int:
+    source = repo_root(args.repo)
+    config, config_digest = load_config(source)
+    if args.local_only:
+        base_worktree = source
+        require_clean(base_worktree, f"source worktree {base_worktree}")
+        start_sha = resolve_local_exact_base(base_worktree, args.base)
+        upstream_sha = None
+        authority = "local-exact-sha"
+        base_branch = None
+    else:
+        base_branch = detect_base_branch(source, args.base or config.get("base_branch"))
+        base_worktree = locate_base_worktree(source, base_branch)
+        require_clean(base_worktree, f"base worktree {base_worktree}")
+        start_sha, upstream_sha, authority = synchronize_base(
+            base_worktree, base_branch, fetch=not args.no_fetch
+        )
+    task = validate_task(args.task)
+    branch = args.branch or f"codex/{task}"
+    validate_branch(base_worktree, branch)
+    if manifest_path(base_worktree, task).exists():
+        raise ToolError(f"task already has a manifest: {task}")
+
+    configured_root = config.get("worktree_root")
+    if args.path:
+        requested_path = Path(args.path).expanduser()
+    elif configured_root:
+        root_value = str(configured_root).format(repo=base_worktree.name, task=task)
+        requested_path = Path(root_value).expanduser()
+        if not requested_path.is_absolute():
+            requested_path = base_worktree / requested_path
+        if "{task}" not in str(configured_root):
+            requested_path /= task
+    else:
+        requested_path = default_worktree_path(base_worktree, task)
+    requested_path = requested_path.absolute()
+    resolved_target = requested_path.resolve(strict=False)
+    for entry in worktree_entries(base_worktree):
+        registered = Path(entry["worktree"]).resolve(strict=True)
+        try:
+            resolved_target.relative_to(registered)
+        except ValueError:
+            pass
+        else:
+            raise ToolError(
+                f"worktree target may not be nested inside existing checkout "
+                f"{registered}: {resolved_target}"
+            )
+    if requested_path.exists() or requested_path.is_symlink():
+        raise ToolError(f"worktree path already exists: {requested_path}")
+    requested_path.parent.mkdir(parents=True, exist_ok=True)
+
+    eprint(f"create: {branch} at {requested_path} from {start_sha}")
+    git(base_worktree, "worktree", "add", "-b", branch, str(requested_path), start_sha)
+    actual_path = requested_path.resolve(strict=True)
+    actual_root = repo_root(actual_path)
+    if actual_root != actual_path:
+        raise ToolError(f"Git reported a different worktree root: {actual_root}")
+    identity, common = repo_identity(actual_path)
+    origin = git(actual_path, "remote", "get-url", "origin", check=False).stdout.strip() or None
+    plan = bootstrap_plan(actual_path, config)
+    record: dict[str, Any] = {
+        "schema": SCHEMA,
+        "tool": {
+            "version": VERSION,
+            "implementation_sha256": implementation_sha256(),
+        },
+        "status": "bootstrapping",
+        "task": task,
+        "branch": branch,
+        "base_branch": base_branch,
+        "start_sha": start_sha,
+        "upstream_sha": upstream_sha,
+        "base_authority": authority,
+        "source_worktree_path": str(base_worktree),
+        "worktree_path": str(actual_path),
+        "requested_worktree_path": str(requested_path),
+        "common_git_dir": str(common),
+        "repository_identity": identity,
+        "origin_url": origin,
+        "policy_path": str(CONFIG_PATH) if config_digest else None,
+        "policy_sha256": config_digest,
+        "bootstrap_plan": plan,
+        "bootstrap_results": [],
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+    }
+    path = manifest_path(actual_path, task)
+    atomic_json(path, record, exclusive=True)
+    try:
+        record["bootstrap_results"] = execute_bootstrap(actual_path, plan, task, start_sha)
+        record["status"] = "ready"
+    except ToolError as exc:
+        record["status"] = "bootstrap_failed"
+        record["failure"] = str(exc)
+        if exc.details:
+            record["bootstrap_results"] = exc.details
+        record["updated_at"] = utc_now()
+        atomic_json(path, record)
+        raise
+    record["updated_at"] = utc_now()
+    atomic_json(path, record)
+    print(json.dumps({
+        "task": task,
+        "branch": branch,
+        "start_sha": start_sha,
+        "worktree_path": str(actual_path),
+        "manifest_path": str(path),
+        "status": "ready",
+    }, indent=2))
+    return 0
+
+
+def load_manifest(repo: Path, task: str) -> tuple[dict[str, Any], Path]:
+    path = manifest_path(repo, task)
+    value = read_json(path)
+    if value.get("schema") != SCHEMA or value.get("task") != task:
+        raise ToolError(f"manifest identity mismatch: {path}")
+    return value, path
+
+
+def proc_start_ticks(pid: int) -> str | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().split()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None
+    return fields[21] if len(fields) > 21 else None
+
+
+def process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except (FileNotFoundError, PermissionError):
+        return None
+
+
+def lock_health(lock: dict[str, Any]) -> dict[str, Any]:
+    local_host = socket.gethostname()
+    result: dict[str, Any] = {"state": "active", "abandoned": False, "reason": None}
+    if lock.get("hostname") != local_host:
+        result.update(state="remote_or_unknown", reason="lock belongs to another host")
+        return result
+    if lock.get("boot_id") and lock.get("boot_id") != boot_id():
+        result.update(state="abandoned", abandoned=True, reason="host rebooted since lock acquisition")
+        return result
+    pid = int(lock.get("wrapper_pid", 0))
+    observed = proc_start_ticks(pid)
+    if not process_exists(pid):
+        result.update(state="abandoned", abandoned=True, reason="wrapper process no longer exists")
+    elif (
+        observed is not None
+        and lock.get("process_start_ticks")
+        and observed != str(lock.get("process_start_ticks"))
+    ):
+        result.update(state="abandoned", abandoned=True, reason="PID was reused")
+    return result
+
+
+def acquire_lock(repo: Path, manifest: dict[str, Any], command: list[str]) -> tuple[dict[str, Any], Path]:
+    path = lock_path(repo, manifest["task"])
+    if path.exists():
+        existing = read_json(path)
+        health = lock_health(existing)
+        raise ToolError(
+            f"writer lock already exists ({health['state']}): {path}; inspect it and use explicit lock clean policy if abandoned",
+            exit_code=5,
+        )
+    lock = {
+        "schema": SCHEMA,
+        "lock_id": uuid.uuid4().hex,
+        "token": uuid.uuid4().hex,
+        "task": manifest["task"],
+        "branch": manifest["branch"],
+        "worktree_path": manifest["worktree_path"],
+        "start_sha": manifest["start_sha"],
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "boot_id": boot_id(),
+        "wrapper_pid": os.getpid(),
+        "process_start_ticks": proc_start_ticks(os.getpid()),
+        "command": command,
+        "acquired_at": utc_now(),
+        "heartbeat_at": utc_now(),
+    }
+    try:
+        atomic_json(path, lock, exclusive=True)
+    except FileExistsError as exc:
+        raise ToolError(f"writer lock raced with another writer: {path}", exit_code=5) from exc
+    return lock, path
+
+
+def refresh_lock(path: Path, lock: dict[str, Any]) -> None:
+    current = read_json(path)
+    if current.get("lock_id") != lock.get("lock_id"):
+        raise ToolError("writer lock identity changed while command was running", exit_code=5)
+    lock["heartbeat_at"] = utc_now()
+    atomic_json(path, lock)
+
+
+def release_lock(path: Path, lock: dict[str, Any]) -> None:
+    if not path.exists():
+        return
+    current = read_json(path)
+    if current.get("lock_id") != lock.get("lock_id"):
+        raise ToolError("refusing to release a replacement writer lock", exit_code=5)
+    path.unlink()
+
+
+def verify_workspace(
+    repo: Path,
+    manifest: dict[str, Any],
+    *,
+    require_writer: bool,
+    writer_token: str | None = None,
+) -> dict[str, Any]:
+    actual_repo = repo_root(repo)
+    expected_repo = Path(manifest["worktree_path"]).resolve(strict=True)
+    errors: list[str] = []
+    if manifest.get("status") != "ready":
+        errors.append(f"workspace manifest is not ready: {manifest.get('status')}")
+    if actual_repo != expected_repo:
+        errors.append(f"repository path mismatch: expected {expected_repo}, got {actual_repo}")
+    actual_common = common_git_dir(actual_repo)
+    expected_common = Path(manifest["common_git_dir"]).resolve(strict=True)
+    if actual_common != expected_common:
+        errors.append(f"common Git directory mismatch: expected {expected_common}, got {actual_common}")
+    branch = git(actual_repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.strip()
+    if branch != manifest["branch"]:
+        errors.append(f"branch mismatch: expected {manifest['branch']}, got {branch or 'detached HEAD'}")
+    merge_base = git(actual_repo, "merge-base", manifest["start_sha"], "HEAD", check=False)
+    if merge_base.returncode != 0 or merge_base.stdout.strip() != manifest["start_sha"]:
+        errors.append("recorded starting SHA is no longer an ancestor of HEAD")
+    try:
+        modules = guard_node_modules(
+            actual_repo,
+            allow_unmarked=False,
+            task=manifest["task"],
+        )
+    except ToolError as exc:
+        errors.append(str(exc))
+        modules = []
+    lock_summary: dict[str, Any] | None = None
+    if require_writer:
+        path = lock_path(actual_repo, manifest["task"])
+        if not path.exists():
+            errors.append("writer verification requested but no writer lock exists")
+        else:
+            lock = read_json(path)
+            health = lock_health(lock)
+            token = writer_token or os.environ.get("WORKTREE_BOOTSTRAP_WRITER_TOKEN")
+            if not token or token != lock.get("token"):
+                errors.append("writer token does not match the active lock")
+            if health["state"] != "active":
+                errors.append(f"writer lock is not active: {health['reason']}")
+            lock_summary = {"lock_id": lock.get("lock_id"), **health}
+    result = {
+        "ok": not errors,
+        "task": manifest["task"],
+        "repository_path": str(actual_repo),
+        "branch": branch,
+        "start_sha": manifest["start_sha"],
+        "node_modules_roots": modules,
+        "writer_lock": lock_summary,
+        "errors": errors,
+        "verified_at": utc_now(),
+    }
+    if errors:
+        raise ToolError("workspace verification failed: " + "; ".join(errors), details=result)
+    return result
+
+
+def verify_command(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    manifest, _ = load_manifest(repo, validate_task(args.task))
+    print(json.dumps(verify_workspace(repo, manifest, require_writer=args.require_writer), indent=2))
+    return 0
+
+
+def launch_command(args: argparse.Namespace) -> int:
+    if not args.command:
+        raise ToolError("launch requires a command after --", exit_code=2)
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    repo = repo_root(args.repo)
+    task = validate_task(args.task)
+    manifest, _ = load_manifest(repo, task)
+    if manifest.get("status") != "ready":
+        raise ToolError(f"task workspace is not ready: {manifest.get('status')}")
+    verify_workspace(repo, manifest, require_writer=False)
+    lock, path = acquire_lock(repo, manifest, command)
+    environment = os.environ.copy()
+    environment.update({
+        "WORKTREE_BOOTSTRAP_TASK": task,
+        "WORKTREE_BOOTSTRAP_BRANCH": manifest["branch"],
+        "WORKTREE_BOOTSTRAP_START_SHA": manifest["start_sha"],
+        "WORKTREE_BOOTSTRAP_MANIFEST": str(manifest_path(repo, task)),
+        "WORKTREE_BOOTSTRAP_WRITER_TOKEN": lock["token"],
+    })
+    child: subprocess.Popen[Any] | None = None
+    exit_code = 1
+    try:
+        verify_workspace(
+            repo,
+            manifest,
+            require_writer=True,
+            writer_token=lock["token"],
+        )
+        eprint(f"launch: lock {lock['lock_id']} acquired for {shlex.join(command)}")
+        child = subprocess.Popen(command, cwd=repo, env=environment)
+        while True:
+            try:
+                exit_code = child.wait(timeout=max(1, args.heartbeat_seconds))
+                break
+            except subprocess.TimeoutExpired:
+                refresh_lock(path, lock)
+    except FileNotFoundError as exc:
+        raise ToolError(f"writer command not found: {command[0]}", exit_code=4) from exc
+    except KeyboardInterrupt:
+        if child and child.poll() is None:
+            child.send_signal(signal.SIGINT)
+            exit_code = child.wait()
+    finally:
+        release_lock(path, lock)
+        eprint(f"launch: lock {lock['lock_id']} released")
+    return exit_code
+
+
+def lock_inspect_command(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    path = lock_path(repo, validate_task(args.task))
+    if not path.exists():
+        print(json.dumps({
+            "task": args.task,
+            "state": "unlocked",
+            "path": str(path),
+            "inspected_at": utc_now(),
+        }, indent=2, sort_keys=True))
+        return 0
+    lock = read_json(path)
+    safe = {key: value for key, value in lock.items() if key != "token"}
+    safe["health"] = lock_health(lock)
+    safe["path"] = str(path)
+    print(json.dumps(safe, indent=2, sort_keys=True))
+    return 0
+
+
+def lock_clean_command(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    task = validate_task(args.task)
+    path = lock_path(repo, task)
+    lock = read_json(path)
+    if lock.get("lock_id") != args.lock_id:
+        raise ToolError("lock ID changed; inspect the current lock before cleaning", exit_code=5)
+    health = lock_health(lock)
+    if args.policy == "dead-local":
+        if not health["abandoned"]:
+            raise ToolError(f"dead-local policy does not apply: {health['reason'] or health['state']}", exit_code=5)
+    elif args.policy == "expired-heartbeat":
+        config, _ = load_config(repo)
+        locks = config.get("locks", {}) if isinstance(config.get("locks", {}), dict) else {}
+        if not locks.get("allow_expired_heartbeat_cleanup", False):
+            raise ToolError("repository policy does not allow expired-heartbeat cleanup", exit_code=5)
+        try:
+            heartbeat = dt.datetime.fromisoformat(str(lock["heartbeat_at"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError) as exc:
+            raise ToolError("lock has no valid heartbeat timestamp", exit_code=5) from exc
+        age = (dt.datetime.now(dt.timezone.utc) - heartbeat).total_seconds()
+        minimum = int(locks.get("expired_heartbeat_seconds", 86400))
+        if age < minimum:
+            raise ToolError(f"lock heartbeat age {age:.0f}s is below policy threshold {minimum}s", exit_code=5)
+    path.unlink()
+    print(json.dumps({
+        "cleaned": True,
+        "task": task,
+        "lock_id": args.lock_id,
+        "policy": args.policy,
+        "prior_health": health,
+        "cleaned_at": utc_now(),
+    }, indent=2))
+    return 0
+
+
+def nul_items(value: bytes) -> list[str]:
+    return [item.decode(errors="surrogateescape") for item in value.split(b"\0") if item]
+
+
+def changed_files(repo: Path, base: str) -> tuple[list[dict[str, Any]], str]:
+    merge_base = git(repo, "merge-base", base, "HEAD").stdout.strip()
+    raw = git(repo, "diff", "--name-status", "-z", "--find-renames", merge_base, text=False).stdout
+    parts = nul_items(raw)
+    files: list[dict[str, Any]] = []
+    index = 0
+    while index < len(parts):
+        status = parts[index]
+        index += 1
+        if status.startswith(("R", "C")):
+            old_path, path = parts[index], parts[index + 1]
+            index += 2
+            files.append({"path": path, "status": status, "old_path": old_path, "tracked": True})
+        else:
+            path = parts[index]
+            index += 1
+            files.append({"path": path, "status": status, "tracked": True})
+    tracked = {item["path"] for item in files}
+    for path in nul_items(git(repo, "ls-files", "--others", "--exclude-standard", "-z", text=False).stdout):
+        if path not in tracked:
+            files.append({"path": path, "status": "?", "tracked": False})
+    return files, merge_base
+
+
+def path_matches(pattern: str, path: str) -> bool:
+    normalized = pattern.strip()
+    if not normalized or normalized.startswith("#"):
+        return False
+    if normalized.startswith("!"):
+        normalized = normalized[1:]
+    anchored = normalized.startswith("/")
+    normalized = normalized.lstrip("/")
+    if normalized.endswith("/"):
+        normalized += "**"
+    if anchored or "/" in normalized:
+        return fnmatch.fnmatchcase(path, normalized)
+    return fnmatch.fnmatchcase(Path(path).name, normalized) or fnmatch.fnmatchcase(path, f"**/{normalized}")
+
+
+def ownership_rules(repo: Path, config: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, str | None]:
+    ownership = config.get("ownership", {}) if isinstance(config.get("ownership", {}), dict) else {}
+    declared = ownership.get("rules", [])
+    if declared:
+        rules = []
+        for index, value in enumerate(declared):
+            if not isinstance(value, dict) or not isinstance(value.get("pattern"), str):
+                raise ToolError(f"ownership.rules[{index}] is invalid")
+            owners = value.get("owners", value.get("owner", []))
+            if isinstance(owners, str):
+                owners = [owners]
+            if not isinstance(owners, list) or not all(isinstance(item, str) for item in owners):
+                raise ToolError(f"ownership.rules[{index}].owners is invalid")
+            rules.append({"pattern": value["pattern"], "owners": owners})
+        return rules, bool(ownership.get("required", False)), str(CONFIG_PATH)
+    for candidate in (repo / ".github/CODEOWNERS", repo / "CODEOWNERS", repo / "docs/CODEOWNERS"):
+        if candidate.exists():
+            rules = []
+            for line in candidate.read_text(errors="replace").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    rules.append({"pattern": parts[0], "owners": parts[1:]})
+            return rules, bool(ownership.get("required", False)), str(candidate.relative_to(repo))
+    return [], bool(ownership.get("required", False)), None
+
+
+def assign_owners(path: str, rules: list[dict[str, Any]]) -> list[str]:
+    owners: list[str] = []
+    for rule in rules:
+        if path_matches(rule["pattern"], path):
+            owners = list(rule["owners"])
+    return owners
+
+
+def hunk_counts(repo: Path, merge_base: str) -> tuple[dict[str, int], int]:
+    patch = git(repo, "diff", "--no-color", "--unified=0", merge_base, "--").stdout
+    current: str | None = None
+    counts: dict[str, int] = {}
+    total = 0
+    for line in patch.splitlines():
+        if line.startswith("+++ b/"):
+            current = line[6:]
+        elif line.startswith("@@") and current:
+            counts[current] = counts.get(current, 0) + 1
+            total += 1
+    return counts, total
+
+
+def untracked_hunks(repo: Path, item: dict[str, Any]) -> int:
+    path = repo / item["path"]
+    if not path.is_file() or path.is_symlink():
+        return 0
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return 0
+    if b"\0" in raw:
+        return 0
+    return 1 if raw else 0
+
+
+def handoff_markdown(value: dict[str, Any]) -> str:
+    lines = [
+        f"# Handoff: {value['task']}",
+        "",
+        f"- Repository: `{value['repository_path']}`",
+        f"- Branch: `{value['branch']}`",
+        f"- Starting SHA: `{value['start_sha']}`",
+        f"- Merge base: `{value['merge_base']}`",
+        f"- HEAD: `{value['head_sha']}`",
+        f"- Dirty: `{str(value['dirty']).lower()}`",
+        f"- Changed files: `{value['summary']['changed_files']}`",
+        f"- Changed hunks: `{value['summary']['changed_hunks']}`",
+        "",
+        "## Files",
+        "",
+    ]
+    if not value["files"]:
+        lines.append("No changes detected.")
+    else:
+        for item in value["files"]:
+            if item["owners"]:
+                owners = ", ".join(item["owners"])
+            elif value["ownership"]["required"]:
+                owners = "UNOWNED (violation)"
+            else:
+                owners = "no owner declared (optional)"
+            lines.append(f"- `{item['status']}` `{item['path']}` — {item['hunks']} hunk(s); {owners}")
+    if value["summary"]["ownership_violations"]:
+        lines.extend(["", "## Ownership violations", ""])
+        lines.extend(f"- `{path}`" for path in value["summary"]["ownership_violations"])
+    lines.extend(["", f"Evidence JSON: `{value['receipt_path']}`", ""])
+    return "\n".join(lines)
+
+
+def handoff_command(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    task = validate_task(args.task)
+    manifest, _ = load_manifest(repo, task)
+    verification = verify_workspace(repo, manifest, require_writer=False)
+    config, config_digest = load_config(repo)
+    files, merge_base = changed_files(repo, manifest["start_sha"])
+    counts, total_hunks = hunk_counts(repo, merge_base)
+    rules, ownership_required, ownership_source = ownership_rules(repo, config)
+    violations: list[str] = []
+    for item in files:
+        if not item["tracked"]:
+            counts[item["path"]] = untracked_hunks(repo, item)
+            total_hunks += counts[item["path"]]
+        item["hunks"] = counts.get(item["path"], 0)
+        item["owners"] = assign_owners(item["path"], rules)
+        if ownership_required and not item["owners"]:
+            violations.append(item["path"])
+    status = git(repo, "status", "--short", "--branch").stdout.rstrip()
+    handoff_dir = task_dir(repo, task) / "handoffs"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = handoff_dir / f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}.json"
+    value: dict[str, Any] = {
+        "schema": HANDOFF_SCHEMA,
+        "tool": {
+            "version": VERSION,
+            "implementation_sha256": implementation_sha256(),
+        },
+        "task": task,
+        "repository_path": str(repo),
+        "common_git_dir": str(common_git_dir(repo)),
+        "branch": manifest["branch"],
+        "start_sha": manifest["start_sha"],
+        "merge_base": merge_base,
+        "head_sha": git(repo, "rev-parse", "HEAD").stdout.strip(),
+        "dirty": bool(files),
+        "git_status": status,
+        "files": sorted(files, key=lambda item: item["path"]),
+        "ownership": {
+            "required": ownership_required,
+            "source": ownership_source,
+            "policy_sha256": config_digest,
+        },
+        "summary": {
+            "changed_files": len(files),
+            "changed_hunks": total_hunks,
+            "ownership_violations": sorted(violations),
+        },
+        "workspace_verification": verification,
+        "generated_at": utc_now(),
+        "receipt_path": str(receipt_path),
+    }
+    atomic_json(receipt_path, value, exclusive=True)
+    output = json.dumps(value, indent=2, sort_keys=True) + "\n" if args.format == "json" else handoff_markdown(value)
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+        try:
+            output_path.relative_to(repo)
+        except ValueError:
+            pass
+        else:
+            raise ToolError(
+                "handoff output must stay outside the writer worktree so it "
+                "cannot invalidate its own evidence"
+            )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(output)
+        print(str(output_path))
+    else:
+        print(output, end="" if output.endswith("\n") else "\n")
+    if violations:
+        eprint("handoff: ownership policy violations are recorded in the receipt")
+        return 6
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="worktree-bootstrap",
+        description="Enforce one task -> one worktree -> one branch -> one writer.",
+    )
+    parser.add_argument("--version", action="version", version=f"worktree-bootstrap {VERSION}")
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    create = subparsers.add_parser("create", help="validate the base, create a worktree, and run locked bootstrap")
+    create.add_argument("task")
+    create.add_argument("--repo", default=".")
+    create.add_argument("--base")
+    create.add_argument("--branch")
+    create.add_argument("--path")
+    authority = create.add_mutually_exclusive_group()
+    authority.add_argument("--no-fetch", action="store_true", help="allowed only for repositories without an upstream")
+    authority.add_argument(
+        "--local-only",
+        action="store_true",
+        help="create from a full local commit SHA without branch or upstream discovery",
+    )
+    create.set_defaults(handler=create_command)
+
+    verify = subparsers.add_parser("verify", help="verify repository, branch, start SHA, dependencies, and optional writer lock")
+    verify.add_argument("task")
+    verify.add_argument("--repo", default=".")
+    verify.add_argument("--require-writer", action="store_true")
+    verify.set_defaults(handler=verify_command)
+
+    launch = subparsers.add_parser(
+        "launch",
+        help="acquire the single-writer lock and run a command",
+        usage=(
+            "worktree-bootstrap launch TASK [--repo REPO] "
+            "[--heartbeat-seconds N] -- WRITER [ARG ...]"
+        ),
+    )
+    launch.add_argument("task")
+    launch.add_argument("--repo", default=".")
+    launch.add_argument("--heartbeat-seconds", type=int, default=10)
+    launch.set_defaults(handler=launch_command)
+
+    lock = subparsers.add_parser("lock", help="inspect or explicitly clean writer locks")
+    lock_subparsers = lock.add_subparsers(dest="lock_command", required=True)
+    inspect = lock_subparsers.add_parser("inspect")
+    inspect.add_argument("task")
+    inspect.add_argument("--repo", default=".")
+    inspect.set_defaults(handler=lock_inspect_command)
+    clean = lock_subparsers.add_parser("clean")
+    clean.add_argument("task")
+    clean.add_argument("--repo", default=".")
+    clean.add_argument("--policy", required=True, choices=["dead-local", "expired-heartbeat"])
+    clean.add_argument("--lock-id", required=True)
+    clean.set_defaults(handler=lock_clean_command)
+
+    handoff = subparsers.add_parser("handoff", help="derive a handoff from Git and ownership evidence")
+    handoff.add_argument("task")
+    handoff.add_argument("--repo", default=".")
+    handoff.add_argument("--format", choices=["json", "markdown"], default="markdown")
+    handoff.add_argument("--output")
+    handoff.set_defaults(handler=handoff_command)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    writer_command: list[str] | None = None
+    if raw[:1] == ["launch"] and not any(
+        value in {"-h", "--help"} for value in raw[1:]
+    ):
+        if "--" not in raw:
+            parser.error("launch requires a writer command after --")
+        boundary = raw.index("--")
+        writer_command = raw[boundary + 1 :]
+        raw = raw[:boundary]
+    args = parser.parse_args(raw)
+    if args.subcommand == "launch":
+        args.command = writer_command or []
+    try:
+        return int(args.handler(args))
+    except ToolError as exc:
+        eprint(f"worktree-bootstrap: {exc}")
+        if exc.details and os.environ.get("WORKTREE_BOOTSTRAP_DEBUG"):
+            eprint(json.dumps(exc.details, indent=2, sort_keys=True))
+        return exc.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -38,7 +38,6 @@ import {
   CREDENTIAL_BOUNDARY_SCHEMA_ID,
   CREDENTIAL_FILE_ENV_KEYS,
   CredentialBoundaryError,
-  DSH_OX_MODEL,
   assertNoWorkerPushUrl,
   collectLaneSecrets,
   createCredentialHandoff,
@@ -275,8 +274,7 @@ function takeEnvAfterPreflight(parsed) {
 function allowedCredentialKey(provider, dshModel) {
   if (provider === 'grok') return 'XAI_API_KEY';
   if (provider === 'cursor-cloud') return 'CURSOR_API_KEY';
-  if (provider === 'dsh' && dshModel === DSH_OX_MODEL) return 'OPENROUTER_API_KEY';
-  if (provider === 'dsh') return 'MODEL_API_KEY';
+  if (provider === 'dsh') return 'OPENROUTER_API_KEY';
   return null;
 }
 

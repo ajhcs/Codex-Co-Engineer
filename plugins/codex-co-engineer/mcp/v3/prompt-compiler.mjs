@@ -73,6 +73,10 @@ import { parseRunManifestV1 } from './run-policy.mjs';
 export const CHILD_ENVELOPE_SCHEMA_ID = 'codex-co-engineer.child-envelope.v1';
 export const CHILD_ENVELOPE_VERSION = 1;
 
+const PROVIDER_WORKSPACE = 'work only in the current working directory (assigned worktree); repository_path is source identity, not a navigation target';
+const PROVIDER_GUIDANCE = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; honor an exact requested output and format exactly; required_evidence labels are controller metadata, not worker response sections; omit routine progress narration and repeated identity or report blocks unless the task prompt requests them, while surfacing blockers and necessary questions; do not seek receipt artifacts because the controller owns lifecycle and machine receipts';
+const PREVIOUS_PROVIDER_GUIDANCE = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; return requested results and evidence without seeking receipt artifacts because the controller owns lifecycle and machine receipts';
+
 // Worst-case rendering bounds. They mirror the P02 validators so the cap can
 // never reject a manifest those validators accept. JSON string escaping can
 // expand one parameter value to at most 3x its UTF-8 byte length (one astral
@@ -244,6 +248,8 @@ function renderEnvelope(fields) {
   pushLine(`lane_index: ${fields.lane_index}`);
   pushLine(`assignment_count: ${fields.assignment_count}`);
   pushLine(`repository_path: ${fields.repository.path}`);
+  pushLine(`provider_workspace: ${PROVIDER_WORKSPACE}`);
+  pushLine(`provider_guidance: ${PROVIDER_GUIDANCE}`);
   pushLine(`base_sha: ${fields.repository.base_sha}`);
   pushBlock('objective', fields.objective);
   pushLine(`assignment_id: ${fields.assignment_id}`);
@@ -529,6 +535,24 @@ export function parseChildEnvelopeV1(envelopeText) {
   }
   const repositoryPath = expectLine(reader, 'repository_path');
   assertRepositoryPath(repositoryPath, 'envelope.repository_path');
+  // Older v1 envelopes either carried the previous exact guidance or no
+  // provider execution guidance. Continue accepting those durable bytes while
+  // every newly compiled envelope makes response precedence explicit.
+  const legacyOffset = reader.offset;
+  const next = splitScaffoldLine(readScaffoldLine(reader));
+  if (next.key === 'provider_workspace') {
+    if (next.value !== PROVIDER_WORKSPACE) {
+      fail('invalid_format', 'envelope.provider_workspace',
+        'provider_workspace must preserve the compiler execution guidance.');
+    }
+    const guidance = expectLine(reader, 'provider_guidance');
+    if (guidance !== PROVIDER_GUIDANCE && guidance !== PREVIOUS_PROVIDER_GUIDANCE) {
+      fail('invalid_format', 'envelope.provider_guidance',
+        'provider_guidance must preserve the compiler execution guidance.');
+    }
+  } else {
+    reader.offset = legacyOffset;
+  }
   const baseSha = expectLine(reader, 'base_sha');
   assertBaseSha(baseSha, 'envelope.base_sha');
   const objectiveBlock = expectBlock(reader, 'objective', 'envelope.objective');

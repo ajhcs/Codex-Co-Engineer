@@ -1,0 +1,304 @@
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
+import test from 'node:test';
+
+const SERVER = fileURLToPath(new URL('../mcp/v3/server.mjs', import.meta.url));
+const CONSENT_CLI = fileURLToPath(new URL('../bin/consent-grants.mjs', import.meta.url));
+
+async function withClient(capabilities, formResult, exercise, options = {}) {
+  const ownsRoot = options.root === undefined;
+  const root = options.root ?? await mkdtemp(path.join(os.tmpdir(), 'co-engineer-consent-roundtrip-'));
+  const repo = path.join(root, 'repo');
+  const fixtureBin = path.join(root, 'bin');
+  await Promise.all([mkdir(repo, { recursive: true }), mkdir(fixtureBin, { recursive: true })]);
+  // Keep unrelated SDK readiness discovery from running real npm and writing logs after teardown.
+  await writeFile(path.join(fixtureBin, 'npm'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
+  if (!existsSync(path.join(repo, '.git'))) {
+    git('init', '--quiet');
+    git('config', 'user.name', 'Fixture');
+    git('config', 'user.email', 'fixture@example.test');
+    await writeFile(path.join(repo, 'README.md'), 'Synthetic consent fixture.\n');
+    git('add', 'README.md');
+    git('-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Fixture');
+  }
+  const sha = git('rev-parse', 'HEAD').toString().trim();
+  const child = spawn(process.execPath, ['--no-warnings', SERVER, '--stdio'], {
+    env: {
+      PATH: `${fixtureBin}${path.delimiter}${process.env.PATH}`,
+      HOME: root,
+      XDG_CONFIG_HOME: path.join(root, 'config'),
+      XDG_STATE_HOME: path.join(root, 'state'),
+      // An accepted form must stop before real workspaces or provider jobs.
+      XDG_RUNTIME_DIR: path.join(root, 'unavailable-runtime'),
+      DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(root, 'absent-bus')}`,
+      CODEX_CO_ENGINEER_STATE_DIR: path.join(root, 'receipts'),
+      CODEX_CO_ENGINEER_GROK_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_CURSOR_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_DSH_COMMAND: '/bin/false',
+      CODEX_CO_ENGINEER_ACPX_COMMAND: '/bin/false',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const pending = new Map();
+  const forms = [];
+  let nextId = 0;
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-2048); });
+  const lines = readline.createInterface({ input: child.stdout });
+  lines.on('line', (line) => {
+    const message = JSON.parse(line);
+    if (message.method === 'elicitation/create') {
+      forms.push(message);
+      const result = typeof formResult === 'function' ? formResult(forms.length) : formResult;
+      if (result !== undefined) {
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);
+      }
+      return;
+    }
+    const item = pending.get(message.id);
+    if (!item) return;
+    clearTimeout(item.timer);
+    pending.delete(message.id);
+    item.resolve(message);
+  });
+  child.once('exit', () => {
+    for (const item of pending.values()) {
+      clearTimeout(item.timer);
+      item.reject(new Error(`Server exited: ${stderr}`));
+    }
+    pending.clear();
+  });
+  const request = (method, params) => new Promise((resolve, reject) => {
+    const id = ++nextId;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Timed out: ${method}; ${stderr}`));
+    }, 15000);
+    pending.set(id, { resolve, reject, timer });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+  });
+  const call = async (name, args) => {
+    const response = await request('tools/call', { name, arguments: { ...args, response_mode: 'structured' } });
+    assert.equal(response.error, undefined);
+    assert.ok(response.result?.structuredContent, JSON.stringify(response.result));
+    return response.result.structuredContent;
+  };
+  try {
+    const initialized = await request('initialize', { protocolVersion: '2025-11-25', capabilities, clientInfo: { name: 'fixture', version: '1' } });
+    await exercise({ root, repo, sha, forms, call, request, initialized: initialized.result });
+  } finally {
+    for (const item of pending.values()) clearTimeout(item.timer);
+    pending.clear();
+    child.stdin.end();
+    child.kill('SIGTERM');
+    lines.close();
+    await new Promise((resolve) => child.exitCode !== null || child.signalCode !== null ? resolve() : child.once('exit', resolve));
+    if (ownsRoot) await rm(root, { recursive: true, force: true });
+  }
+}
+
+function submission(repo, runId = 'native-consent-roundtrip', providers = ['cursor-local']) {
+  return { run_request: {
+    run_id: runId, repo,
+    objective: 'Exercise native consent without launching a provider.',
+    assignments: providers.map((provider, index) => ({
+      assignment_id: `review-${index}`, provider, role: 'review',
+      prompt: 'Review the synthetic README.', expected_duration_ms: 60000,
+    })),
+  } };
+}
+
+async function noDispatch(call, receipt) {
+  assert.equal(receipt.authoritative_required_dispatch, false);
+  assert.ok(receipt.lanes.every((lane) => !lane.prompt_dispatched));
+  const diagnostics = await call('task', {
+    run_id: receipt.run_id, view: 'diagnostics', wait_ms: 0,
+  });
+  assert.equal(diagnostics.side_effects.provider_dispatched, false);
+  assert.ok(diagnostics.lanes.every((lane) => !lane.prepared && !lane.prompt_dispatched));
+  return diagnostics;
+}
+
+for (const [action, approved] of [['decline', false], ['cancel', false], ['accept', false], ['accept', 'true']]) {
+  test(`stdio native form ${action}/${approved} never approves repository exposure`, async () => {
+    const result = action === 'accept' ? { action, content: { approved } } : { action };
+    await withClient({ elicitation: { form: {} } }, result, async ({ repo, forms, call }) => {
+      const receipt = await call('delegate', submission(repo));
+      assert.equal(forms.length, 1);
+      assert.notEqual(receipt.consent.status, 'approved');
+      await noDispatch(call, receipt);
+      const inspected = await call('task', { run_id: receipt.run_id, wait_until: 'decision_or_attention', wait_ms: 0 });
+      assert.equal(inspected.run_id, receipt.run_id);
+      assert.equal(inspected.phase, receipt.phase);
+      assert.equal(forms.length, 1, 'inspection must not request another form');
+    });
+  });
+}
+
+test('stdio native acceptance crosses consent and stops at the isolated readiness barrier', async () => {
+  await withClient({ elicitation: { form: {} } }, {
+    action: 'accept', content: { approval_duration: 'This run only' },
+  }, async ({ repo, sha, forms, call }) => {
+    const receipt = await call('delegate', submission(repo));
+    assert.equal(forms.length, 1);
+    const form = forms[0].params;
+    assert.ok(form.message.includes(repo));
+    assert.ok(form.message.includes(sha));
+    assert.equal(form.requestedSchema.properties.approval_duration.type, 'string');
+    assert.deepEqual(form.requestedSchema.properties.approval_duration.enum,
+      ['Remember for this repository and these providers', 'This run only']);
+    assert.ok(form.requestedSchema.required.includes('approval_duration'));
+    assert.equal(receipt.consent.status, 'approved');
+    assert.equal(receipt.consent.duration, 'this_run_only');
+    assert.equal(receipt.phase, 'failed');
+    const diagnostics = await noDispatch(call, receipt);
+    assert.equal(diagnostics.telemetry.admission_failure_stage, 'readiness');
+    const inspected = await call('status', { run_id: receipt.run_id });
+    assert.equal(inspected.run_id, receipt.run_id);
+    assert.equal(inspected.phase, 'failed');
+    assert.equal(forms.length, 1);
+  });
+});
+
+test('stdio host without form capability gives an explicit blocker without elicitation', async () => {
+  await withClient({}, null, async ({ repo, forms, call }) => {
+    const receipt = await call('delegate', submission(repo));
+    assert.equal(forms.length, 0);
+    assert.equal(receipt.error.code, 'consent_host_unavailable');
+    assert.equal(receipt.blockers.verification, true);
+    const diagnostics = await noDispatch(call, receipt);
+    assert.equal(diagnostics.complete_candidate_blocked, true);
+  });
+});
+
+test('a dismissed form can be reopened explicitly on the same run', async () => {
+  const response = (attempt) => attempt === 1
+    ? { action: 'cancel' }
+    : { action: 'accept', content: { approval_duration: 'This run only' } };
+  await withClient({ elicitation: { form: {} } }, response, async ({ repo, forms, call }) => {
+    const pending = await call('delegate', submission(repo));
+    assert.equal(pending.phase, 'awaiting_consent');
+    await noDispatch(call, pending);
+    const resumed = await call('task', {
+      run_id: pending.run_id, run_reply: { request_consent: true },
+    });
+    assert.equal(forms.length, 2);
+    assert.equal(resumed.run_id, pending.run_id);
+    assert.equal(resumed.consent.status, 'approved');
+    const diagnostics = await noDispatch(call, resumed);
+    assert.equal(diagnostics.telemetry.admission_failure_stage, 'readiness');
+  });
+});
+
+test('status and cancellation remain usable while a native form is open', async () => {
+  let formOpened;
+  const opened = new Promise((resolve) => { formOpened = resolve; });
+  await withClient({ elicitation: { form: {} } }, () => { formOpened(); }, async ({ repo, call }) => {
+    const submissionResult = call('delegate', submission(repo));
+    await opened;
+    const pending = await call('status', { run_id: 'native-consent-roundtrip' });
+    assert.equal(pending.phase, 'awaiting_consent');
+    await noDispatch(call, pending);
+    const cancelled = await call('cancel', { run_id: pending.run_id });
+    assert.equal(cancelled.phase, 'cancelled');
+    await noDispatch(call, cancelled);
+    await noDispatch(call, await submissionResult);
+    const terminal = await call('status', { run_id: pending.run_id });
+    assert.equal(terminal.phase, 'cancelled');
+  });
+});
+
+test('stdio remembers across restart, reprompts on expansion and repository change, and observes CLI revoke', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-consent-restart-'));
+  const acceptRemember = { action: 'accept', content: {
+    approval_duration: 'Remember for this repository and these providers',
+  } };
+  try {
+    await withClient({ elicitation: { form: {} } }, acceptRemember,
+      async ({ repo, forms, call }) => {
+        const receipt = await call('delegate', submission(repo, 'remember-first'));
+        assert.equal(forms.length, 1);
+        assert.equal(receipt.consent.duration, 'repository_and_selected_providers');
+        assert.equal(receipt.consent.source, 'native_form');
+        await noDispatch(call, receipt);
+      }, { root });
+
+    await withClient({ elicitation: { form: {} } }, acceptRemember,
+      async ({ repo, forms, call }) => {
+        const reused = await call('delegate', submission(repo, 'remember-restart'));
+        assert.equal(forms.length, 0);
+        assert.equal(reused.consent.duration, 'repository_and_selected_providers');
+        assert.equal(reused.consent.source, 'durable_grant');
+        await noDispatch(call, reused);
+
+        const expanded = await call('delegate', submission(repo, 'remember-expanded',
+          ['cursor-local', 'dsh']));
+        assert.equal(forms.length, 1, 'adding a provider asks again');
+        assert.equal(expanded.consent.source, 'native_form');
+        await noDispatch(call, expanded);
+
+        const other = path.join(root, 'other-repo');
+        await mkdir(other);
+        const otherGit = (...args) => execFileSync('git', args, { cwd: other, stdio: 'pipe' });
+        otherGit('init', '--quiet');
+        otherGit('config', 'user.name', 'Fixture');
+        otherGit('config', 'user.email', 'fixture@example.test');
+        await writeFile(path.join(other, 'README.md'), 'Other repository.\n');
+        otherGit('add', 'README.md');
+        otherGit('-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Fixture');
+        const different = await call('delegate', submission(other, 'remember-different'));
+        assert.equal(forms.length, 2, 'a different repository asks again');
+        await noDispatch(call, different);
+
+        execFileSync(process.execPath, [CONSENT_CLI, 'revoke', '--repo', repo], {
+          env: { ...process.env, CODEX_CO_ENGINEER_STATE_DIR: path.join(root, 'receipts') },
+          stdio: 'pipe',
+        });
+        const revoked = await call('delegate', submission(repo, 'remember-revoked'));
+        assert.equal(forms.length, 3, 'the running server reloads a CLI revocation');
+        await noDispatch(call, revoked);
+      }, { root });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('native discovery metadata describes the workflow and accepts real receipt field types', async () => {
+  await withClient({ elicitation: { form: {} } }, { action: 'decline' }, async ({ repo, request, call, initialized }) => {
+    assert.ok(initialized.instructions.length <= 512);
+    assert.match(initialized.instructions, /run_request/);
+    const { result: { tools } } = await request('tools/list', {});
+    assert.equal(tools.length, 5);
+    const byName = new Map(tools.map(tool => [tool.name, tool]));
+    for (const tool of tools) {
+      assert.ok(tool.title);
+      assert.equal(tool.outputSchema.type, 'object');
+      assert.equal(typeof tool.annotations.readOnlyHint, 'boolean');
+    }
+    const cases = [
+      ['status', { detail: 'compact', include_tasks: false }],
+      ['delegate', submission(repo)],
+      ['task', { run_id: 'native-consent-roundtrip', wait_ms: 0 }],
+      ['cancel', { run_id: 'native-consent-roundtrip' }],
+    ];
+    for (const [name, args] of cases) {
+      const receipt = await call(name, args);
+      for (const [field, rule] of Object.entries(byName.get(name).outputSchema.properties)) {
+        if (!(field in receipt) || !rule.type) continue;
+        const value = receipt[field];
+        const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+        const allowed = Array.isArray(rule.type) ? rule.type : [rule.type];
+        assert.ok(allowed.includes(actual) || (allowed.includes('integer') && Number.isInteger(value)),
+          `${name}.${field}: advertised ${allowed}, received ${actual}`);
+        if (rule.enum) assert.ok(rule.enum.includes(value), `${name}.${field}: unexpected enum value`);
+      }
+    }
+  });
+});

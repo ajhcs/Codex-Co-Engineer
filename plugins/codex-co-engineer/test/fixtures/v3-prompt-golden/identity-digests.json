@@ -40,24 +40,24 @@
       "domain": "codex-co-engineer.identity.v1",
       "version": 1,
       "label": "child-envelope.v1",
-      "input_bytes": 3555,
-      "digest": "caf1dc18402d1a05e3fd985b23700e4509f32e808f13c759238b3c52839a0e9a"
+      "input_bytes": 4222,
+      "digest": "0064faadfb6e6d9734d8adb2c335f3abe16e6d790cf733e789717f93d5ca6724"
     },
     "docs-reviewer": {
       "algorithm": "sha256",
       "domain": "codex-co-engineer.identity.v1",
       "version": 1,
       "label": "child-envelope.v1",
-      "input_bytes": 1648,
-      "digest": "28fb6b34fbfce6a1516c3cf8fa088701b081a7eb8118b2225e0dbb8283d9be5c"
+      "input_bytes": 2317,
+      "digest": "8d9718b5f4c74ea7c66ce6b031b1c71cf09d1f2492e6632b504b6a4b45535597"
     },
     "cloud-verify": {
       "algorithm": "sha256",
       "domain": "codex-co-engineer.identity.v1",
       "version": 1,
       "label": "child-envelope.v1",
-      "input_bytes": 1689,
-      "digest": "fbe3cbcec07b90645f0ebb987cc74d2584c455bd8592dface3ec887384ed6a84"
+      "input_bytes": 2358,
+      "digest": "ac8cb61f55170c403c55416232e6923d77128d6c8b8a7f9c9c52eaee98bee87d"
     }
   }
 }

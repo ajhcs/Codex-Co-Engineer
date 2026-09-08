@@ -21,7 +21,6 @@ kind = "bootstrap"
 command = ["npm", "--prefix", "tools/acpx-vendor", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
 failure_class = "environment_blocked"
 timeout_seconds = 180
-env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
 
 [[stages]]
 name = "co-engineer-unit"
@@ -74,7 +73,6 @@ kind = "build"
 command = ["npm", "--prefix", "tools/acpx-vendor", "run", "test:reproducible"]
 failure_class = "product_test_failed"
 timeout_seconds = 180
-env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
 
 [[stages]]
 name = "acpx-publish-provenance"
@@ -82,7 +80,6 @@ kind = "security_checks"
 command = ["npm", "--prefix", "tools/acpx-vendor", "run", "verify:publish-provenance"]
 failure_class = "product_test_failed"
 timeout_seconds = 180
-env = { ACPX_NPM_CACHE = "/tmp/codex-acpx-release-npm-cache", NPM_CONFIG_CACHE = "/tmp/codex-acpx-release-npm-cache" }
 
 [[stages]]
 name = "co-engineer-package-inventory"
