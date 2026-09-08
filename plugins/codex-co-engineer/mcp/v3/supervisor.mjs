@@ -78,6 +78,7 @@ import {
 } from './run-request-compiler.mjs';
 import { loadReadinessSnapshot, saveReadinessSnapshot } from './readiness-snapshot.mjs';
 import { buildGitIdentityV1, buildWorkspaceIdentityV1 } from './protected-identity.mjs';
+import { assertRuntimeEntrypoints } from './runtime-entrypoints.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
@@ -178,6 +179,7 @@ const PUBLIC_STARTUP_MESSAGES = Object.freeze({
   cursor_cloud_start_ref_unavailable: 'Cursor Cloud requires an immutable starting commit.',
   cursor_cloud_start_ref_invalid: 'Cursor Cloud requires a full 40-character commit starting reference.',
   invalid_provider_repo: 'provider_repo_url is supported only for Cursor Cloud tasks.',
+  runtime_install_incomplete: 'The installed Codex-Co-Engineer runtime is incomplete. Reinstall the plugin, then restart Codex.',
 });
 
 export class SupervisorError extends Error {
@@ -803,6 +805,14 @@ export async function submitTask(input, dependencies = {}) {
   } catch (error) {
     if (error instanceof SupervisorError) throw error;
     if (error?.code !== 'ENOENT') throw error;
+  }
+  try {
+    await (dependencies.preflightRuntime ?? assertRuntimeEntrypoints)(input.provider);
+  } catch {
+    throw publicStartupError(
+      new SupervisorError('runtime_install_incomplete', 'The installed runtime is incomplete.'),
+      'runtime_install_incomplete',
+    );
   }
   if (input.provider !== 'cursor-cloud') {
     requireLocalBoundary(await localBoundaryReadiness(dependencies.probeBoundary));

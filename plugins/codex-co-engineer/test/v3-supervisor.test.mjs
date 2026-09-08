@@ -171,6 +171,47 @@ test('invalid worktree receipt fails before dispatch', async () => {
   );
 });
 
+test('incomplete installed runtime fails before local provisioning or cloud dispatch', async () => {
+  for (const provider of ['grok', 'cursor-cloud']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `co-engineer-runtime-preflight-${provider}-`));
+    const calls = [];
+    try {
+      await assert.rejects(
+        submitTask({
+          task_id: `runtime-preflight-${provider}`,
+          provider,
+          repo: '/repo',
+          prompt: 'PRIVATE_PROMPT',
+          expected_duration_ms: 10_000,
+        }, {
+          root,
+          preflightRuntime: async (selectedProvider) => {
+            calls.push(['runtime', selectedProvider]);
+            throw Object.assign(new Error('/deleted/cache/credential-handoff-loader.mjs'), { code: 'ENOENT' });
+          },
+          probeBoundary: async () => { calls.push(['boundary']); return readyBoundary(); },
+          createWorkspace: async () => { calls.push(['workspace']); throw new Error('must not provision'); },
+          execute: async () => { calls.push(['git']); throw new Error('must not inspect repository'); },
+          launch: async () => { calls.push(['launch']); throw new Error('must not launch'); },
+        }),
+        (error) => {
+          assert.equal(error.code, 'runtime_install_incomplete');
+          assert.equal(error.message, 'The installed Codex-Co-Engineer runtime is incomplete. Reinstall the plugin, then restart Codex.');
+          assert.doesNotMatch(error.message, /deleted|cache|credential/iu);
+          return true;
+        },
+      );
+      assert.deepEqual(calls, [['runtime', provider]]);
+      await assert.rejects(
+        readTask(root, `runtime-preflight-${provider}`),
+        (error) => error.code === 'ENOENT',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('managed delegation rejects a missing or invalid workspace before provider launch', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-supervisor-workspace-contract-'));
   const launches = [];
