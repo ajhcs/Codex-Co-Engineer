@@ -6,6 +6,9 @@
 
 ### Fixed
 
+- Provider instructions honor the requested answer format and omit routine
+  narration and unrequested evidence headings. Controller evidence requirements
+  remain intact and do not act as an answer template.
 - Handle processes disappearing during verification cleanup scans and parse
   parenthesized process names correctly, while preserving fail-closed errors.
 - Remember explicit native approval for the same repository and selected
