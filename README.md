@@ -44,9 +44,10 @@ completion and cleanup, and concise Grok results. Read the
 
 ### 1. Check your host
 
-You need **Node.js 24+**, **Git**, and a current **Codex CLI** with plugin support.
+You need **Node.js 24+**, **Git**, **Python 3.11+** for the bundled setup, and a
+current **Codex CLI** with plugin support.
 Local Grok, Cursor, and Muse also require **Linux**, a working `systemd --user`
-manager, `systemd-run` 244+, unified cgroup v2, and **Python 3.11+**.
+manager, `systemd-run` 244+, and unified cgroup v2.
 Cursor Cloud runs remotely and does not require that local process boundary.
 
 Install the CLI and account access for **only the providers you plan to use**.
