@@ -40,7 +40,7 @@ function request() {
 }
 
 
-test('default simple dispatch sends the compiled envelope and pins its workspace base', async () => {
+test('default simple dispatch sends the compiled envelope with native workspace guidance and pins its workspace base', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-simple-dispatch-contract-'));
   const calls = [];
   try {
@@ -93,6 +93,10 @@ test('default simple dispatch sends the compiled envelope and pins its workspace
     assert.deepEqual(call.input.capabilities, [...RUN_REQUEST_DEFAULT_CAPABILITIES]);
     assert.equal(call.input.child_envelope_digest, compiled.assignments[0].prompt_envelope_digest);
     assert.equal(call.input.prompt, compiled.assignments[0].child_envelope.envelope_text);
+    assert.match(call.input.prompt, /^repository_path: \/tmp\/fixture-repo$/mu);
+    assert.match(call.input.prompt, /^provider_workspace: work only in the current working directory \(assigned worktree\); repository_path is source identity, not a navigation target$/mu);
+    assert.match(call.input.prompt, /^provider_guidance: .*controller owns lifecycle and machine receipts$/mu);
+    assert.equal(envelope.prompt, 'Implement the bounded slice.');
     assert.equal(envelope.execution.provider, 'grok');
     assert.equal(envelope.execution.model, 'grok-4');
     assert.equal(envelope.role, 'implement');
