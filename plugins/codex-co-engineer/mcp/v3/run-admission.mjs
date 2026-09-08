@@ -147,11 +147,14 @@ const SAFE_CONSENT_ERROR_CODES = capturedFreeze([
   'consent_timed_out',
   'consent_response_invalid',
   'consent_request_aborted',
+  'consent_grant_store_invalid',
+  'consent_repository_identity_changed',
 ]);
 const RETRYABLE_CONSENT_ERROR_CODES = capturedFreeze([
   'consent_cancelled',
   'consent_timed_out',
   'consent_request_aborted',
+  'consent_repository_identity_changed',
 ]);
 const SAFE_ATTENTION_CAPABILITIES = capturedFreeze([
   'read_run_receipts', 'read_provider_logs', 'read_own_worktree',
@@ -410,7 +413,9 @@ function publicConsentRequest(compiled) {
     repository_identity: repositoryIdentity,
     providers,
     scope: 'full_repository',
-    duration: 'this_run_only',
+    duration: 'user_selected',
+    duration_options: ['repository_and_selected_providers', 'this_run_only'],
+    default_duration: 'repository_and_selected_providers',
     remote_mutation: false,
   });
 }
@@ -805,7 +810,11 @@ function receipt(record, extras = {}) {
     lanes: record.lanes.map(laneReceipt),
     consent: record.consent_request
       ? { status: record.consent_status, request: record.consent_request }
-      : { status: record.consent_status },
+      : {
+        status: record.consent_status,
+        duration: record.consent_binding?.duration ?? 'this_run_only',
+        source: record.consent_binding?.source ?? null,
+      },
     admission: record.admission,
     dispatched_assignment_ids: dispatched,
     undispatched_assignment_ids: undispatched,
@@ -1149,6 +1158,13 @@ export function createRunAdmissionRuntime(overrides = {}) {
     if (isConsentApproved(response)) {
       record.consent_status = 'approved';
       record.consent_request = null;
+      record.consent_binding = freezeData({
+        ...record.consent_binding,
+        duration: response?.duration === 'repository_and_selected_providers'
+          ? 'repository_and_selected_providers'
+          : 'this_run_only',
+        source: response?.source === 'durable_grant' ? 'durable_grant' : 'native_form',
+      });
       record.error = null;
       return true;
     }

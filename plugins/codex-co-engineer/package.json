@@ -8,6 +8,9 @@
     "node": ">=24.0.0"
   },
   "type": "module",
+  "bin": {
+    "codex-co-engineer-consent": "./bin/consent-grants.mjs"
+  },
   "files": [
     ".codex-plugin",
     ".mcp.json",

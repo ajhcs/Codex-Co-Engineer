@@ -51,6 +51,7 @@ import {
   experienceForRunToolResult,
 } from './run-tool-adapter.mjs';
 import { createNativeConsentTransport } from './consent.mjs';
+import { createConsentGrantStore } from './consent-grants.mjs';
 
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26']);
 let negotiated = '2025-11-25';
@@ -708,6 +709,7 @@ const nativeConsent = createNativeConsentTransport({
   send,
   getCapabilities: () => clientCapabilities,
   getProtocolVersion: () => negotiated,
+  grantStore: createConsentGrantStore({ root: stateRoot() }),
 });
 
 async function handle(message) {

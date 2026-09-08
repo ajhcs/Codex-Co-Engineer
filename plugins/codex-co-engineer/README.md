@@ -213,6 +213,29 @@ repository files. Task receipts contain bounded output, provider/session
 identifiers, branch and PR information, lifecycle state, and runtime
 identity; they do not contain credentials or the full prompt.
 
+The native repository consent form treats the host's **Accept** action as the
+approval. Its required selector defaults, as disclosed in the form, to
+remembering the canonical repository and selected providers; **This run only**
+keeps the approval one-time. Adding a provider or changing repository identity
+asks again. Existing run-only approvals are never promoted automatically.
+
+```bash
+node /absolute/path/to/plugin/bin/consent-grants.mjs list
+node /absolute/path/to/plugin/bin/consent-grants.mjs revoke --repo /absolute/path/to/repository
+node /absolute/path/to/plugin/bin/consent-grants.mjs revoke --grant-id GRANT_ID_FROM_LIST
+```
+
+An npm installation also exposes `codex-co-engineer-consent`. A plugin install
+does not place package bins on the global `PATH`, so use the explicit script
+path shown above. If an interrupted update leaves `.consent-grants.lock`,
+verify that no MCP server or consent command is running before removing that
+one owner-only lock file from the Co-Engineer state directory.
+
+The grant file is owner-only state. It contains repository identity, normalized
+credential-free origin identity, provider IDs, and grant time, never prompts or
+credentials. Revocation is observed by an already-running MCP server on its
+next request.
+
 ## Advanced Co-Engineer Control/API
 
 This section is for operators and Codex internals. Normal users do not

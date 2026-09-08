@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { MCP_PENDING_CALL_BUDGET_MS } from './contract.mjs';
+import {
+  CONSENT_GRANT_DURATION,
+  CONSENT_RUN_DURATION,
+} from './consent-grants.mjs';
 
 export const NATIVE_CONSENT_METHOD = 'elicitation/create';
 export const NATIVE_CONSENT_MAX_PENDING = 8;
-export const NATIVE_CONSENT_TIMEOUT_MS = 120_000;
+export const NATIVE_CONSENT_TIMEOUT_MS = 600_000;
 export const NATIVE_CONSENT_SUPPORTED_PROTOCOLS = Object.freeze([
   '2025-11-25',
   '2025-06-18',
@@ -16,6 +20,8 @@ export const NATIVE_CONSENT_BLOCKED_CODES = Object.freeze([
   'consent_timed_out',
   'consent_response_invalid',
   'consent_request_aborted',
+  'consent_grant_store_invalid',
+  'consent_repository_identity_changed',
 ]);
 
 const RUN_ID = /^[a-z][a-z0-9-]{2,63}$/u;
@@ -23,18 +29,21 @@ const BASE_SHA = /^[a-f0-9]{40}$/iu;
 const MAX_TIMEOUT_MS = MCP_PENDING_CALL_BUDGET_MS;
 const ACCEPT_ACTIONS = new Set(['accept', 'decline', 'cancel']);
 const PROVIDER = /^[a-z][a-z0-9-]{0,63}$/u;
+const REMEMBER_LABEL = 'Remember for this repository and these providers';
+const THIS_RUN_LABEL = 'This run only';
 
 const REQUESTED_SCHEMA = Object.freeze({
   type: 'object',
   properties: Object.freeze({
-    approved: Object.freeze({
-      type: 'boolean',
-      title: 'Allow repository access',
-      description: 'Allow the selected co-engineers to read the full repository and its history for this run.',
-      default: false,
+    approval_duration: Object.freeze({
+      type: 'string',
+      title: 'Remember this approval?',
+      description: 'Choose whether to remember access for this repository and exactly these providers. The default remembers it; choose this run only for a one-time approval.',
+      enum: Object.freeze([REMEMBER_LABEL, THIS_RUN_LABEL]),
+      default: REMEMBER_LABEL,
     }),
   }),
-  required: Object.freeze(['approved']),
+  required: Object.freeze(['approval_duration']),
   additionalProperties: false,
 });
 
@@ -109,13 +118,18 @@ function consentMessage(binding) {
     `Base SHA: ${binding.base_sha}`,
     `Selected providers: ${binding.providers.join(', ')}`,
     'Scope: full repository and Git history.',
-    'Duration: this run only.',
+    'Default: remember approval for this repository and the selected providers.',
+    'Alternative: approve this run only.',
+    'Adding a provider, changing the repository origin, or recreating the repository asks again.',
     'Remote mutations: none.',
   ].join('\n');
 }
 
 function blocked(code) {
-  const status = ['consent_cancelled', 'consent_timed_out', 'consent_request_aborted'].includes(code)
+  const status = [
+    'consent_cancelled', 'consent_timed_out', 'consent_request_aborted',
+    'consent_repository_identity_changed',
+  ].includes(code)
     ? 'required' : 'blocked';
   return Object.freeze({ status, code });
 }
@@ -132,13 +146,19 @@ function validateResult(result) {
   const hasContent = own(result, 'content');
   if (result.action === 'accept') {
     if (!hasContent || !isRecord(result.content)
-      || Object.keys(result.content).some((key) => key !== 'approved')
-      || typeof result.content.approved !== 'boolean') {
+      || Object.keys(result.content).length !== 1
+      || !own(result.content, 'approval_duration')
+      || ![REMEMBER_LABEL, THIS_RUN_LABEL]
+        .includes(result.content.approval_duration)) {
       return responseInvalid();
     }
-    return result.content.approved === true
-      ? Object.freeze({ approved: true })
-      : blocked('consent_declined');
+    return Object.freeze({
+      approved: true,
+      duration: result.content.approval_duration === REMEMBER_LABEL
+        ? CONSENT_GRANT_DURATION
+        : CONSENT_RUN_DURATION,
+      source: 'native_form',
+    });
   }
   if (hasContent && result.content !== undefined
     && (!isRecord(result.content) || Object.keys(result.content).length > 0)) {
@@ -184,6 +204,7 @@ export function createNativeConsentTransport(options = {}) {
   const getProtocolVersion = options.getProtocolVersion;
   const defaultTimeout = validTimeout(options.timeoutMs, NATIVE_CONSENT_TIMEOUT_MS);
   const maxPending = validPendingLimit(options.maxPending, NATIVE_CONSENT_MAX_PENDING);
+  const grantStore = options.grantStore ?? null;
   const pending = new Map();
   const byRun = new Map();
   let closed = false;
@@ -198,24 +219,49 @@ export function createNativeConsentTransport(options = {}) {
     return true;
   }
 
-  function requestConsent(compiled, requestOptions = {}) {
+  async function requestConsent(compiled, requestOptions = {}) {
     const binding = consentBinding(compiled);
     const capabilities = capabilitiesValue(requestOptions, getCapabilities);
     const version = protocolVersion(requestOptions, getProtocolVersion);
     if (closed || !supportsNativeForm(capabilities)
       || !NATIVE_CONSENT_SUPPORTED_PROTOCOLS.includes(version)) {
-      return Promise.resolve(blocked('consent_host_unavailable'));
+      return blocked('consent_host_unavailable');
     }
-    if (binding === null) return Promise.resolve(responseInvalid());
+    if (binding === null) return responseInvalid();
     const signal = requestOptions?.signal;
-    if (signal?.aborted) return Promise.resolve(blocked('consent_request_aborted'));
+    if (signal?.aborted) return blocked('consent_request_aborted');
     const existing = byRun.get(binding.run_id);
     if (existing) {
       return existing.binding_key === bindingKey(binding)
         ? existing.promise
-        : Promise.resolve(responseInvalid());
+        : responseInvalid();
     }
-    if (pending.size >= maxPending) return Promise.resolve(blocked('consent_host_unavailable'));
+    let repositoryIdentity = null;
+    if (grantStore !== null) {
+      let remembered;
+      try {
+        repositoryIdentity = await grantStore.resolveIdentity(binding.repository_path);
+        remembered = await grantStore.lookup({
+          repositoryPath: binding.repository_path,
+          repositoryIdentity,
+          providers: binding.providers,
+        });
+      } catch {
+        return blocked('consent_grant_store_invalid');
+      }
+      if (closed) return blocked('consent_host_unavailable');
+      if (signal?.aborted) return blocked('consent_request_aborted');
+      const afterLookup = byRun.get(binding.run_id);
+      if (afterLookup) {
+        return afterLookup.binding_key === bindingKey(binding)
+          ? afterLookup.promise
+          : responseInvalid();
+      }
+      if (remembered?.approved === true
+        && remembered.duration === CONSENT_GRANT_DURATION
+        && remembered.source === 'durable_grant') return remembered;
+    }
+    if (pending.size >= maxPending) return blocked('consent_host_unavailable');
 
     const request_id = nextRequestId(pending);
     const params = {
@@ -235,6 +281,8 @@ export function createNativeConsentTransport(options = {}) {
       timer: null,
       signal,
       onAbort: null,
+      repository_identity: repositoryIdentity,
+      responded: false,
     };
     entry.onAbort = () => settle(entry, blocked('consent_request_aborted'));
     pending.set(request_id, entry);
@@ -267,12 +315,39 @@ export function createNativeConsentTransport(options = {}) {
     if (!hasResult && !hasError) return message.id !== undefined;
     const entry = pending.get(message.id);
     if (!entry) return true;
+    if (entry.responded) return true;
+    entry.responded = true;
     if (own(message, 'method') || (hasResult && hasError)) {
       settle(entry, responseInvalid());
     } else if (hasError) {
       settle(entry, responseInvalid());
     } else {
-      settle(entry, validateResult(message.result));
+      const result = validateResult(message.result);
+      if (result.approved === true && grantStore !== null) {
+        Promise.resolve(grantStore.assertIdentityCurrent({
+          repositoryPath: entry.binding.repository_path,
+          repositoryIdentity: entry.repository_identity,
+        })).then(async () => {
+          if (pending.get(entry.request_id) !== entry) return false;
+          if (result.duration === CONSENT_GRANT_DURATION) {
+            await grantStore.remember({
+              repositoryPath: entry.binding.repository_path,
+              repositoryIdentity: entry.repository_identity,
+              providers: entry.binding.providers,
+            });
+          }
+          return true;
+        }).then((active) => active && settle(entry, result)).catch((error) => {
+          const code = error?.code === 'consent_repository_identity_changed'
+            ? 'consent_repository_identity_changed'
+            : 'consent_grant_store_invalid';
+          settle(entry, blocked(code));
+        });
+      } else if (result.approved === true && result.duration === CONSENT_GRANT_DURATION) {
+        settle(entry, blocked('consent_grant_store_invalid'));
+      } else {
+        settle(entry, result);
+      }
     }
     return true;
   }
