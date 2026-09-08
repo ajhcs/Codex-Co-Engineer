@@ -18,6 +18,7 @@ import {
   UNSHARE_EXECUTABLE,
   VERIFICATION_EXECUTION_DIGEST_LABEL,
   executeConstrainedVerificationV1,
+  listProcDescendants,
 } from '../mcp/v3/constrained-verification-runner.mjs';
 import {
   SHA_DIFF,
@@ -427,6 +428,21 @@ test('the approved command is spawned exactly once per invocation', async () => 
     assert.equal(calls.spawn.length, 1);
     assert.equal(calls.spawn[0].file, TRUE_EXECUTABLE);
   });
+});
+
+test('proc descendant scan tolerates vanished entries and parses command names containing parentheses', async () => {
+  const reads = [];
+  const descendants = await listProcDescendants(50, {
+    readDir: async () => ['50', '51', '52', 'self'],
+    readText: async (file) => {
+      reads.push(file);
+      if (file === '/proc/51/stat') throw Object.assign(new Error('vanished'), { code: 'ESRCH' });
+      return '52 (worker) helper) S 1 50 50 0 0 0 0';
+    },
+  });
+  assert.deepEqual(descendants, [52]);
+  assert.equal(Object.isFrozen(descendants), true);
+  assert.deepEqual(reads, ['/proc/51/stat', '/proc/52/stat']);
 });
 
 test('the disposable workspace materializes candidate README bytes for the command', async () => {

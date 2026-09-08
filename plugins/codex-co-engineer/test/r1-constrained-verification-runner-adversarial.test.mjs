@@ -19,6 +19,7 @@ import {
   WORKSPACE_NAME_PREFIX,
   WORKSPACE_PARENT_PREFIX,
   executeConstrainedVerificationV1,
+  listProcDescendants,
 } from '../mcp/v3/constrained-verification-runner.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import {
@@ -473,6 +474,28 @@ test('parent-failing /proc enumeration failure is cleanup_uncertain not pass', a
     assert.equal(nonArray.code, 'cleanup_uncertain');
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('proc descendant scan keeps unexpected read failures and malformed identities fail-closed', async () => {
+  const unreadable = await errorOf(() => listProcDescendants(50, {
+    readDir: async () => ['51'],
+    readText: async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); },
+  }));
+  assert.equal(unreadable.code, 'cleanup_uncertain');
+  assert.equal(unreadable.path, 'execution');
+
+  for (const malformed of [
+    '51 (worker) S not-a-pid 50 0 0 0',
+    '51 (worker) S 1 not-a-group 0 0 0',
+    '51 worker S 1 50 0 0 0',
+  ]) {
+    const error = await errorOf(() => listProcDescendants(50, {
+      readDir: async () => ['51'],
+      readText: async () => malformed,
+    }));
+    assert.equal(error.code, 'cleanup_uncertain');
+    assert.equal(error.path, 'execution');
   }
 });
 
