@@ -78,11 +78,31 @@ cannot provide those derived fields. A changed objective, assignment,
 provider, SHA, or scope produces a different identity.
 
 The stdio server requests repository exposure through the host's native MCP
-form. The form names the repository/base, run, and selected providers and asks
-for explicit approval to share the full repository and history for this run.
-Only the host's accepted confirmation permits admission; a model-authored
-boolean or prose reply does not. Hosts without form elicitation return an
+form. The form names the repository/base, run, and selected providers. Native
+**Accept** is the approval; there is no second approval checkbox. The required
+selector clearly defaults to remembering approval for the canonical Git
+repository and exactly those providers, with **This run only** as the one-time
+choice. A remembered provider subset can be reused across worktrees that share
+the same Git common directory. A new provider, changed origin, unrelated or
+recreated repository, rejected form, or malformed owner state cannot reuse it.
+No earlier run-only approval is migrated. A model-authored boolean or prose
+reply does not approve access. Hosts without form elicitation return an
 explicit capability blocker before any workspace or prompt dispatch.
+
+Remembered grants live in the owner-only Co-Engineer state directory and never
+contain credentials. Inspect or revoke them with the installed package command:
+
+```sh
+node /absolute/path/to/plugin/bin/consent-grants.mjs list
+node /absolute/path/to/plugin/bin/consent-grants.mjs revoke --repo /absolute/path/to/repository
+node /absolute/path/to/plugin/bin/consent-grants.mjs revoke --grant-id GRANT_ID_FROM_LIST
+```
+
+An npm package installation also provides the shorter
+`codex-co-engineer-consent` command. If a process stops during a grant update
+and later commands report `consent_grant_store_busy`, first verify that no MCP
+server or consent command is running, then remove only
+`.consent-grants.lock` from the owner-only Co-Engineer state directory.
 
 A dismissed or interrupted approval remains inspectable. To request the
 native form again for a pending run, call `task` with the same `run_id` and
