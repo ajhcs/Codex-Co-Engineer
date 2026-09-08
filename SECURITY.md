@@ -95,9 +95,9 @@ shared across linked worktrees of the same repository. They do not authorize new
 providers, changed origins, or replacement repositories. Earlier one-run approvals
 are not automatically converted into remembered grants.
 
-Use `codex-co-engineer-consent list` and `codex-co-engineer-consent revoke`
-to inspect or revoke grants; see the [plugin README](plugins/codex-co-engineer/README.md)
-for command arguments. Revocation affects later admissions, not already authorized
+Use the packaged `bin/consent-grants.mjs` command to inspect or revoke grants;
+see the [plugin README](plugins/codex-co-engineer/README.md) for invocation and
+command arguments. Revocation affects later admissions, not already authorized
 running tasks; cancel those tasks separately when required.
 
 ## Credentials and persistent sessions
