@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   boundedEvent,
+  GROK_RESPONSE_RULES_V1,
   handlePermissionRequest,
   isUserFacingPermission,
   publicError,
@@ -139,6 +140,22 @@ test('runs a prompt through ACP and persists a compact receipt', async () => {
   assert.match(events, /"type":"cleanup"/u);
 });
 
+test('Grok sets creation-only response rules without changing prompt bytes, while Cursor remains unchanged', async () => {
+  const prompt = 'Read the version. Reply exactly: R\u00e9sum\u00e9 \u{1F98A}\n';
+  for (const provider of ['grok', 'cursor-local']) {
+    const value = await fixture({ provider, id: `${provider}-session-rules`, prompt, mode: 'capture-wire' });
+    await runAcpTask({ root: value.root, taskId: value.taskId });
+    const sessionNew = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-session-new.json'), 'utf8'));
+    const promptRequest = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-prompt.json'), 'utf8'));
+    if (provider === 'grok') {
+      assert.equal(sessionNew._meta.rules, GROK_RESPONSE_RULES_V1);
+    } else {
+      assert.equal(Object.hasOwn(sessionNew._meta ?? {}, 'rules'), false);
+    }
+    assert.deepEqual(promptRequest.prompt, [{ type: 'text', text: prompt }]);
+  }
+});
+
 for (const provider of ['grok', 'cursor-local']) {
   test(`${provider} preserves a terminal verdict at the end of long ACP output`, async () => {
     const value = await fixture({
@@ -202,6 +219,7 @@ test('reconnects an acknowledged ACP session without replaying its prompt', asyn
   assert.equal(resumed.reconnected, true);
   assert.equal(resumed.prompt_replayed, false);
   assert.equal(ensureInput.resumeSessionId, 'persisted-acp-session');
+  assert.equal(Object.hasOwn(ensureInput, 'sessionOptions'), false);
   assert.equal(startTurnCalled, false);
   assert.equal(closed, true);
   const { task } = await readTask(value.root, value.taskId);

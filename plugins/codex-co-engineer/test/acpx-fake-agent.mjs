@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const FIXTURE_MODES = new Set([
+  'capture-wire',
   'normal',
   'raw-partial-frame',
   'silent-initialize',
@@ -116,6 +117,9 @@ async function handleRequest(message) {
   if (method === 'notifications/initialized' || method === 'initialized') return;
   if (method === 'session/new') {
     if (fixtureMode === 'silent-session-create') return;
+    if (fixtureMode === 'capture-wire') {
+      await writeFile(join(process.cwd(), '.acpx-fake-session-new.json'), `${JSON.stringify(params)}\n`, { mode: 0o600 });
+    }
     const sessionId = `fake-session-${sessions.size + 1}`;
     sessions.add(sessionId);
     response(id, { sessionId });
@@ -140,6 +144,9 @@ async function handleRequest(message) {
     if (!sessions.has(params.sessionId)) {
       errorResponse(id, -32001, 'unknown session');
       return;
+    }
+    if (fixtureMode === 'capture-wire') {
+      await writeFile(join(process.cwd(), '.acpx-fake-prompt.json'), `${JSON.stringify(params)}\n`, { mode: 0o600 });
     }
     const text = Array.isArray(params.prompt)
       ? params.prompt.filter((entry) => entry?.type === 'text').map((entry) => entry.text).join(' ')

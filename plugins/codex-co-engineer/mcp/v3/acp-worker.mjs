@@ -49,6 +49,7 @@ const MAX_ACPX_EXEC_FRAME = 256 * 1024;
 const MAX_ACPX_EXEC_STDERR = 64 * 1024;
 const MAX_ACPX_EXEC_EVENTS = 256;
 const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
+export const GROK_RESPONSE_RULES_V1 = 'Unless the user explicitly requests narration, do not emit opening acknowledgments, preambles, or routine progress text as agent messages. Use tools silently. Emit only the final answer requested by the user, in the requested format. If a genuine blocker prevents completion or a necessary question requires user input, emit that blocker or question instead.';
 
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
@@ -1612,6 +1613,7 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       agent: configuration.agent,
       mode: 'persistent',
       cwd,
+      ...(task.provider === 'grok' ? { sessionOptions: { rules: GROK_RESPONSE_RULES_V1 } } : {}),
     });
     await updateTask(root, taskId, {
       status: 'running',

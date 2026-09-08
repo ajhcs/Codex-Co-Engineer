@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -37,7 +37,7 @@ async function waitForProcessExit(pid, timeoutMs = 3_000) {
   return !processAlive(pid);
 }
 
-async function fixture(mode, timeoutMs = 2_000) {
+async function fixture(mode, timeoutMs = 2_000, sessionOptions = undefined) {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-acpx-runtime-'));
   const cwd = path.join(root, 'worktree');
   const stateDir = path.join(root, 'state');
@@ -53,14 +53,56 @@ async function fixture(mode, timeoutMs = 2_000) {
     permissionMode: 'approve-all',
     timeoutMs,
   });
-  const handle = await runtime.ensureSession({
-    sessionKey: `runtime-${mode}`,
-    agent: 'grok',
-    mode: 'persistent',
-    cwd,
-  });
-  return { root, cwd, runtime, handle };
+  try {
+    const handle = await runtime.ensureSession({
+      sessionKey: `runtime-${mode}`,
+      agent: 'grok',
+      mode: 'persistent',
+      cwd,
+      sessionOptions,
+    });
+    return { root, cwd, runtime, handle };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
+
+test('session rules are bounded and preserve existing ACPX session metadata', async () => {
+  const value = await fixture('capture-wire', 2_000, {
+    rules: 'Return only the requested final answer.',
+    allowedTools: ['Read'],
+    maxTurns: 3,
+    systemPrompt: { append: 'Existing Claude append rule.' },
+  });
+  try {
+    const params = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-session-new.json'), 'utf8'));
+    assert.equal(params._meta.rules, 'Return only the requested final answer.');
+    assert.deepEqual(params._meta.systemPrompt, { append: 'Existing Claude append rule.' });
+    assert.deepEqual(params._meta.claudeCode.options, {
+      allowedTools: ['Read'],
+      maxTurns: 3,
+    });
+  } finally {
+    await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
+  }
+});
+
+test('session rules reject malformed or over-bound values explicitly', async () => {
+  const boundary = await fixture('capture-wire', 2_000, { rules: 'x'.repeat(4 * 1024) });
+  try {
+    const params = JSON.parse(await readFile(path.join(boundary.cwd, '.acpx-fake-session-new.json'), 'utf8'));
+    assert.equal(params._meta.rules, 'x'.repeat(4 * 1024));
+  } finally {
+    await boundary.runtime.close({ handle: boundary.handle, reason: 'test_cleanup' });
+  }
+  for (const rules of ['', '   ', 'contains\0nul', 'x'.repeat(4 * 1024 + 1), 42]) {
+    await assert.rejects(
+      fixture('normal', 2_000, { rules }),
+      (error) => error?.code === 'ACP_SESSION_RULES_INVALID',
+    );
+  }
+});
 
 test('caps an unterminated ACP NDJSON frame and fails the turn closed', async () => {
   const value = await fixture('raw-partial-frame', 1_000);
