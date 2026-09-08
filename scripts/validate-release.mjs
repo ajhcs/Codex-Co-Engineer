@@ -75,6 +75,9 @@ const required = [
   `${PLUGIN}/assets/acpx-third-party-notices.md`,
   `${PLUGIN}/vendor/dsh-acp-demo/LICENSE`, `${PLUGIN}/vendor/dsh-acp-demo/PROVENANCE.json`,
   `${PLUGIN}/vendor/dsh-acp-demo/package.json`,
+  `${PLUGIN}/vendor/worktree-bootstrap/LICENSE`, `${PLUGIN}/vendor/worktree-bootstrap/PROVENANCE.json`,
+  `${PLUGIN}/vendor/worktree-bootstrap/worktree-bootstrap`,
+  `${PLUGIN}/mcp/v3/worktree-bootstrap-runtime.mjs`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/SKILL.md`,
   `${PLUGIN}/skills/control-codex-co-engineer-agents/agents/openai.yaml`,
   'scripts/release-prerequisites.mjs', 'scripts/validate-release.mjs', 'scripts/r1-first-release-contract.mjs',
@@ -216,6 +219,16 @@ const dshPackage = await json(`${PLUGIN}/vendor/dsh-acp-demo/package.json`);
 for (const file of ['LICENSE', 'PROVENANCE.json']) {
   if (!dshPackage.files?.includes(file)) fail(`DSH package omits ${file}.`);
 }
+
+const worktreeBootstrapProvenance = await json(`${PLUGIN}/vendor/worktree-bootstrap/PROVENANCE.json`);
+const worktreeBootstrap = await readFile(absolute(`${PLUGIN}/vendor/worktree-bootstrap/worktree-bootstrap`));
+if (worktreeBootstrapProvenance.version !== '1.1.0'
+  || worktreeBootstrapProvenance.license !== 'MIT'
+  || createHash('sha256').update(worktreeBootstrap).digest('hex') !== worktreeBootstrapProvenance.artifact_sha256) {
+  fail('Bundled worktree-bootstrap provenance/hash mismatch.');
+}
+const worktreeBootstrapMode = (await lstat(absolute(`${PLUGIN}/vendor/worktree-bootstrap/worktree-bootstrap`))).mode;
+if ((worktreeBootstrapMode & 0o111) === 0) fail('Bundled worktree-bootstrap must be executable.');
 
 async function releaseFiles(directory = ROOT) {
   const values = [];

@@ -33,6 +33,7 @@ import {
 import { createClock, createLifecycleFns } from './fixtures/r1-run-runtime-fixtures.mjs';
 import { appendTaskEvent, createLaunchReservation, createTask, readRuntimeRecord, readTask, updateTask, writeRuntimeRecord } from '../mcp/v3/task-store.mjs';
 import { runCursorCloudTask } from '../mcp/v3/cursor-cloud-worker.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from '../mcp/v3/worktree-bootstrap-runtime.mjs';
 
 const SHA = 'a'.repeat(40);
 const run = promisify(execFile);
@@ -104,7 +105,7 @@ test('writer workspace parses noisy pretty JSON and requests a bounded large buf
     },
     checkPath: async () => ({ isDirectory: () => true }),
   });
-  assert.equal(calls[0][0], 'worktree-bootstrap');
+  assert.equal(calls[0][0], BUNDLED_WORKTREE_BOOTSTRAP);
   assert.deepEqual(calls[0][1], ['create', 'parallel-one', '--repo', '/repo', '--base', 'feature']);
   assert.ok(calls[0][2].maxBuffer >= 16 * 1024 * 1024);
   assert.equal(result.worktree_path, '/worktrees/parallel-one');
@@ -137,7 +138,7 @@ test('exact local SHA workspace creation does not require an upstream or source 
     checkPath: async () => ({ isDirectory: () => true }),
   });
 
-  assert.deepEqual(calls.find(([command]) => command === 'worktree-bootstrap')?.[1], [
+  assert.deepEqual(calls.find(([command]) => command === BUNDLED_WORKTREE_BOOTSTRAP)?.[1], [
     'create', 'local-sha', '--repo', '/repo', '--base', SHA, '--local-only',
   ]);
   assert.equal(result.start_sha, SHA);
@@ -426,7 +427,7 @@ test('direct local mode uses the caller worktree and does not invoke bootstrap',
     assert.equal(value.task.branch, 'feature');
     assert.equal(value.task.start_sha, SHA);
     assert.equal(launches[0].writer, false);
-    assert.equal(calls.some(([command]) => command === 'worktree-bootstrap'), false);
+    assert.equal(calls.some(([command]) => command === BUNDLED_WORKTREE_BOOTSTRAP), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -676,7 +677,7 @@ test('managed launch failure marks the task failed and cleans an abandoned write
     assert.equal(task.error.code, 'worker_failed');
     assert.doesNotMatch(task.error.message, /private|secret/iu);
     assert.deepEqual(calls.at(-1), [
-      'worktree-bootstrap',
+      BUNDLED_WORKTREE_BOOTSTRAP,
       ['lock', 'clean', 'launch-fail', '--repo', worktreePath, '--policy', 'dead-local', '--lock-id', 'dead-lock'],
     ]);
   } finally {

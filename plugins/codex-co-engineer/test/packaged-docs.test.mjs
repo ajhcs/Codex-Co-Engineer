@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { access, mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
@@ -16,6 +17,20 @@ const NPM = process.env.npm_execpath || 'npm';
 
 function slashPath(value) {
   return value.split(path.sep).join('/');
+}
+
+
+async function assertBundledWorktreeBootstrap(root) {
+  const executable = path.join(root, 'vendor', 'worktree-bootstrap', 'worktree-bootstrap');
+  const [metadata, bytes, provenance] = await Promise.all([
+    stat(executable),
+    readFile(executable),
+    readFile(path.join(root, 'vendor', 'worktree-bootstrap', 'PROVENANCE.json'), 'utf8').then(JSON.parse),
+  ]);
+  assert.notEqual(metadata.mode & 0o111, 0, 'packed worktree-bootstrap lost its executable mode');
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), provenance.artifact_sha256);
+  assert.equal(provenance.version, '1.1.0');
+  assert.equal(provenance.license, 'MIT');
 }
 
 async function listFiles(directory, prefix = '') {
@@ -185,6 +200,7 @@ test('packed documentation is self-contained and installs without the source rep
     await execFileAsync('tar', ['-xzf', archive, '-C', extractDirectory], { maxBuffer: 4 * 1024 * 1024 });
     const packedRoot = path.join(extractDirectory, 'package');
     await access(path.join(packedRoot, 'README.md'));
+    await assertBundledWorktreeBootstrap(packedRoot);
     await assertPackageDocs(packedRoot, { compareSource: true });
     await assertMarkdownLinks(packedRoot);
 
@@ -199,6 +215,7 @@ test('packed documentation is self-contained and installs without the source rep
     ], { cwd: installDirectory, env: npmEnvironment, maxBuffer: 4 * 1024 * 1024 });
     const installedRoot = path.join(installDirectory, 'node_modules', 'codex-co-engineer');
     await access(path.join(installedRoot, 'README.md'));
+    await assertBundledWorktreeBootstrap(installedRoot);
     await assertPackageDocs(installedRoot);
     await assertMarkdownLinks(installedRoot);
   } finally {

@@ -91,7 +91,7 @@ async function packageTree(root, versions = {}) {
   }
 }
 
-async function fixture({ includeWorktree = true, versions, configMode = 0o600, recordInstall = false } = {}) {
+async function fixture({ includePython = true, versions, configMode = 0o600, recordInstall = false } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-setup-test-'));
   const bin = path.join(root, 'bin');
   const home = path.join(root, 'home');
@@ -113,9 +113,6 @@ async function fixture({ includeWorktree = true, versions, configMode = 0o600, r
     ['dsh-acp-demo', 'dsh-acp-override'],
   ]) {
     await executable(path.join(bin, name), `#!/bin/sh\nprintf '%s\\n' '${output}'\n`);
-  }
-  if (includeWorktree) {
-    await executable(path.join(bin, 'worktree-bootstrap'), '#!/bin/sh\nprintf \'%s\\n\' \'worktree-override\'\n');
   }
   const installArgsFile = path.join(root, 'npm-install.args');
   const setupOutputFile = path.join(root, 'setup-output.txt');
@@ -193,7 +190,7 @@ fi
     HOME: home,
     XDG_CONFIG_HOME: configHome,
     XDG_STATE_HOME: stateHome,
-    PATH: bin,
+    PATH: includePython ? `${bin}:/usr/bin:/bin` : bin,
     CODEX_CO_ENGINEER_DSH_COMMAND: path.join(bin, 'dsh'),
     CODEX_CO_ENGINEER_ACPX_COMMAND: path.join(bin, 'acpx'),
     CODEX_CO_ENGINEER_DSH_ACP_COMMAND: path.join(bin, 'dsh-acp-demo'),
@@ -229,7 +226,7 @@ async function runCheck(environment) {
   return { code: 0, value: JSON.parse(output) };
 }
 
-test('setup check honors command and config overrides and verifies worktree-bootstrap', async () => {
+test('setup check uses bundled worktree-bootstrap without an ambient PATH command', async () => {
   const value = await fixture();
   try {
     const result = await runCheck(value.environment);
@@ -237,7 +234,12 @@ test('setup check honors command and config overrides and verifies worktree-boot
     assert.equal(result.value.dsh.output, 'dsh-override');
     assert.equal(result.value.acpx.output, 'acpx-override');
     assert.equal(result.value.dshAcp.output, path.join(value.bin, 'dsh-acp-demo'));
-    assert.equal(result.value.worktreeBootstrap.output, 'worktree-override');
+    assert.equal(result.value.node.ok, true);
+    assert.equal(result.value.node.required, '>=24.0.0');
+    assert.equal(result.value.python.ok, true);
+    assert.equal(result.value.python.required, '>=3.11');
+    assert.equal(result.value.worktreeBootstrap.output, 'worktree-bootstrap 1.1.0');
+    assert.equal(result.value.worktreeBootstrap.source, 'bundled');
     assert.equal(result.value.config.path, value.configFile);
     assert.equal(result.value.config.ok, true);
     assert.equal(result.value.oxConfig.path, value.oxConfigFile);
@@ -251,12 +253,16 @@ test('setup check honors command and config overrides and verifies worktree-boot
   }
 });
 
-test('setup check fails closed when worktree-bootstrap is unavailable', async () => {
-  const value = await fixture({ includeWorktree: false });
+test('setup check diagnoses missing Python required by bundled worktree-bootstrap', async () => {
+  const value = await fixture({ includePython: false });
   try {
     const result = await runCheck(value.environment);
     assert.equal(result.code, 1);
+    assert.equal(result.value.node.ok, true);
+    assert.equal(result.value.python.ok, false);
+    assert.equal(result.value.python.required, '>=3.11');
     assert.equal(result.value.worktreeBootstrap.ok, false);
+    assert.equal(result.value.worktreeBootstrap.source, 'bundled');
     assert.equal(result.value.config.ok, true);
     assert.equal(result.value.oxConfig.ok, true);
     assert.equal(result.value.packages.ok, true);

@@ -35,6 +35,7 @@ import {
 import { recordNeedsAttention, replyDecision, waitForReply } from './mailbox.mjs';
 import { boundedProviderResult, boundedProviderValue, createProviderResultAccumulator, providerCharCount } from './provider-result.mjs';
 import { RunContractV1Error } from './run-manifest.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from './worktree-bootstrap-runtime.mjs';
 import { appendTaskEvent, readPrompt, readRuntimeRecord, readTask, taskPaths, updateTask } from './task-store.mjs';
 
 process.umask(0o077);
@@ -299,7 +300,7 @@ export async function boundedWtbHandoff({
   };
   try {
     const { stdout } = await withBound(
-      () => runFileImpl('worktree-bootstrap', [
+      () => runFileImpl(BUNDLED_WORKTREE_BOOTSTRAP, [
         'handoff',
         taskName,
         '--repo',
@@ -1868,7 +1869,7 @@ export async function runAcpWorkerCli(argv, {
     await awaitSupervisorRegistration(request.root, request.task_id, controller.signal);
     await removeStalePromptTransports(request.root, request.task_id);
     if (env.WORKTREE_BOOTSTRAP_TASK) {
-      await runFileImpl('worktree-bootstrap', [
+      await runFileImpl(BUNDLED_WORKTREE_BOOTSTRAP, [
         'verify',
         env.WORKTREE_BOOTSTRAP_TASK,
         '--repo',

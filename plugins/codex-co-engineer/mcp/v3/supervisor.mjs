@@ -80,6 +80,7 @@ import {
 import { loadReadinessSnapshot, saveReadinessSnapshot } from './readiness-snapshot.mjs';
 import { buildGitIdentityV1, buildWorkspaceIdentityV1 } from './protected-identity.mjs';
 import { assertRuntimeEntrypoints } from './runtime-entrypoints.mjs';
+import { BUNDLED_WORKTREE_BOOTSTRAP } from './worktree-bootstrap-runtime.mjs';
 
 const execFile = promisify(nodeExecFile);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'acp-worker.mjs');
@@ -474,7 +475,7 @@ export async function createWriterWorkspace({ taskId, repo, baseSha, execute = e
     if (exactSha) argv.push('--local-only');
     let result;
     try {
-      result = await execute('worktree-bootstrap', argv, {
+      result = await execute(BUNDLED_WORKTREE_BOOTSTRAP, argv, {
       encoding: 'utf8',
       maxBuffer: WORKTREE_CREATE_MAX_BUFFER,
       });
@@ -557,7 +558,7 @@ export async function cleanupManagedWorkspace({ workspace, taskId, execute = exe
   const reference = workspaceReference(workspace, taskId);
   if (!reference) return { state: 'unavailable', cleaned: false };
   try {
-    const { stdout } = await execute('worktree-bootstrap', [
+    const { stdout } = await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
     ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     const lock = parseJsonSuffix(stdout);
@@ -576,7 +577,7 @@ export async function cleanupManagedWorkspace({ workspace, taskId, execute = exe
     if (health.state !== 'abandoned' || typeof lock.lock_id !== 'string' || lock.lock_id.length === 0) {
       return { state: health.state ?? lock.state ?? 'unknown', cleaned: false };
     }
-    await execute('worktree-bootstrap', [
+    await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'clean', reference.task,
       '--repo', reference.worktree_path,
       '--policy', 'dead-local',
@@ -679,7 +680,7 @@ export async function launchWorker({
   const log = await open(paths.log, 'a', 0o600);
   const worker = provider === 'cursor-cloud' ? CLOUD_WORKER : WORKER;
   const workerArgv = [process.execPath, '--no-warnings', worker, '--request', paths.request];
-  const command = writer ? 'worktree-bootstrap' : workerArgv.shift();
+  const command = writer ? BUNDLED_WORKTREE_BOOTSTRAP : workerArgv.shift();
   const args = writer
     ? ['launch', taskId, '--repo', cwd, '--', ...workerArgv]
     : workerArgv;
@@ -724,7 +725,7 @@ export async function launchWorker({
       pid: child.pid,
       process_group: boundary ? null : child.pid,
       process_start_ticks: processStartTicks(child.pid),
-      command: writer ? 'worktree-bootstrap' : process.execPath,
+      command: writer ? BUNDLED_WORKTREE_BOOTSTRAP : process.execPath,
       ...(boundary ? { process_boundary: boundary.receipt } : {}),
     });
     await appendTaskEvent(root, taskId, { type: 'worker', state: 'spawned', pid: child.pid });
@@ -740,7 +741,7 @@ export async function launchWorker({
           pid: child.pid,
           process_group: null,
           process_start_ticks: processStartTicks(child.pid),
-          command: writer ? 'worktree-bootstrap' : process.execPath,
+          command: writer ? BUNDLED_WORKTREE_BOOTSTRAP : process.execPath,
           process_boundary: boundary.receipt,
           updated_at: new Date().toISOString(),
         };
@@ -1262,7 +1263,7 @@ async function inspectManagedLockState(task, runtime, dependencies = {}) {
   if (!reference) return { lock: 'unknown', code: 'worktree_lock_inspect_failed', cleaned: false };
   const execute = dependencies.execute ?? execFile;
   try {
-    const { stdout } = await execute('worktree-bootstrap', [
+    const { stdout } = await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'inspect', reference.task, '--repo', reference.worktree_path,
     ], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     const lock = parseJsonSuffix(stdout);
@@ -1286,7 +1287,7 @@ async function cleanManagedLockAfterBoundary(task, runtime, dependencies = {}) {
   const reference = workspaceReference(task, task.worktree_task ?? task.id);
   const execute = dependencies.execute ?? execFile;
   try {
-    await execute('worktree-bootstrap', [
+    await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'clean', reference.task,
       '--repo', reference.worktree_path,
       '--policy', 'dead-local',
@@ -1956,7 +1957,7 @@ async function inspectSimpleWorkspace({ root, task_id: taskId, workspace, execut
 async function workspaceLockId(workspace, execute) {
   if (typeof workspace?.task !== 'string' || typeof workspace?.worktree_path !== 'string') return null;
   try {
-    const result = await execute('worktree-bootstrap', [
+    const result = await execute(BUNDLED_WORKTREE_BOOTSTRAP, [
       'lock', 'inspect', workspace.task, '--repo', workspace.worktree_path,
     ], { encoding: 'utf8', maxBuffer: 64 * 1024 });
     const lock = parseJsonSuffix(result?.stdout);
