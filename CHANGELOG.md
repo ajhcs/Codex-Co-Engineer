@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- Handle processes disappearing during verification cleanup scans and parse
+  parenthesized process names correctly, while preserving fail-closed errors.
 - Remember explicit native approval for the same repository and selected
   providers, with a one-run option and local revocation. Remove the redundant
   approval checkbox and allow more time to answer the native form.
