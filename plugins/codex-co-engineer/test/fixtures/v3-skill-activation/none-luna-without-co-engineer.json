@@ -1,0 +1,16 @@
+{
+  "id": "none-luna-without-co-engineer",
+  "skill": null,
+  "activation": "none",
+  "user_prompt": "Use Luna Max for a local analysis of this helper.",
+  "ask_once": false,
+  "expected_skills": [],
+  "forbidden_skills": [
+    "delegate-to-co-engineer",
+    "chat-with-co-engineer",
+    "use-grok-co-engineer",
+    "use-cursor-co-engineer",
+    "use-muse-co-engineer",
+    "control-codex-co-engineer-agents"
+  ]
+}

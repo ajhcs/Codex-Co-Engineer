@@ -1,0 +1,27 @@
+{
+  "id": "direct-luna-pm-sol-exception",
+  "activation": "direct",
+  "journey": null,
+  "user_prompt": "Chatting with Co-Engineer: escalate this protected-ref risk to Sol High.",
+  "codex_response": "Luna Max remains the project manager for this Co-Engineer run. Sol High may adjudicate this protected-ref exception. Normal completion does not wake Sol.",
+  "expected_phrases": [
+    "Luna Max remains the project manager for this Co-Engineer run",
+    "Sol High may adjudicate this protected-ref exception",
+    "Normal completion does not wake Sol"
+  ],
+  "forbidden_in_response": [
+    "I am delegating this to Co-Engineer",
+    "Sol Medium",
+    "I am substituting Sol",
+    "Co-Engineer finished, and I verified the candidate."
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": "decision_or_attention",
+    "chatting": true,
+    "chatting_actions": [
+      "continue"
+    ],
+    "verified_final": false
+  }
+}

@@ -103,7 +103,10 @@ Co-Engineer finished, and I verified the candidate. You may cancel:
 The honest shape is up to eight isolated external co-engineers, one
 bounded run, one coordinated wait, one verified decision.
 
-Codex remains chief engineer. You remain merge authority.
+Codex remains chief engineer and reviewer. External workers may commit within
+their assigned scope. Publication and merge require user authorization and Codex review.
+Review exact commit and tree identities, verification results, and current CI
+before integration. The user retains version, tag, release, and protected-ref authority.
 
 Next:
 

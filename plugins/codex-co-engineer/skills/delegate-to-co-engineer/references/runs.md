@@ -48,4 +48,4 @@ That is still one submission and one coordinated wait. The ask happens before de
 
 ## After the wait
 
-Continue, inspect, answer grouped attention, or cancel through `$chat-with-co-engineer` on this same run. Do not add a second submission.
+Continue, inspect, answer grouped attention, or cancel through `$chat-with-co-engineer` on this same run. Do not add a second submission. If Luna Max was pinned for this run, chatting messages that same host-bound project-manager thread.

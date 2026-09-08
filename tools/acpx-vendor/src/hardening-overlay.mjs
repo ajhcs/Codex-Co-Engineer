@@ -331,8 +331,88 @@ AcpRuntimeManager.prototype.createClient = function coEngineerCreateClient(optio
   const next = {
     ...options,
     closedProviderEnv: options.closedProviderEnv ?? this.options?.closedProviderEnv,
+    onElicitationRequest: options.onElicitationRequest ?? this.options?.onElicitationRequest,
   };
   return this.deps.clientFactory?.(next) ?? new AcpClient(next);
+};
+
+/*
+ * Advertise and handle ACP form elicitation so Grok's ask_user_question
+ * tool has a structured Co-Engineer question bridge. Without this, Grok
+ * reports the tool unsupported, dumps the question as ordinary result
+ * text, and the lane can false-succeed with question_id null.
+ */
+AcpClient.prototype.initializeProtocolConnection = async function coEngineerInitializeProtocolConnection(
+  connection,
+  launch,
+) {
+  const initializePromise = connection.initialize({
+    protocolVersion: PROTOCOL_VERSION,
+    clientCapabilities: {
+      ...resolveClientCapabilities({
+        devinAcp: launch.devinAcp,
+        fs: this.options.fs !== false,
+        terminal: this.options.terminal !== false,
+      }),
+      elicitation: { form: {} },
+    },
+    clientInfo: resolveClientInfo(launch.devinAcp),
+  });
+  const initialized = launch.geminiAcp
+    ? await withTimeout(initializePromise, resolveGeminiAcpStartupTimeoutMs())
+    : await initializePromise;
+  await this.authenticateIfRequired(connection, initialized.authMethods ?? []);
+  return initialized;
+};
+
+AcpClient.prototype.createConnection = function coEngineerCreateConnection(stream, launch) {
+  return new ClientSideConnection(() => ({
+    sessionUpdate: async (params) => {
+      await this.handleSessionUpdate(params);
+    },
+    requestPermission: async (params) => this.handlePermissionRequest(params),
+    unstable_createElicitation: async (params) => this.handleElicitationRequest(params),
+    extMethod: async (method) => {
+      if (launch.devinAcp && isDevinRequestDiagnosticsMethod(method)) return {};
+      const error = RequestError.methodNotFound(method);
+      throw this.options.suppressSdkConsoleErrors || console.error(error.message), error;
+    },
+    readTextFile: async (params) => this.handleReadTextFile(params),
+    writeTextFile: async (params) => this.handleWriteTextFile(params),
+    createTerminal: async (params) => this.handleCreateTerminal(params),
+    terminalOutput: async (params) => this.handleTerminalOutput(params),
+    waitForTerminalExit: async (params) => this.handleWaitForTerminalExit(params),
+    killTerminal: async (params) => this.handleKillTerminal(params),
+    releaseTerminal: async (params) => this.handleReleaseTerminal(params),
+    extNotification: async () => {},
+  }), stream);
+};
+
+AcpClient.prototype.handleElicitationRequest = async function coEngineerHandleElicitationRequest(params) {
+  const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : undefined;
+  if (sessionId && this.cancellingSessionIds.has(sessionId)) return { action: 'cancel' };
+  const handler = this.options?.onElicitationRequest;
+  if (typeof handler !== 'function') return { action: 'cancel' };
+  const signal = sessionId ? this.cancellationSignalForSession(sessionId) : undefined;
+  try {
+    const decision = await handler({
+      sessionId,
+      raw: params,
+      kind: 'elicitation',
+    }, { signal });
+    if (signal?.aborted || this.cancellingSessionIds.has(sessionId)) return { action: 'cancel' };
+    if (!decision || decision.action === 'cancel') return { action: 'cancel' };
+    if (decision.action === 'decline') return { action: 'decline' };
+    if (decision.action === 'accept' || decision.content != null || decision.response != null) {
+      return {
+        action: 'accept',
+        ...(decision.content != null ? { content: decision.content } : {}),
+      };
+    }
+    return { action: 'cancel' };
+  } catch {
+    return { action: 'cancel' };
+  }
 };
 
 /*

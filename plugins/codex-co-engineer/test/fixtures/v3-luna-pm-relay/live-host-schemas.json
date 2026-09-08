@@ -1,0 +1,35 @@
+{
+  "executor": "codex_skill",
+  "invokes_host_callbacks": false,
+  "sixth_mcp_tool": false,
+  "sequence": [
+    "create_thread",
+    "bind_usable_thread",
+    "set_thread_pinned",
+    "send_message_to_thread",
+    "wait_threads",
+    "set_thread_archived"
+  ],
+  "create_thread": {
+    "request_required": ["model"],
+    "usable_result_required": ["threadId", "hostId"],
+    "setup_pending_result": ["clientThreadId"]
+  },
+  "send_message_to_thread": {
+    "required": ["threadId", "prompt"]
+  },
+  "wait_threads": {
+    "required": ["targets", "timeoutMs"],
+    "target_required": ["threadId"],
+    "target_optional": ["hostId", "afterCursor"]
+  },
+  "read_thread": {
+    "required": ["threadId", "afterCursor"]
+  },
+  "set_thread_pinned": {
+    "required": ["threadId", "pinned"]
+  },
+  "set_thread_archived": {
+    "required": ["threadId", "archived"]
+  }
+}

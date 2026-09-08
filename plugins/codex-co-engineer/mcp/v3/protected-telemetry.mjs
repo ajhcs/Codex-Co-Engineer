@@ -16,6 +16,8 @@
 // prompts, results, credentials, provider-issued references, or idempotency
 // keys. Variable identity appears only as P03 `sha256:<hex>` correlation
 // digests. There is no filesystem, network, process, or provider runtime.
+// Compact truthful token/cost/byte accounting belongs to UsageLedgerV1;
+// this module only exports identity correlation for that sibling ledger.
 
 import { MAX_TIMEOUT_MS } from './contract.mjs';
 import {
@@ -178,6 +180,10 @@ function correlate(label, field, value, extra = {}) {
     value,
     ...extra,
   });
+}
+
+export function correlateTelemetryFieldV1(label, field, value, extra = {}) {
+  return correlate(label, field, value, extra);
 }
 
 function validateExecution(requestedValue, resolvedValue, observedValue) {
@@ -632,3 +638,4 @@ capturedFreeze(assertDispatchProvenanceContinuityV1);
 capturedFreeze(validateDispatchTelemetryV1);
 capturedFreeze(projectDispatchTelemetryV1);
 capturedFreeze(assertDispatchTelemetryContinuityV1);
+capturedFreeze(correlateTelemetryFieldV1);

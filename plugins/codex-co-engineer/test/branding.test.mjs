@@ -112,7 +112,7 @@ test('visitor README leads with the product shot and copy/paste install', async 
   assert.ok(readme.includes(poster));
   assert.equal(readme.includes('docs/assets/co-engineer-3.4.0/final/derived/hero-muted.mp4'), false);
   assert.equal(readme.includes('docs/assets/co-engineer-3.4.0/final/derived/hero-muted.webm'), false);
-  assert.match(readme, /static Co-Engineer architecture illustration is the authoritative/u);
+  assert.match(readme, /Architecture illustration, not a live screenshot/u);
   assert.match(readme, /There is no autoplay audio/u);
   assert.doesNotMatch(readme, /Optional silent architecture animation/u);
   assert.doesNotMatch(readme, /<video\b/iu);
@@ -168,33 +168,39 @@ test('visitor README leads with the product shot and copy/paste install', async 
     assert.equal(readme.includes(stale), false, stale);
   }
 
-  assert.match(readme, /git clone https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
+  assert.match(readme, /git clone --branch v3\.4\.2 --single-branch https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
   assert.match(readme, /codex plugin marketplace add "\$PWD"/u);
   assert.match(readme, /codex plugin add codex-co-engineer@codex-co-engineer/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup:check/u);
-  assert.match(readme, /wait_until": "terminal"/u);
-  assert.match(readme, /property `repo`/u);
-  assert.match(readme, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
+
+
+
   assert.match(readme, /docs\/releases\/v3\.4\.2\.md/u);
   assert.match(readme, /historical\s+3\.3\.0\s+notes/u);
   assert.doesNotMatch(readme, /upcoming,?\s+unreleased/iu);
+});
+
+test('public README and quickstart retain user publication authority', async () => {
+  for (const relative of ['README.md', 'docs/co-engineer-quickstart.md']) {
+    const text = await readFile(path.join(REPO, relative), 'utf8');
+    assert.match(text, /External workers may commit/u);
+    assert.match(text, /Publication and merge require user authorization and Codex review/u);
+  }
 });
 
 test('README information architecture maps safe final-art slots and keeps explicit holds', async () => {
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');
   const headings = [
-    '## Visual demo',
-    '## First 60 seconds',
-    '## How a run works',
-    '## Provider choices',
-    '## Codex authority and safety',
-    '## Chatting, grouped attention, and the final decision',
+    '## What makes it useful',
     '## Install and authentication',
-    '## Migrating from 3.2.1',
+    '## Your first delegation',
+    '## Provider choices',
+    '## Upgrade to 3.4.2',
     '## Troubleshooting',
-    '## Advanced Co-Engineer Control/API',
+    '## Control and data handling',
+    '## For integrators and contributors',
   ];
   let previous = -1;
   for (const heading of headings) {
@@ -294,10 +300,10 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.4.2', async () => {
   assert.doesNotMatch(JSON.stringify(marketplace), /codex-co-engineer-3\.1\.0/u);
   assert.doesNotMatch(JSON.stringify(marketplace), /Using DSH Co-Engineer/u);
 
-  const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.3.0.md'), 'utf8');
-  assert.match(notes, /Codex-Co-Engineer 3\.3\.0/u);
-  assert.match(notes, /decision_or_attention/u);
-  assert.match(notes, /"repo": "\/absolute\/path\/to\/git-worktree"/u);
-  assert.match(notes, /gh release create v3\.3\.0/u);
+  const notes = await readFile(path.join(REPO, 'docs', 'releases', 'v3.4.0.md'), 'utf8');
+  assert.match(notes, /Codex-Co-Engineer 3\.4\.0/u);
+  assert.match(notes, /Luna/u);
+  assert.match(notes, /UsageLedgerV1/u);
+  assert.match(notes, /gh release create v3\.4\.0/u);
   assert.match(notes, /EXACT_REVIEWED_MAIN_SHA/u);
 });

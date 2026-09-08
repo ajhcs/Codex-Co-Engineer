@@ -16,6 +16,7 @@ import { publicState } from '../mcp/v3/contract.mjs';
 import { COMPACT_VIEW } from '../mcp/v3/compact-task.mjs';
 import {
   SUPERVISOR_FALSE_SUCCESS_REASON,
+  SUPERVISOR_UNANSWERABLE_ATTENTION_REASON,
   cancelTask,
   classifySupervisorTerminalReceipt,
   projectSupervisorPublicState,
@@ -25,6 +26,10 @@ import {
   taskStatus,
 } from '../mcp/v3/supervisor.mjs';
 import { TASK_SCHEMA, createTask, listTasks, listTasksPage, readTask, taskPaths } from '../mcp/v3/task-store.mjs';
+import {
+  observedUnsupportedQuestionReceipt,
+  quotedUnsupportedQuestionInSuccessfulResultReceipt,
+} from './fixtures/r1-grok-attention-bridge-fixtures.mjs';
 import {
   AUTHORITATIVE_PING_TIMEOUT,
   COMPACT_CARD_KEYS,
@@ -202,6 +207,21 @@ test('succeeded is only for completed receipts without a terminal error', () => 
   assert.equal(projectSupervisorTerminalReceipt(clean), clean);
 
   const quoted = quotedPingInSuccessfulResultReceipt();
+  const quotedClassified = classifySupervisorTerminalReceipt(quoted);
+  assert.equal(quotedClassified.corrected, false);
+  assert.equal(quotedClassified.public_state, 'succeeded');
+});
+
+test('structured Grok unsupported-question completed receipt is never succeeded', () => {
+  const receipt = observedUnsupportedQuestionReceipt();
+  const classified = classifySupervisorTerminalReceipt(receipt);
+  assert.equal(classified.corrected, true);
+  assert.equal(classified.projected_status, 'failed');
+  assert.equal(classified.public_state, 'failed');
+  assert.equal(classified.reason, SUPERVISOR_UNANSWERABLE_ATTENTION_REASON.code);
+  assertContentFreeReason(classified.error);
+  assertNotSucceeded(classified.public_state);
+  const quoted = quotedUnsupportedQuestionInSuccessfulResultReceipt();
   const quotedClassified = classifySupervisorTerminalReceipt(quoted);
   assert.equal(quotedClassified.corrected, false);
   assert.equal(quotedClassified.public_state, 'succeeded');

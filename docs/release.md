@@ -131,29 +131,28 @@ independent provider review pass. `create_pr` is Cloud-only; local workers
 return commits and handoff evidence for Codex to decide whether a PR should be
 opened. Never create an empty PR.
 
-## GitHub Release notes
+## Authorized GitHub publication
 
-The 3.4.2 GitHub Release body is
-[releases/v3.4.2.md](releases/v3.4.2.md). Keep historical
-[releases/v3.3.0.md](releases/v3.3.0.md),
-[releases/v3.2.1.md](releases/v3.2.1.md),
-[releases/v3.2.0.md](releases/v3.2.0.md),
-[releases/v3.1.0.md](releases/v3.1.0.md) and
-[releases/v3.1.1.md](releases/v3.1.1.md) in the repository even when
-GitHub Releases is empty. Documentation work must not tag, push, or
-publish the GitHub Release.
+The release body is [releases/v3.4.2.md](releases/v3.4.2.md). Preserve all historical
+release notes, including [3.4.0](releases/v3.4.0.md). Documentation changes alone
+are not publication authorization; an explicit maintainer release instruction is.
 
-Capture the exact-tree gate receipt before any later publication:
+1. Fetch public main and reconcile it into the candidate. Both the published
+   baseline and the accepted local fixes must be ancestors of the release.
+2. Review the diff against public main, including deleted files, historical
+   feature inventory, installation, packaged documentation, and privacy.
+3. Run the exact-candidate local gate. Keep private host evidence outside Git.
+4. Push the release branch without force and open a release PR. Verify current
+   GitHub CI and required review before merging; do not bypass failed checks.
+5. Merge the reviewed branch, capture the exact resulting main SHA, and verify
+   that its tree matches the qualified candidate. If content changed, qualify
+   the new candidate before tagging.
+6. Create `v3.4.2` at that reviewed main SHA and publish the body from
+   `docs/releases/v3.4.2.md`. Verify the remote tag, release body, source download,
+   and tag-based installation instructions after publication.
 
-```sh
-release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.2-release-gate.json
-```
-
-When a maintainer later publishes against an exact reviewed `main` SHA,
-use the placeholder form in [releases/v3.4.2.md](releases/v3.4.2.md)
-(`EXACT_REVIEWED_MAIN_SHA`). Do not invent a tag or remote mutation from
-documentation work.
+The public release includes source and documentation. Never attach owner-only
+live receipts, prompts, credentials, machine configuration, or private logs.
 
 ## Provider boundary regressions
 

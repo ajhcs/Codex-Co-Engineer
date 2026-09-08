@@ -11,6 +11,8 @@ const FIXTURE_MODES = new Set([
   'raw-partial-frame',
   'silent-initialize',
   'silent-session-create',
+  'ask-user-unsupported',
+  'ask-user-question',
 ]);
 const modeIndex = process.argv.indexOf('--mode');
 const fixtureMode = modeIndex === 2 ? process.argv[3] : undefined;
@@ -97,6 +99,30 @@ function sessionUpdate(sessionId, text) {
 function toolUpdate(sessionId, update) {
   send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update } });
 }
+
+function toolCallUpdate(sessionId, payload) {
+  send({
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: {
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        ...payload,
+      },
+    },
+  });
+}
+
+const OBSERVED_UNSUPPORTED_QUESTION_TRANSCRIPT = [
+  'I tried to use ask_user_question, but that tool is unsupported in this environment.',
+  '',
+  'Question: Should I implement option A or option B before any work?',
+  'A) Keep the current validator',
+  'B) Replace the validator',
+  '',
+  'I will not continue until answered.',
+].join('\n');
 
 async function finishPrompt(id, sessionId, stopReason = 'end_turn') {
   pendingPrompts.delete(id);
@@ -213,6 +239,47 @@ async function handleRequest(message) {
       await finishPrompt(id, params.sessionId);
       return;
     }
+    if (fixtureMode === 'ask-user-unsupported' || text.includes('ask-user-unsupported')) {
+      toolCallUpdate(params.sessionId, {
+        toolCallId: 'ask_user_question',
+        title: 'ask_user_question',
+        status: 'failed',
+        kind: 'other',
+        rawOutput: 'unsupported',
+      });
+      sessionUpdate(params.sessionId, OBSERVED_UNSUPPORTED_QUESTION_TRANSCRIPT);
+      await finishPrompt(id, params.sessionId);
+      return;
+    }
+    if (fixtureMode === 'ask-user-question' || text.includes('ask-user-question')) {
+      const elicitationId = nextId++;
+      pendingPrompts.set(id, { sessionId: params.sessionId, timer: null, elicitationId });
+      send({
+        jsonrpc: '2.0',
+        id: elicitationId,
+        method: 'elicitation/create',
+        params: {
+          sessionId: params.sessionId,
+          mode: 'form',
+          message: 'Should I implement option A or option B before any work?',
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              choice: {
+                type: 'string',
+                title: 'Choice',
+                oneOf: [
+                  { const: 'A', title: 'Keep the current validator' },
+                  { const: 'B', title: 'Replace the validator' },
+                ],
+              },
+            },
+            required: ['choice'],
+          },
+        },
+      });
+      return;
+    }
     if (text.includes('permission')) {
       const permissionId = nextId++;
       pendingPrompts.set(id, { sessionId: params.sessionId, timer: null });
@@ -247,6 +314,12 @@ async function handleRequest(message) {
   // response id is not a method, so resolve it against the active prompt.
   if (Object.hasOwn(message, 'result') && id !== undefined) {
     for (const [promptId, prompt] of pendingPrompts) {
+      if (prompt.elicitationId === id) {
+        const choice = message.result?.content?.choice ?? message.result?.action ?? 'cancel';
+        sessionUpdate(prompt.sessionId, `question-selected-${choice}`);
+        await finishPrompt(promptId, prompt.sessionId);
+        return;
+      }
       if (prompt.permissionId !== id) continue;
       const selected = params?.outcome?.optionId ?? message.result?.outcome?.optionId;
       sessionUpdate(prompt.sessionId, selected === 'allow' ? 'permission-selected-allow' : 'permission-selected-reject');

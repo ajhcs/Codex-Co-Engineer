@@ -17,6 +17,11 @@
 //   - live progress, detailed events, same-session reply identity,
 //     cancellation confirmation, and restart reattach are supported exactly
 //     where Grok ACP supports them, with stale identities failing closed;
+//   - the structured Co-Engineer question bridge latches needs_attention
+//     with the live session_id and question_id; one reply resumes that
+//     session once. Missing identity, unconfirmed delivery, or an
+//     unsupported ask_user_question completion fail closed and are never
+//     replayed as a new prompt;
 //   - completed, failed, cancelled, cancel_confirmed, and already_terminal
 //     latch process-local terminal evidence; later reconcile stays terminal
 //     and later cancel is already_terminal with no further transport cancel.
@@ -67,6 +72,10 @@ import {
   validateDriverPreflightRequestV1,
   validateDriverReconcileRequestV1,
 } from './provider-driver.mjs';
+import {
+  eventsHaveUnsupportedAskUserQuestion,
+  QUESTION_BRIDGE_UNAVAILABLE_CODE,
+} from './grok-question-bridge.mjs';
 import { boundedProviderValue } from './provider-result.mjs';
 import {
   assertAllowedKeys,
@@ -93,10 +102,12 @@ export const GROK_ACP_AGENT = 'grok-build';
 export const GROK_ACP_DRIVER_SCHEMA_ID = 'codex-co-engineer.grok-acp-driver.v1';
 export const GROK_ACP_TRANSPORT_SCHEMA_ID = 'codex-co-engineer.grok-acp-transport.v1';
 export const GROK_ACP_EVIDENCE_SCHEMA_ID = 'codex-co-engineer.grok-acp-evidence.v1';
+export const GROK_ACP_REPLY_REQUEST_SCHEMA_ID = 'codex-co-engineer.grok-acp-reply.v1';
+export const GROK_ACP_REPLY_RESULT_SCHEMA_ID = 'codex-co-engineer.grok-acp-reply-result.v1';
 export const GROK_ACP_CAPABILITY_REVISION = 'p18.grok-acp.1';
 
 export const GROK_ACP_TRANSPORT_OPERATIONS = capturedFreeze([
-  'preflight', 'spawn', 'dispatch', 'observe', 'cancel', 'reattach',
+  'preflight', 'spawn', 'dispatch', 'observe', 'cancel', 'reattach', 'reply',
 ]);
 
 export const GROK_ACP_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -168,11 +179,20 @@ const REATTACH_RECEIPT_KEYS = capturedFreeze([
   'reattached', 'session_id', 'provider', 'model', 'run_id', 'assignment_id',
   'lane_index', 'base_sha', 'child_envelope_digest', 'repository_path',
 ]);
+const REPLY_RECEIPT_KEYS = capturedFreeze([
+  'answered', 'session_id', 'question_id', 'provider', 'model', 'run_id',
+  'assignment_id', 'lane_index', 'base_sha', 'child_envelope_digest', 'repository_path',
+]);
 const ATTENTION_KEYS = capturedFreeze(['session_id', 'question_id', 'prompt']);
 const PROGRESS_KEYS = capturedFreeze(['cursor', 'event_count', 'elapsed_ms', 'status']);
 const EVIDENCE_QUERY_KEYS = capturedFreeze([
   'run_id', 'assignment_id', 'child_envelope_digest', 'cursor',
 ]);
+const REPLY_REQUEST_KEYS = capturedFreeze([
+  'schema', 'run_id', 'assignment_id', 'child_envelope_digest',
+  'session_id', 'question_id', 'response',
+]);
+const REPLY_RESPONSE_MAX_BYTES = 16 * 1024;
 const POST_SPAWN_ERROR_CODES = capturedFreeze([
   'dispatch_ack_missing', 'transport_exception', 'transport_lost', 'transport_timeout',
 ]);
@@ -191,7 +211,7 @@ const BLOCKED_PREFLIGHT_DETAIL = capturedFreeze({
 });
 const DRIVER_STORES = new WEAK_MAP_CTOR();
 
-const GROK_ACP_NOTES = 'Grok ACP persistent session (grok-build). Launch confirms only after an authoritative ACP acknowledgement. Same-session reply is supported while the local worker is alive. Process-local lane state only; no durable P19/P21 store, supervisor cutover, or live-transport qualification.';
+const GROK_ACP_NOTES = 'Grok ACP persistent session (grok-build). Launch confirms only after an authoritative ACP acknowledgement. Same-session reply uses the structured Co-Engineer question bridge with a live session_id and question_id. Process-local lane state only; no durable P19/P21 store, supervisor cutover, or live-transport qualification.';
 
 function truncateForMessage(value) {
   const text = STRING(value);
@@ -910,7 +930,17 @@ function observeLane(store, identity, record, include) {
     fail('capability_reply_mismatch', 'transport.observe.result.attention',
       'Grok ACP needs_attention requires the exact live session_id and question_id; silent unanswerable attention is denied.');
   }
-  return capturedFreeze({ receipt, sessionId, status, evidence });
+  let observedStatus = status;
+  if (observedStatus === 'completed' && evidence.attention !== undefined) {
+    observedStatus = 'needs_attention';
+  }
+  if (observedStatus === 'completed'
+    && evidence.attention === undefined
+    && eventsHaveUnsupportedAskUserQuestion(optOwn(receipt, 'events'))) {
+    fail(QUESTION_BRIDGE_UNAVAILABLE_CODE, 'transport.observe.result.attention',
+      'Grok ACP completed after ask_user_question was unsupported without a live question identity.');
+  }
+  return capturedFreeze({ receipt, sessionId, status: observedStatus, evidence });
 }
 
 function reconcileDisposition(status) {
@@ -972,12 +1002,14 @@ function runReconcile(store, request) {
     : disposition === 'terminal' ? 'terminal'
       : disposition === 'dispatch_uncertain' ? 'dispatch_uncertain'
         : 'in_progress';
+  const questionId = observed.evidence?.attention?.question_id;
   putLane(store, identity, {
     ...getLane(store, identity),
     state: nextState,
     evidence: observed.evidence,
     last_status: observed.status,
     session_id: observed.sessionId,
+    question_id: questionId,
     terminal_latch: nextState === 'terminal',
   });
   return driverResult('reconcile', identity, disposition);
@@ -1027,6 +1059,123 @@ function runCancel(store, request) {
   return driverResult('cancel', identity, outcome);
 }
 
+function boundedReplyResponse(value, path) {
+  if (typeof value === 'string') {
+    assertBoundedText(value, { min: 1, max: REPLY_RESPONSE_MAX_BYTES, path, label: 'response' });
+    return value;
+  }
+  if (value !== null && typeof value === 'object') {
+    const serialized = JSON.stringify(value);
+    if (capturedUtf8ByteLength(serialized) > REPLY_RESPONSE_MAX_BYTES) {
+      fail('invalid_reply', path, `${path} exceeds the bounded reply byte limit.`);
+    }
+    return value;
+  }
+  fail('invalid_reply', path, `${path} must be a string or object.`);
+}
+
+function runReply(store, request) {
+  const path = 'grok_acp.reply.request';
+  if (request === undefined || request === null) {
+    fail('invalid_type', path, `${path} must be a plain reply request object.`);
+  }
+  assertDirectJsonClosure(request, path);
+  assertPlainObject(request, 'invalid_type', path, path);
+  assertAllowedKeys(request, REPLY_REQUEST_KEYS, path);
+  if (optOwn(request, 'schema') !== GROK_ACP_REPLY_REQUEST_SCHEMA_ID) {
+    fail('schema_mismatch', `${path}.schema`,
+      `${path}.schema must be exactly "${GROK_ACP_REPLY_REQUEST_SCHEMA_ID}".`);
+  }
+  const runId = optOwn(request, 'run_id');
+  const assignmentId = optOwn(request, 'assignment_id');
+  const digest = assertDigest(optOwn(request, 'child_envelope_digest'), `${path}.child_envelope_digest`);
+  const sessionId = assertPatternedId(
+    optOwn(request, 'session_id'), GROK_ACP_SESSION_ID_PATTERN, `${path}.session_id`, 'session_id',
+  );
+  const questionId = assertPatternedId(
+    optOwn(request, 'question_id'), GROK_ACP_QUESTION_ID_PATTERN, `${path}.question_id`, 'question_id',
+  );
+  const response = boundedReplyResponse(optOwn(request, 'response'), `${path}.response`);
+  const record = store.lanes.get(laneKey(runId, assignmentId));
+  if (record === undefined || record.spawned !== true) {
+    fail('not_dispatched', path, 'Reply addresses an existing Grok dispatch; this child has no launch observation.');
+  }
+  if (!digestsEqual(record.identity.child_envelope_digest, digest)) {
+    fail('stale_identity_denied', `${path}.child_envelope_digest`,
+      'Reply child identity does not match the exact Grok lane previously observed.');
+  }
+  if (record.reply_attempted === true) {
+    fail('reply_already_attempted', `${path}.question_id`,
+      'This question was already answered once; replies are attempt-once.');
+  }
+  if (record.state !== 'unresolved_attention' || record.question_id === undefined) {
+    fail('no_attention_question', `${path}.question_id`,
+      'No attention question is outstanding on this exact Grok lane.');
+  }
+  if (record.question_id !== questionId) {
+    fail('question_mismatch', `${path}.question_id`,
+      'The reply question does not equal the exact outstanding question.');
+  }
+  if (record.session_id !== undefined && record.session_id !== sessionId) {
+    fail('stale_identity_denied', `${path}.session_id`,
+      'The reply session does not match the live Grok ACP session.');
+  }
+  putLane(store, record.identity, { ...record, reply_attempted: true });
+  const replyRequest = transportIdentityRequest(record.identity, {
+    session_id: sessionId,
+    question_id: questionId,
+    response,
+  });
+  assertNoContentKeys(replyRequest, 'grok_acp_transport.reply.request');
+  let receipt;
+  try {
+    receipt = callTransport(store, 'reply', replyRequest);
+  } catch (error) {
+    void error;
+    fail('reply_delivery_unconfirmed', 'grok_acp_transport.reply',
+      'The same-session reply was not confirmed and will never be retried.');
+  }
+  assertClosedReceipt(receipt, REPLY_RECEIPT_KEYS, 'transport.reply.result');
+  assertReceiptIdentity(receipt, record.identity, 'transport.reply.result');
+  const ackSession = assertPatternedId(
+    optOwn(receipt, 'session_id'), GROK_ACP_SESSION_ID_PATTERN, 'transport.reply.result.session_id', 'session_id',
+  );
+  if (ackSession !== sessionId) {
+    fail('stale_identity_denied', 'transport.reply.result.session_id',
+      'Reply acknowledgement session_id must match the live Grok ACP session.');
+  }
+  const ackQuestion = assertPatternedId(
+    optOwn(receipt, 'question_id'), GROK_ACP_QUESTION_ID_PATTERN, 'transport.reply.result.question_id', 'question_id',
+  );
+  if (ackQuestion !== questionId) {
+    fail('question_mismatch', 'transport.reply.result.question_id',
+      'Reply acknowledgement question_id must match the exact outstanding question.');
+  }
+  if (optOwn(receipt, 'answered') !== true) {
+    fail('reply_delivery_unconfirmed', 'transport.reply.result.answered',
+      'The transport did not authoritatively confirm the same-session reply.');
+  }
+  putLane(store, record.identity, {
+    ...getLane(store, record.identity),
+    state: 'in_progress',
+    question_id: undefined,
+    reply_attempted: true,
+    reply_delivered: true,
+  });
+  return freezeData({
+    schema: GROK_ACP_REPLY_RESULT_SCHEMA_ID,
+    version: PROVIDER_DRIVER_VERSION,
+    run_id: record.identity.run_id,
+    assignment_id: record.identity.assignment_id,
+    lane_index: record.identity.lane_index,
+    base_sha: record.identity.base_sha,
+    child_envelope_digest: record.identity.child_envelope_digest,
+    session_id: sessionId,
+    question_id: questionId,
+    answered: true,
+  });
+}
+
 export function createGrokAcpDriverV1(transport) {
   assertGrokAcpTransportV1(transport);
   const handlers = capturedCreate(null);
@@ -1073,6 +1222,10 @@ export function bindGrokAcpDriverV1(transport) {
   const bound = bindProviderDriverV1(driver, grokAcpDriverDeclarationV1());
   DRIVER_STORES.set(bound, DRIVER_STORES.get(driver));
   return bound;
+}
+
+export function submitGrokAcpAttentionReplyV1(driver, request) {
+  return runReply(storeFor(driver), request);
 }
 
 export function inspectGrokAcpLaneEvidenceV1(driver, query) {
@@ -1153,9 +1306,10 @@ export function describeGrokAcpAdapterSurfaceV1() {
       observe: 'page turn.events / live progress with the closed caps; never copy envelope bytes into diagnostics',
       cancel: 'turn.cancel and wait for cancellation confirmation',
       reattach: 'ensureSession resume of the persisted ACP session identity with no new prompt',
+      reply: 'submitGrokAcpAttentionReplyV1 on the exact live session_id and question_id once; never a new prompt',
       forbidden: capturedFreeze([
         'cli_fallback_after_spawn', 'digest_only_launch', 'direct_mode', 'merge_or_create_pr',
-        'post_spawn_retry', 'provider_or_model_substitution',
+        'post_spawn_retry', 'prose_question_guess', 'provider_or_model_substitution',
       ]),
     }),
     feature_values: DRIVER_FEATURE_VALUES,
@@ -1165,6 +1319,7 @@ export function describeGrokAcpAdapterSurfaceV1() {
 capturedFreeze(assertGrokAcpTransportV1);
 capturedFreeze(createGrokAcpDriverV1);
 capturedFreeze(bindGrokAcpDriverV1);
+capturedFreeze(submitGrokAcpAttentionReplyV1);
 capturedFreeze(inspectGrokAcpLaneEvidenceV1);
 capturedFreeze(describeGrokAcpAdapterSurfaceV1);
 capturedFreeze(grokAcpDriverDeclarationV1);

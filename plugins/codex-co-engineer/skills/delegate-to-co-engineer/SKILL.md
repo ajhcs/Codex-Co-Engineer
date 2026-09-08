@@ -24,3 +24,7 @@ Never ask the user to construct tool payloads.
 
 Read [model guidance](references/model-roles.md) only when choosing models is
 part of the task; a separate coordinator is optional.
+
+For an explicitly requested legacy Luna/Sol relay, see [optional host relay](references/luna-pm.md). This is not required for ordinary delegation.
+
+External workers may commit within their assigned scope. Publication and merge require user authorization and Codex review.

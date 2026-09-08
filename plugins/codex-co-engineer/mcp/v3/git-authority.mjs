@@ -4,12 +4,18 @@
 //
 // Additive v3 static law: protected/default refs, the allowed task-branch
 // namespace, credential-free repository/ref identity, tri-class
-// classification, and operation authority. External agents never merge,
-// rebase, push, create PRs, mutate protected/default refs, create
-// tags/releases, or obtain credential/remote mutation authority. No Git
-// mutation, no P29 credential/remote I/O, no P30 audit. Policy plus
-// detection is not containment. Receipts never echo repository paths,
-// URLs, credentials, provider text, or hostile refs.
+// classification, and operation authority. External workers never merge,
+// rebase, force-push, mutate protected/default refs, create tags/releases,
+// or obtain credential/remote mutation authority. They may commit only in
+// the managed worktree lane. A user-authorized publisher actor may
+// non-force push the exact task-owned unprotected codex/* branch and open
+// or update its draft PR. Luna may request readiness but cannot merge. Sol
+// may regular-merge that PR only after expected-head CAS, current green
+// CI, no hidden failed checks, accepted verifier receipts, protected-ref
+// policy, and merge-topology checks. No Git mutation, no P29
+// credential/remote I/O, no P30 audit. Policy plus detection is not
+// containment. Receipts never echo repository paths, URLs, credentials,
+// provider text, or hostile refs.
 
 import { Buffer as NodeBuffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
@@ -47,7 +53,9 @@ export const GIT_AUTHORITY_VERSION = 1;
 export const REF_CLASS_VALUES = capturedFreeze([
   'platform_run_owned', 'unclassified', 'user_protected', 'worker_lane',
 ]);
-export const ACTOR_VALUES = capturedFreeze(['codex', 'platform', 'worker']);
+export const ACTOR_VALUES = capturedFreeze([
+  'codex', 'platform', 'worker', 'luna', 'publisher', 'sol',
+]);
 export const AUTHORITY_VERDICTS = capturedFreeze(['allowed', 'denied']);
 export const ALLOWED_OPERATIONS = capturedFreeze([
   'commit_on_lane_branch', 'compose_candidate_non_authoritative',
@@ -107,7 +115,17 @@ export const POSTURE_ALLOWED_KEYS = capturedFreeze([...CAPABILITY_RECORD_ALLOWED
 export const OPERATION_REQUEST_ALLOWED_KEYS = capturedFreeze([
   'actor', 'capability', 'default_branch', 'history', 'identity',
   'init_default_branch', 'manifest_digest_hex', 'operation',
-  'origin_head_branch', 'ref', 'schema', 'version',
+  'origin_head_branch', 'publication', 'ref', 'schema', 'version',
+]);
+export const PUBLICATION_ALLOWED_KEYS = capturedFreeze([
+  'candidate_tree', 'ci_current', 'ci_green', 'current_head', 'current_tree',
+  'draft', 'expected_head', 'failed_check_count', 'force', 'hidden_failed_checks',
+  'merge_topology_ok', 'user_authorized_publication', 'verifier_accepted',
+]);
+export const SOL_MERGE_REQUIRED_KEYS = capturedFreeze([
+  'candidate_tree', 'ci_current', 'ci_green', 'current_head', 'current_tree',
+  'expected_head', 'failed_check_count', 'hidden_failed_checks',
+  'merge_topology_ok', 'user_authorized_publication', 'verifier_accepted',
 ]);
 export const OPERATION_REQUEST_REQUIRED_KEYS = capturedFreeze([
   'actor', 'identity', 'operation', 'schema', 'version',
@@ -127,11 +145,13 @@ export const GIT_AUTHORITY_ERROR_CODES = capturedFreeze([
   'authority_identity_invalid', 'authority_posture_mismatch',
   'branch_namespace_violation', 'credential_content_denied',
   'default_branch_target_denied', 'exotic_prototype_denied',
+  'expected_head_mismatch', 'failed_checks_present', 'identity_drift',
   'invalid_format', 'invalid_type', 'merge_authority_denied',
-  'merge_history_denied', 'missing_key', 'non_enumerable_property_denied',
-  'out_of_range', 'own_undefined_denied', 'protected_ref_write_denied',
-  'proxy_denied', 'push_authority_denied', 'symbol_key_denied',
-  'unknown_git_operation', 'unknown_key', 'value_depth_exceeded',
+  'merge_history_denied', 'missing_key', 'non_draft_pr_denied',
+  'non_enumerable_property_denied', 'out_of_range', 'own_undefined_denied',
+  'protected_ref_write_denied', 'proxy_denied', 'push_authority_denied',
+  'stale_ci', 'symbol_key_denied', 'unknown_git_operation', 'unknown_key',
+  'value_depth_exceeded',
 ]);
 
 const DEFINE = Object.defineProperty;
@@ -171,6 +191,9 @@ const ACTOR_OPERATIONS = capturedFreeze({
   worker: capturedFreeze(['commit_on_lane_branch', 'create_lane_branch', 'read_only_inspect']),
   platform: capturedFreeze(['compose_candidate_non_authoritative', 'read_only_inspect']),
   codex: capturedFreeze(['read_only_inspect']),
+  luna: capturedFreeze(['read_only_inspect']),
+  publisher: capturedFreeze(['create_pr', 'push', 'read_only_inspect']),
+  sol: capturedFreeze(['merge_pr', 'read_only_inspect']),
 });
 const RECORD_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
@@ -183,11 +206,16 @@ const MSG = capturedFreeze({
   credential_content_denied: 'GitAuthorityPolicyV1 denies credentials and remote mutation material.',
   default_branch_target_denied: 'GitAuthorityPolicyV1 denies default-branch and protected-target assignments.',
   exotic_prototype_denied: 'GitAuthorityPolicyV1 denies exotic prototypes.',
+  expected_head_mismatch: 'GitAuthorityPolicyV1 expected-head compare-and-swap failed.',
+  failed_checks_present: 'GitAuthorityPolicyV1 denies merge when checks have failed.',
+  identity_drift: 'GitAuthorityPolicyV1 rejected identity drift and returned work to Luna.',
   invalid_format: 'GitAuthorityPolicyV1 rejected a value that violates a closed grammar.',
   invalid_type: 'GitAuthorityPolicyV1 rejected a non-JSON authority value.',
   merge_authority_denied: 'GitAuthorityPolicyV1 denies merge rebase and create-PR authority.',
   merge_history_denied: 'GitAuthorityPolicyV1 denies merge commits and merge histories.',
   missing_key: 'GitAuthorityPolicyV1 requires every canonical authority key.',
+  non_draft_pr_denied: 'GitAuthorityPolicyV1 denies non-draft pull requests.',
+  stale_ci: 'GitAuthorityPolicyV1 denies merge on stale CI.',
   non_enumerable_property_denied: 'GitAuthorityPolicyV1 denies non-enumerable properties.',
   out_of_range: 'GitAuthorityPolicyV1 rejected a value outside closed bounds.',
   own_undefined_denied: 'GitAuthorityPolicyV1 denies own undefined values.',
@@ -624,6 +652,178 @@ function assertEvidenceContext(context, path) {
   return { factId, discrepancyId, sequence };
 }
 
+function assertSha40(value, path) {
+  if (typeof value !== 'string' || !capturedTest(SHA40_PATTERN, value)) deny('invalid_format', path);
+  return value;
+}
+
+function parsePublication(object, path) {
+  if (!hasOwn(object, 'publication')) return null;
+  const pubPath = `${path}.publication`;
+  const pub = assertClosedObject(optOwn(object, 'publication'), PUBLICATION_ALLOWED_KEYS, pubPath);
+  const parsed = {};
+  if (hasOwn(pub, 'user_authorized_publication')) {
+    const value = optOwn(pub, 'user_authorized_publication');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.user_authorized_publication`);
+    parsed.user_authorized_publication = value;
+  }
+  if (hasOwn(pub, 'draft')) {
+    const value = optOwn(pub, 'draft');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.draft`);
+    parsed.draft = value;
+  }
+  if (hasOwn(pub, 'force')) {
+    const value = optOwn(pub, 'force');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.force`);
+    parsed.force = value;
+  }
+  if (hasOwn(pub, 'ci_green')) {
+    const value = optOwn(pub, 'ci_green');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.ci_green`);
+    parsed.ci_green = value;
+  }
+  if (hasOwn(pub, 'ci_current')) {
+    const value = optOwn(pub, 'ci_current');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.ci_current`);
+    parsed.ci_current = value;
+  }
+  if (hasOwn(pub, 'hidden_failed_checks')) {
+    const value = optOwn(pub, 'hidden_failed_checks');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.hidden_failed_checks`);
+    parsed.hidden_failed_checks = value;
+  }
+  if (hasOwn(pub, 'verifier_accepted')) {
+    const value = optOwn(pub, 'verifier_accepted');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.verifier_accepted`);
+    parsed.verifier_accepted = value;
+  }
+  if (hasOwn(pub, 'merge_topology_ok')) {
+    const value = optOwn(pub, 'merge_topology_ok');
+    if (typeof value !== 'boolean') deny('invalid_type', `${pubPath}.merge_topology_ok`);
+    parsed.merge_topology_ok = value;
+  }
+  if (hasOwn(pub, 'failed_check_count')) {
+    const value = optOwn(pub, 'failed_check_count');
+    if (typeof value !== 'number' || !IS_INT(value) || value < 0 || value > 4096) {
+      deny('out_of_range', `${pubPath}.failed_check_count`);
+    }
+    parsed.failed_check_count = value;
+  }
+  for (const key of ['expected_head', 'current_head', 'current_tree', 'candidate_tree']) {
+    if (hasOwn(pub, key)) parsed[key] = assertSha40(optOwn(pub, key), `${pubPath}.${key}`);
+  }
+  return parsed;
+}
+
+function denyReceipt(actor, operation, identity, code, receiptPath, extras = {}) {
+  return receipt({
+    verdict: 'denied', code, path: receiptPath, actor, operation,
+    run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+    ...extras,
+  });
+}
+
+function classifyPublicationOperation(object, actor, operation, identity) {
+  const alwaysDenied = DENIED_OPERATION_CODES[operation];
+  if (operation === 'force_push' || operation === 'tag_create' || operation === 'tag_delete'
+    || operation === 'release_create' || operation === 'protected_ref_update'
+    || operation === 'credential_helper' || operation === 'remote_mutate'
+    || operation === 'delete_ref' || operation === 'rebase') {
+    return denyReceipt(actor, operation, identity, alwaysDenied, 'operation');
+  }
+  if (!capturedIncludes(ACTOR_OPERATIONS[actor], operation)) {
+    const code = alwaysDenied === undefined ? 'authority_posture_mismatch' : alwaysDenied;
+    return denyReceipt(actor, operation, identity, code, 'actor');
+  }
+  if (operation === 'read_only_inspect') {
+    return receipt({
+      verdict: 'allowed', code: 'authority_ok', path: 'operation', actor, operation,
+      run_id: identity.run_id, assignment_id: identity.assignment_id, base_sha: identity.base_sha,
+    });
+  }
+
+  const publication = parsePublication(object, 'request');
+  if (publication === null || publication.user_authorized_publication !== true) {
+    return denyReceipt(actor, operation, identity, 'authority_posture_mismatch', 'publication');
+  }
+  if (publication.force === true) {
+    return denyReceipt(actor, operation, identity, 'push_authority_denied', 'publication');
+  }
+  if (!hasOwn(object, 'ref')) deny('missing_key', 'request.ref');
+  const classified = classifyRefFromOperation(object, identity);
+  const ownLane = classified !== undefined
+    && classified.ref_class === 'worker_lane'
+    && classified.protected === false
+    && classified.code === 'authority_ok';
+  if (!ownLane) {
+    const code = classified?.default_branch_target === true
+      ? 'default_branch_target_denied'
+      : (classified?.code ?? 'protected_ref_write_denied');
+    return denyReceipt(actor, operation, identity, code, 'ref', {
+      ref_class: classified === undefined ? null : classified.ref_class,
+      default_branch_target: classified === undefined ? false : classified.default_branch_target,
+    });
+  }
+
+  if (actor === 'publisher') {
+    if (operation === 'create_pr' && publication.draft !== true) {
+      return denyReceipt(actor, operation, identity, 'non_draft_pr_denied', 'publication', {
+        ref_class: 'worker_lane',
+      });
+    }
+    return receipt({
+      verdict: 'allowed', code: 'authority_ok', path: 'operation', actor, operation,
+      ref_class: 'worker_lane', run_id: identity.run_id, assignment_id: identity.assignment_id,
+      base_sha: identity.base_sha,
+    });
+  }
+
+  for (const key of SOL_MERGE_REQUIRED_KEYS) {
+    if (!Object.hasOwn(publication, key)) deny('missing_key', `request.publication.${key}`);
+  }
+  if (publication.expected_head !== publication.current_head) {
+    return denyReceipt(actor, operation, identity, 'expected_head_mismatch', 'publication', {
+      ref_class: 'worker_lane',
+    });
+  }
+  if (publication.current_tree !== publication.candidate_tree) {
+    return denyReceipt(actor, operation, identity, 'identity_drift', 'publication', {
+      ref_class: 'worker_lane',
+    });
+  }
+  if (identity.head_sha !== undefined && identity.head_sha !== publication.expected_head) {
+    return denyReceipt(actor, operation, identity, 'identity_drift', 'identity', {
+      ref_class: 'worker_lane',
+    });
+  }
+  if (publication.ci_current !== true) {
+    return denyReceipt(actor, operation, identity, 'stale_ci', 'publication', {
+      ref_class: 'worker_lane',
+    });
+  }
+  if (publication.ci_green !== true || publication.failed_check_count !== 0
+    || publication.hidden_failed_checks === true) {
+    return denyReceipt(actor, operation, identity, 'failed_checks_present', 'publication', {
+      ref_class: 'worker_lane',
+    });
+  }
+  if (publication.verifier_accepted !== true) {
+    return denyReceipt(actor, operation, identity, 'merge_authority_denied', 'publication', {
+      ref_class: 'worker_lane',
+    });
+  }
+  if (publication.merge_topology_ok !== true) {
+    return denyReceipt(actor, operation, identity, 'merge_history_denied', 'publication', {
+      ref_class: 'worker_lane',
+    });
+  }
+  return receipt({
+    verdict: 'allowed', code: 'authority_ok', path: 'operation', actor, operation,
+    ref_class: 'worker_lane', run_id: identity.run_id, assignment_id: identity.assignment_id,
+    base_sha: identity.base_sha,
+  });
+}
+
 export function classifyGitOperationV1(input) {
   const path = 'request';
   const object = assertClosedObject(input, OPERATION_REQUEST_ALLOWED_KEYS, path);
@@ -637,6 +837,10 @@ export function classifyGitOperationV1(input) {
   if (!capturedIncludes(GIT_OPERATIONS, operation)) deny('unknown_git_operation', `${path}.operation`);
   const identity = bindAuthorityIdentityV1(optOwn(object, 'identity'));
   if (hasOwn(object, 'capability')) assertAuthorityPostureV1(optOwn(object, 'capability'));
+
+  if (actor === 'publisher' || actor === 'sol') {
+    return classifyPublicationOperation(object, actor, operation, identity);
+  }
 
   const deniedCode = DENIED_OPERATION_CODES[operation];
   if (deniedCode !== undefined) {

@@ -1,115 +1,88 @@
 # Codex-Co-Engineer
 
-Give Codex a team of external co-engineers without giving up control.
+**Give Codex a team. Keep control of the result.**
 
-Codex remains the chief engineer, reviewer, and merge authority. External
-co-engineers do isolated assigned work. The honest shape is up to eight
-isolated external co-engineers, one bounded run, one coordinated wait,
-one verified decision.
+Bring Grok, Cursor, and Muse into the same Codex task for implementation,
+investigation, or review. Co-Engineer prepares isolated workspaces for up to
+eight independent assignments and returns their results for Codex to inspect.
+You decide what ships.
 
-`Delegating to Co-Engineer` starts one bounded run. `Chatting with
-Co-Engineer` inspects, continues, answers grouped attention, or cancels
-that existing run. Public names are `Using Grok Co-Engineer`, `Using
-Cursor Co-Engineer`, and `Using Muse Co-Engineer`. Cursor on this
-computer and Cursor Cloud both stay Cursor Co-Engineer in public speech.
+[Quickstart](docs/co-engineer-quickstart.md) · [Configuration](docs/configuration.md) ·
+[Troubleshooting](docs/co-engineer-troubleshooting.md) · [3.4.2 release notes](docs/releases/v3.4.2.md)
 
-The package, plugin, and MCP server identifier is `codex-co-engineer`.
-The current source version is 3.4.2. Publication remains subject to the
-exact-tree, host, and live-provider gates in the
-[3.4.2 release note](docs/releases/v3.4.2.md).
+> Use Grok Co-Engineer to review the latest change. Report actionable findings.
 
-Any extra Co-Engineer panel is optional, feature-detected, and
-host-specific. Complete headless fallback: the Delegating/Chatting
-conversation in Codex CLI is enough. This package does not claim a
-Co-Engineer UI on every Codex Desktop host.
-
-This README contains the installation, authentication, first-run, and safety
-guidance needed after the package is installed. Concise guides:
-
-- [Quickstart](docs/co-engineer-quickstart.md)
-- [Troubleshooting](docs/co-engineer-troubleshooting.md)
-- [3.2.1 migration](docs/co-engineer-migration-3.2.1.md)
-- [Configuration](docs/configuration.md)
-- [Run tool API](docs/run-tool-api.md)
-- [Efficient dogfood workflow](docs/efficient-dogfood.md)
-- [3.4.2 release and compatibility notes](docs/releases/v3.4.2.md)
-
-Normal users speak ordinary language. They do not write tool payloads.
-
-For optional Astra/Sol/Luna coordination, see the bundled
-[model roles and evidence](skills/delegate-to-co-engineer/references/model-roles.md).
-Normal launches use existing provider choices and server admission; they do
-not require a separate manager task or configuration workflow.
+Speak naturally; you do not need tool payloads, a profile, or another manager
+for an ordinary launch. A separate host panel is optional. The CLI conversation
+is a complete workflow. The stable plugin and MCP identifier is `codex-co-engineer`.
 
 ## Install and authentication
 
-Fresh-visitor install (clone, then Codex plugin, then setup) is
-documented below. The commands are package-local scripts from this directory.
+### Requirements
 
-Requirements:
+- Node.js 24+, Git, and a current Codex CLI with plugin support.
+- For local providers: Linux, `systemd --user`, `systemd-run` 244+, unified
+  cgroup v2, and `worktree-bootstrap` on `PATH`.
+- Install and authenticate only the provider routes you intend to use.
 
-- Node.js 24 or newer (the release gate is pinned to Node 24)
-- Git and `worktree-bootstrap`
-- Linux with a working `systemd --user` manager, `systemd-run` 244 or
-  newer, and unified cgroup v2 for local providers
-- the official Grok Build CLI
-- `cursor-agent`
-- a Cursor Cloud API key
-- an OpenRouter API key for default DSH Muse or optional Ox Alpha
-
-For a local repository clone, register the marketplace and add the plugin:
+### Install from a release clone
 
 ```bash
-git clone https://github.com/ajhcs/Codex-Co-Engineer.git
+git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
 cd Codex-Co-Engineer
+npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
-```
-
-From this package directory—the directory containing `package.json` and
-`bin/setup.mjs`:
-
-```bash
-npm run setup
-npm run setup:check
-npm test
-```
-
-From a repository clone, the same scripts are:
-
-```bash
-npm --prefix plugins/codex-co-engineer run setup
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Setup installs pinned ACPX `0.13.0`, Cursor SDK `1.0.28`, and the
-cohesive official DSH `0.1.0-rc.7` composition. It writes key-free Muse
-and Ox Alpha DSH ACP configurations plus an owner-only session
-directory; it does not perform login.
-`npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor
-SDK, and `worktree-bootstrap` dependencies. It does not install or
-authenticate Grok or Cursor Local or validate the Cursor Cloud key. Ask
-Codex to show Co-Engineer status after setup: `local_boundary` verifies
-the Linux systemd/cgroup prerequisite from the MCP process's actual
-environment, and local providers are reported unavailable when it fails.
-Release acceptance also launches the MCP through the manifest's exact
-environment allowlist before local dispatch is allowed.
+Keep the clone as the registered marketplace source. Setup installs pinned ACPX
+0.13.0, Cursor SDK 1.0.28, and the DSH 0.1.0-rc.7 composition globally. Use a
+user-writable npm global prefix on your `PATH`; a Node version manager is one
+way to provide it. Setup creates key-free DSH profiles and owner-only session
+storage. It preserves compatible profiles and reports incompatible ones.
 
-Authenticate providers normally so sessions persist across Codex tasks:
+From an installed package directory containing `package.json`, the equivalent
+commands are `npm run setup` and `npm run setup:check`.
+
+### Connect one or more providers
+
+| Route | Authentication |
+| --- | --- |
+| Grok | Install the official Grok Build CLI, then `grok login` |
+| Cursor Local | Install Cursor CLI, then `cursor-agent login` |
+| Cursor Cloud | `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or its owner-only key file |
+| Muse / DSH | From the clone, run `plugins/codex-co-engineer/bin/set-model-api-key` for OpenRouter |
+
+Muse defaults to Muse Spark 1.3 Contributor with XHigh reasoning through
+OpenRouter. The optional Ox Alpha route has a separate DSH profile.
+Authentication persists in normal provider login state or owner-only key files;
+never include credentials in prompts or tool arguments. See
+[configuration](docs/configuration.md#authentication) for locations and variables.
+
+### Verify and start
+
+Start a new Codex session and ask: **Show Co-Engineer status.** Then name a
+provider and describe its first assignment. Setup checks dependencies and DSH
+profiles; the live `status` tool checks provider readiness and the MCP process's
+local Linux boundary. Setup does not install or authenticate Grok or Cursor.
+
+### Upgrade
+
+Finish or cancel active runs, then update your clean registered source clone:
 
 ```bash
-grok login
-cursor-agent login
-bin/set-model-api-key
+git fetch origin tag v3.4.2
+git switch --detach v3.4.2
+npm --prefix plugins/codex-co-engineer run setup
+codex plugin remove codex-co-engineer@codex-co-engineer
+codex plugin add codex-co-engineer@codex-co-engineer
+npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-DSH Muse and DSH Ox Alpha use `OPENROUTER_API_KEY`,
-`CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or the owner-only
-`~/.config/codex-co-engineer/openrouter-api-key`; their ACP configuration
-and model selection remain separate. Cursor Cloud uses
-`CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or the existing owner-only
-`~/.config/cursor-cloud-control/api-key`. Credentials are never MCP
-arguments or task receipts.
+Restart the Codex session. Use the identity from `codex plugin list` if your
+marketplace name differs. Preserve dirty source clones and existing task state.
+Direct Meta Muse profiles need the [OpenRouter migration](docs/releases/v3.4.2.md#upgrading).
 
 ## Execution and safety model
 
@@ -212,6 +185,8 @@ is authorized to review them. Do not include credentials in prompts or
 repository files. Task receipts contain bounded output, provider/session
 identifiers, branch and PR information, lifecycle state, and runtime
 identity; they do not contain credentials or the full prompt.
+
+## Remembered repository consent
 
 The native repository consent form treats the host's **Accept** action as the
 approval. Its required selector defaults, as disclosed in the form, to

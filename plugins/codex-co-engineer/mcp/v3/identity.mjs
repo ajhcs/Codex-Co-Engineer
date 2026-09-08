@@ -79,6 +79,7 @@ import {
   RETURN_CONTRACT_REQUIRED_KEYS,
   RunContractV1Error,
   assertDenseJsonArray,
+  assertExtendedCanonicalComplexity,
   assertManifestComplexity,
   isPlainObject,
   utf8ByteLength,
@@ -258,6 +259,17 @@ function exactJsonEqual(left, right) {
 // emission then rejects the scalar forms JSON cannot carry canonically.
 export function canonicalJsonStringify(value) {
   assertManifestComplexity(value);
+  return emitCanonicalJson(value);
+}
+
+// Fixed extended bound for platform-owned evidence records that are larger
+// than a run manifest. Callers cannot select or raise the node ceiling.
+export function canonicalExtendedJsonStringify(value) {
+  assertExtendedCanonicalComplexity(value);
+  return emitCanonicalJson(value);
+}
+
+function emitCanonicalJson(value) {
   const parts = [];
   emitCanonical(parts, value, '$', 0);
   return capturedJoin(parts, '');

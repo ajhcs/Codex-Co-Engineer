@@ -23,3 +23,7 @@ claiming verification; report any failure or unresolved work honestly.
 Read [existing-run details](references/existing-run.md) only for an unfamiliar
 reply or diagnostic operation. Raw lifecycle debugging uses
 `$control-codex-co-engineer-agents`. Never ask the user to construct tool payloads.
+
+For an explicitly requested legacy Luna/Sol relay, see [optional host relay](references/luna-pm-events.md). This is not required for ordinary delegation.
+
+External workers may commit within their assigned scope. Publication and merge require user authorization and Codex review.

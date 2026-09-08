@@ -23,6 +23,7 @@ import {
 import { COMPACT_VIEW, projectCompactTask, resolveTaskView } from './compact-task.mjs';
 import { deadlineReached, nextDeadlineExtension, resolveTaskDeadline } from './deadline.mjs';
 import { compactSummary, compactTaskCard, diagnosticEnvelope, projectCompactStatus, readTaskDiagnostics } from './diagnostics.mjs';
+import { completedWithoutLiveQuestionIdentity } from './grok-question-bridge.mjs';
 import { readAttention, submitReply } from './mailbox.mjs';
 import {
   appendTaskEvent,
@@ -1621,6 +1622,11 @@ export const SUPERVISOR_FALSE_SUCCESS_REASON = Object.freeze({
   message: 'Completed receipt carried a terminal error.',
 });
 
+export const SUPERVISOR_UNANSWERABLE_ATTENTION_REASON = Object.freeze({
+  code: 'completed_with_unanswerable_attention',
+  message: 'Completed receipt had no live question identity.',
+});
+
 const WHOLE_RESULT_TERMINAL_TEXT = /^(?:[A-Za-z][\w.]*Error\s+)?(?:\[[A-Za-z0-9._-]{1,64}\]\s+)?PING timed out\.?$/u;
 const TERMINAL_TRANSPORT_PROVIDER_CODES = new Set([
   'unavailable',
@@ -1637,6 +1643,16 @@ const TERMINAL_TRANSPORT_PROVIDER_CODES = new Set([
   'econnrefused',
 ]);
 
+function classificationError(reason) {
+  if (reason === SUPERVISOR_UNANSWERABLE_ATTENTION_REASON.code) {
+    return Object.freeze({ ...SUPERVISOR_UNANSWERABLE_ATTENTION_REASON });
+  }
+  if (reason === SUPERVISOR_FALSE_SUCCESS_REASON.code) {
+    return Object.freeze({ ...SUPERVISOR_FALSE_SUCCESS_REASON });
+  }
+  return null;
+}
+
 function freezeTerminalClassification({
   stored_status,
   projected_status,
@@ -1650,7 +1666,7 @@ function freezeTerminalClassification({
     public_state,
     corrected,
     reason,
-    error: reason ? Object.freeze({ ...SUPERVISOR_FALSE_SUCCESS_REASON }) : null,
+    error: classificationError(reason),
   });
 }
 
@@ -1781,6 +1797,21 @@ export function classifySupervisorTerminalReceipt(task) {
         public_state: publicState('failed'),
         corrected: true,
         reason: SUPERVISOR_FALSE_SUCCESS_REASON.code,
+      });
+    }
+    let unanswered = false;
+    try {
+      unanswered = completedWithoutLiveQuestionIdentity(task);
+    } catch {
+      unanswered = true;
+    }
+    if (unanswered) {
+      return freezeTerminalClassification({
+        stored_status: storedStatus,
+        projected_status: 'failed',
+        public_state: publicState('failed'),
+        corrected: true,
+        reason: SUPERVISOR_UNANSWERABLE_ATTENTION_REASON.code,
       });
     }
   }

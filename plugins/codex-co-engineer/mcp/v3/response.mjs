@@ -706,11 +706,176 @@ function projectLaneCard(lane) {
 
 function projectRepository(receipt) {
   const git = receipt.git && typeof receipt.git === 'object' ? receipt.git : {};
+  const branchRaw = typeof git.branch === 'string' ? git.branch.trim() : (typeof receipt.branch === 'string' ? receipt.branch.trim() : null);
+  const targetRaw = typeof git.target === 'string' ? git.target.trim() : (typeof receipt.target === 'string' ? receipt.target.trim() : (typeof git.target_branch === 'string' ? git.target_branch.trim() : null));
+  const branch = branchRaw && isBranchNameOk(branchRaw) ? clipBranch(branchRaw) : null;
+  const target = targetRaw && isBranchNameOk(targetRaw) ? clipBranch(targetRaw) : null;
   return {
     digest: digestValue(git.digest ?? receipt.repository_digest ?? null),
     base_sha: sha40(git.base_sha ?? receipt.base_sha ?? null),
+    branch,
+    target,
   };
 }
+
+function isBranchNameOk(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  if (value.length > 200) return false;
+  if (value.includes('..') || value.includes('//') || value.includes(' ')) return false;
+  const parts = value.split('/');
+  if (parts.length > 8) return false;
+  for (const seg of parts) {
+    if (seg.length === 0 || seg.length > 64) return false;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(seg)) return false;
+  }
+  return true;
+}
+
+function clipBranch(value) {
+  const redacted = redactDiagnosticText(String(value ?? ''));
+  if (redacted.length <= 128) return redacted;
+  return redacted.slice(0, 127) + '…';
+}
+
+function clipChanged(value) {
+  if (typeof value === 'string') {
+    const t = redactDiagnosticText(value.trim());
+    if (t === '') return null;
+    return t.length <= 512 ? t : t.slice(0, 511) + '…';
+  }
+  if (Array.isArray(value)) {
+    const parts = value.filter((v) => typeof v === 'string' && v.trim() !== '').map((v) => redactDiagnosticText(v.trim()).slice(0, 96)).slice(0, 8);
+    return parts.length > 0 ? parts.join(', ') : null;
+  }
+  if (value && typeof value === 'object' && typeof value.summary === 'string' && value.summary.trim() !== '') {
+    const s = redactDiagnosticText(value.summary.trim());
+    return s.length <= 512 ? s : s.slice(0, 511) + '…';
+  }
+  return null;
+}
+
+function inferChangedSummary(receipt, lanes) {
+  // Prefer explicit changed_summary fields, bounded, else derive from lanes scopes
+  const explicit = clipChanged(receipt.changed_summary ?? receipt.changed ?? receipt.files_changed);
+  if (explicit) return explicit;
+  if (Array.isArray(receipt.files_changed) && receipt.files_changed.length > 0) {
+    const parts = receipt.files_changed.filter((v) => typeof v === 'string' && v.trim() !== '').slice(0, 8).map((v) => redactDiagnosticText(String(v)).slice(0, 96));
+    if (parts.length > 0) return parts.join(', ');
+  }
+  // Deterministic scope sample
+  const scopes = lanes.map((l) => Array.isArray(l.write_scope) ? l.write_scope.join(', ') : '').filter(Boolean).slice(0, 8);
+  if (scopes.length > 0) return scopes.join('; ').slice(0, 512);
+  return null;
+}
+
+function inferCleanState(receipt) {
+  if (receipt.git && typeof receipt.git.clean === 'boolean') return receipt.git.clean ? 'clean' : 'dirty';
+  if (typeof receipt.clean === 'boolean') return receipt.clean ? 'clean' : 'dirty';
+  if (typeof receipt.worktree_clean === 'boolean') return receipt.worktree_clean ? 'clean' : 'dirty';
+  if (receipt.git && typeof receipt.git.status === 'string') {
+    if (receipt.git.status === 'clean') return 'clean';
+    if (receipt.git.status === 'dirty') return 'dirty';
+  }
+  return 'unknown';
+}
+
+function inferVerification(receipt, lanes) {
+  const tests = lanes.filter((lane) => lane.role === 'verify' || (Array.isArray(lane.write_scope) && lane.write_scope.join(' ').toLowerCase().includes('test'))).map((l) => l.assignment_id).filter(Boolean);
+  const hasTests = tests.length > 0;
+  // Check evidence kinds for tests_passed
+  const ev = projectEvidence(receipt.evidence);
+  const testsPassed = ev.kinds.includes('tests_passed');
+  const blockers = Array.isArray(receipt.blockers) ? receipt.blockers.slice(0, 8) : (Array.isArray(receipt.verification?.blockers) ? receipt.verification.blockers.slice(0, 8) : []);
+  const blockerLabels = blockers.map((b) => typeof b === 'string' ? redactDiagnosticText(b).slice(0, 96) : (b && typeof b.reason === 'string' ? redactDiagnosticText(b.reason).slice(0, 96) : '')).filter(Boolean);
+  return {
+    tests: hasTests ? tests : [],
+    tests_present: hasTests,
+    tests_passed: testsPassed,
+    blockers: blockerLabels,
+    verification_present: ev.present,
+  };
+}
+
+function inferPushState(receipt) {
+  if (receipt.git && typeof receipt.git.pushed === 'boolean') return receipt.git.pushed ? 'pushed' : 'not pushed';
+  if (typeof receipt.pushed === 'boolean') return receipt.pushed ? 'pushed' : 'not pushed';
+  if (receipt.push && typeof receipt.push.pushed === 'boolean') return receipt.push.pushed ? 'pushed' : 'not pushed';
+  if (Array.isArray(receipt.pushed_branches) && receipt.pushed_branches.length > 0) return receipt.pushed_branches.slice(0, 4).join(', ');
+  return null;
+}
+
+function inferDraftPr(receipt) {
+  const pr = receipt.draft_pr ?? receipt.pr ?? receipt.pull_request ?? receipt.git?.pr;
+  if (!pr) return null;
+  if (typeof pr === 'string' && pr.trim() !== '') return redactDiagnosticText(pr.trim()).slice(0, 256);
+  if (typeof pr === 'object') {
+    if (typeof pr.url === 'string' && pr.url.trim() !== '') return redactDiagnosticText(pr.url.trim()).slice(0, 256);
+    if (Number.isInteger(pr.number)) return '#' + String(pr.number);
+    if (typeof pr.head === 'string' && /^[a-fA-F0-9]{40}$/.test(pr.head)) return pr.head.toLowerCase();
+    if (typeof pr.ref === 'string' && pr.ref.trim() !== '') return redactDiagnosticText(pr.ref.trim()).slice(0, 128);
+  }
+  return null;
+}
+
+function inferCurrentPrHead(receipt) {
+  const h = receipt.current_pr_head ?? receipt.pr_head ?? receipt.git?.pr_head ?? receipt.git?.prHead;
+  const sha = sha40(typeof h === 'string' ? h : (h && typeof h.sha === 'string' ? h.sha : null));
+  return sha;
+}
+
+function inferUsageLedgerSummary(receipt) {
+  const u = receipt.usage_ledger ?? receipt.usage ?? receipt.ledger ?? receipt.efficiency;
+  if (u == null) return 'unknown';
+  if (typeof u === 'string') {
+    const t = redactDiagnosticText(u.trim());
+    return t === '' ? 'unknown' : (t.length <= 512 ? t : t.slice(0, 511) + '…');
+  }
+  if (typeof u === 'object') {
+    if (typeof u.summary === 'string' && u.summary.trim() !== '') {
+      const s = redactDiagnosticText(u.summary.trim());
+      return s.length <= 512 ? s : s.slice(0, 511) + '…';
+    }
+    if (typeof u.compact === 'string' && u.compact.trim() !== '') {
+      const c = redactDiagnosticText(u.compact.trim());
+      return c.length <= 512 ? c : c.slice(0, 511) + '…';
+    }
+    try {
+      const json = JSON.stringify(u);
+      const red = redactDiagnosticText(json);
+      return red.length <= 512 ? red : red.slice(0, 511) + '…';
+    } catch { return 'unknown'; }
+  }
+  return 'unknown';
+}
+
+function evidenceRefsForUi(receipt) {
+  const ev = projectEvidence(receipt.evidence);
+  const refs = Array.isArray(receipt.evidence_refs) ? receipt.evidence_refs.slice(0, 16) : (Array.isArray(receipt.evidence?.refs) ? receipt.evidence.refs.slice(0, 16) : []);
+  const safe = [];
+  const source = refs.length > 0 ? refs : ev.kinds;
+  for (const entry of source.slice(0, 16)) {
+    const kind = typeof entry === 'string' ? entry : (entry && typeof entry.kind === 'string' ? entry.kind : '');
+    if (!kind) continue;
+    const k = redactDiagnosticText(String(kind)).trim();
+    if (k === '') continue;
+    if (k.length > 96) continue;
+    if (!/^[a-z_]{3,32}$/.test(k)) continue;
+    if (!KNOWN_EVIDENCE_KINDS.includes(k)) continue;
+    safe.push(k);
+    if (safe.length >= 16) break;
+  }
+  return safe;
+}
+
+function isTypedSolReady(receipt, candidate, evidence) {
+  // Only boolean true with typed evidence counts; prevents hijack via string or number
+  if (receipt.ready_for_sol_merge !== true) return false;
+  // Typed evidence requires evidence.present === true and candidate.composed === true when those exist
+  if (!evidence || evidence.present !== true) return false;
+  if (candidate && candidate.composed !== true) return false;
+  return true;
+}
+
 
 function projectQuestions(items, lanes) {
   const byId = new Map(lanes.map((lane) => [laneId(lane), lane]));
@@ -898,11 +1063,29 @@ function experienceSummaryPhrases(card, receipt, lanes) {
 function projectRunCard(receipt, lanes) {
   const projectedLanes = lanes.map(projectLaneCard)
     .sort((left, right) => String(left.assignment_id).localeCompare(String(right.assignment_id)));
+  // Efficiency inline: provider/branch/head/health/pending IDs without routine wake (bounded, truthful)
+  const provider = typeof receipt.provider === 'string' && Object.hasOwn(PROVIDER_DISPLAY, receipt.provider) ? receipt.provider : (lanes[0]?.provider ?? null);
+  const provider_phrase = provider ? PROVIDER_DISPLAY[provider] : null;
+  const branchRaw = typeof receipt.branch === 'string' ? receipt.branch : (receipt.git?.branch ?? null);
+  const branch = branchRaw && isBranchNameOk(String(branchRaw)) ? clipBranch(String(branchRaw)) : null;
+  const head = sha40(receipt.head ?? receipt.git?.head ?? receipt.head_sha ?? null);
+  const healthRaw = receipt.health ?? receipt.status;
+  const health = typeof healthRaw === 'string' ? redactDiagnosticText(String(healthRaw)).slice(0, 64) : (healthRaw === true ? 'healthy' : healthRaw === false ? 'unhealthy' : null);
+  const pending = Array.isArray(receipt.pending_ids) ? receipt.pending_ids.filter((v) => typeof v === 'string' && v.trim() !== '').slice(0, 8).map((v) => redactDiagnosticText(String(v)).slice(0, 64)) : (Array.isArray(receipt.pending) ? receipt.pending.filter((v) => typeof v === 'string').slice(0, 8) : []);
   return {
     objective: utf8Head(receipt.objective, EXPERIENCE_OBJECTIVE_BYTES),
     repository: projectRepository(receipt),
     lanes: projectedLanes,
     authority: { ...EXPERIENCE_AUTHORITY },
+    // Running card efficiency evidence (may show without routine wake)
+    running: {
+      provider,
+      provider_phrase,
+      branch,
+      head,
+      health,
+      pending_ids: pending,
+    },
   };
 }
 
@@ -1039,11 +1222,25 @@ function projectFinalCard(receipt, lanes) {
       authority: 'p35',
       accepted: false,
     };
+  const git = gitFacts(receipt, lanes);
+  const verification = inferVerification(receipt, lanes);
+  const evidence = projectEvidence(receipt.evidence);
+  const evidenceRefs = evidenceRefsForUi(receipt);
+  // PR-ready truthful identity: owned branch/head/tree/base/target (bounded, validated)
+  const ownedBranchRaw = git.branch ?? receipt.branch ?? receipt.git?.branch ?? null;
+  const ownedBranch = ownedBranchRaw && isBranchNameOk(String(ownedBranchRaw)) ? clipBranch(String(ownedBranchRaw)) : null;
+  const targetRaw = projectRepository(receipt).target ?? receipt.target ?? receipt.git?.target ?? null;
+  const target = targetRaw && isBranchNameOk(String(targetRaw)) ? clipBranch(String(targetRaw)) : null;
+  const pushState = inferPushState(receipt);
+  const draftPr = inferDraftPr(receipt);
+  const currentPrHead = inferCurrentPrHead(receipt);
+  const usageSummary = inferUsageLedgerSummary(receipt);
+  const readyForSolMerge = isTypedSolReady(receipt, candidate, evidence);
   return {
     accepted_lanes: accepted,
     failed_lanes: failed,
     unresolved_lanes: unresolved,
-    git: gitFacts(receipt, lanes),
+    git: { ...git, branch: ownedBranch, target },
     scope: lanes.map(projectLaneCard).map((lane) => ({
       assignment_id: lane.assignment_id,
       scope: lane.scope,
@@ -1060,7 +1257,35 @@ function projectFinalCard(receipt, lanes) {
       planned_lanes: plannedReviews,
     },
     candidate,
-    evidence: projectEvidence(receipt.evidence),
+    evidence,
+    evidence_refs: evidenceRefs,
+    // PR-ready extensions (truthful, bounded, no fabrication)
+    pr_ready: {
+      owned_branch: ownedBranch,
+      head: git.head,
+      tree: git.tree,
+      base_sha: git.base_sha,
+      target,
+      changed_summary: inferChangedSummary(receipt, lanes),
+      clean_state: inferCleanState(receipt),
+      verification: {
+        present: verification.verification_present,
+        tests_present: verification.tests_present,
+        tests_passed: verification.tests_passed,
+        blockers: verification.blockers,
+      },
+      push_state: pushState,
+      draft_pr: draftPr,
+      current_pr_head: currentPrHead,
+      ready_for_sol_merge: readyForSolMerge,
+      usage_ledger_summary: usageSummary,
+      evidence_refs: evidenceRefs,
+    },
+    // Legacy alias for strict boolean check
+    ready_for_sol_merge: readyForSolMerge,
+    changed_summary: inferChangedSummary(receipt, lanes),
+    clean_state: inferCleanState(receipt),
+    usage_ledger_summary: usageSummary,
     controls: { ...EXPERIENCE_DENIED_CONTROLS },
   };
 }

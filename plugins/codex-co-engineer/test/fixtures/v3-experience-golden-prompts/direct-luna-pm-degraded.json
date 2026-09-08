@@ -1,0 +1,26 @@
+{
+  "id": "direct-luna-pm-degraded",
+  "activation": "direct",
+  "journey": null,
+  "user_prompt": "Chatting with Co-Engineer: Luna Max is unavailable on this host.",
+  "codex_response": "Luna Max project-manager messaging is unavailable, so I am continuing in this Codex task. I am not substituting Sol. I am not starting another bounded run.",
+  "expected_phrases": [
+    "Luna Max project-manager messaging is unavailable, so I am continuing in this Codex task",
+    "I am not substituting Sol"
+  ],
+  "forbidden_in_response": [
+    "I am delegating this to Co-Engineer",
+    "Co-Engineer finished, and I verified the candidate.",
+    "Sol Medium"
+  ],
+  "coordination": {
+    "submissions": 0,
+    "aggregate_wait": null,
+    "chatting": true,
+    "chatting_actions": [
+      "inspect",
+      "continue"
+    ],
+    "verified_final": false
+  }
+}

@@ -104,5 +104,43 @@
     "team of external co-engineers",
     "isolated external co-engineers",
     "independent assignments"
-  ]
+  ],
+  "luna_pm": {
+    "default_model": "luna-max",
+    "role": "routine_pm",
+    "authorization": "user-authorized-pinned-task",
+    "public_skill": false,
+    "sol_medium_mandatory": false,
+    "sol_adjudicator": [
+      "sol-high",
+      "sol-xhigh"
+    ],
+    "wake_events": [
+      "completed",
+      "blocked",
+      "failed",
+      "question",
+      "timeout",
+      "user_update",
+      "merge_ready"
+    ],
+    "sol_escalation_criteria": [
+      "conflicting_exact_evidence_or_reviewer_verdicts",
+      "security_or_protected_ref_risk",
+      "composition_ambiguity",
+      "repeated_deterministic_rejection",
+      "release_authority_decision",
+      "explicit_user_escalation"
+    ],
+    "host_task_tools": [
+      "create_thread",
+      "send_message_to_thread",
+      "wait_threads",
+      "read_thread"
+    ],
+    "degraded_mode": "current_codex_task",
+    "native_subagent_role": "local_analysis",
+    "never_wake_sol_on": "completed",
+    "never_substitute": "sol"
+  }
 }
