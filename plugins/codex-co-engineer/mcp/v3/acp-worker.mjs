@@ -48,8 +48,8 @@ const MAX_CLI_OUTPUT = 1024 * 1024;
 const MAX_ACPX_EXEC_FRAME = 256 * 1024;
 const MAX_ACPX_EXEC_STDERR = 64 * 1024;
 const MAX_ACPX_EXEC_EVENTS = 256;
+const MAX_GROK_FINAL_TOOL_IDS = 512;
 const DEFAULT_DSH_MODEL = 'meta/muse-spark-1.3-contributor';
-export const GROK_RESPONSE_RULES_V1 = 'All assistant text, including text emitted alongside tool calls, is concatenated into the returned answer; there is no separate commentary channel. Unless the user explicitly requests narration, leave assistant text accompanying tool calls empty, do not emit opening acknowledgments, preambles, or routine progress, and return only the requested final answer in the requested format. If a genuine blocker prevents completion or a necessary question requires user input, emit that blocker or question instead.';
 
 const PROCESS_LIST_MAX_BUFFER = 4 * 1024 * 1024;
 const ACPX_TERMINATION_GRACE_MS = 1_000;
@@ -550,6 +550,81 @@ export function boundedEvent(event, prompt = '') {
   if (!plainObject(event)) return { type: 'status', text: boundedText(String(event), prompt, budget) };
   const safe = boundedValue(event, prompt, budget);
   return plainObject(safe) ? safe : { type: 'status', text: boundedText(safe, prompt, budget) };
+}
+
+/**
+ * Follow Grok's native Messages reducer boundary: a completed client-tool
+ * round closes the assistant frame and the final frame becomes `result`.
+ * https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless/reducer/messages/mod.rs
+ *
+ * This projection is deliberately more conservative than xAI's formatter:
+ * ambiguous/interleaved tool streams and every WebSearch fall back to the
+ * complete provider stream because ACPX does not forward Grok's `_meta.backend`.
+ */
+export function createGrokFinalResponseReducerV1({ sanitize = (text) => text } = {}) {
+  let currentOutput = createProviderResultAccumulator({ sanitize });
+  let currentComplete = createLocalProviderResultCollectorV1();
+  let currentHasNonWhitespace = false;
+  const pendingToolIds = new Set();
+  let sawSettledRound = false;
+  let reliable = true;
+
+  const resetCurrent = () => {
+    currentOutput = createProviderResultAccumulator({ sanitize });
+    currentComplete = createLocalProviderResultCollectorV1();
+    currentHasNonWhitespace = false;
+  };
+  const toolId = (event) => (
+    typeof event?.toolCallId === 'string' && event.toolCallId.length > 0 && event.toolCallId.length <= 512
+      ? event.toolCallId
+      : null
+  );
+
+  return {
+    append(event) {
+      if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
+        if (event.text.length > 0 && pendingToolIds.size > 0) reliable = false;
+        currentOutput.append(event.text);
+        currentComplete.append(event.text);
+        currentHasNonWhitespace ||= /\S/u.test(event.text);
+        return;
+      }
+      if (event?.type !== 'tool_call') return;
+      if (event?.rawInput?.variant === 'WebSearch') reliable = false;
+      const id = toolId(event);
+      if (event.tag === 'tool_call') {
+        if (id === null || pendingToolIds.has(id) || pendingToolIds.size >= MAX_GROK_FINAL_TOOL_IDS) {
+          reliable = false;
+          return;
+        }
+        pendingToolIds.add(id);
+        return;
+      }
+      if (event.tag !== 'tool_call_update' || !['completed', 'failed'].includes(event.status)) return;
+      if (id === null || !pendingToolIds.delete(id)) {
+        reliable = false;
+        return;
+      }
+      if (pendingToolIds.size > 0) {
+        return;
+      }
+      sawSettledRound = true;
+      resetCurrent();
+    },
+    finish({ turnResult, fullSnapshot }) {
+      const eligible = reliable
+        && sawSettledRound
+        && pendingToolIds.size === 0
+        && currentHasNonWhitespace
+        && turnResult?.status === 'completed'
+        && turnResult?.stopReason === 'end_turn'
+        && fullSnapshot?.overflow !== true;
+      if (!eligible) return null;
+      const snapshot = currentComplete.snapshot();
+      if (snapshot.overflow === true) return null;
+      return Object.freeze({ bounded: currentOutput.finish(), snapshot });
+    },
+  };
 }
 
 export function publicError(error, prompt = '') {
@@ -1613,7 +1688,6 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       agent: configuration.agent,
       mode: 'persistent',
       cwd,
-      ...(task.provider === 'grok' ? { sessionOptions: { rules: GROK_RESPONSE_RULES_V1 } } : {}),
     });
     await updateTask(root, taskId, {
       status: 'running',
@@ -1641,12 +1715,16 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     let lastEvent = null;
     const output = createProviderResultAccumulator({ sanitize: (text) => sanitizeText(text, prompt) });
     const complete = createLocalProviderResultCollectorV1();
+    const grokFinal = task.provider === 'grok'
+      ? createGrokFinalResponseReducerV1({ sanitize: (text) => sanitizeText(text, prompt) })
+      : null;
     try {
       for await (const event of turn.events) {
         if (event?.type === 'text_delta' && event.stream !== 'thought' && typeof event.text === 'string') {
           output.append(event.text);
           complete.append(event.text);
         }
+        grokFinal?.append(event);
         const compact = boundedEvent(event, prompt);
         await appendTaskEvent(root, taskId, { type: 'provider', event: compact });
         lastEvent = compact;
@@ -1657,7 +1735,10 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
 
     const result = await turn.result;
     const status = result.status === 'completed' ? 'completed' : result.status;
-    const bounded = output.finish();
+    const fullBounded = output.finish();
+    const fullSnapshot = complete.snapshot();
+    const reduced = grokFinal?.finish({ turnResult: result, fullSnapshot });
+    const bounded = reduced?.bounded ?? fullBounded;
     const closeEvidence = await closeOnce();
     const terminal = await persistWorkerTerminal(root, taskId, {
       status,
@@ -1667,9 +1748,10 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       ...Object.fromEntries(Object.entries(bounded).filter(([key]) => key.startsWith('result_'))),
       ...(result.status === 'failed' ? { error: publicError(result.error, prompt), fallback_safe: false } : {}),
     }, closeEvidence, { wtb_handoff: 'not_applicable' });
-    const snapshot = complete.snapshot();
+    const snapshot = reduced?.snapshot ?? fullSnapshot;
     return attachLocalProviderResultSink(
-      root, terminal, snapshot.source, false, snapshot.overflow === true,
+      root, terminal, snapshot.source, false,
+      fullSnapshot.overflow === true || snapshot.overflow === true,
     );
   } catch (error) {
     const failure = publicError(error, prompt);

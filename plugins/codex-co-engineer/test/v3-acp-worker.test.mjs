@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   boundedEvent,
-  GROK_RESPONSE_RULES_V1,
+  createGrokFinalResponseReducerV1,
   handlePermissionRequest,
   isUserFacingPermission,
   publicError,
@@ -140,19 +140,74 @@ test('runs a prompt through ACP and persists a compact receipt', async () => {
   assert.match(events, /"type":"cleanup"/u);
 });
 
-test('Grok sets creation-only response rules without changing prompt bytes, while Cursor remains unchanged', async () => {
-  const prompt = 'Read the version. Reply exactly: R\u00e9sum\u00e9 \u{1F98A}\n';
+test('Grok selects the final framed response while retaining pre-tool text in provider events', async () => {
   for (const provider of ['grok', 'cursor-local']) {
-    const value = await fixture({ provider, id: `${provider}-session-rules`, prompt, mode: 'capture-wire' });
-    await runAcpTask({ root: value.root, taskId: value.taskId });
-    const sessionNew = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-session-new.json'), 'utf8'));
-    const promptRequest = JSON.parse(await readFile(path.join(value.cwd, '.acpx-fake-prompt.json'), 'utf8'));
-    if (provider === 'grok') {
-      assert.equal(sessionNew._meta.rules, GROK_RESPONSE_RULES_V1);
-    } else {
-      assert.equal(Object.hasOwn(sessionNew._meta ?? {}, 'rules'), false);
-    }
-    assert.deepEqual(promptRequest.prompt, [{ type: 'text', text: prompt }]);
+    const value = await fixture({
+      provider,
+      id: `${provider}-framed-final`,
+      prompt: 'review the framed result',
+      mode: 'framed-final',
+    });
+    const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+    assert.equal(
+      terminal.result,
+      provider === 'grok' ? 'fake-final-answer' : 'fake-opening-preamblefake-final-answer',
+    );
+    const events = await readFile(path.join(value.root, 'tasks', value.taskId, 'events.jsonl'), 'utf8');
+    assert.match(events, /fake-opening-preamble/u);
+    assert.match(events, /fake-final-answer/u);
+  }
+});
+
+test('Grok final framing falls back when reduction could hide output', () => {
+  const text = (value) => ({ type: 'text_delta', stream: 'output', text: value });
+  const call = (id, rawInput = { variant: 'ReadFile' }) => ({
+    type: 'tool_call', tag: 'tool_call', toolCallId: id, rawInput,
+  });
+  const done = (id) => ({
+    type: 'tool_call', tag: 'tool_call_update', toolCallId: id, status: 'completed',
+  });
+  const completed = { status: 'completed', stopReason: 'end_turn' };
+  const finish = (events, options = {}) => {
+    const reducer = createGrokFinalResponseReducerV1();
+    for (const event of events) reducer.append(event);
+    return reducer.finish({
+      turnResult: options.turnResult ?? completed,
+      fullSnapshot: { overflow: options.overflow === true },
+    });
+  };
+
+  const selected = finish([text('preamble'), call('read'), done('read'), text('final')]);
+  assert.equal(selected.bounded.value, 'final');
+  assert.equal(selected.snapshot.source.toString('utf8'), 'final');
+
+  const parallel = finish([
+    text('preamble'), call('one'), call('two'), done('one'), done('two'), text('parallel-final'),
+  ]);
+  assert.equal(parallel.bounded.value, 'parallel-final');
+  const sequential = finish([
+    text('preamble'), call('one'), done('one'), text('between'), call('two'), done('two'),
+    text('final-'), text('chunks'),
+  ]);
+  assert.equal(sequential.bounded.value, 'final-chunks');
+
+  const fallbacks = [
+    ['whitespace final', [text('preamble'), call('read'), done('read'), text('   ')], {}],
+    ['full collector overflow', [text('preamble'), call('read'), done('read'), text('final')], { overflow: true }],
+    ['text while tool pending', [text('preamble'), call('read'), text('interleaved'), done('read'), text('final')], {}],
+    ['text after partial settle', [text('preamble'), call('one'), call('two'), done('one'), text('interleaved'), done('two'), text('final')], {}],
+    ['web search', [text('preamble'), call('search', { variant: 'WebSearch' }), done('search'), text('final')], {}],
+    ['unmatched terminal', [text('preamble'), done('missing'), text('final')], {}],
+    ['duplicate pending id', [text('preamble'), call('same'), call('same'), done('same'), text('final')], {}],
+    ['missing id', [text('preamble'), call(null), text('final')], {}],
+    ['overlong id', [text('preamble'), call('x'.repeat(513)), text('final')], {}],
+    ['pending tool', [text('partial'), call('pending')], {}],
+    ['pending after settled round', [text('preamble'), call('one'), done('one'), text('candidate'), call('pending')], {}],
+    ['failed turn', [text('preamble'), call('read'), done('read'), text('failure detail')], { turnResult: { status: 'failed', stopReason: 'error' } }],
+    ['non-end turn', [text('preamble'), call('read'), done('read'), text('partial')], { turnResult: { status: 'completed', stopReason: 'max_tokens' } }],
+  ];
+  for (const [name, events, options] of fallbacks) {
+    assert.equal(finish(events, options), null, name);
   }
 });
 
@@ -219,7 +274,6 @@ test('reconnects an acknowledged ACP session without replaying its prompt', asyn
   assert.equal(resumed.reconnected, true);
   assert.equal(resumed.prompt_replayed, false);
   assert.equal(ensureInput.resumeSessionId, 'persisted-acp-session');
-  assert.equal(Object.hasOwn(ensureInput, 'sessionOptions'), false);
   assert.equal(startTurnCalled, false);
   assert.equal(closed, true);
   const { task } = await readTask(value.root, value.taskId);

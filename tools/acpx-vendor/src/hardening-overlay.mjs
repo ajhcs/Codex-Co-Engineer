@@ -11,7 +11,6 @@ const CO_ENGINEER_ACPX_MAX_FRAME_BYTES = 256 * 1024;
 const CO_ENGINEER_ACPX_MAX_EVENT_ITEM_BYTES = 256 * 1024;
 const CO_ENGINEER_ACPX_MAX_EVENT_QUEUE_ITEMS = 512;
 const CO_ENGINEER_ACPX_MAX_EVENT_QUEUE_BYTES = 4 * 1024 * 1024;
-const CO_ENGINEER_ACPX_MAX_SESSION_RULES_BYTES = 4 * 1024;
 const CO_ENGINEER_ACPX_AGENT_DESCENDANTS = Symbol('co-engineer-acpx-agent-descendants');
 
 function coEngineerAcpFrameError(agentCommand) {
@@ -26,27 +25,6 @@ function coEngineerAcpQueueError() {
     new Error('ACP event queue exceeded its bounded memory limit.'),
     { code: 'ACP_EVENT_QUEUE_LIMIT' },
   );
-}
-
-function coEngineerSessionRulesError() {
-  return Object.assign(
-    new Error('ACP session rules must be a non-empty bounded string without NUL.'),
-    { code: 'ACP_SESSION_RULES_INVALID' },
-  );
-}
-
-function coEngineerSessionRules(options) {
-  if (options?.rules === undefined) return undefined;
-  const rules = options.rules;
-  if (
-    typeof rules !== 'string'
-    || rules.trim().length === 0
-    || rules.includes('\0')
-    || Buffer.byteLength(rules, 'utf8') > CO_ENGINEER_ACPX_MAX_SESSION_RULES_BYTES
-  ) {
-    throw coEngineerSessionRulesError();
-  }
-  return rules;
 }
 
 function coEngineerAcpQueueSize(value) {
@@ -347,19 +325,6 @@ function coEngineerClosedAgentEnvironment(sessionEnv) {
  */
 buildAgentEnvironment = function coEngineerBuildAgentEnvironment(_authCredentials, sessionEnv) {
   return coEngineerClosedAgentEnvironment(sessionEnv);
-};
-
-/*
- * Preserve ACPX's existing provider metadata and add one bounded, creation-
- * only rules field for agents that support session/new._meta.rules. Runtime
- * callers opt in explicitly through sessionOptions.rules.
- */
-const coEngineerUpstreamSessionMeta = buildClaudeCodeOptionsMeta;
-buildClaudeCodeOptionsMeta = function coEngineerBuildSessionMeta(options, isolateUserSettings) {
-  const upstream = coEngineerUpstreamSessionMeta(options, isolateUserSettings);
-  const rules = coEngineerSessionRules(options);
-  if (rules === undefined) return upstream;
-  return { ...upstream, rules };
 };
 
 AcpRuntimeManager.prototype.createClient = function coEngineerCreateClient(options) {

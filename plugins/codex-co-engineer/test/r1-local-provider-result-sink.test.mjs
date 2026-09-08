@@ -452,6 +452,25 @@ test('Grok ACP with run identity stores the complete result after terminal publi
   assert.ok(stored.length > String(terminal.result).length);
 });
 
+test('Grok ACP sinks only the final reliably framed assistant response', async () => {
+  const value = await workerFixture({
+    provider: 'grok',
+    id: 'grok-final-frame-sink',
+    run_id: RUN_ID,
+    assignment_id: 'lane-final-frame',
+    model: GROK_MODEL,
+    prompt: 'review the framed result',
+    mode: 'framed-final',
+  });
+  const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+  assert.equal(terminal.result, 'fake-final-answer');
+  assert.equal(terminal.provider_result_sink.published, true);
+  assert.equal(terminal.provider_result_sink.inline_tail.text, 'fake-final-answer');
+  const store = await openLocalProviderArtifactStoreV1(value.root);
+  const stored = await readAllSanitized(store, terminal.provider_result_sink.sanitized_ref);
+  assert.equal(stored, 'fake-final-answer');
+});
+
 test('Cursor Local ACP with run identity preserves legacy bounded result beside artifacts', async () => {
   const value = await workerFixture({
     provider: 'cursor-local',
