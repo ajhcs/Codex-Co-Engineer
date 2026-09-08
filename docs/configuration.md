@@ -79,7 +79,8 @@ credentials, or provider shell capabilities. Local dispatch fails closed
 when this boundary cannot be verified.
 
 `npm run setup:check` validates the DSH/ACPX composition and CLI, Cursor
-SDK, and `worktree-bootstrap` dependency. It does not install or
+SDK, Node.js 24+, Python 3.11+, and the bundled `worktree-bootstrap` executable.
+No separate worktree-tool installation is needed. It does not install or
 authenticate Grok or Cursor Local or validate the Cursor Cloud key. Ask
 Codex to show Co-Engineer status after setup. Its `local_boundary`
 object validates the systemd/cgroup prerequisite in the MCP process's
@@ -92,12 +93,12 @@ allowlisted environment.
 Any extra Co-Engineer panel is optional, feature-detected, and
 host-specific. Headless Codex CLI remains a complete fallback.
 
-## Luna Max project manager
+## Optional Luna/Sol host relay
 
-Delegating to Co-Engineer and Chatting with Co-Engineer treat a
-user-authorized pinned Luna Max task as the default routine project
-manager. That is skill policy. It is not a sixth public skill, a sixth
-MCP tool, or a change to the Co-Engineer run/event transport.
+Ordinary delegation stays in the current Codex task and uses your selected model.
+The following legacy Luna/Sol relay is available only when explicitly requested.
+It is not a sixth public skill, a sixth MCP tool, or a change to the
+Co-Engineer run/event transport.
 
 The skill can guarantee policy. Codex is the host executor for Desktop
 task tools. The JS adapter plans and validates those call shapes and
@@ -109,8 +110,8 @@ The skill can guarantee:
 
 - one Co-Engineer submission, one `decision_or_attention` wait
 - no model polling on the Co-Engineer transport
-- Luna Max as the default manager when the user authorizes a pinned
-  task and Luna Max is actually available
+- Luna Max as manager for an explicitly requested relay when a pinned
+  task is authorized and Luna Max is actually available
 - wake on completed, blocked, failed, question, timeout, or
   user_update; never on routine progress
 - a distinct `merge_ready` envelope that may wake Sol High or Sol

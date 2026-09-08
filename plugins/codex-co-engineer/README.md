@@ -22,8 +22,10 @@ is a complete workflow. The stable plugin and MCP identifier is `codex-co-engine
 
 - Node.js 24+, Git, and a current Codex CLI with plugin support.
 - For local providers: Linux, `systemd --user`, `systemd-run` 244+, unified
-  cgroup v2, and `worktree-bootstrap` on `PATH`.
+  cgroup v2, and Python 3.11+.
 - Install and authenticate only the provider routes you intend to use.
+
+The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
 
 ### Install from a release clone
 

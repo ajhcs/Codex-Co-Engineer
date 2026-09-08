@@ -46,7 +46,7 @@ completion and cleanup, and concise Grok results. Read the
 
 You need **Node.js 24+**, **Git**, and a current **Codex CLI** with plugin support.
 Local Grok, Cursor, and Muse also require **Linux**, a working `systemd --user`
-manager, `systemd-run` 244+, unified cgroup v2, and `worktree-bootstrap` on `PATH`.
+manager, `systemd-run` 244+, unified cgroup v2, and **Python 3.11+**.
 Cursor Cloud runs remotely and does not require that local process boundary.
 
 Install the CLI and account access for **only the providers you plan to use**.
@@ -69,11 +69,12 @@ npm --prefix plugins/codex-co-engineer run setup:check
 Keep this clone: it is the registered local marketplace source. Setup installs
 pinned ACPX, Cursor SDK, and DSH dependencies globally and creates key-free DSH
 configuration. It preserves existing compatible configuration and reports
-incompatible profiles instead of overwriting them.
+incompatible profiles instead of overwriting them. Use a user-writable npm global
+prefix on your `PATH`; a Node version manager is one way to provide it.
 
-`setup:check` checks installed dependencies and DSH configuration. Provider login
+`setup:check` checks Node/Python prerequisites, installed dependencies, and DSH configuration. Provider login
 and the running MCP process's Linux boundary are checked separately by `status`.
-A local provider needs `worktree-bootstrap` even if the other setup checks pass.
+The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
 
 ### 3. Connect your chosen provider
 

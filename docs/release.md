@@ -24,7 +24,7 @@ replacement for the exact-tree local receipt.
 After the provider-free gate passes:
 
 1. Run `npm run setup:check` on the target host.
-   This validates DSH/ACPX, the Cursor SDK, and `worktree-bootstrap`
+   This validates DSH/ACPX, the Cursor SDK, runtime versions, and bundled `worktree-bootstrap`
    dependencies. It does not install or authenticate Grok or Cursor Local,
    validate their CLIs or the Cursor Cloud key, or prove the local process
    boundary. Use the `status` tool to check provider readiness.
