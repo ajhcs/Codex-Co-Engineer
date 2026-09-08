@@ -6,9 +6,12 @@
 
 ### Fixed
 
-- Provider instructions honor the requested answer format and omit routine
+- Instruct providers to honor the requested answer format and omit routine
   narration and unrequested evidence headings. Controller evidence requirements
   remain intact and do not act as an answer template.
+- Return Grok's final response after a settled tool round on successful tasks.
+  Preserve progress in task events and retain aggregate output when framing is
+  ambiguous, incomplete, over limit, or includes inline web search.
 - Handle processes disappearing during verification cleanup scans and parse
   parenthesized process names correctly, while preserving fail-closed errors.
 - Remember explicit native approval for the same repository and selected
