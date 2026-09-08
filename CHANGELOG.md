@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [3.4.2] - 2026-09-04
+## [3.4.2] - 2026-09-08
 
 ### Fixed
 
@@ -59,6 +59,12 @@
   redundant launch field while rejecting explicit role/access conflicts.
 
 ### Changed
+
+- Bundle MIT-licensed Worktree Bootstrap 1.1.0 with recorded source provenance.
+  Local setup no longer depends on a separately installed private tool; Python
+  3.11+ is required. Validate runtime prerequisites before installation.
+- Reorganize installation and first-use documentation, include detailed upgrade
+  notes, and keep Luna/Sol coordination explicitly optional.
 
 - Default Muse to `meta/muse-spark-1.3-contributor` through OpenRouter with
   XHigh reasoning, using only the OpenRouter credential for that route.
