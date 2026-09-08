@@ -172,10 +172,15 @@ function asErrorCode(error, fallback = 'provider_failure') {
     : fallback;
 }
 
+const ADMISSION_FAILURE_MESSAGES = Object.freeze({
+  runtime_install_incomplete: 'The installed Codex-Co-Engineer runtime is incomplete. Reinstall the plugin, then restart Codex.',
+});
+
 function errorSummary(error, fallback = 'The run operation failed.') {
   const code = asErrorCode(error, fallback);
-  return { code, message: code.length > RUN_ADMISSION_CAPS.max_error_bytes
-    ? code.slice(0, RUN_ADMISSION_CAPS.max_error_bytes) : code };
+  const message = ADMISSION_FAILURE_MESSAGES[code] ?? code;
+  return { code, message: message.length > RUN_ADMISSION_CAPS.max_error_bytes
+    ? message.slice(0, RUN_ADMISSION_CAPS.max_error_bytes) : message };
 }
 
 function ownObject(value, field) {

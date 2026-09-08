@@ -2112,6 +2112,7 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     ...(options.verifyConsent ? { verifyConsent: options.verifyConsent } : {}),
     providerReady: options.providerReady ?? (async ({ assignment }) => {
       assertProviderModelDispatchable(assignment.provider, assignment.model);
+      await (options.preflightRuntime ?? assertRuntimeEntrypoints)(assignment.provider);
       try {
         await workerEnvironment(assignment.provider, env, assignment.provider === 'dsh' ? assignment.model : undefined);
         return { ready: true };
@@ -2891,6 +2892,7 @@ export async function createSupervisorRunToolAdapter(options = {}) {
       verifyConsent: options.verifyConsent,
       providerReady: options.providerReady,
       processBoundaryReady: options.processBoundaryReady,
+      preflightRuntime: options.preflightRuntime,
       verifyRepository: options.verifyRepository,
       prepareWorkspace: options.prepareWorkspace,
       cleanupWorkspace: options.cleanupWorkspace,

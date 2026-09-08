@@ -121,6 +121,42 @@ test('unsupported live model overrides fail before task submission', async () =>
   );
 });
 
+test('run request reports an actionable incomplete-runtime failure before workspace preparation', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-run-runtime-preflight-'));
+  const calls = [];
+  try {
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      inProcess: true,
+      compile: (value) => compileRunRequestV1(value, { observeGit: async () => OBSERVED }),
+      requestConsent: async () => ({ approved: true }),
+      preflightRuntime: async (provider) => {
+        calls.push(['runtime', provider]);
+        throw Object.assign(new Error('/deleted/cache/acp-worker.mjs?token=secret'), {
+          code: 'runtime_install_incomplete',
+        });
+      },
+      processBoundaryReady: async () => { calls.push(['boundary']); return { ready: true }; },
+      verifyRepository: async () => { calls.push(['repository']); return { verified: true }; },
+      prepareWorkspace: async () => { calls.push(['workspace']); throw new Error('must not prepare'); },
+      createSession: async () => { calls.push(['session']); throw new Error('must not create session'); },
+      dispatchPrompt: async () => { calls.push(['prompt']); throw new Error('must not dispatch'); },
+    });
+
+    const receipt = await adapter.dispatch('delegate', { run_request: request() });
+    assert.equal(receipt.phase, 'failed');
+    assert.equal(receipt.error.code, 'runtime_install_incomplete');
+    assert.equal(receipt.error.message, 'The installed Codex-Co-Engineer runtime is incomplete. Reinstall the plugin, then restart Codex.');
+    assert.equal(receipt.lanes[0].error.code, 'runtime_install_incomplete');
+    assert.notEqual(receipt.lanes[0].prepared, true);
+    assert.equal(receipt.lanes[0].prompt_dispatched, false);
+    assert.deepEqual(calls, [['runtime', 'grok']]);
+    assert.doesNotMatch(JSON.stringify(receipt), /deleted|cache|token|PRIVATE_PROMPT/iu);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('supervisor wires run_request through admission while preserving bounded receipts', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-simple-run-'));
   const calls = [];
