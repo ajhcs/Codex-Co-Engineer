@@ -1,7 +1,8 @@
 # Luna Max event relay
 
-Read this only when chatting on an existing Co-Engineer run that has, or
-should have, a Luna Max project manager. Chatting still never starts a
+Read this only when chatting on an existing Co-Engineer run for which the
+user explicitly requested and authorized a Luna Max project manager.
+Chatting still never starts a
 second bounded run. Keep the same run cursor and the same
 `decision_or_attention` wait. Co-Engineer MCP cannot invoke host-only
 Codex task tools and must not add a sixth tool to simulate the Desktop
@@ -37,15 +38,17 @@ question identity, attempt, generation, and correlation or digest. Route
 one structured response covering all answerable questions exactly once.
 Do not alias the group to a single question_id.
 
-Sol Medium is not a mandatory layer. Normal completion does not wake
-Sol. A distinct `merge_ready` envelope may wake Sol High or Sol XHigh
-exactly once for final integration, and only when exact head and tree,
-verifier acceptance, current green CI, zero failed or hidden checks, and
-topology facts all pass. Sol High or Sol XHigh may also adjudicate
-conflicting exact evidence or reviewer verdicts, security or
-protected-ref risk, composition ambiguity, repeated deterministic
-rejection, a release-authority decision, or explicit user escalation.
-Only Luna's parent project-manager task may terminalize work for Sol.
+Sol Medium is not a mandatory layer, and neither is any other Luna or Sol
+model. Normal completion does not wake Sol. A distinct `merge_ready`
+envelope may notify Sol High or Sol
+XHigh exactly once only when the user explicitly selected that optional
+relay target and exact head and tree, verifier acceptance, current green
+CI, zero failed or hidden checks, and topology facts all pass. The
+optional relay may also notify that selected target about conflicting
+exact evidence or reviewer verdicts, security or protected-ref risk,
+composition ambiguity, repeated deterministic rejection, a
+release-authority decision, or explicit user escalation. Only Luna's
+parent project-manager task may send those relay notifications.
 
 Forward bounded sanitized evidence references only. Auto-spill over-bound
 bodies to artifact references. Do not send raw transcripts or secrets.
@@ -53,11 +56,12 @@ Luna native subagents stay local analysis, inherit capabilities, stay
 at depth at most 2, and must not duplicate a Co-Engineer external writer
 assignment. External workers may commit. A scoped publisher may non-force push
 the task-owned unprotected Codex branch and open or update a draft pull
-request. Sol High or Sol XHigh alone performs regular merge after
-deterministic exact-head, current-green-CI, and topology checks. The
-user retains release, tag, version, and protected-ref authority. No
-worker or message can force-push, merge, rebase, tag, release, delete
-refs, or override verification. Luna does not merge.
+request. Codex remains the merge authority and may merge only after
+deterministic exact-head, current-green-CI, and topology checks and the
+user's authorization. The user retains release, tag, version, and
+protected-ref authority. No worker or message can force-push, merge,
+rebase, tag, release, delete refs, or override verification. Luna does
+not merge, and a relay notification grants no merge or release authority.
 
 The shared TaskPort policy is
 [../../delegate-to-co-engineer/references/luna-pm-relay.mjs](../../delegate-to-co-engineer/references/luna-pm-relay.mjs).

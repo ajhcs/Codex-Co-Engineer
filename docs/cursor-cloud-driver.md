@@ -114,5 +114,7 @@ Coverage lives in `test/r1-cursor-cloud-driver.test.mjs` and
 
 This slice does NOT qualify a real Cursor Cloud transport. It claims no
 durable store, scheduler, registry cutover, supervisor cutover, merge
-authority, or automatic PR creation. One Luna Max exact review follows;
-real Cursor Cloud transport qualification follows exact acceptance.
+authority, or automatic PR creation. Any further review uses the current
+Codex task and its user-selected model unless the user explicitly requests
+the optional legacy host relay. Real Cursor Cloud transport qualification
+follows exact acceptance.

@@ -40,13 +40,13 @@ fails, continue in the current Codex task and say that Luna Max
 project-manager messaging is unavailable. I am not substituting Sol. Do
 not invent another model.
 
-## Pin the default project manager
+## Pin the explicitly requested relay manager
 
 When the user authorizes it and Luna Max is actually available and the
-host tools exist, pin one Luna Max task as the default routine project
-manager for this run. After `create_thread`, bind a usable `threadId`
-and `hostId`. Message that same thread later. Do not start a second
-Co-Engineer submission to get a manager.
+host tools exist, pin one Luna Max task as the optional relay manager for
+this run. After `create_thread`, bind a usable `threadId` and `hostId`.
+Message that same thread later. Do not start a second Co-Engineer
+submission to get a manager.
 
 ## Exact Codex Desktop host-tool sequence
 
@@ -74,10 +74,10 @@ this sequence when the host tools exist:
 8. Optionally call `set_thread_archived` with `{ threadId, archived }`.
 
 Preserve explicit user model overrides and the named Grok, Cursor, or
-Muse co-engineers. Sol Medium is not a mandatory layer and must not
-become the default manager. Sol High or Sol XHigh is the merge actor
-for a verified `merge_ready` packet and an on-demand exception
-adjudicator.
+Muse co-engineers. No Luna or Sol model is a mandatory layer or default
+manager. If the user explicitly selects Sol High or Sol XHigh as an
+optional relay target, it may receive a verified `merge_ready` packet or
+an on-demand exception notification. Codex remains the merge authority.
 
 Luna may use native read-only analysis subagents with inherited
 capabilities. Depth from the root is at most 2. Their descendant budget
@@ -90,10 +90,11 @@ project-manager task may reply to or terminalize work for Sol.
 
 Wake the pinned Luna Max task on completed, blocked, failed, question,
 timeout, or user_update envelopes. Routine progress does not wake it. A
-distinct `merge_ready` envelope may wake Sol High or Sol XHigh exactly
-once, and only when exact head and tree, verifier acceptance, current
-green CI, zero failed or hidden checks, and topology facts all pass.
-Normal lane completion stays with Luna Max.
+distinct `merge_ready` envelope may notify Sol High or Sol XHigh exactly
+once only when the user explicitly selected that optional relay target
+and exact head and tree, verifier acceptance, current green CI, zero
+failed or hidden checks, and topology facts all pass. Normal lane
+completion stays with Luna Max.
 
 Each envelope carries message id, run id, assignment id when applicable,
 attempt id, from and to task ids, parent or reply id when applicable,
@@ -117,7 +118,8 @@ verification facts when merge-ready.
 ## Sol, publisher, and merge
 
 Normal completion never wakes Sol. A verified publication-ready packet
-may wake Sol High or Sol XHigh once. Escalate otherwise only for
+may notify Sol High or Sol XHigh once only when the user explicitly
+selected that optional relay target. Notify it otherwise only for
 conflicting exact evidence or reviewer verdicts, security or
 protected-ref risk, composition ambiguity, repeated deterministic
 rejection, a release-authority decision, or explicit user escalation.
@@ -125,13 +127,13 @@ rejection, a release-authority decision, or explicit user escalation.
 External workers may commit in their managed worktree. A scoped
 publisher may non-force push only the exact task-owned unprotected Codex
 branch and open or update its draft pull request after the user
-authorized publication. Sol High or Sol XHigh alone performs regular
-merge after deterministic exact-head, current-green-CI, and topology
-checks. The user retains release, tag, version, and protected-ref
-authority. Luna may request readiness or publishing and does not merge.
-No worker or message can force-push, merge, rebase, tag, release,
-delete refs, or override verification. Identity drift fails closed back
-to Luna.
+authorized publication. Codex remains the merge authority and may merge
+only after deterministic exact-head, current-green-CI, and topology
+checks and the user's authorization. The user retains release, tag,
+version, and protected-ref authority. Luna may request readiness or
+publishing and does not merge. No worker or message can force-push,
+merge, rebase, tag, release, delete refs, or override verification.
+Identity drift fails closed back to Luna.
 
 The executable TaskPort policy is [luna-pm-relay.mjs](luna-pm-relay.mjs).
 The runtime host adapter is

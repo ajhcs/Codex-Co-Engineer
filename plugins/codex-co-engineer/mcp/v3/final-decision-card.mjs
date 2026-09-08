@@ -20,8 +20,10 @@
 // infer a run-level external artifact class.
 //
 // The card cannot merge, push, rebase, create a PR, tag, or release.
-// Sol High/XHigh alone may regular-merge after exact-head, exact-tree,
-// current-green-CI, and topology CAS checks. Progressive disclosure keeps
+// Codex remains the merge authority and may regular-merge only after
+// exact-head, exact-tree, current-green-CI, and topology CAS checks plus
+// the user's authorization. The card cannot grant merge or release
+// authority. Progressive disclosure keeps
 // a compact model-facing summary plus artifact references for expensive
 // diff/log/evidence, with deterministic truncation provenance.
 //

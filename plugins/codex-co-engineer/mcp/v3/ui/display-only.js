@@ -621,7 +621,7 @@
       '</dl>',
       '</section>',
       '<section aria-labelledby="cce-sol-heading">',
-      '<h2 id="cce-sol-heading">Ready for Sol merge</h2>',
+      '<h2 id="cce-sol-heading">Ready for integration review</h2>',
       '<p data-field="ready_for_sol_merge">' + escapeHtml(solReady) + '</p>',
       '</section>',
       '<section aria-labelledby="cce-scope-heading">',
