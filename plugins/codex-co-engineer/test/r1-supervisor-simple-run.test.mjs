@@ -95,7 +95,7 @@ test('default simple dispatch sends the compiled envelope with native workspace 
     assert.equal(call.input.prompt, compiled.assignments[0].child_envelope.envelope_text);
     assert.match(call.input.prompt, /^repository_path: \/tmp\/fixture-repo$/mu);
     assert.match(call.input.prompt, /^provider_workspace: work only in the current working directory \(assigned worktree\); repository_path is source identity, not a navigation target$/mu);
-    assert.match(call.input.prompt, /^provider_guidance: .*controller owns lifecycle and machine receipts$/mu);
+    assert.match(call.input.prompt, /^provider_guidance: .*honor an exact requested output and format exactly; required_evidence labels are controller metadata, not worker response sections; omit routine progress narration and repeated identity or report blocks unless the task prompt requests them, while surfacing blockers and necessary questions; do not seek receipt artifacts because the controller owns lifecycle and machine receipts$/mu);
     assert.equal(envelope.prompt, 'Implement the bounded slice.');
     assert.equal(envelope.execution.provider, 'grok');
     assert.equal(envelope.execution.model, 'grok-4');

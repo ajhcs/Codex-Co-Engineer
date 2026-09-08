@@ -334,7 +334,7 @@ test('an envelope embeds no sibling output and no hidden routing instructions', 
   // Declared facts stay visible; only opaque blocks are elided.
   assert.match(surface, /^execution\.provider: dsh$/mu);
   assert.match(surface, /^provider_workspace: work only in the current working directory \(assigned worktree\); repository_path is source identity, not a navigation target$/mu);
-  assert.match(surface, /^provider_guidance: .*return requested results and evidence without seeking receipt artifacts because the controller owns lifecycle and machine receipts$/mu);
+  assert.match(surface, /^provider_guidance: .*honor an exact requested output and format exactly; required_evidence labels are controller metadata, not worker response sections; omit routine progress narration and repeated identity or report blocks unless the task prompt requests them, while surfacing blockers and necessary questions; do not seek receipt artifacts because the controller owns lifecycle and machine receipts$/mu);
   assert.match(surface, /<objective [0-9]+ bytes elided>/u);
   assert.match(surface, /<prompt [0-9]+ bytes elided>/u);
 });
@@ -348,6 +348,18 @@ test('parser retains compatibility with v1 envelopes created before provider gui
   assert.equal(legacy.repository.path, current.repository.path);
   assert.equal(legacy.prompt, current.prompt);
   assert.equal(legacy.objective, current.objective);
+});
+
+test('parser retains compatibility with v1 envelopes carrying the previous provider guidance', () => {
+  const [current] = compileChildEnvelopesV1(defaultManifest());
+  const previousGuidance = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; return requested results and evidence without seeking receipt artifacts because the controller owns lifecycle and machine receipts';
+  const previousText = current.envelope_text
+    .replace(/^provider_guidance: .*$/mu, `provider_guidance: ${previousGuidance}`);
+  assert.notEqual(previousText, current.envelope_text);
+  const previous = parseChildEnvelopeV1(previousText);
+  assert.equal(previous.envelope_text, previousText);
+  assert.equal(previous.prompt, current.prompt);
+  assert.equal(previous.objective, current.objective);
 });
 
 test('opaque prompts survive framing look-alike injection byte-exactly', () => {

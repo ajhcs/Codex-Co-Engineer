@@ -974,8 +974,8 @@ test('manifest, prompt, envelope, and run-identity goldens keep their exact byte
     domain: 'codex-co-engineer.identity.v1',
     version: 1,
     label: 'child-envelope.v1',
-    input_bytes: 1939,
-    digest: '594996fb2b6aeb928ebe32d47e8e20fc1dc00aae28e6cac41a10f2f679261e71',
+    input_bytes: 2188,
+    digest: 'fa0f7729b3f2f8295843caf6869cc81e222de04c8a390757645c76c158e74ecb',
   });
   const identity = describeRunIdentityV1(manifest);
   assert.deepEqual(identity.assignment_prompt_digests.map((entry) => entry.digest), [

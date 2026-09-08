@@ -74,7 +74,8 @@ export const CHILD_ENVELOPE_SCHEMA_ID = 'codex-co-engineer.child-envelope.v1';
 export const CHILD_ENVELOPE_VERSION = 1;
 
 const PROVIDER_WORKSPACE = 'work only in the current working directory (assigned worktree); repository_path is source identity, not a navigation target';
-const PROVIDER_GUIDANCE = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; return requested results and evidence without seeking receipt artifacts because the controller owns lifecycle and machine receipts';
+const PROVIDER_GUIDANCE = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; honor an exact requested output and format exactly; required_evidence labels are controller metadata, not worker response sections; omit routine progress narration and repeated identity or report blocks unless the task prompt requests them, while surfacing blockers and necessary questions; do not seek receipt artifacts because the controller owns lifecycle and machine receipts';
+const PREVIOUS_PROVIDER_GUIDANCE = 'task prompt and local repository instructions are sufficient unless the assignment explicitly requests an external skill; return requested results and evidence without seeking receipt artifacts because the controller owns lifecycle and machine receipts';
 
 // Worst-case rendering bounds. They mirror the P02 validators so the cap can
 // never reject a manifest those validators accept. JSON string escaping can
@@ -534,9 +535,9 @@ export function parseChildEnvelopeV1(envelopeText) {
   }
   const repositoryPath = expectLine(reader, 'repository_path');
   assertRepositoryPath(repositoryPath, 'envelope.repository_path');
-  // Older v1 envelopes did not carry provider execution guidance. Continue
-  // accepting those durable bytes while every newly compiled envelope makes
-  // the controller-assigned cwd and receipt boundary explicit.
+  // Older v1 envelopes either carried the previous exact guidance or no
+  // provider execution guidance. Continue accepting those durable bytes while
+  // every newly compiled envelope makes response precedence explicit.
   const legacyOffset = reader.offset;
   const next = splitScaffoldLine(readScaffoldLine(reader));
   if (next.key === 'provider_workspace') {
@@ -545,7 +546,7 @@ export function parseChildEnvelopeV1(envelopeText) {
         'provider_workspace must preserve the compiler execution guidance.');
     }
     const guidance = expectLine(reader, 'provider_guidance');
-    if (guidance !== PROVIDER_GUIDANCE) {
+    if (guidance !== PROVIDER_GUIDANCE && guidance !== PREVIOUS_PROVIDER_GUIDANCE) {
       fail('invalid_format', 'envelope.provider_guidance',
         'provider_guidance must preserve the compiler execution guidance.');
     }
