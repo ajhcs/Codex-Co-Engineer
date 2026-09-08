@@ -64,6 +64,26 @@ After the provider-free gate passes:
    4-hour `tool_timeout_sec` as a measured Desktop limit until those probes
    have been run on the shipping host.
 
+## Local release installation identity
+
+Use a distinct local marketplace name for an unpublished release candidate when
+an open project still contains an older plugin under the public marketplace name.
+Keep the plugin name and tested plugin bytes unchanged. Remove the conflicting
+installed identity through the supported plugin CLI; preserve any dirty source
+checkout instead of changing its version label or replacing its files.
+
+Codex can refresh installed local plugins when listing project marketplaces.
+A project source with the same marketplace/plugin identity can replace the
+shared cache even when its version is older than the configured global source.
+An existing MCP process then retains paths into the removed version.
+
+After installation, verify the actual project-scoped `plugin/list` operation for
+open development checkouts: the candidate must remain installed and enabled,
+its complete file inventory must match the qualified source, and old identities
+must remain uninstalled. Repeat the inventory check after the host connection
+restarts, then run native provider acceptance. CLI marketplace listing alone
+and a successful check immediately after copying files do not prove persistence.
+
 ## Native run acceptance
 
 Qualify the normal semantic `run_request` path as a complete user workflow.
