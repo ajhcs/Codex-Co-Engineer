@@ -555,7 +555,8 @@ export function boundedEvent(event, prompt = '') {
 /**
  * Follow Grok's native Messages reducer boundary: a completed client-tool
  * round closes the assistant frame and the final frame becomes `result`.
- * https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless/reducer/messages/mod.rs
+ * Source: https://github.com/xai-org/grok-build
+ * Grok pager: src/headless/reducer/messages/mod.rs
  *
  * This projection is deliberately more conservative than xAI's formatter:
  * ambiguous/interleaved tool streams and every WebSearch fall back to the
