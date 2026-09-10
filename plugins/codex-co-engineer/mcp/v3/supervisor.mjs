@@ -2365,6 +2365,9 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     })),
     loadRecord: options.loadRecord ?? admissionStore.load,
     persistRecord: options.persistRecord ?? admissionStore.save,
+    // Custom persistence fixtures may supply their own atomic reservation.
+    ...((options.reserveRevision || (!options.loadRecord && !options.persistRecord))
+      ? { reserveRevision: options.reserveRevision ?? admissionStore.reserveRevision } : {}),
   };
   const runtime = createRunAdmissionRuntime(simpleDeps);
   const loadRecord = simpleDeps.loadRecord;
@@ -2441,13 +2444,7 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
       );
     }
     const derived = deriveOwnedRevisionRequestV1(producer, revision);
-    if (typeof runtime.submitOwnedRevision === 'function') {
-      return runtime.submitOwnedRevision(record.run_id, derived, reviseOptions);
-    }
-    return runtime.submitRunRequest(derived.run_request, {
-      ...reviseOptions,
-      correction: derived.correction,
-    });
+    return runtime.submitOwnedRevision(record.run_id, derived, reviseOptions);
   }
   return Object.freeze({
     ...runtime,

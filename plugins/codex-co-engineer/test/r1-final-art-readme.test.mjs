@@ -291,7 +291,7 @@ test('optional absent slots have no images and public README has no art-QA prose
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');
   const bounds = {
-    'multi-lane-run': 'If you have no saved profile',
+    'multi-lane-run': '### Continue, answer, or cancel',
     'grouped-attention': 'That answer is chatting',
     'verified-final-decision': 'If a required assignment fails',
   };

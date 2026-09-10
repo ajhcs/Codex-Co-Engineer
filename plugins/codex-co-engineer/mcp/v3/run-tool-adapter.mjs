@@ -97,6 +97,7 @@ import {
   OWNED_REVISION_REQUEST_KEYS,
 } from './owned-delegation.mjs';
 import { projectRunCoordinationResponseV1 } from './run-coordination-response.mjs';
+import { projectRunResultEvidenceV1 } from './run-result-evidence.mjs';
 import { projectExperience } from './response.mjs';
 import {
   assertDirectJsonClosure,
@@ -167,7 +168,7 @@ export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'audience', 'candidate', 'checks',
   'cleanup', 'complete_candidate_blocked', 'decision_or_attention',
   'dispatch_uncertain_assignment_ids', 'dispatched_assignment_ids',
-  'consent', 'coordination', 'cursor', 'error', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
+  'consent', 'coordination', 'cursor', 'error', 'result_evidence', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
   'revision',
   'remote_mutated', 'run_id', 'schema', 'side_effects', 'status', 'tool',
   'undispatched_assignment_ids', 'version', 'wait_until', 'waited_ms', 'wake',
@@ -1241,6 +1242,15 @@ function compactOverflowReceipt(compact, simpleResponseCap) {
     ...(compact.error?.code ? { error: { code: utf8Head(compact.error.code, 128) } } : {}),
     ...(compact.result !== undefined ? { result_omitted: true } : {}),
     ...(compact.candidate ? { candidate: compact.candidate } : {}),
+    ...(compact.result_evidence ? { result_evidence: {
+      label: compact.result_evidence.label,
+      assignment_result: compact.result_evidence.assignment_result,
+      codex_accepted: compact.result_evidence.codex_accepted,
+      unresolved: compact.result_evidence.unresolved,
+      next_decision: compact.result_evidence.next_decision,
+      text: utf8Head(compact.result_evidence.text, 384),
+      detail: 'diagnostics',
+    } } : {}),
     ...(compact.blockers ? { blockers: compact.blockers } : {}),
     diagnostics: {
       view: 'diagnostics',
@@ -1313,6 +1323,7 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
       : {}),
     ...(candidate ? { candidate } : {}),
     coordination: projectRunCoordinationResponseV1(runtimeReceipt),
+    ...(receipt.result_evidence ? { result_evidence: receipt.result_evidence } : {}),
     ...(verification ? { verification } : {}),
     ...(receipt.operation === 'wait' ? {
       wait_until: receipt.wait_until,
@@ -1611,6 +1622,24 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     already_terminal: runtimeReceipt?.already_terminal === true,
     error: sanitizeModelFacing(runtimeReceipt?.error ?? null),
     telemetry: sanitizeModelFacing(runtimeReceipt?.telemetry ?? null),
+    ...(runtimeReceipt?.correction ? { correction: sanitizeModelFacing(runtimeReceipt.correction) } : {}),
+    ...(simpleAdmission && runtimeReceipt.persisted !== false && runtimeReceipt.usage_ledger != null
+      && runtimeReceipt.lanes.length > 0 ? {
+      result_evidence: projectRunResultEvidenceV1(JSON.parse(JSON.stringify({
+        schema: runtimeReceipt.schema, run_id: runtimeReceipt.run_id,
+        phase: runtimeReceipt.phase, base_sha: runtimeReceipt.base_sha,
+        lanes: runtimeReceipt.lanes.map(lane => ({
+          assignment_id: lane.assignment_id, provider: lane.provider, role: lane.role,
+          required: lane.required, status: lane.status, phase: lane.phase,
+          prompt_dispatched: lane.prompt_dispatched,
+          dispatch_confidence: lane.dispatch_confidence, task_final: lane.task_final,
+          clean: lane.clean ?? lane.handoff?.clean, head: lane.head,
+        })),
+        usage_ledger: runtimeReceipt.usage_ledger,
+      })), {
+        view: view === 'diagnostics' ? 'detail' : 'summary',
+      }),
+    } : {}),
     ...(operation === 'wait' ? {
       wait_until: capturedIncludes(WAIT_UNTIL_VALUES, runtimeReceipt?.wait_until)
         ? runtimeReceipt.wait_until

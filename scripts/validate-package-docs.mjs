@@ -16,6 +16,7 @@ export const PACKAGE_DOCUMENTS = Object.freeze([
   ['docs/configuration.md', 'configuration.md'],
   ['docs/mcp-pending-call.md', 'mcp-pending-call.md'],
   ['docs/run-tool-api.md', 'run-tool-api.md'],
+  ['docs/run-results.md', 'run-results.md'],
   ['docs/efficient-dogfood.md', 'efficient-dogfood.md'],
   ['docs/releases/v3.3.0.md', 'releases/v3.3.0.md'],
   ['docs/releases/v3.4.1.md', 'releases/v3.4.1.md'],

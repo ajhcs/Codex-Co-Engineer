@@ -2,11 +2,23 @@
 
 ## [Unreleased]
 
+Target: 3.4.3. Source candidate; existing release and host acceptance gates apply.
+
 ### Added
 
 - Explicit provider preferences and bounded candidate revisions through the
   existing Co-Engineer tool surface, preserving external ownership and prior
   evidence instead of rebuilding correction assignments in the lead agent.
+
+- Ordinary run results and on-demand usage evidence through the existing ledger
+  and decision-card helpers; unknown usage stays unknown and completion never
+  implies Codex acceptance.
+- A one-provider first-outcome example, issue forms, PR template, support links,
+  contributor tasks, roadmap, and a documented real development correction loop.
+- Reproducible frozen comparison cases and an offline analyzer covering native
+  helpers, corrections, failed attempts, exact source identities, and missing
+  acceptance coverage. Synthetic fixtures do not establish savings.
+- OpenAI showcase preparation with the current local-MCP submission limitation.
 
 ### Changed
 
@@ -14,10 +26,16 @@
   owners; return compact evidence for Astra and other autonomous lead agents.
   Preserve final review, host model defaults, and repository authorization.
 
+- Cap owned correction chains at three rounds, reserve one admitted child per
+  producer across server processes, and retain lineage through restart.
+
 ### Fixed
 
 - Make supported deadline extensions govern the active ACP turn and preserve
   timeout/cancellation truth after partial provider output.
+- Preserve empty capability restrictions and complete Unicode review feedback;
+  reject unproven producers and competing feedback instead of silently dropping it.
+- Direct terminal uncertainty to inspection and keep active work on bounded waits.
 
 ## [3.4.2] - 2026-09-08
 

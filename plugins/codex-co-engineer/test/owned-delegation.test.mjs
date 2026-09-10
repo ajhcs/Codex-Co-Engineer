@@ -15,6 +15,7 @@ import {
   producerFromRunReceiptV1,
   projectOwnedProducerCandidateV1,
 } from '../mcp/v3/owned-delegation.mjs';
+import { compileRunRequestV1 } from '../mcp/v3/run-request-compiler.mjs';
 import { compileOwnedCorrectionPromptV1 } from '../mcp/v3/prompt-compiler.mjs';
 import { projectRunCoordinationResponseV1 } from '../mcp/v3/run-coordination-response.mjs';
 
@@ -41,6 +42,7 @@ function producer(overrides = {}) {
     request_idempotency_key: IDEMPOTENCY,
     phase: 'completed',
     status: 'completed',
+      task_final: true,
     prompt_dispatched: true,
     dispatch_confidence: 'authoritative',
     head: HEAD,
@@ -194,6 +196,7 @@ test('producer receipts keep write scope and git identity for correction handoff
       write_scope: ['src/**'],
       phase: 'completed',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       handoff: { current_head: HEAD, clean: true },
@@ -256,6 +259,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       request_idempotency_key: IDEMPOTENCY,
@@ -283,6 +287,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       head: HEAD,
       clean: false,
       handoff: { current_head: HEAD, clean: false },
@@ -300,6 +305,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       head: HEAD,
@@ -319,6 +325,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       head: HEAD,
@@ -339,6 +346,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       head: HEAD,
@@ -357,6 +365,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       head: HEAD,
@@ -393,6 +402,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       dispatch_confidence: 'authoritative',
       head: HEAD,
@@ -412,6 +422,7 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      task_final: true,
       prompt_dispatched: true,
       head: HEAD,
       clean: true,
@@ -499,4 +510,38 @@ test('lineage and follow records persist original root, round, and child identit
     }),
     (error) => error.code === 'missing_key',
   );
+});
+
+test('valid maximum Unicode feedback compiles and empty capabilities stay empty', async () => {
+  const feedback = 'é'.repeat(2048);
+  const derived = deriveOwnedRevisionRequestV1(producer({ capabilities: [] }), revision({ feedback }));
+  const compiled = await compileRunRequestV1(derived.run_request, {
+    observeGit: async () => ({ base_sha: HEAD, head_sha: HEAD, tree_sha: 'c'.repeat(40),
+      branch: 'main', clean: true, remote_present: true, remote_count: 1 }),
+  });
+  assert.deepEqual(compiled.assignments[0].capabilities, []);
+  assert.ok(compiled.assignments[0].prompt.includes(feedback));
+  assert.ok(Buffer.byteLength(compiled.objective, 'utf8') <= 4096);
+});
+
+test('terminal uncertainty requires inspection while active uncertainty waits', () => {
+  for (const status of ['completed', 'failed', 'timeout', 'cancelled']) {
+    const packet = projectRunCoordinationResponseV1({
+      run_id: 'terminal-uncertainty', phase: 'completed',
+      lanes: [producer({ status, phase: status, task_final: true, dispatch_confidence: 'uncertain' })],
+    });
+    assert.equal(packet.next_action.action, 'inspect');
+    assert.equal(packet.available_actions.includes('revision'), false);
+  }
+  for (const task_final of [false, undefined]) {
+    const packet = projectRunCoordinationResponseV1({
+      run_id: 'lifecycle-missing', lanes: [producer({ task_final })],
+    });
+    assert.equal(packet.next_action.action, 'inspect');
+    assert.equal(packet.available_actions.includes('revision'), false);
+  }
+  const active = projectRunCoordinationResponseV1({
+    run_id: 'active-uncertainty', lanes: [producer({ status: 'running', phase: 'running', task_final: false, dispatch_confidence: 'uncertain' })],
+  });
+  assert.equal(active.next_action.action, 'wait');
 });

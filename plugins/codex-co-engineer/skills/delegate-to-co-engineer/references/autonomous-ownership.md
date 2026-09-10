@@ -14,7 +14,9 @@ micro-assignments that make the coordinator rebuild context after every commit.
 Break up work when dependencies or ownership require it, not to prescribe every
 tool call. Never dispatch a dependent review against the implementation's base.
 
-Use explicit or saved provider preferences. Spare Grok/Cursor capacity should
+Reuse the caller’s explicit `run_request.preferences` by role on each eligible
+request. Assignment `provider` and `model` values take priority. Preferences do
+not create a global settings store. Spare Grok/Cursor capacity should
 affect assignment ownership when the user requests that objective. Readiness is
 not a subscription balance, and Cursor Cloud API usage is not assumed to consume
 the same allowance as Cursor Local. Unknown usage stays unknown. Never replay
@@ -39,6 +41,12 @@ supported revision operation and its returned identity/action rather than
 reconstructing a launch from memory. A terminal revision is new scoped work,
 not a replay or an answer to an old attention question. It preserves provider,
 model, ownership, repository authorization, and immutable previous evidence.
+The correction chain permits three rounds and one admitted child per producer.
+Follow the returned child; an exhausted or failed loop needs an explicit decision
+about a new bounded assignment. Do not branch the original producer repeatedly.
+Read `result_evidence` for the outcome and use diagnostics only when the detailed
+usage or unresolved evidence affects the decision. Its usage covers this run,
+so include earlier attempts and native helpers when comparing the whole outcome.
 
 ## Wait without manufacturing work
 
@@ -71,3 +79,8 @@ review outcomes, and elapsed time. Record why external capacity was idle where
 that fact is known. Separate dependency waits from provider failures. Do not
 invent provider token counts, exact balances, or an expected percentage saving.
 Fewer native tokens with missed defects is not a successful optimization.
+
+Different feedback against a producer with an admitted child is rejected with
+that child's id and a statement that the feedback was not applied. Inspect the
+child before requesting its next correction. A pending durable reservation
+without a child receipt requires inspection; it never authorizes a replay.

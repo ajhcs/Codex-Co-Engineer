@@ -1,5 +1,8 @@
 # Roadmap
 
+Status: source candidate under review; no 3.4.3 publication or fresh-install
+qualification is claimed. See the [release requirements](release.md).
+
 This roadmap distinguishes the **3.4.3 adoption and ownership package** from
 later ideas. It is not a usage forecast, adoption claim, or endorsement.
 
@@ -10,7 +13,16 @@ later ideas. It is not a usage forecast, adoption claim, or endorsement.
 | Ownership and deadlines | Finish complete external ownership through bounded correction, with truthful deadline and revision behavior. |
 | Demonstrable outcomes | Make a reviewed candidate understandable: assignment outcome, changes, decisive checks, review state, and unresolved decisions. |
 | Onboarding | A short first-success path: host compatibility, one chosen provider, and a tiny public example under `examples/first-outcome`. |
-| Contribution and evaluation package | Issue forms, PR template, `SUPPORT.md`, welcoming contributor guide, starter tasks, and a place to grow reproducible evaluations without paid-provider CI. |
+| Contribution and evaluation package | Issue forms, PR template, `SUPPORT.md`, welcoming contributor guide, starter tasks, frozen comparison cases and an offline analyzer that includes native helpers, corrections, and failed attempts. |
+
+## Evidence before release and showcase
+
+The [development case](demos/ownership-deadline.md) records actual implementation,
+review, correction, and Codex acceptance of a specific fix. Complete the existing
+gate and host acceptance before labeling a recording as a qualified-release demo.
+Run fresh-user installation attempts and matched paid comparison cohorts with an
+explicit evaluation budget; publish failures and missing measurements too.
+See [showcase preparation](showcase.md) for the current local-MCP distribution route.
 
 ## Later (not this package)
 

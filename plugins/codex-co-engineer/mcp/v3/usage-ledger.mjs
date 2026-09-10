@@ -1348,15 +1348,15 @@ function clipUsageText(text, maxBytes) {
 }
 
 function formatMetricPhrase(metric) {
-  const unit = metric.unit === 'bytes' ? ' bytes' : (
-    metric.unit === 'tokens' ? ' tokens' : (
-      metric.unit === 'millicents' ? ' millicents' : (
-        metric.unit === 'milliseconds' ? ' ms' : ''
-      )
-    )
-  );
+  const value = STRING(metric.value);
+  if (metric.key === 'submissions') return `${value} submission${metric.value === 1 ? '' : 's'}`;
+  if (metric.key === 'elapsed_ms') return `${value} ms elapsed`;
+  if (metric.key === 'input_tokens') return `${value} input tokens`;
+  if (metric.key === 'output_tokens') return `${value} output tokens`;
+  if (metric.key === 'cache_tokens') return `${value} cached tokens`;
   const label = STRING(metric.key).split('_').join(' ');
-  return `${STRING(metric.value)}${unit} ${label}`;
+  const unit = metric.unit === 'count' ? '' : ` ${metric.unit}`;
+  return `${label}: ${value}${unit}`;
 }
 
 function tokenComparability(totals) {

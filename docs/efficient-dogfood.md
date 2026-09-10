@@ -1,7 +1,9 @@
 # Efficient Codex-Co-Engineer dogfood workflow
 
-For current semantic runs, read the delegation skill’s autonomous ownership
-guide and the [run API](run-tool-api.md). Delegate preparation, implementation, tests and
+For current semantic runs, read
+`skills/delegate-to-co-engineer/references/autonomous-ownership.md` and
+`skills/delegate-to-co-engineer/references/launch.md` inside the installed plugin
+(`plugins/codex-co-engineer/` in a source clone), plus the [run API](run-tool-api.md). Delegate preparation, implementation, tests and
 corrections together, retain provider preferences, and use compact candidate
 evidence at the review boundary. Measure parent plus native-child usage per
 accepted result; moving work from Astra to a native helper does not measure

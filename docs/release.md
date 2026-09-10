@@ -107,6 +107,32 @@ Record the tested commit and whether other provider routes were exercised.
 The lifecycle ownership decision is
 [ADR 0002](adr/0002-native-run-lifecycle.md).
 
+## Additional 3.4.3 candidate evidence
+
+Keep every existing requirement above. The new result and comparison fixtures
+are provider-free; they do not establish paid evaluation results or replace
+live acceptance. The local gate and CI both run the comparison fixture suite.
+
+For ownership changes, retain evidence of a completed producer, independent
+review, specific feedback, a corrected candidate, and Codex's acceptance.
+Exercise the successful revision, exhausted correction limit, stale head,
+concurrent repeated request, missing lifecycle proof, and timeout after partial
+output. Inspect revision lineage again after restart. Prove deadline extensions
+against both the old and extended deadline with concurrent sessions.
+
+The [development case study](demos/ownership-deadline.md) records real work;
+it identifies the installed coordinator and the limit of each check. Before a
+release showcase, capture actual use on the qualified host and label elapsed
+time and any compression. Do not present a scripted walkthrough or fixture
+comparison as live provider evidence. Fresh-user installation observations
+should record the chosen provider, host class, tested version, first successful
+outcome or failing step, and time to that result; keep private diagnostics local.
+
+For matched evaluations, follow the [benchmark protocol](../benchmarks/),
+including native helpers, failed attempts, and corrections. An explicit budget
+is required before paid cohorts; the deterministic CI suite does not launch
+them. Missing usage stays unknown in the [result report](run-results.md).
+
 ## Handoff and cleanup
 
 Codex reviews and merges. Managed local worktrees remain until their result is

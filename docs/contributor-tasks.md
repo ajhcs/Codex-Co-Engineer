@@ -124,10 +124,6 @@ paid provider. Paid comparisons are explicitly optional and out of CI.
 
 ```bash
 git diff --check
-# Depends on scripts/compare-coengineer-runs.mjs (planned companion script).
-# If that file is absent in this tree, skip the comparison CLI and rely on
-# the outline's documented fixture steps plus git diff --check only.
-test -f scripts/compare-coengineer-runs.mjs \
-  && node scripts/compare-coengineer-runs.mjs --help \
-  || echo "compare-coengineer-runs.mjs not present yet; outline-only check"
+node scripts/compare-coengineer-runs.mjs --validate-cases --cases benchmarks/cases
+node --no-warnings --test scripts/compare-coengineer-runs.test.mjs
 ```

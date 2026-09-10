@@ -235,6 +235,7 @@ function monotoneOrEqual(previous, next) {
 
 function compatibleSnapshot(previous, next) {
   if (previous.kind !== next.kind) return false;
+  if (previous.provider !== null && (previous.provider !== next.provider || previous.model !== next.model)) return false;
   if (next.sequence <= previous.sequence) return false;
   if (TERMINAL_OUTCOMES.includes(previous.outcome) && previous.outcome !== next.outcome) {
     return false;
@@ -713,7 +714,9 @@ export function compareTrials(cases, trials, options = {}) {
     seenTrials.add(trial.trial_id);
   }
   const caseById = new Map(parsedCases.map((entry) => [entry.id, entry]));
-  const provenance = parseProvenance(options.provenance);
+  const suppliedProvenance = parseProvenance(options.provenance);
+  const provenance = parsedTrials.some(trial => trial.coengineer_source.kind === 'synthetic_label')
+    ? { ...suppliedProvenance, class: 'synthetic_unverified' } : suppliedProvenance;
   const rows = [];
   for (const caseRecord of parsedCases) {
     const arms = {};
@@ -859,7 +862,6 @@ export function caseCommitMessage(caseId) {
 async function runGit(cwd, args) {
   const env = {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
-    HOME: cwd,
     TMPDIR: os.tmpdir(),
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',

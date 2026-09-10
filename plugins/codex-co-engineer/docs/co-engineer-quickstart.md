@@ -69,13 +69,14 @@ eight. This is still one bounded run and one coordinated wait.
 
 You:
 
-> Split this into three isolated independent assignments: API
-> validation, the operator guide, and a review of both diffs.
+> Use Grok for API validation and Muse for the operator guide in two
+> isolated assignments. Once both finish, have Cursor review the integrated
+> candidate.
 
 Codex:
 
-> I am delegating this to Co-Engineer. Co-Engineer is preparing 3
-> independent assignments.
+> I am delegating this to Co-Engineer. Co-Engineer is preparing 2
+> independent assignments. I will arrange review after integration.
 
 The first card says `preparing` until every required lane has authoritative
 prompt-dispatch evidence; only then does it say `running`.
@@ -88,12 +89,15 @@ Name co-engineers when you care which route takes which assignment:
 Codex:
 
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
-> Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
-> preparing 3 assignments.
+> Using Muse Co-Engineer. Co-Engineer is preparing 2 assignments.
+> Cursor will review the resulting candidate in a subsequent assignment.
 
 For multi-provider recipes, **review the resulting immutable candidate**. Do
 not run a dependent review concurrently against the shared base while writers
 are still producing it.
+
+The unreleased 3.4.3 candidate adds provider preferences and `task.revision`.
+Published 3.4.2 uses explicit fresh assignments for completed-candidate fixes.
 
 Provider preferences on a run request reuse ownership **for that request** by
 role. Exact assignment provider or model choices win. Preferences are not
@@ -101,7 +105,7 @@ saved global Codex settings.
 
 ## 5. Ask once when nothing is named
 
-If you want a team and have no named co-engineers on the request:
+If no provider choice is available from the request or earlier conversation:
 
 You:
 

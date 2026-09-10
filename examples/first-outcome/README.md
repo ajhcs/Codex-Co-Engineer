@@ -1,8 +1,8 @@
 # First outcome example
 
-Tiny public assignment you can copy into a **clean Git repository**. It needs no
-paid provider and no `package.json` / `npm install`: acceptance is a local Node
-check using `.mjs` / `.cjs` only.
+Tiny public assignment you can copy into a **clean Git repository**. Its local
+acceptance check needs only Node, with no `package.json` or `npm install`.
+Delegating the implementation uses your chosen provider's account and usage.
 
 The shipped library is an **intentionally incomplete stub**. `node check.mjs`
 fails until a provider implements the summarizer. After a useful outcome, the

@@ -9,6 +9,8 @@
 
 [Install](#install-and-authentication) · [Try it](#your-first-delegation) · [Providers](#provider-choices) · [Release notes](docs/releases/v3.4.2.md) · [Troubleshooting](#troubleshooting)
 
+[Report a problem](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=bug.yml) · [Suggest an improvement](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=feature.yml) · [Ask or share a workflow](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=question.yml) · [Contribute](CONTRIBUTING.md)
+
 Ask Codex to bring in **Grok, Cursor, or Muse** for implementation, investigation,
 or a second opinion. Co-Engineer prepares isolated workspaces, coordinates up to
 **eight independent assignments**, and brings their results back for Codex to review.
@@ -112,6 +114,10 @@ new decision. [Inspect or revoke remembered access](plugins/codex-co-engineer/RE
 
 ## Your first delegation
 
+Start with [one provider and a small useful outcome](docs/co-engineer-quickstart.md).
+The [copyable example](examples/first-outcome/) includes a fixed local acceptance
+check, so you can see what the agent changed and verify it yourself.
+
 > Use Grok Co-Engineer to review the authentication changes. Report actionable findings.
 
 Codex submits the assignment, Co-Engineer prepares its workspace, and the provider
@@ -151,7 +157,9 @@ Codex asks which one to use. It does not silently choose a different provider or
 
 One grouped decision covers every assignment that asked; unaffected assignments
 can keep working. That answer is chatting with the existing run, not a new launch.
-Chatting requires an existing run. Starting new work remains an explicit delegation.
+Chatting requires an existing run. Ask for a correction to a reviewed candidate
+to return the findings to its external owner. Unrelated new work remains an
+explicit delegation.
 
 <!-- README_ART_SLOT: verified-final-decision -->
 
@@ -172,6 +180,10 @@ It does not describe an incomplete run as a verified result.
 
 ## Autonomous engineering ownership
 
+**In development for 3.4.3.** The new revision operation and result reporting
+require this candidate; the installation instructions above still select the
+published 3.4.2 release. See the [scope and roadmap](docs/roadmap.md).
+
 Give Grok or Cursor the complete bounded assignment: relevant preparation,
 implementation, meaningful checks, and requested corrections. Use an independent
 external review where useful; Codex retains final review and integration authority.
@@ -183,6 +195,8 @@ They do not infer subscription balances or silently replace an active worker.
 The [autonomous ownership guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/autonomous-ownership.md)
 explains how this reduces coordination work for Astra and other capable agents.
 Measure total native-agent work per accepted result, including any native helpers.
+Read the [actual development correction case](docs/demos/ownership-deadline.md),
+[result and usage guide](docs/run-results.md), and [comparison protocol](benchmarks/).
 
 ## Provider choices
 
@@ -270,6 +284,8 @@ single-task calls and full run envelopes remain supported.
 | [Plugin reference](plugins/codex-co-engineer/README.md) | Installed-package setup, authentication, and API examples |
 | [Configuration](docs/configuration.md) | Providers, credentials, profiles, and host variables |
 | [Contributing](CONTRIBUTING.md) | Local commands, compatibility, and review expectations |
+| [Support](SUPPORT.md) and [starter tasks](docs/contributor-tasks.md) | Reports, questions, examples, and approachable contributions |
+| [Showcase preparation](docs/showcase.md) | A source-backed demonstration and current distribution limits |
 | [Release process](docs/release.md) | Exact-candidate qualification and publication |
 
 Co-Engineer keeps coordination compact, but token parity with native subagents

@@ -561,3 +561,11 @@ test('CLI bounds reject oversized trial files', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('cumulative snapshots cannot move previously reported usage to another model', async () => {
+  const c = (await loadCases(CASES_DIR))[0];
+  const usage = { provider_output_tokens: metric(20, 'provider_report', 'provider_untrusted') };
+  const first = { attempt_id: 'provider-attempt', sequence: 1, kind: 'initial', outcome: 'unfinal', provider: 'grok', model: 'model-a', usage };
+  const changed = { ...first, sequence: 2, model: 'model-b' };
+  assert.throws(() => parseTrial(trial(c, { attempts: [first, changed] })), error => error.code === 'incompatible_snapshot');
+});

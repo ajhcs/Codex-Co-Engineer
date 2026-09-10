@@ -134,14 +134,14 @@ function collectUnresolved(lanes, receipt) {
     let reason = null;
     if (laneCleanupIncomplete(lane, receipt)) reason = 'cleanup';
     else if (clean === false) reason = 'dirty';
-    else if (lane?.dispatch_confidence === 'uncertain' || lane?.dispatch_confidence === 'not_sent') {
-      reason = 'uncertain';
-    } else if (status === null) reason = 'unresolved';
+    else if (status === null) reason = 'unresolved';
     else if (capturedIncludes(ATTENTION, status)) reason = 'needs_attention';
     else if (capturedIncludes(FAILED, status)) reason = 'failed';
     else if (capturedIncludes(ACTIVE, status)) reason = 'active';
+    else if (lane?.dispatch_confidence === 'uncertain' || lane?.dispatch_confidence === 'not_sent'
+      || lane?.dispatch_confidence === 'unknown') reason = 'uncertain';
     else if (capturedIncludes(COMPLETED, status)) {
-      if (clean !== true || lane?.dispatch_confidence !== 'authoritative' || lane?.prompt_dispatched !== true) {
+      if (clean !== true || lane?.task_final !== true || lane?.dispatch_confidence !== 'authoritative' || lane?.prompt_dispatched !== true) {
         reason = 'unresolved';
       } else {
         continue;
@@ -161,6 +161,7 @@ function isProvenCompletedCleanWriter(lane) {
   return capturedIncludes(COMPLETED, laneStatus(lane))
     && (lane?.access === 'writer' || lane?.access === 'write' || lane?.role === 'implement')
     && laneClean(lane) === true
+    && lane?.task_final === true
     && lane?.dispatch_confidence === 'authoritative'
     && lane?.prompt_dispatched === true;
 }
@@ -191,7 +192,7 @@ function chooseNextAction(receipt, lanes, unresolved) {
       action: 'reply',
     });
   }
-  if (unresolved.some((item) => item.reason === 'active' || item.reason === 'uncertain')) {
+  if (unresolved.some((item) => item.reason === 'active')) {
     return freezeData({
       tool: 'task',
       operation: 'wait',
@@ -204,6 +205,7 @@ function chooseNextAction(receipt, lanes, unresolved) {
     || item.reason === 'dirty'
     || item.reason === 'cleanup'
     || item.reason === 'unresolved'
+    || item.reason === 'uncertain'
   ));
   if (failed) {
     return freezeData({

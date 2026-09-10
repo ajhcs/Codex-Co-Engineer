@@ -41,7 +41,7 @@ body:
         - Codex CLI
         - Codex Desktop or another Codex host
         - Unsure / other
-      default: 0
+      default: 2
     validations:
       required: false
   - type: dropdown

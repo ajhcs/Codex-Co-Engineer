@@ -76,6 +76,13 @@ label cannot mix candidate builds. Native Codex uses
 `{ "kind": "native", "value": "native-codex" }`. Duplicate case IDs are
 rejected.
 
+For real trials, replace the fixture's `codex-default` label with the actual
+host model id and record the effective settings. Record the external model ids
+and routes in `provider_configuration`, keeping them fixed across Co-Engineer
+arms. Resolve these before collecting a cohort. A stock-default setting is not
+proof that two sessions used the same effective model. Operator-supplied records
+remain unverified until their retained evidence is independently checked.
+
 ## Analyze sanitized records
 
 Unknown flags are rejected. `--cases` and `--trials` are required for
@@ -101,7 +108,7 @@ The fixture output is labeled `synthetic_unverified`. It does not claim
 - Native parent usage must set `native_parent_excludes_helpers: true` when
   helpers are recorded separately.
 - Same-attempt cumulative snapshots must increase sequence and keep terminal
-  outcomes. A later snapshot cannot overwrite a terminal failure with an
+  outcomes and provider/model attribution. A later snapshot cannot overwrite a terminal failure with an
   incompatible outcome.
 - `usage_per_accepted_result` keeps failures and corrections in the numerator.
   If any trial in the arm is missing `accepted`, the ratio is unknown until

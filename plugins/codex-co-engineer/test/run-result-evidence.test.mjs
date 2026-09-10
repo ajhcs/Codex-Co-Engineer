@@ -93,7 +93,7 @@ function artifactRef() {
 }
 
 function receipt(overrides = {}) {
-  return {
+  const result = {
     schema: RUN_ADMISSION_RECEIPT_SCHEMA_ID,
     version: 1,
     run_id: RUN_ID,
@@ -121,6 +121,9 @@ function receipt(overrides = {}) {
     }],
     ...overrides,
   };
+  return { ...result, lanes: result.lanes.map(lane => ({
+    prompt_dispatched: true, dispatch_confidence: 'authoritative', task_final: true, clean: true, ...lane,
+  })) };
 }
 
 test('describe seam keeps the exported projection API', () => {
@@ -587,4 +590,21 @@ test('maximum eight-lane known-metric outputs stay inside byte caps', () => {
   assert.ok(detail.usage.truncation == null || typeof detail.usage.truncation.truncated === 'boolean');
   assert.equal(JSON.stringify(summary).includes(HOSTILE_PATH), false);
   assert.equal(JSON.stringify(summary).includes(HOSTILE_PROMPT), false);
+});
+
+test('completed status alone cannot hide missing dispatch or final-lifecycle proof', () => {
+  for (const patch of [
+    { dispatch_confidence: undefined }, { dispatch_confidence: 'not_sent' },
+    { prompt_dispatched: false }, { task_final: undefined },
+  ]) {
+    const value = receipt();
+    for (const [key, field] of Object.entries(patch)) {
+      if (field === undefined) delete value.lanes[0][key];
+      else value.lanes[0][key] = field;
+    }
+    const report = summarizeRunResultEvidenceV1(value);
+    assert.equal(report.assignment_result, 'uncertain');
+    assert.equal(report.next_decision, 'inspect_unresolved');
+    assert.equal(report.codex_accepted, false);
+  }
 });

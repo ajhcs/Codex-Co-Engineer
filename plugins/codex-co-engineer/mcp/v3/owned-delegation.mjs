@@ -4,8 +4,8 @@
 //
 // Correction rounds are a fixed chain-depth ceiling of three, independent of
 // each assignment's duration. One admitted correction child per producer;
-// different feedback against the same producer follows that child instead of
-// branching a new first-round candidate. Exhausted budget rejects before
+// different feedback against the same producer is rejected with its child id
+// rather than silently dropping feedback or branching a first-round candidate. Exhausted budget rejects before
 // provider dispatch and requires a deliberate new bounded assignment. An
 // admitted child that later fails does not replenish its consumed round.
 
@@ -481,7 +481,7 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
     required_evidence: producer.required_evidence,
     expected_head: revision.expected_head,
   });
-  const objective = `Correct ${producer.assignment_id}: ${revision.feedback}`.slice(0, 4096);
+  const objective = `Correct the reviewed ${producer.assignment_id} candidate.`;
   const assignment = {
     assignment_id: producer.assignment_id,
     provider: producer.provider,
@@ -491,7 +491,7 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
     expected_duration_ms: producer.expected_duration_ms,
     write_scope: [...producer.write_scope],
     required: true,
-    ...(Array.isArray(producer.capabilities) && producer.capabilities.length > 0
+    ...(Array.isArray(producer.capabilities)
       ? { capabilities: [...producer.capabilities] }
       : {}),
   };

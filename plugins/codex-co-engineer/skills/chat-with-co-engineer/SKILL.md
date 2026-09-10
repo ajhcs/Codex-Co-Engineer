@@ -1,6 +1,6 @@
 ---
 name: chat-with-co-engineer
-description: Inspect, continue, answer grouped questions, or cancel an existing Co-Engineer run. Use for Chatting with Co-Engineer; never start new work.
+description: Inspect, continue, answer grouped questions, or cancel an existing Co-Engineer run. Use for Chatting with Co-Engineer and bounded same-provider candidate revisions; never start unrelated work.
 ---
 
 # Chatting with Co-Engineer
@@ -18,7 +18,8 @@ use `task.revision` with concise findings and the exact returned producer
 identity. The [launch reference](../delegate-to-co-engineer/references/launch.md)
 lists its fields.
 Keep the original external provider/model and scope. A revision has a fresh
-identity and preserves prior evidence; do not use an old attention reply or
+identity and preserves prior evidence. Follow its returned revision run ID and
+cursor. It continues the assignment as fresh scoped work; do not use an old attention reply or
 replay an active/uncertain task. Return routine fixes to the external owner.
 
 For interrupted repository consent, reopen the actual host form on the same run
@@ -28,7 +29,7 @@ Unaffected assignments continue. Inspect the result and relevant checks before
 claiming verification; report any failure or unresolved work honestly.
 
 Read [existing-run details](references/existing-run.md) only for an unfamiliar
-reply or diagnostic operation. Raw lifecycle debugging uses
+revision, reply, or diagnostic operation. Raw lifecycle debugging uses
 `$control-codex-co-engineer-agents`. Never ask the user to construct tool payloads.
 
 For an explicitly requested legacy Luna/Sol relay, see [optional host relay](references/luna-pm-events.md). This is not required for ordinary delegation.

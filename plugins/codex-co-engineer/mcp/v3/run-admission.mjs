@@ -47,6 +47,7 @@ import {
   validateRunIdentityV1,
   validateWorkspaceIdentityV1,
 } from './protected-identity.mjs';
+import { projectAdmissionUsageLedgerV1 } from './admission-usage.mjs';
 import {
   compactOwnedCorrectionFollowV1,
   compactOwnedCorrectionLineageV1,
@@ -99,7 +100,7 @@ export const RUN_ADMISSION_DEPENDENCIES = capturedFreeze([
   'verifyRepository', 'prepareWorkspace', 'cleanupWorkspace', 'createSession',
   'dispatchPrompt', 'inspectLane', 'reconnectLane', 'replyAttention', 'cancelLane',
   'inspectWorkspace', 'buildHandoff', 'verifyRun', 'clock', 'sleep', 'compile',
-  'loadRecord', 'persistRecord', 'waitForProgress',
+  'loadRecord', 'persistRecord', 'waitForProgress', 'reserveRevision',
 ]);
 const MAX_PROVIDER_RESULT_BYTES = 8 * 1024;
 
@@ -877,6 +878,7 @@ function receipt(record, extras = {}) {
     // are immutable snapshots, while later cancellation/reconciliation still
     // needs to update the record's counters.
     telemetry: { ...record.telemetry },
+    usage_ledger: projectAdmissionUsageLedgerV1(record),
     ...(record.correction ? { correction: record.correction } : {}),
     ...extras,
   });
@@ -977,6 +979,7 @@ function createDefaultDependencies(overrides) {
     compile: compileRunRequestV1,
     loadRecord: async () => null,
     persistRecord: async () => {},
+    reserveRevision: async (_runId, _assignmentId, follow) => ({ reserved: true, follow, release: async () => {} }),
   };
   for (const key of RUN_ADMISSION_DEPENDENCIES) {
     if (capturedHasOwn(overrides ?? {}, key)) {
@@ -1838,22 +1841,9 @@ export function createRunAdmissionRuntime(overrides = {}) {
       const existingFollow = lane.correction_follow
         ? compactOwnedCorrectionFollowV1(lane.correction_follow, 'correction_follow')
         : null;
-      if (existingFollow) {
-        if (existingFollow.identity_digest === follow.identity_digest
-          && existingFollow.child_run_id === follow.child_run_id
-          && existingFollow.child_assignment_id === follow.child_assignment_id) {
-          return submitRunRequest(derived.run_request, { ...options, correction });
-        }
-        const child = await loadRecord(existingFollow.child_run_id);
-        if (!child) {
-          admissionError(
-            'revision_child_exists',
-            'revision',
-            `Follow the admitted correction child ${existingFollow.child_run_id}; this producer already consumed its correction slot.`,
-          );
-        }
-        if (isTerminalRun(child) || child.phase === 'awaiting_consent') return receipt(child);
-        return enqueue(child.run_id, async () => reconcile(child));
+      if (existingFollow && existingFollow.identity_digest !== follow.identity_digest) {
+        admissionError('revision_child_exists', 'revision',
+          `Feedback was not applied. Inspect correction child ${existingFollow.child_run_id}; this producer already consumed its correction slot.`);
       }
       const expected = assertOwnedCorrectionBudgetV1(ownedCorrectionPolicyV1({
         run_id: producer.run_id,
@@ -1867,6 +1857,20 @@ export function createRunAdmissionRuntime(overrides = {}) {
         admissionError('durable_state_mismatch', 'correction',
           'Derived correction lineage does not match the producer round policy.');
       }
+      const reservation = await injected.reserveRevision(producerRunId, lane.assignment_id, follow);
+      if (reservation.reserved !== true) {
+        const reservedFollow = compactOwnedCorrectionFollowV1(reservation.follow, 'correction_follow');
+        if (reservedFollow.identity_digest !== follow.identity_digest
+          || reservedFollow.child_run_id !== follow.child_run_id
+          || reservedFollow.child_assignment_id !== follow.child_assignment_id) {
+          admissionError('revision_child_exists', 'revision',
+            `Feedback was not applied. Inspect correction child ${reservedFollow.child_run_id}; this producer already consumed its correction slot.`);
+        }
+        const child = await loadRecord(reservedFollow.child_run_id);
+        if (!child) admissionError('revision_admission_pending', 'revision',
+          `Correction ${reservedFollow.child_run_id} is reserved but its receipt is unavailable; inspect before starting new work.`);
+        return inspectRun({ run_id: child.run_id });
+      }
       lane.correction_follow = follow;
       bump(producer);
       await persist(producer);
@@ -1879,6 +1883,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
           bump(producer);
           try {
             await persist(producer);
+            await reservation.release();
           } catch {
             // Keep the fail-closed reservation rather than masking the original error.
           }

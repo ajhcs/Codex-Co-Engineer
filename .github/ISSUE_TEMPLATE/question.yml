@@ -1,5 +1,5 @@
-name: Question
-description: Ask for help or clarification. Discussions is not enabled on this repository.
+name: Question or workflow
+description: Ask for help or share a useful workflow. Discussions is not enabled on this repository.
 title: "[Question]: "
 labels: ["question"]
 body:
@@ -12,8 +12,8 @@ body:
   - type: textarea
     id: question
     attributes:
-      label: Your question
-      description: What you are trying to do and where you are stuck.
+      label: Your question or workflow
+      description: What you are trying to do, where you are stuck, or a small workflow others can try.
     validations:
       required: true
   - type: textarea

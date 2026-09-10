@@ -1,8 +1,8 @@
 // RunResultEvidenceV1 — bounded shareable projection of simple run-admission
 // receipts onto existing usage-ledger and local-outcome components.
 //
-// Additive helper. Parent may call the exported seam from real admission
-// receipt/projection after runtime wiring. This module is not an MCP tool,
+// The admission adapter calls this projection on its measured receipt facts.
+// This module is not an MCP tool,
 // does not scrape private Codex state, and does not dump a usage ledger
 // into every wait. Summary is the default; detail is on-demand.
 //
@@ -182,7 +182,10 @@ function mapLaneOutcome(lane) {
   if (lane.task_final === false) return 'uncertain';
   if (laneIsDirty(lane)) return 'uncertain';
   if (confidence === 'uncertain' || confidence === 'unknown') return 'uncertain';
-  if (token === 'completed') return 'completed';
+  if (token === 'completed') {
+    return confidence === 'authoritative' && lane.prompt_dispatched === true && lane.task_final === true
+      ? 'completed' : 'uncertain';
+  }
   if (capturedIncludes(UNCERTAIN_OUTCOMES, token)) return 'uncertain';
   return 'uncertain';
 }
@@ -660,7 +663,7 @@ export function projectRunResultEvidenceV1(source, options) {
   const candidate = selectCandidate(lanes, wrapped.candidate);
   const checks = deriveChecks(wrapped.checks);
   const artifacts = collectArtifacts(runId, lanes, wrapped.artifacts);
-  const usageBudget = view === 'detail' ? MAX_USAGE_DETAIL_BYTES : 768;
+  const usageBudget = view === 'detail' ? MAX_USAGE_DETAIL_BYTES : 1_280;
   const usage = projectUsage(wrapped.usage_ledger ?? receipt.usage_ledger, view, usageBudget);
   const baseSha = readSha(receipt.base_sha) ?? readSha(receipt.git?.base_sha);
   if (baseSha == null) deny('missing_key', 'receipt.base_sha');
