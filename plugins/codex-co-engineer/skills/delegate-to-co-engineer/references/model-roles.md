@@ -5,6 +5,15 @@ independent assignments when their benefit exceeds coordination overhead.
 Co-Engineer delegates to external providers; native model selection and
 reasoning effort belong to the host. Preserve user choices and stock defaults.
 
+## Provider ownership comes first
+
+When the user wants to use available external capacity, keep implementation,
+technical review, and corrections with authorized Grok/Cursor/Muse owners where
+their capabilities fit. A cheaper native agent still draws on the native pool;
+adding a Luna/Sol relay does not by itself meet that objective. Keep final host
+review and genuine escalation decisions with the host. See the
+[autonomous ownership guide](autonomous-ownership.md).
+
 ## Practical task ladder
 
 These job titles and effort thresholds are workflow heuristics, not official

@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Explicit provider preferences and bounded candidate revisions through the
+  existing Co-Engineer tool surface, preserving external ownership and prior
+  evidence instead of rebuilding correction assignments in the lead agent.
+
+### Changed
+
+- Delegate complete engineering assignments, checks and corrections to external
+  owners; return compact evidence for Astra and other autonomous lead agents.
+  Preserve final review, host model defaults, and repository authorization.
+
+### Fixed
+
+- Make supported deadline extensions govern the active ACP turn and preserve
+  timeout/cancellation truth after partial provider output.
+
 ## [3.4.2] - 2026-09-08
 
 ### Fixed

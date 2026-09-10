@@ -16,6 +16,19 @@ Speak naturally; you do not need tool payloads, a profile, or another manager
 for an ordinary launch. A separate host panel is optional. The CLI conversation
 is a complete workflow. The stable plugin and MCP identifier is `codex-co-engineer`.
 
+## Complete engineering assignments
+
+Grok and Cursor can own preparation, implementation, meaningful checks, and
+requested corrections. Tell Codex your provider preferences once in the task;
+it can reuse them for eligible assignments while you retain final control.
+Co-Engineer returns concise candidate evidence and supports bounded revisions
+without rebuilding dispatch details. An explicit provider choice takes priority.
+
+The [autonomous ownership guide](skills/delegate-to-co-engineer/references/autonomous-ownership.md)
+explains coordination for Astra and other autonomous agents. Compare total
+native-agent work per accepted result, including native helpers; provider
+readiness does not establish a subscription balance.
+
 ## Install and authentication
 
 ### Requirements

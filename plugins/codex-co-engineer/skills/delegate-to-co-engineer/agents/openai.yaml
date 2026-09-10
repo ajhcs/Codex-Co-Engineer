@@ -1,7 +1,7 @@
 interface:
   display_name: "Delegating to Co-Engineer"
-  short_description: "Start one bounded Co-Engineer run"
-  default_prompt: "Use $delegate-to-co-engineer to launch the requested work with existing provider choices, one semantic submission, and one coordinated wait."
+  short_description: "Delegate a complete engineering assignment"
+  default_prompt: "Use $delegate-to-co-engineer to give the complete bounded assignment to an authorized external owner, preserve provider preferences, and return a concise candidate for review."
 dependencies:
   tools:
     - type: "mcp"

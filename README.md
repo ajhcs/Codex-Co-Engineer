@@ -136,8 +136,8 @@ acknowledgement is not a completed review.
 Independent assignments stay isolated. Assign work that can proceed independently;
 ask for a review of the resulting changes after the implementation is available.
 
-If you have no saved profile and do not name a provider, Codex asks which one to
-use. It does not silently choose a different provider or model.
+If neither your provider preferences nor a named provider resolves the choice,
+Codex asks which one to use. It does not silently choose a different provider or model.
 
 ### Continue, answer, or cancel
 
@@ -169,6 +169,20 @@ It does not describe an incomplete run as a verified result.
 ![Conceptual illustration of a required assignment that failed or stayed unresolved, with no verified candidate claimed.](docs/assets/co-engineer-3.4.0/final/derived/failure-unresolved.jpg)
 
 </details>
+
+## Autonomous engineering ownership
+
+Give Grok or Cursor the complete bounded assignment: relevant preparation,
+implementation, meaningful checks, and requested corrections. Use an independent
+external review where useful; Codex retains final review and integration authority.
+Co-Engineer derives revision identities and concise candidate evidence so the
+lead agent can make decisions without rebuilding routine dispatch paperwork.
+
+Provider preferences are explicit and preserve a directly selected provider.
+They do not infer subscription balances or silently replace an active worker.
+The [autonomous ownership guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/autonomous-ownership.md)
+explains how this reduces coordination work for Astra and other capable agents.
+Measure total native-agent work per accepted result, including any native helpers.
 
 ## Provider choices
 
