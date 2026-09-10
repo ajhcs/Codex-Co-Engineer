@@ -559,3 +559,80 @@ AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRun
   }
   return coEngineerWaitForAgentTree(child, waitMs);
 };
+
+/*
+ * Turn deadlines must stay extensible. Upstream runPromptTurn races the prompt
+ * against a fixed withTimeout; when that timer fires after any agent reply it
+ * fabricates {stopReason:'end_turn',source:'session'}, which the manager
+ * records as a completed turn. Co-Engineer therefore:
+ *   1. races the prompt against the turn AbortSignal (worker-owned deadline)
+ *   2. never promotes TimeoutError / interrupt into a synthetic end_turn
+ * Session startup and bounded cleanup keep using their own withTimeout paths.
+ */
+let coEngineerActiveTurnSignal = null;
+
+const coEngineerOriginalRunRuntimeTurnTask = AcpRuntimeManager.prototype.runRuntimeTurnTask;
+AcpRuntimeManager.prototype.runRuntimeTurnTask = async function coEngineerRunRuntimeTurnTask(task) {
+  const previous = coEngineerActiveTurnSignal;
+  coEngineerActiveTurnSignal = task?.input?.signal ?? null;
+  try {
+    return await coEngineerOriginalRunRuntimeTurnTask.call(this, task);
+  } finally {
+    coEngineerActiveTurnSignal = previous;
+  }
+};
+
+async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } = {}) {
+  const hasTimeout = timeoutMs != null && timeoutMs > 0;
+  const hasSignal = signal != null;
+  if (!hasTimeout && !hasSignal) return await promise;
+  if (signal?.aborted) throw new InterruptedError();
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    let abortTimer;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (abortTimer) clearTimeout(abortTimer);
+      if (hasSignal) signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => {
+      // Let session/cancel settle cooperatively before forcing a turn failure.
+      // Hostile agents that ignore cancel still fail after this short grace.
+      abortTimer = setTimeout(() => finish(reject, new InterruptedError()), 200);
+    };
+    if (hasSignal) signal.addEventListener('abort', onAbort, { once: true });
+    if (hasTimeout) {
+      timer = setTimeout(() => finish(reject, new TimeoutError(timeoutMs)), timeoutMs);
+    }
+    promise.then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+runPromptTurn = async function coEngineerRunPromptTurn(params) {
+  try {
+    const promptPromise = params.client.prompt(params.sessionId, params.prompt);
+    await params.onPromptStarted?.();
+    const response = await coEngineerAwaitPromptWithDeadline(promptPromise, {
+      timeoutMs: params.timeoutMs,
+      signal: params.signal ?? coEngineerActiveTurnSignal,
+    });
+    await params.client.waitForSessionUpdatesIdle?.({
+      idleMs: SESSION_REPLY_IDLE_MS,
+      timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
+    }).catch(() => {});
+    recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
+    return { stopReason: response.stopReason, source: 'rpc' };
+  } catch (error) {
+    throw error;
+  }
+};

@@ -1682,15 +1682,21 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
   const cwd = requireAbsoluteDirectory(task.cwd);
   const prompt = await readPrompt(root, taskId);
   const configuration = providerConfiguration(task);
-  const timeoutMs = taskTimeoutMs(task);
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) fail('invalid_timeout', 'timeout_ms must be at least 1000.');
+  // Session startup / reconnect keep a bounded timeout. The turn itself is
+  // owned by startDeadlineWatch + AbortSignal so audited extensions re-arm.
+  const startupTimeoutMs = taskTimeoutMs(task);
+  if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs < 1) {
+    fail('invalid_timeout', 'timeout_ms must be at least 1000.');
+  }
 
   if (task.provider === 'dsh') {
-    return runDshExec({ root, task, prompt, cwd, configuration, timeoutMs, signal });
+    return runDshExec({ root, task, prompt, cwd, configuration, timeoutMs: startupTimeoutMs, signal });
   }
 
   const childEnv = providerChildEnvironment(task);
-  const runtime = await makeRuntime({ root, cwd, configuration, timeoutMs, taskId, signal, env: childEnv });
+  const runtime = await makeRuntime({
+    root, cwd, configuration, timeoutMs: startupTimeoutMs, taskId, signal, env: childEnv,
+  });
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort(signal?.reason ?? new AcpWorkerError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'ACP task exceeded its recorded deadline.' : 'Task cancelled.'));
@@ -1739,7 +1745,9 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
       text: prompt,
       mode: 'prompt',
       requestId,
-      timeoutMs,
+      // Disable the fixed inner turn timer; the worker deadline AbortSignal is
+      // the sole extensible execution bound for this prompt.
+      timeoutMs: 0,
       signal: controller.signal,
     });
     // From this point onward the provider may have accepted the prompt. A
@@ -1773,6 +1781,12 @@ export async function runAcpTask({ root, taskId, signal } = {}) {
     }
 
     const result = await turn.result;
+    // Authoritative deadline / cancel outcomes beat any runtime settlement,
+    // including partial text that upstream historically treated as end_turn.
+    if (timedOut) fail('timeout', 'ACP task exceeded its recorded deadline.');
+    if (result.status === 'cancelled' || controller.signal.aborted) {
+      fail('cancelled', 'ACP task was cancelled.');
+    }
     const current = (await readTask(root, taskId)).task;
     const unsupportedQuestion = isStructuredAskUserQuestionUnsupported(lastEvent)
       || observedUnsupportedQuestion;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -157,5 +157,181 @@ test('turn timeout settles and runtime close leaves no ACP child', async () => {
     await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
   } finally {
     await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' }).catch(() => {});
+  }
+});
+
+test('partial agent reply before a fixed turn timeout is not completed', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-acpx-partial-timeout-'));
+  const cwd = path.join(root, 'worktree');
+  const stateDir = path.join(root, 'state');
+  await mkdir(cwd);
+  await mkdir(stateDir);
+  const agentPath = path.join(root, 'partial-timeout-agent.mjs');
+  await writeFile(agentPath, `import { createInterface } from 'node:readline';
+function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
+function response(id, result) { send({ jsonrpc: '2.0', id, result }); }
+async function handle(message) {
+  const { id, method, params = {} } = message;
+  if (method === 'initialize') {
+    return response(id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+    });
+  }
+  if (method === 'notifications/initialized' || method === 'initialized') return;
+  if (method === 'session/new') return response(id, { sessionId: 'partial-timeout-session' });
+  if (method === 'session/close') return response(id, {});
+  if (method === 'session/cancel') return;
+  if (method === 'session/prompt') {
+    send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'partial-before-timeout' },
+        },
+      },
+    });
+  }
+}
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+process.stdin.resume();
+input.on('line', (line) => { try { handle(JSON.parse(line)); } catch {} });
+process.once('SIGTERM', () => process.exit(0));
+`);
+  const runtime = createAcpRuntime({
+    cwd,
+    sessionStore: createRuntimeStore({ stateDir }),
+    agentRegistry: createAgentRegistry({
+      overrides: { grok: [process.execPath, agentPath] },
+    }),
+    mcpServers: [],
+    permissionMode: 'approve-all',
+    timeoutMs: 2_000,
+  });
+  const handle = await runtime.ensureSession({
+    sessionKey: 'partial-timeout',
+    agent: 'grok',
+    mode: 'persistent',
+    cwd,
+  });
+  try {
+    const turn = runtime.startTurn({
+      handle,
+      text: 'partial then hang',
+      mode: 'prompt',
+      requestId: 'partial-timeout',
+      timeoutMs: 400,
+    });
+    const chunks = [];
+    for await (const event of turn.events) {
+      if (event?.type === 'text_delta' && typeof event.text === 'string') chunks.push(event.text);
+    }
+    const result = await Promise.race([
+      turn.result,
+      delay(3_000).then(() => { throw new Error('partial timeout did not settle'); }),
+    ]);
+    assert.equal(result.status, 'failed');
+    assert.notEqual(result.status, 'completed');
+    assert.notEqual(result.stopReason, 'end_turn');
+    assert.deepEqual(chunks, ['partial-before-timeout']);
+  } finally {
+    await runtime.close({ handle, reason: 'test_cleanup' }).catch(() => {});
+  }
+});
+
+test('turn AbortSignal owns cancellation when the fixed turn timeout is disabled', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-acpx-signal-cancel-'));
+  const cwd = path.join(root, 'worktree');
+  const stateDir = path.join(root, 'state');
+  await mkdir(cwd);
+  await mkdir(stateDir);
+  const agentPath = path.join(root, 'signal-cancel-agent.mjs');
+  await writeFile(agentPath, `import { createInterface } from 'node:readline';
+function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
+function response(id, result) { send({ jsonrpc: '2.0', id, result }); }
+const pending = new Map();
+async function handle(message) {
+  const { id, method, params = {} } = message;
+  if (method === 'initialize') {
+    return response(id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+    });
+  }
+  if (method === 'notifications/initialized' || method === 'initialized') return;
+  if (method === 'session/new') return response(id, { sessionId: 'signal-cancel-session' });
+  if (method === 'session/close') return response(id, {});
+  if (method === 'session/cancel') {
+    for (const [promptId] of pending) {
+      response(promptId, { stopReason: 'cancelled' });
+      pending.delete(promptId);
+    }
+    return;
+  }
+  if (method === 'session/prompt') {
+    send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'waiting-for-cancel' },
+        },
+      },
+    });
+    pending.set(id, params.sessionId);
+  }
+}
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+process.stdin.resume();
+input.on('line', (line) => { try { handle(JSON.parse(line)); } catch {} });
+process.once('SIGTERM', () => process.exit(0));
+`);
+  const runtime = createAcpRuntime({
+    cwd,
+    sessionStore: createRuntimeStore({ stateDir }),
+    agentRegistry: createAgentRegistry({
+      overrides: { grok: [process.execPath, agentPath] },
+    }),
+    mcpServers: [],
+    permissionMode: 'approve-all',
+    timeoutMs: 5_000,
+  });
+  const handle = await runtime.ensureSession({
+    sessionKey: 'signal-cancel',
+    agent: 'grok',
+    mode: 'persistent',
+    cwd,
+  });
+  try {
+    const controller = new AbortController();
+    const turn = runtime.startTurn({
+      handle,
+      text: 'hold open for signal cancel',
+      mode: 'prompt',
+      requestId: 'signal-owned-cancel',
+      timeoutMs: 0,
+      signal: controller.signal,
+    });
+    const events = (async () => {
+      for await (const _event of turn.events) {
+        // Drain so close is not blocked on an open iterator.
+      }
+    })();
+    await delay(100);
+    controller.abort();
+    const result = await Promise.race([
+      turn.result,
+      delay(3_000).then(() => { throw new Error('signal-owned cancel did not settle'); }),
+    ]);
+    await events;
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.stopReason, 'cancelled');
+  } finally {
+    await runtime.close({ handle, reason: 'test_cleanup' }).catch(() => {});
   }
 });
