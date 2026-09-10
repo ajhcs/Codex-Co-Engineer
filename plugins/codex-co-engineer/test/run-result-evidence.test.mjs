@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 
 import { ARTIFACT_REF_SCHEMA_ID } from '../mcp/v3/artifact-ref.mjs';
 import {
+  MAX_RUN_RESULT_DETAIL_BYTES,
   MAX_RUN_RESULT_SUMMARY_BYTES,
   RUN_ADMISSION_RECEIPT_SCHEMA_ID,
   RUN_RESULT_EVIDENCE_SCHEMA_ID,
@@ -14,7 +15,14 @@ import {
   summarizeRunResultEvidenceV1,
 } from '../mcp/v3/run-result-evidence.mjs';
 import {
+  HOST_USAGE_KEYS,
+  PROVIDER_USAGE_KEYS,
+  USAGE_BUDGET_METRICS,
+  USAGE_TOKEN_TOTALS_NON_COMPARABLE,
   appendUsageReceiptV1,
+  buildUsageIdentityV1,
+  correlateUsageAssignmentV1,
+  correlateUsageModelV1,
   evidenceBytesMetricV1,
   hostMeasuredMetricV1,
   openUsageLedgerV1,
@@ -115,11 +123,11 @@ function receipt(overrides = {}) {
   };
 }
 
-test('describe seam is disconnected from MCP and names parent wiring', () => {
+test('describe seam keeps the exported projection API', () => {
   const inventory = describeRunResultEvidenceV1();
   assert.equal(inventory.schema, RUN_RESULT_EVIDENCE_SCHEMA_ID);
-  assert.equal(inventory.public_mcp, 'not exposed');
-  assert.equal(inventory.parent_wiring_required, true);
+  assert.equal(Object.hasOwn(inventory, 'public_mcp'), false);
+  assert.equal(Object.hasOwn(inventory, 'parent_wiring_required'), false);
   assert.equal(inventory.completed_is_not_accepted, true);
   assert.equal(inventory.default_view, 'summary');
   assert.deepEqual([...inventory.api], [
@@ -137,10 +145,12 @@ test('completed admission work is not Codex acceptance', () => {
   assert.equal(summary.codex_accepted, false);
   assert.equal(summary.review_needed, true);
   assert.equal(summary.next_decision, 'review_candidate');
-  assert.equal(summary.public_mcp, 'not exposed');
+  assert.equal(Object.hasOwn(summary, 'public_mcp'), false);
   assert.equal(summary.view, 'summary');
   assert.equal(summary.candidate.head, HEAD_SHA);
   assert.equal(Object.hasOwn(summary, 'assignments'), false);
+  assert.match(summary.text, /needs review/u);
+  assert.equal(summary.text.includes('not_accepted'), false);
 });
 
 test('failed, uncertain, and unfinal states stay distinct', () => {
@@ -240,4 +250,341 @@ test('shareable projection is bounded and omits owner-only prompts and paths', a
   assert.equal(source.includes('server.mjs'), false);
   assert.equal(source.includes('run-admission.mjs'), false);
   assert.equal(source.includes('run-runtime.mjs'), false);
+});
+
+function writerLane(overrides = {}) {
+  return {
+    assignment_id: 'lane-writer',
+    provider: 'grok',
+    role: 'implement',
+    required: true,
+    phase: 'completed',
+    status: 'completed',
+    head: HEAD_SHA,
+    ...overrides,
+  };
+}
+
+test('mismatched run and lane states stay coherent', () => {
+  const failedWithOutput = summarizeRunResultEvidenceV1(receipt({
+    phase: 'failed',
+    status: 'failed',
+    lanes: [writerLane({
+      phase: 'completed',
+      status: 'completed',
+      head: HEAD_SHA,
+    })],
+  }));
+  assert.equal(failedWithOutput.assignment_result, 'failed');
+  assert.equal(failedWithOutput.label, 'Failed');
+  assert.equal(failedWithOutput.next_decision, 'resolve_failures');
+  assert.equal(failedWithOutput.review_needed, false);
+  assert.match(failedWithOutput.text, /failed/iu);
+  assert.equal(failedWithOutput.unresolved, false);
+
+  const failedDetail = detailRunResultEvidenceV1(receipt({
+    phase: 'failed',
+    status: 'failed',
+    lanes: [writerLane()],
+  }));
+  assert.equal(failedDetail.assignment_result, 'failed');
+  assert.equal(failedDetail.assignments[0].outcome, 'completed');
+  assert.equal(failedDetail.assignments[0].head, HEAD_SHA);
+
+  const pending = summarizeRunResultEvidenceV1(receipt({
+    phase: 'lifecycle_pending',
+    status: 'lifecycle_pending',
+    lanes: [writerLane({
+      phase: 'completed',
+      status: 'completed',
+      task_final: false,
+    })],
+  }));
+  assert.equal(pending.assignment_result, 'uncertain');
+  assert.equal(pending.next_decision, 'inspect_unresolved');
+  assert.equal(pending.label, 'Unresolved');
+  assert.match(pending.text, /inspect/iu);
+
+  const unknownProof = summarizeRunResultEvidenceV1(receipt({
+    phase: 'completed',
+    status: 'completed',
+    lanes: [writerLane({
+      dispatch_confidence: 'unknown',
+    })],
+  }));
+  assert.equal(unknownProof.assignment_result, 'uncertain');
+  assert.equal(unknownProof.next_decision, 'inspect_unresolved');
+
+  const dirty = summarizeRunResultEvidenceV1(receipt({
+    phase: 'completed',
+    status: 'completed',
+    lanes: [writerLane({
+      clean: false,
+    })],
+  }));
+  assert.equal(dirty.assignment_result, 'uncertain');
+  assert.equal(dirty.next_decision, 'inspect_unresolved');
+
+  const terminalFailedUncertain = summarizeRunResultEvidenceV1(receipt({
+    phase: 'failed',
+    status: 'failed',
+    lanes: [writerLane({
+      phase: 'timeout',
+      status: 'timeout',
+      dispatch_confidence: 'uncertain',
+      head: HEAD_SHA,
+    })],
+  }));
+  assert.equal(terminalFailedUncertain.assignment_result, 'failed');
+  assert.equal(terminalFailedUncertain.next_decision, 'resolve_failures');
+
+  const stillRunning = summarizeRunResultEvidenceV1(receipt({
+    phase: 'running',
+    status: 'running',
+    lanes: [
+      writerLane(),
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        phase: 'running',
+        status: 'running',
+      },
+    ],
+  }));
+  assert.equal(stillRunning.assignment_result, 'unfinal');
+  assert.equal(stillRunning.next_decision, 'wait_for_completion');
+  assert.match(stillRunning.text, /in progress/iu);
+});
+
+test('completed verify work is not treated as a passed check', () => {
+  const detailed = detailRunResultEvidenceV1(receipt({
+    lanes: [{
+      assignment_id: 'lane-verify',
+      provider: 'grok',
+      role: 'verify',
+      required: true,
+      phase: 'completed',
+      status: 'completed',
+      head: HEAD_SHA,
+    }],
+  }));
+  assert.equal(detailed.assignment_result, 'completed');
+  assert.equal(detailed.assignments[0].role, 'verify');
+  assert.equal(detailed.assignments[0].outcome, 'completed');
+  assert.equal(detailed.checks.length, 0);
+  assert.equal(detailed.codex_accepted, false);
+  assert.equal(detailed.review_needed, true);
+});
+
+test('candidate heads stay unambiguous and composition must be explicit', () => {
+  const otherHead = 'cccccccccccccccccccccccccccccccccccccccc';
+  const missingHead = summarizeRunResultEvidenceV1(receipt({
+    lanes: [
+      writerLane({ assignment_id: 'lane-writer', head: HEAD_SHA }),
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: true,
+        phase: 'completed',
+        status: 'completed',
+        head: null,
+      },
+    ],
+  }));
+  assert.equal(missingHead.candidate.head, null);
+  assert.equal(missingHead.candidate.composed, false);
+
+  const mixed = detailRunResultEvidenceV1(receipt({
+    lanes: [
+      writerLane({ assignment_id: 'lane-writer', head: HEAD_SHA }),
+      {
+        assignment_id: 'lane-docs',
+        provider: 'cursor-local',
+        role: 'implement',
+        required: true,
+        phase: 'completed',
+        status: 'completed',
+        head: otherHead,
+      },
+    ],
+  }));
+  assert.equal(mixed.candidate.head, null);
+  assert.equal(mixed.candidate.composed, false);
+  assert.equal(mixed.assignments.find((row) => row.assignment_id === 'lane-writer').head, HEAD_SHA);
+  assert.equal(mixed.assignments.find((row) => row.assignment_id === 'lane-docs').head, otherHead);
+
+  const composed = summarizeRunResultEvidenceV1({
+    receipt: receipt({
+      lanes: [
+        writerLane({ assignment_id: 'lane-writer', head: HEAD_SHA }),
+        {
+          assignment_id: 'lane-docs',
+          provider: 'cursor-local',
+          role: 'implement',
+          required: true,
+          phase: 'completed',
+          status: 'completed',
+          head: otherHead,
+        },
+      ],
+    }),
+    candidate: {
+      branch: 'ce/composed',
+      head: HEAD_SHA,
+      tree: BASE_SHA,
+      composed: true,
+    },
+  });
+  assert.equal(composed.candidate.head, HEAD_SHA);
+  assert.equal(composed.candidate.composed, true);
+
+  const single = summarizeRunResultEvidenceV1(receipt());
+  assert.equal(single.candidate.head, HEAD_SHA);
+  assert.equal(single.candidate.composed, false);
+});
+
+test('unbound or stale Codex acceptance cannot label Accepted', () => {
+  const flagOnly = summarizeRunResultEvidenceV1({
+    receipt: receipt(),
+    codex_acceptance: { accepted: true, authority: 'codex' },
+  });
+  assert.equal(flagOnly.codex_accepted, false);
+  assert.equal(flagOnly.label, 'Review needed');
+
+  const otherHead = 'cccccccccccccccccccccccccccccccccccccccc';
+  const stale = summarizeRunResultEvidenceV1({
+    receipt: receipt(),
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: otherHead,
+    },
+  });
+  assert.equal(stale.codex_accepted, false);
+
+  const bound = summarizeRunResultEvidenceV1({
+    receipt: receipt(),
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: HEAD_SHA,
+    },
+  });
+  assert.equal(bound.codex_accepted, true);
+  assert.equal(bound.label, 'Accepted');
+
+  const failed = summarizeRunResultEvidenceV1({
+    receipt: receipt({
+      phase: 'failed',
+      status: 'failed',
+      lanes: [writerLane({ phase: 'failed', status: 'failed', head: HEAD_SHA })],
+    }),
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: HEAD_SHA,
+    },
+  });
+  assert.equal(failed.codex_accepted, false);
+  assert.equal(failed.label, 'Failed');
+});
+
+function fullUsageGroup() {
+  return {
+    provider_usage: {
+      ...unknownProviderUsageV1(),
+      input_tokens: providerReportedMetricV1(120_000_000),
+      output_tokens: providerReportedMetricV1(120_000_000),
+      cache_tokens: providerReportedMetricV1(120_000_000),
+    },
+    host_usage: unknownHostUsageV1(),
+  };
+}
+
+function maxLaneId(index) {
+  return `lane-${'x'.repeat(58)}${index}`;
+}
+
+function laneUsageIdentity(telemetry, assignmentId, provider, model) {
+  const base = usageIdentityFromTelemetryV1(telemetry, {
+    requested_effort: 'max',
+    effective_effort: 'max',
+  });
+  return buildUsageIdentityV1({
+    ...identityFields(base),
+    assignment_id_digest: correlateUsageAssignmentV1(assignmentId),
+    provider,
+    requested_model_digest: correlateUsageModelV1(provider, model),
+    effective_model_digest: correlateUsageModelV1(provider, model),
+  });
+}
+
+test('maximum eight-lane known-metric outputs stay inside byte caps', () => {
+  const runId = `r${'y'.repeat(63)}`;
+  const lanes = Array.from({ length: 8 }, (_, index) => ({
+    assignment_id: maxLaneId(index),
+    provider: index % 2 === 0 ? 'grok' : 'cursor-local',
+    role: index === 7 ? 'verify' : 'implement',
+    required: true,
+    phase: 'completed',
+    status: 'completed',
+    head: index === 0 ? HEAD_SHA : (index === 1 ? 'd'.repeat(40) : null),
+  }));
+  const artifacts = lanes.map((lane, index) => ({
+    schema: ARTIFACT_REF_SCHEMA_ID,
+    run_id: runId,
+    assignment_id: lane.assignment_id,
+    artifact_kind: 'git_diff',
+    artifact_class: 'sanitized',
+    relative_path: `runs/${runId}/${lane.assignment_id}/diff-${index}.patch`,
+    byte_length: 128,
+    sha256: index.toString(16).padStart(2, '0').repeat(32),
+    media_type: 'text/plain',
+    content_encoding: 'identity',
+  }));
+  let ledger = openUsageLedgerV1({ budgets: [] });
+  for (let index = 0; index < 8; index += 1) {
+    const provider = index % 2 === 0 ? 'grok' : 'cursor-local';
+    const model = provider === 'grok' ? 'grok-4' : 'composer-1';
+    const assignmentId = maxLaneId(index);
+    const telemetry = makeSubmission({ runId, assignmentId }).telemetry;
+    const group = fullUsageGroup();
+    ledger = appendUsageReceiptV1(ledger, {
+      seq: 1,
+      recorded_at: `2026-09-10T12:00:0${index}.000Z`,
+      identity: identityFields(laneUsageIdentity(telemetry, assignmentId, provider, model)),
+      provider_usage: group.provider_usage,
+      host_usage: group.host_usage,
+    });
+  }
+  const source = {
+    receipt: receipt({
+      run_id: runId,
+      lanes,
+    }),
+    usage_ledger: ledger,
+    artifacts,
+  };
+  const summary = projectRunResultEvidenceV1(source, { view: 'summary' });
+  const detail = projectRunResultEvidenceV1(source, { view: 'detail' });
+  const summaryBytes = Buffer.byteLength(JSON.stringify(summary), 'utf8');
+  const detailBytes = Buffer.byteLength(JSON.stringify(detail), 'utf8');
+  assert.ok(summaryBytes <= MAX_RUN_RESULT_SUMMARY_BYTES, summaryBytes);
+  assert.ok(detailBytes <= MAX_RUN_RESULT_DETAIL_BYTES, detailBytes);
+  assert.equal(summary.run_id, runId);
+  assert.equal(summary.assignment_result, 'completed');
+  assert.equal(summary.candidate.head, null);
+  assert.equal(detail.assignments.length, 8);
+  assert.equal(detail.assignments[0].head, HEAD_SHA);
+  assert.equal(USAGE_BUDGET_METRICS.length, PROVIDER_USAGE_KEYS.length + HOST_USAGE_KEYS.length);
+  assert.equal(detail.usage.token_totals, USAGE_TOKEN_TOTALS_NON_COMPARABLE);
+  assert.ok(detail.usage.truncation == null || typeof detail.usage.truncation.truncated === 'boolean');
+  assert.equal(JSON.stringify(summary).includes(HOSTILE_PATH), false);
+  assert.equal(JSON.stringify(summary).includes(HOSTILE_PROMPT), false);
 });

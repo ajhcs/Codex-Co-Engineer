@@ -278,10 +278,16 @@ export const LOCAL_OUTCOME_REQUIRED_KEYS = capturedFreeze([
 ]);
 export const LOCAL_CANDIDATE_KEYS = capturedFreeze(['branch', 'composed', 'head', 'tree']);
 export const LOCAL_ASSIGNMENT_KEYS = capturedFreeze([
+  'assignment_id', 'head', 'outcome', 'provider', 'required', 'role',
+]);
+export const LOCAL_ASSIGNMENT_REQUIRED_KEYS = capturedFreeze([
   'assignment_id', 'outcome', 'provider', 'required', 'role',
 ]);
 export const LOCAL_CHECK_KEYS = capturedFreeze(['id', 'present', 'status']);
-export const LOCAL_ACCEPTANCE_KEYS = capturedFreeze(['accepted', 'authority']);
+export const LOCAL_ACCEPTANCE_KEYS = capturedFreeze([
+  'accepted', 'authority', 'head', 'run_id', 'tree',
+]);
+export const LOCAL_ACCEPTANCE_REQUIRED_KEYS = capturedFreeze(['accepted', 'authority']);
 export const LOCAL_OUTCOME_RESULT_KEYS = capturedFreeze([
   'artifacts', 'assignment_result', 'assignments', 'candidate', 'checks',
   'codex_accepted', 'label', 'next_decision', 'review_needed', 'schema',
@@ -1130,19 +1136,23 @@ function parseLocalCandidate(input, pathLabel) {
 
 function parseLocalAssignment(input, pathLabel) {
   const object = assertClosedObject(input, LOCAL_ASSIGNMENT_KEYS, pathLabel);
-  requireKeys(object, LOCAL_ASSIGNMENT_KEYS, pathLabel);
+  requireKeys(object, LOCAL_ASSIGNMENT_REQUIRED_KEYS, pathLabel);
   const assignmentId = ownString(object, 'assignment_id', `${pathLabel}.assignment_id`);
   if (!isAssignmentId(assignmentId)) deny('invalid_format', `${pathLabel}.assignment_id`);
   const provider = ownString(object, 'provider', `${pathLabel}.provider`);
   if (!isKnownProvider(provider)) deny('invalid_format', `${pathLabel}.provider`);
   const role = ownString(object, 'role', `${pathLabel}.role`);
   if (!isKnownRole(role)) deny('invalid_format', `${pathLabel}.role`);
+  const head = hasOwn(object, 'head')
+    ? optionalSha40(object, 'head', `${pathLabel}.head`)
+    : null;
   return freezeRecord(LOCAL_ASSIGNMENT_KEYS, {
     assignment_id: assignmentId,
     provider,
     role,
     required: ownBoolean(object, 'required', `${pathLabel}.required`),
     outcome: ownEnum(object, 'outcome', ASSIGNMENT_OUTCOMES, `${pathLabel}.outcome`),
+    head,
   });
 }
 
@@ -1195,21 +1205,55 @@ function parseLocalChecks(input, pathLabel) {
 
 function parseCodexAcceptance(input, pathLabel) {
   if (input === undefined) {
-    return freezeRecord(LOCAL_ACCEPTANCE_KEYS, { accepted: false, authority: null });
+    return freezeRecord(LOCAL_ACCEPTANCE_KEYS, {
+      accepted: false, authority: null, run_id: null, head: null, tree: null,
+    });
   }
   const object = assertClosedObject(input, LOCAL_ACCEPTANCE_KEYS, pathLabel);
-  requireKeys(object, LOCAL_ACCEPTANCE_KEYS, pathLabel);
+  requireKeys(object, LOCAL_ACCEPTANCE_REQUIRED_KEYS, pathLabel);
   const accepted = ownBoolean(object, 'accepted', `${pathLabel}.accepted`);
   const authority = ownDataValue(object, 'authority', `${pathLabel}.authority`);
   if (authority !== null && typeof authority !== 'string') deny('invalid_type', `${pathLabel}.authority`);
   if (authority !== null && authority !== CODEX_ACCEPTANCE_AUTHORITY) {
     deny('invalid_format', `${pathLabel}.authority`);
   }
-  const honor = accepted === true && authority === CODEX_ACCEPTANCE_AUTHORITY;
+  const runId = hasOwn(object, 'run_id')
+    ? ownDataValue(object, 'run_id', `${pathLabel}.run_id`)
+    : null;
+  if (runId !== null && typeof runId !== 'string') deny('invalid_type', `${pathLabel}.run_id`);
+  if (typeof runId === 'string') bindRunId(runId, `${pathLabel}.run_id`);
+  const head = hasOwn(object, 'head')
+    ? optionalSha40(object, 'head', `${pathLabel}.head`)
+    : null;
+  const tree = hasOwn(object, 'tree')
+    ? optionalSha40(object, 'tree', `${pathLabel}.tree`)
+    : null;
   return freezeRecord(LOCAL_ACCEPTANCE_KEYS, {
-    accepted: honor,
-    authority: honor ? CODEX_ACCEPTANCE_AUTHORITY : null,
+    accepted: accepted === true,
+    authority: authority === CODEX_ACCEPTANCE_AUTHORITY ? CODEX_ACCEPTANCE_AUTHORITY : null,
+    run_id: typeof runId === 'string' ? runId : null,
+    head,
+    tree,
   });
+}
+
+function hasKnownFailedCheck(checks) {
+  for (let i = 0; i < checks.length; i += 1) {
+    if (checks[i].status === 'failed') return true;
+  }
+  return false;
+}
+
+function honorCodexAcceptance(acceptance, identity, candidate, assignmentResult, checks) {
+  if (acceptance.accepted !== true) return false;
+  if (acceptance.authority !== CODEX_ACCEPTANCE_AUTHORITY) return false;
+  if (assignmentResult !== 'completed') return false;
+  if (acceptance.run_id == null || acceptance.head == null) return false;
+  if (acceptance.run_id !== identity.run_id) return false;
+  if (candidate.head == null || acceptance.head !== candidate.head) return false;
+  if (acceptance.tree != null && acceptance.tree !== candidate.tree) return false;
+  if (hasKnownFailedCheck(checks)) return false;
+  return true;
 }
 
 function rollupAssignmentResult(assignments) {
@@ -1247,7 +1291,7 @@ function deriveNextDecision(result, reviewNeeded, unresolved) {
 }
 
 function localLabel(result, reviewNeeded, unresolved, accepted) {
-  if (accepted === true) return PUBLIC_LABEL_ACCEPTED;
+  if (accepted === true && result === 'completed') return PUBLIC_LABEL_ACCEPTED;
   if (result === 'failed' || result === 'cancelled') return PUBLIC_LABEL_FAILED;
   if (result === 'unfinal') return PUBLIC_LABEL_IN_PROGRESS;
   if (unresolved === true || result === 'uncertain') return PUBLIC_LABEL_UNRESOLVED;
@@ -1255,16 +1299,22 @@ function localLabel(result, reviewNeeded, unresolved, accepted) {
   return PUBLIC_LABEL_REVIEW_NEEDED;
 }
 
+function localSummaryText(result, accepted, reviewNeeded, unresolved) {
+  if (accepted === true && result === 'completed') {
+    return 'Codex accepted this completed candidate.';
+  }
+  if (result === 'failed') return 'The run failed; resolve the failures.';
+  if (result === 'cancelled') return 'The run was cancelled; resolve the failures.';
+  if (result === 'unfinal') return 'Work is still in progress; wait for completion.';
+  if (result === 'uncertain' || unresolved === true) {
+    return 'The outcome is unresolved; inspect before deciding.';
+  }
+  if (reviewNeeded === true) return 'Completed work needs review; it is not Codex-accepted.';
+  return 'Completed work is not Codex-accepted.';
+}
+
 function projectLocalSummary(candidate, result, accepted, reviewNeeded, unresolved, nextDecision) {
-  const text = clipSummaryText([
-    result,
-    accepted === true ? 'codex_accepted' : 'not_accepted',
-    reviewNeeded === true ? 'review_needed' : 'review_not_needed',
-    unresolved === true ? 'unresolved' : 'resolved',
-    nextDecision,
-    candidate.head ?? 'head_unknown',
-    candidate.tree ?? 'tree_unknown',
-  ].join(' '));
+  const text = clipSummaryText(localSummaryText(result, accepted, reviewNeeded, unresolved));
   return freezeRecord(LOCAL_SUMMARY_KEYS, {
     assignment_result: result,
     codex_accepted: accepted,
@@ -1309,15 +1359,10 @@ export function projectLocalOutcomeCardV1(input) {
   );
   const assignmentResult = rollupAssignmentResult(assignments);
   const unresolved = assignmentResult === 'uncertain' || assignmentResult === 'unfinal';
-  const providerPass = (() => {
-    for (let i = 0; i < checks.length; i += 1) {
-      if (checks[i].status === 'passed' || checks[i].status === 'provider_pass') return true;
-    }
-    return false;
-  })();
-  const codexAccepted = acceptance.accepted === true;
-  const reviewNeeded = codexAccepted !== true
-    && (assignmentResult === 'completed' || candidate.composed === true || providerPass === true);
+  const codexAccepted = honorCodexAcceptance(
+    acceptance, identity, candidate, assignmentResult, checks,
+  );
+  const reviewNeeded = codexAccepted !== true && assignmentResult === 'completed';
   const nextDecision = deriveNextDecision(assignmentResult, reviewNeeded, unresolved);
   const truncation = freezeRecord(TRUNCATION_KEYS, {
     truncated: artifacts.truncated,

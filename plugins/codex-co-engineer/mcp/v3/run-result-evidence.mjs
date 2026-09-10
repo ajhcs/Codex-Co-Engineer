@@ -13,17 +13,21 @@
 import { Buffer as NodeBuffer } from 'node:buffer';
 
 import {
-  ARTIFACT_CLASSES,
   compareArtifactRefsV1,
   parseArtifactRefV1,
 } from './artifact-ref.mjs';
 import {
   LOCAL_OUTCOME_SCHEMA_ID,
   LOCAL_OUTCOME_VERSION,
+  PUBLIC_LABEL_ACCEPTED,
+  PUBLIC_LABEL_FAILED,
+  PUBLIC_LABEL_IN_PROGRESS,
+  PUBLIC_LABEL_REVIEW_NEEDED,
+  PUBLIC_LABEL_UNRESOLVED,
+  TRUNCATION_KEYS,
   projectLocalOutcomeCardV1,
 } from './final-decision-card.mjs';
 import {
-  capturedCreate,
   capturedFreeze,
   capturedHasOwn,
   capturedIncludes,
@@ -53,6 +57,7 @@ import {
   MAX_USAGE_DETAIL_BYTES,
   MAX_USAGE_SUMMARY_BYTES,
   MAX_USAGE_SUMMARY_TEXT_BYTES,
+  USAGE_REPORT_TRUNCATION_REASON,
   projectUsageReportV1,
   unknownUsageReportV1,
   validateUsageLedgerV1,
@@ -77,12 +82,13 @@ export const WRAPPER_KEYS = capturedFreeze([
 ]);
 export const SUMMARY_RESULT_KEYS = capturedFreeze([
   'assignment_result', 'candidate', 'codex_accepted', 'label', 'next_decision',
-  'public_mcp', 'review_needed', 'run_id', 'schema', 'text', 'unresolved',
+  'review_needed', 'run_id', 'schema', 'text', 'truncation', 'unresolved',
   'usage', 'version', 'view',
 ]);
 export const DETAIL_RESULT_KEYS = capturedFreeze([
-  ...SUMMARY_RESULT_KEYS, 'artifacts', 'assignments', 'checks', 'truncation',
+  ...SUMMARY_RESULT_KEYS, 'artifacts', 'assignments', 'checks',
 ]);
+export const RUN_RESULT_REPORT_TRUNCATION_REASON = USAGE_REPORT_TRUNCATION_REASON;
 
 const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,7}$/u;
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -92,7 +98,8 @@ const FAILED_OUTCOMES = capturedFreeze([
   'timeout', 'timed_out', 'transport_lost', 'unrecoverable_post_prompt',
 ]);
 const UNCERTAIN_OUTCOMES = capturedFreeze([
-  'degraded', 'needs_attention', 'partial_handoff', 'unknown',
+  'degraded', 'lifecycle_pending', 'needs_attention', 'partial_handoff',
+  'unknown', 'unresolved',
 ]);
 const UNFINAL_OUTCOMES = capturedFreeze([
   'accepted', 'awaiting_consent', 'dispatching', 'dispatched', 'planned',
@@ -149,18 +156,34 @@ function ownPlain(value, pathLabel) {
   return value;
 }
 
-function mapLaneOutcome(lane) {
+function laneToken(lane) {
   const status = typeof lane.status === 'string' ? lane.status : null;
   const phase = typeof lane.phase === 'string' ? lane.phase : null;
+  return status ?? phase;
+}
+
+function laneIsDirty(lane) {
+  if (lane.clean === false) return true;
+  const handoff = lane.handoff;
+  if (handoff && typeof handoff === 'object' && !capturedIsArray(handoff) && handoff.clean === false) {
+    return true;
+  }
+  return false;
+}
+
+function mapLaneOutcome(lane) {
+  const token = laneToken(lane);
   const confidence = typeof lane.dispatch_confidence === 'string' ? lane.dispatch_confidence : null;
-  if (confidence === 'uncertain') return 'uncertain';
-  const token = status ?? phase;
-  if (token === 'completed') return 'completed';
   if (capturedIncludes(FAILED_OUTCOMES, token)) {
     return token === 'cancelled' ? 'cancelled' : 'failed';
   }
+  if (capturedIncludes(UNFINAL_OUTCOMES, token)) return 'unfinal';
+  if (token === 'lifecycle_pending') return 'uncertain';
+  if (lane.task_final === false) return 'uncertain';
+  if (laneIsDirty(lane)) return 'uncertain';
+  if (confidence === 'uncertain' || confidence === 'unknown') return 'uncertain';
+  if (token === 'completed') return 'completed';
   if (capturedIncludes(UNCERTAIN_OUTCOMES, token)) return 'uncertain';
-  if (capturedIncludes(UNFINAL_OUTCOMES, token) || token == null) return 'unfinal';
   return 'uncertain';
 }
 
@@ -168,8 +191,55 @@ function mapRunOutcome(phase) {
   if (phase === 'completed') return 'completed';
   if (phase === 'failed') return 'failed';
   if (phase === 'cancelled') return 'cancelled';
-  if (phase === 'needs_attention' || phase === 'degraded') return 'uncertain';
-  return 'unfinal';
+  if (capturedIncludes(FAILED_OUTCOMES, phase)) {
+    return phase === 'cancelled' ? 'cancelled' : 'failed';
+  }
+  if (capturedIncludes(UNFINAL_OUTCOMES, phase)) return 'unfinal';
+  if (capturedIncludes(UNCERTAIN_OUTCOMES, phase)) return 'uncertain';
+  return 'uncertain';
+}
+
+function combineAssignmentResult(runOutcome, laneOutcomes) {
+  let hasActive = false;
+  let hasFailed = false;
+  let hasCancelled = false;
+  let hasUncertain = false;
+  let completedRequired = 0;
+  let requiredCount = 0;
+  for (let i = 0; i < laneOutcomes.length; i += 1) {
+    const row = laneOutcomes[i];
+    if (row.required === true) requiredCount += 1;
+    if (row.outcome === 'unfinal') hasActive = true;
+    else if (row.outcome === 'failed') hasFailed = true;
+    else if (row.outcome === 'cancelled') hasCancelled = true;
+    else if (row.outcome === 'uncertain') hasUncertain = true;
+    else if (row.outcome === 'completed' && row.required === true) completedRequired += 1;
+  }
+  if (runOutcome === 'failed' || hasFailed) return 'failed';
+  if (runOutcome === 'cancelled' || hasCancelled) return 'cancelled';
+  if (hasActive || runOutcome === 'unfinal') return 'unfinal';
+  if (runOutcome === 'uncertain' || hasUncertain) return 'uncertain';
+  if (runOutcome === 'completed' && requiredCount > 0 && completedRequired === requiredCount) {
+    return 'completed';
+  }
+  return 'uncertain';
+}
+
+function resultLabel(result, accepted, reviewNeeded) {
+  if (accepted === true && result === 'completed') return PUBLIC_LABEL_ACCEPTED;
+  if (result === 'failed' || result === 'cancelled') return PUBLIC_LABEL_FAILED;
+  if (result === 'unfinal') return PUBLIC_LABEL_IN_PROGRESS;
+  if (result === 'uncertain') return PUBLIC_LABEL_UNRESOLVED;
+  if (reviewNeeded === true) return PUBLIC_LABEL_REVIEW_NEEDED;
+  return PUBLIC_LABEL_REVIEW_NEEDED;
+}
+
+function resultNextDecision(result, reviewNeeded) {
+  if (result === 'unfinal') return 'wait_for_completion';
+  if (result === 'failed' || result === 'cancelled') return 'resolve_failures';
+  if (result === 'uncertain') return 'inspect_unresolved';
+  if (reviewNeeded === true) return 'review_candidate';
+  return 'none';
 }
 
 function readSha(value) {
@@ -231,58 +301,55 @@ function parseLane(raw, index) {
   };
 }
 
-function selectCandidate(receipt, lanes, override) {
+function selectCandidate(lanes, override) {
   if (override && typeof override === 'object') {
+    const head = readSha(override.head);
+    const tree = readSha(override.tree);
+    const composed = override.composed === true && head != null;
+    if (lanes.length > 1 && composed !== true) {
+      return {
+        branch: null,
+        head: null,
+        tree: null,
+        composed: false,
+      };
+    }
     return {
       branch: readBranch(override.branch),
-      head: readSha(override.head),
-      tree: readSha(override.tree),
-      composed: override.composed === true,
+      head,
+      tree,
+      composed,
     };
   }
-  let head = null;
-  let mixedHead = false;
-  for (let i = 0; i < lanes.length; i += 1) {
-    if (lanes[i].head == null) continue;
-    if (head == null) head = lanes[i].head;
-    else if (head !== lanes[i].head) mixedHead = true;
+  if (lanes.length === 1) {
+    return {
+      branch: null,
+      head: lanes[0].head,
+      tree: null,
+      composed: false,
+    };
   }
-  const git = receipt.git && typeof receipt.git === 'object' ? receipt.git : capturedCreate(null);
   return {
-    branch: readBranch(receipt.branch) ?? readBranch(git.branch),
-    head: mixedHead ? null : head,
-    tree: readSha(receipt.tree) ?? readSha(git.tree),
+    branch: null,
+    head: null,
+    tree: null,
     composed: false,
   };
 }
 
-function deriveChecks(lanes, override) {
-  if (capturedIsArray(override)) {
-    const checks = [];
-    for (let i = 0; i < override.length && checks.length < 8; i += 1) {
-      const row = override[i];
-      if (row == null || typeof row !== 'object') continue;
-      if (typeof row.id !== 'string' || !capturedTest(CHECK_ID_PATTERN, row.id)) continue;
-      const status = row.status;
-      if (status !== 'passed' && status !== 'failed' && status !== 'unknown'
-        && status !== 'provider_pass' && status !== 'missing') continue;
-      checks.push({
-        id: row.id,
-        present: row.present === true,
-        status,
-      });
-    }
-    return checks;
-  }
+function deriveChecks(override) {
+  if (!capturedIsArray(override)) return [];
   const checks = [];
-  for (let i = 0; i < lanes.length; i += 1) {
-    if (lanes[i].role !== 'verify') continue;
-    const status = lanes[i].outcome === 'completed'
-      ? 'provider_pass'
-      : (lanes[i].outcome === 'failed' ? 'failed' : 'unknown');
+  for (let i = 0; i < override.length && checks.length < 8; i += 1) {
+    const row = override[i];
+    if (row == null || typeof row !== 'object') continue;
+    if (typeof row.id !== 'string' || !capturedTest(CHECK_ID_PATTERN, row.id)) continue;
+    const status = row.status;
+    if (status !== 'passed' && status !== 'failed' && status !== 'unknown'
+      && status !== 'provider_pass' && status !== 'missing') continue;
     checks.push({
-      id: `verify-${lanes[i].assignment_id}`,
-      present: lanes[i].outcome === 'completed' || lanes[i].outcome === 'failed',
+      id: row.id,
+      present: row.present === true,
       status,
     });
   }
@@ -314,28 +381,238 @@ function collectArtifacts(runId, lanes, override) {
   return unique;
 }
 
-function projectUsage(value, view) {
+function projectUsage(value, view, maxBytes) {
   if (value == null) return unknownUsageReportV1(view);
   validateUsageLedgerV1(value);
-  return projectUsageReportV1(value, { view });
+  return projectUsageReportV1(value, { view, max_bytes: maxBytes });
 }
 
-function compactText(outcome, usage) {
-  return clipText([
-    outcome.assignment_result,
-    outcome.codex_accepted === true ? 'codex_accepted' : 'not_accepted',
-    outcome.review_needed === true ? 'review_needed' : 'review_not_needed',
-    outcome.next_decision,
-    usage.present === true ? usage.text : 'usage unknown',
-  ].join(' '), MAX_RUN_RESULT_TEXT_BYTES);
-}
-
-function boundRecord(record, maxBytes, pathLabel) {
-  const encoded = canonicalJsonStringify(record);
-  if (BYTE_LENGTH(encoded, 'utf8') > maxBytes) {
-    deny('out_of_range', pathLabel, `Run result ${record.view} exceeds ${maxBytes} bytes.`);
+function compactText(assignmentResult, accepted, reviewNeeded, usage) {
+  const usageText = usage.present === true
+    ? usage.text
+    : 'No usage recorded. Native token balance is unknown.';
+  let lead = 'Completed work needs review; it is not Codex-accepted.';
+  if (accepted === true && assignmentResult === 'completed') {
+    lead = 'Codex accepted this completed candidate.';
+  } else if (assignmentResult === 'failed') {
+    lead = 'The run failed; resolve the failures.';
+  } else if (assignmentResult === 'cancelled') {
+    lead = 'The run was cancelled; resolve the failures.';
+  } else if (assignmentResult === 'unfinal') {
+    lead = 'Work is still in progress; wait for completion.';
+  } else if (assignmentResult === 'uncertain') {
+    lead = 'The outcome is unresolved; inspect before deciding.';
+  } else if (reviewNeeded !== true) {
+    lead = 'Completed work is not Codex-accepted.';
   }
-  return freezeData(record);
+  return clipText(`${lead} ${usageText}`, MAX_RUN_RESULT_TEXT_BYTES);
+}
+
+function emptyTruncation(count) {
+  return freezeRecord(TRUNCATION_KEYS, {
+    truncated: false,
+    fields: freezeList([]),
+    original_count: count,
+    retained: count,
+    omitted: 0,
+    reason: null,
+  });
+}
+
+function reportTruncation(fields, originalCount, retained) {
+  return freezeRecord(TRUNCATION_KEYS, {
+    truncated: true,
+    fields: freezeList(fields),
+    original_count: originalCount,
+    retained,
+    omitted: originalCount > retained ? originalCount - retained : 0,
+    reason: RUN_RESULT_REPORT_TRUNCATION_REASON,
+  });
+}
+
+function recordBytes(record) {
+  return BYTE_LENGTH(canonicalJsonStringify(record), 'utf8');
+}
+
+function mergeTruncation(base, extraFields, originalCount, retained) {
+  const fields = [];
+  const fromBase = base && capturedIsArray(base.fields) ? base.fields : [];
+  for (let i = 0; i < fromBase.length; i += 1) fields.push(fromBase[i]);
+  for (let i = 0; i < extraFields.length; i += 1) {
+    if (!capturedIncludes(fields, extraFields[i])) fields.push(extraFields[i]);
+  }
+  const truncated = (base && base.truncated === true) || extraFields.length > 0;
+  if (!truncated) {
+    return base ?? emptyTruncation(originalCount);
+  }
+  return reportTruncation(
+    fields,
+    originalCount,
+    retained,
+  );
+}
+
+function fitRunResult(record, maxBytes, pathLabel) {
+  const originalCount = (
+    (capturedIsArray(record.assignments) ? record.assignments.length : 0)
+    + (capturedIsArray(record.artifacts) ? record.artifacts.length : 0)
+    + (capturedIsArray(record.checks) ? record.checks.length : 0)
+    + (record.usage && capturedIsArray(record.usage.metrics) ? record.usage.metrics.length : 0)
+  );
+  if (recordBytes(record) <= maxBytes) return freezeData(record);
+  const fields = [];
+  let current = { ...record };
+  const clipTo = (limit) => {
+    const next = clipText(current.text, limit);
+    if (next !== current.text) {
+      if (!capturedIncludes(fields, 'text')) fields.push('text');
+      current = { ...current, text: next };
+    }
+  };
+  clipTo(240);
+  if (current.candidate && current.candidate.branch != null) {
+    fields.push('candidate');
+    current = {
+      ...current,
+      candidate: {
+        branch: null,
+        head: current.candidate.head,
+        tree: current.candidate.tree,
+        composed: current.candidate.composed === true,
+      },
+    };
+  }
+  const applyTruncation = (retained) => ({
+    ...current,
+    truncation: mergeTruncation(current.truncation, fields, originalCount, retained),
+  });
+  if (recordBytes(applyTruncation(originalCount)) <= maxBytes) {
+    return freezeData(applyTruncation(originalCount));
+  }
+  if (current.usage && capturedIsArray(current.usage.groups) && current.usage.groups.length > 0) {
+    fields.push('usage');
+    current = { ...current, usage: { ...current.usage, groups: [] } };
+  }
+  if (capturedIsArray(current.artifacts) && current.artifacts.length > 0) {
+    fields.push('artifacts');
+    current = { ...current, artifacts: [] };
+  }
+  if (recordBytes(applyTruncation(originalCount)) <= maxBytes) {
+    return freezeData(applyTruncation(originalCount));
+  }
+  if (current.usage && capturedIsArray(current.usage.metrics) && current.usage.metrics.length > 0) {
+    if (!capturedIncludes(fields, 'usage')) fields.push('usage');
+    current = {
+      ...current,
+      usage: {
+        ...current.usage,
+        metrics: [],
+        text: clipText(
+          current.usage.present === true
+            ? 'Usage recorded; retrieve detail. Native token balance is unknown. Savings are not inferred.'
+            : current.usage.text,
+          160,
+        ),
+      },
+    };
+  }
+  clipTo(160);
+  if (recordBytes(applyTruncation(
+    (capturedIsArray(current.assignments) ? current.assignments.length : 0)
+    + (capturedIsArray(current.checks) ? current.checks.length : 0),
+  )) <= maxBytes) {
+    return freezeData(applyTruncation(
+      (capturedIsArray(current.assignments) ? current.assignments.length : 0)
+      + (capturedIsArray(current.checks) ? current.checks.length : 0),
+    ));
+  }
+  if (capturedIsArray(current.assignments) && current.assignments.length > 0) {
+    fields.push('assignments');
+    const kept = [];
+    for (let i = 0; i < current.assignments.length; i += 1) {
+      kept.push({
+        assignment_id: current.assignments[i].assignment_id,
+        provider: current.assignments[i].provider,
+        role: current.assignments[i].role,
+        required: current.assignments[i].required,
+        outcome: current.assignments[i].outcome,
+        head: current.assignments[i].head ?? null,
+      });
+    }
+    current = { ...current, assignments: kept };
+  }
+  if (capturedIsArray(current.checks) && current.checks.length > 0) {
+    fields.push('checks');
+    current = { ...current, checks: [] };
+  }
+  const retained = capturedIsArray(current.assignments) ? current.assignments.length : 0;
+  const fitted = applyTruncation(retained);
+  if (recordBytes(fitted) <= maxBytes) return freezeData(fitted);
+  const minimal = {
+    schema: current.schema,
+    version: current.version,
+    view: current.view,
+    run_id: current.run_id,
+    assignment_result: current.assignment_result,
+    codex_accepted: current.codex_accepted,
+    review_needed: current.review_needed,
+    unresolved: current.unresolved,
+    next_decision: current.next_decision,
+    label: current.label,
+    candidate: {
+      branch: null,
+      head: current.candidate?.head ?? null,
+      tree: current.candidate?.tree ?? null,
+      composed: current.candidate?.composed === true,
+    },
+    usage: current.usage
+      ? {
+        schema: current.usage.schema,
+        view: current.usage.view,
+        present: current.usage.present,
+        identities: current.usage.identities,
+        observations: current.usage.observations,
+        metrics: [],
+        unknown: current.usage.unknown,
+        savings: current.usage.savings,
+        subscription: current.usage.subscription,
+        token_totals: current.usage.token_totals,
+        text: clipText('Usage truncated; retrieve detail.', 64),
+        truncation: current.usage.truncation ?? emptyTruncation(0),
+      }
+      : current.usage,
+    text: clipText(
+      compactText(
+        current.assignment_result,
+        current.codex_accepted,
+        current.review_needed,
+        { present: false, text: '' },
+      ),
+      160,
+    ),
+    truncation: reportTruncation(
+      ['text', 'usage', 'assignments', 'artifacts', 'checks', 'candidate'],
+      originalCount,
+      0,
+    ),
+  };
+  if (current.view === 'detail') {
+    minimal.assignments = capturedIsArray(current.assignments)
+      ? current.assignments.map((row) => ({
+        assignment_id: row.assignment_id,
+        outcome: row.outcome,
+        required: row.required,
+        provider: row.provider,
+        role: row.role,
+        head: row.head ?? null,
+      }))
+      : [];
+    minimal.checks = [];
+    minimal.artifacts = [];
+  }
+  if (recordBytes(minimal) <= maxBytes) return freezeData(minimal);
+  deny('out_of_range', pathLabel, `Run result ${record.view} exceeds ${maxBytes} bytes.`);
+  return freezeData(minimal);
 }
 
 export function describeRunResultEvidenceV1() {
@@ -344,8 +621,6 @@ export function describeRunResultEvidenceV1() {
     version: RUN_RESULT_EVIDENCE_VERSION,
     api: RUN_RESULT_EVIDENCE_API,
     views: RUN_RESULT_EVIDENCE_VIEWS,
-    parent_wiring_required: true,
-    public_mcp: 'not exposed',
     default_view: 'summary',
     max_summary_bytes: MAX_RUN_RESULT_SUMMARY_BYTES,
     max_detail_bytes: MAX_RUN_RESULT_DETAIL_BYTES,
@@ -382,10 +657,11 @@ export function projectRunResultEvidenceV1(source, options) {
     if (lane == null) deny('invalid_format', `receipt.lanes[${i}]`);
     lanes.push(lane);
   }
-  const candidate = selectCandidate(receipt, lanes, wrapped.candidate);
-  const checks = deriveChecks(lanes, wrapped.checks);
+  const candidate = selectCandidate(lanes, wrapped.candidate);
+  const checks = deriveChecks(wrapped.checks);
   const artifacts = collectArtifacts(runId, lanes, wrapped.artifacts);
-  const usage = projectUsage(wrapped.usage_ledger ?? receipt.usage_ledger, view);
+  const usageBudget = view === 'detail' ? MAX_USAGE_DETAIL_BYTES : 768;
+  const usage = projectUsage(wrapped.usage_ledger ?? receipt.usage_ledger, view, usageBudget);
   const baseSha = readSha(receipt.base_sha) ?? readSha(receipt.git?.base_sha);
   if (baseSha == null) deny('missing_key', 'receipt.base_sha');
   const outcome = projectLocalOutcomeCardV1({
@@ -402,44 +678,50 @@ export function projectRunResultEvidenceV1(source, options) {
       role: lane.role,
       required: lane.required,
       outcome: lane.outcome,
+      head: lane.head,
     })),
     checks,
     artifacts,
     ...(hasOwn(wrapped, 'codex_acceptance') ? { codex_acceptance: wrapped.codex_acceptance } : {}),
   });
   const runOutcome = mapRunOutcome(phase);
-  const assignmentResult = runOutcome === 'unfinal' && outcome.assignment_result === 'completed'
-    ? 'unfinal'
-    : (runOutcome === 'completed' ? outcome.assignment_result : runOutcome);
+  const assignmentResult = combineAssignmentResult(runOutcome, lanes);
+  const unresolved = assignmentResult === 'unfinal' || assignmentResult === 'uncertain';
+  const reviewNeeded = outcome.codex_accepted !== true && assignmentResult === 'completed';
+  const nextDecision = resultNextDecision(assignmentResult, reviewNeeded);
+  const label = resultLabel(assignmentResult, outcome.codex_accepted === true, reviewNeeded);
+  const truncation = outcome.truncation ?? emptyTruncation(artifacts.length);
   const summary = freezeRecord(SUMMARY_RESULT_KEYS, {
     schema: RUN_RESULT_EVIDENCE_SCHEMA_ID,
     version: RUN_RESULT_EVIDENCE_VERSION,
     view,
-    public_mcp: 'not exposed',
     run_id: runId,
     assignment_result: assignmentResult,
-    codex_accepted: outcome.codex_accepted,
-    review_needed: outcome.review_needed,
-    unresolved: outcome.unresolved || assignmentResult === 'unfinal' || assignmentResult === 'uncertain',
-    next_decision: assignmentResult === 'unfinal'
-      ? 'wait_for_completion'
-      : outcome.next_decision,
-    label: outcome.label,
+    codex_accepted: outcome.codex_accepted === true && assignmentResult === 'completed',
+    review_needed: reviewNeeded,
+    unresolved,
+    next_decision: nextDecision,
+    label,
     candidate: outcome.candidate,
     usage,
-    text: compactText(outcome, usage),
+    text: compactText(
+      assignmentResult,
+      outcome.codex_accepted === true && assignmentResult === 'completed',
+      reviewNeeded,
+      usage,
+    ),
+    truncation,
   });
   if (view === 'summary') {
-    return boundRecord(summary, MAX_RUN_RESULT_SUMMARY_BYTES, 'run_result_summary');
+    return fitRunResult(summary, MAX_RUN_RESULT_SUMMARY_BYTES, 'run_result_summary');
   }
   const detail = freezeRecord(DETAIL_RESULT_KEYS, {
     ...summary,
     assignments: outcome.assignments,
     checks: outcome.checks,
     artifacts: outcome.artifacts,
-    truncation: outcome.truncation,
   });
-  return boundRecord(detail, MAX_RUN_RESULT_DETAIL_BYTES, 'run_result_detail');
+  return fitRunResult(detail, MAX_RUN_RESULT_DETAIL_BYTES, 'run_result_detail');
 }
 
 export function summarizeRunResultEvidenceV1(source) {

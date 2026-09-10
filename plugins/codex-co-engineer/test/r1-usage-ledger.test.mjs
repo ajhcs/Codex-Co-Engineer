@@ -25,8 +25,18 @@ import {
   unknownUsageMetricV1,
   usageIdentityFromTelemetryV1,
   validateUsageLedgerV1,
+  HOST_USAGE_KEYS,
+  MAX_COST_MILLICENTS,
+  MAX_TOKEN_COUNT,
+  MAX_USAGE_BYTES,
+  MAX_USAGE_COUNTER,
+  MAX_USAGE_DETAIL_BYTES,
+  MAX_USAGE_DURATION_MS,
   MAX_USAGE_SUMMARY_BYTES,
   MAX_USAGE_SUMMARY_TEXT_BYTES,
+  PROVIDER_USAGE_KEYS,
+  USAGE_BUDGET_METRICS,
+  USAGE_TOKEN_TOTALS_NON_COMPARABLE,
   detailUsageLedgerV1,
   projectUsageReportV1,
   summarizeUsageLedgerV1,
@@ -609,4 +619,110 @@ test('missing metrics stay unknown and are never hidden zeros', () => {
   assert.equal(input.trust, 'unknown');
   assert.equal(detailed.unknown.includes('input_tokens'), true);
   assert.equal(detailed.view, 'detail');
+  assert.match(missing.text, /native token balance is unknown/iu);
+  assert.match(missing.text, /no usage recorded/iu);
+  assert.equal(missing.text.includes('usage unknown;'), false);
+});
+
+test('heterogeneous provider token totals stay non-comparable and grouped', () => {
+  const grok = makeSubmission({ assignmentId: ASSIGNMENT_ID });
+  const cursor = makeSubmission({ assignmentId: 'docs-reviewer', runId: grok.run_id });
+  const afterGrok = appendUsageReceiptV1(openUsageLedgerV1({ budgets: [] }), observation({
+    telemetry: grok.telemetry,
+    identity: laneIdentity(grok.telemetry, {
+      assignmentId: ASSIGNMENT_ID,
+      provider: 'grok',
+      model: 'grok-4',
+    }),
+    provider_usage: providerUsage({
+      input_tokens: providerReportedMetricV1(21),
+      output_tokens: providerReportedMetricV1(8),
+    }),
+    host_usage: hostUsage({
+      submissions: hostMeasuredMetricV1(1),
+      retrievable_evidence_bytes: evidenceBytesMetricV1(16),
+    }),
+  }));
+  const both = appendUsageReceiptV1(afterGrok, observation({
+    telemetry: cursor.telemetry,
+    recordedAt: '2026-08-22T12:00:01.000Z',
+    identity: laneIdentity(cursor.telemetry, {
+      assignmentId: 'docs-reviewer',
+      provider: 'cursor-local',
+      model: 'composer-1',
+    }),
+    provider_usage: providerUsage({
+      input_tokens: providerReportedMetricV1(13),
+      output_tokens: providerReportedMetricV1(5),
+    }),
+    host_usage: hostUsage({
+      submissions: hostMeasuredMetricV1(1),
+      retrievable_evidence_bytes: evidenceBytesMetricV1(8),
+    }),
+  }));
+  const summary = summarizeUsageLedgerV1(both);
+  const detailed = detailUsageLedgerV1(both);
+  assert.equal(summary.token_totals, USAGE_TOKEN_TOTALS_NON_COMPARABLE);
+  assert.match(summary.text, /not comparable/iu);
+  assert.match(summary.text, /native token balance is unknown/iu);
+  assert.equal(summary.metrics.some((row) => row.key === 'input_tokens'), false);
+  assert.equal(detailed.token_totals, USAGE_TOKEN_TOTALS_NON_COMPARABLE);
+  const grokGroup = detailed.groups.find((row) => row.scope === 'provider' && row.key === 'grok');
+  const cursorGroup = detailed.groups.find((row) => row.scope === 'provider' && row.key === 'cursor-local');
+  assert.equal(grokGroup.metrics.find((row) => row.key === 'input_tokens').value, 21);
+  assert.equal(cursorGroup.metrics.find((row) => row.key === 'input_tokens').value, 13);
+  assert.equal(detailed.native_tokens, 'unknown');
+});
+
+test('all known metrics with large integers stay inside report caps', () => {
+  const largeTokens = 120_000_000;
+  const identities = Array.from({ length: 8 }, (_, index) => (
+    makeSubmission({ assignmentId: `usage-lane-${index + 1}` })
+  ));
+  let ledger = openUsageLedgerV1({ budgets: [] });
+  for (let index = 0; index < identities.length; index += 1) {
+    const current = identities[index];
+    ledger = appendUsageReceiptV1(ledger, observation({
+      telemetry: current.telemetry,
+      recordedAt: `2026-08-22T12:00:0${index}.000Z`,
+      identity: laneIdentity(current.telemetry, {
+        assignmentId: `usage-lane-${index + 1}`,
+        provider: index % 2 === 0 ? 'grok' : 'dsh',
+        model: index % 2 === 0 ? 'grok-4' : 'dsh-1',
+      }),
+      provider_usage: providerUsage({
+        input_tokens: providerReportedMetricV1(largeTokens),
+        output_tokens: providerReportedMetricV1(largeTokens),
+        cache_tokens: providerReportedMetricV1(largeTokens),
+      }),
+    }));
+  }
+  const summary = summarizeUsageLedgerV1(ledger);
+  const detailed = detailUsageLedgerV1(ledger);
+  const summaryBytes = Buffer.byteLength(JSON.stringify(summary), 'utf8');
+  const detailBytes = Buffer.byteLength(JSON.stringify(detailed), 'utf8');
+  assert.ok(summaryBytes <= MAX_USAGE_SUMMARY_BYTES, summaryBytes);
+  assert.ok(detailBytes <= MAX_USAGE_DETAIL_BYTES, detailBytes);
+  assert.ok(Buffer.byteLength(summary.text, 'utf8') <= MAX_USAGE_SUMMARY_TEXT_BYTES);
+  assert.equal(summary.present, true);
+  assert.equal(summary.identities, 8);
+  assert.equal(summary.token_totals, USAGE_TOKEN_TOTALS_NON_COMPARABLE);
+  assert.equal(detailed.metrics.length, USAGE_BUDGET_METRICS.length);
+  for (const key of USAGE_BUDGET_METRICS) {
+    assert.equal(detailed.metrics.some((row) => row.key === key), true, key);
+  }
+  assert.equal(PROVIDER_USAGE_KEYS.length + HOST_USAGE_KEYS.length, USAGE_BUDGET_METRICS.length);
+  assert.equal(detailed.native_tokens, 'unknown');
+  const tight = projectUsageReportV1(ledger, { view: 'detail', max_bytes: 900 });
+  assert.ok(Buffer.byteLength(JSON.stringify(tight), 'utf8') <= 900);
+  assert.equal(tight.truncation.truncated, true);
+  assert.equal(tight.truncation.reason, 'report_bound');
+  assert.equal(tight.identities, 8);
+  assert.equal(tight.present, true);
+  assert.equal(tight.token_totals, USAGE_TOKEN_TOTALS_NON_COMPARABLE);
+  assert.ok(MAX_TOKEN_COUNT >= largeTokens);
+  assert.ok(MAX_COST_MILLICENTS > largeTokens);
+  assert.ok(MAX_USAGE_BYTES > largeTokens);
+  assert.ok(MAX_USAGE_COUNTER > 0);
+  assert.ok(MAX_USAGE_DURATION_MS > 0);
 });

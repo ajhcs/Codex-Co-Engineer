@@ -30,6 +30,7 @@ import {
   PUBLIC_LABEL_UNRESOLVED,
   PUBLIC_LABEL_FAILED,
   PUBLIC_LABEL_IN_PROGRESS,
+  PUBLIC_LABEL_ACCEPTED,
   projectFinalDecisionCardV1,
   projectLocalOutcomeCardV1,
 } from '../mcp/v3/final-decision-card.mjs';
@@ -372,4 +373,103 @@ test('provider pass and unfinal or failed states stay honest', () => {
     codex_acceptance: { accepted: true, authority: null },
   }));
   assert.equal(forged.codex_accepted, false);
+});
+
+test('Codex acceptance is bound to the exact run and candidate head', () => {
+  const flagOnly = projectLocalOutcomeCardV1(localRequest({
+    codex_acceptance: { accepted: true, authority: 'codex' },
+  }));
+  assert.equal(flagOnly.codex_accepted, false);
+  assert.equal(flagOnly.label, PUBLIC_LABEL_REVIEW_NEEDED);
+  assert.match(flagOnly.summary.text, /needs review/iu);
+
+  const otherHead = 'cccccccccccccccccccccccccccccccccccccccc';
+  const otherRun = projectLocalOutcomeCardV1(localRequest({
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: 'other-run-01',
+      head: HEAD_SHA,
+    },
+  }));
+  assert.equal(otherRun.codex_accepted, false);
+
+  const staleHead = projectLocalOutcomeCardV1(localRequest({
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: otherHead,
+    },
+  }));
+  assert.equal(staleHead.codex_accepted, false);
+  assert.equal(staleHead.label, PUBLIC_LABEL_REVIEW_NEEDED);
+
+  const bound = projectLocalOutcomeCardV1(localRequest({
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: HEAD_SHA,
+      tree: TREE_SHA,
+    },
+  }));
+  assert.equal(bound.codex_accepted, true);
+  assert.equal(bound.label, PUBLIC_LABEL_ACCEPTED);
+  assert.equal(bound.next_decision, 'none');
+  assert.match(bound.summary.text, /accepted/iu);
+
+  const failed = projectLocalOutcomeCardV1(localRequest({
+    assignments: [{
+      assignment_id: WRITER,
+      provider: 'grok',
+      role: 'implement',
+      required: true,
+      outcome: 'failed',
+    }],
+    checks: [{ id: 'unit', present: true, status: 'failed' }],
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: HEAD_SHA,
+    },
+  }));
+  assert.equal(failed.assignment_result, 'failed');
+  assert.equal(failed.codex_accepted, false);
+  assert.equal(failed.label, PUBLIC_LABEL_FAILED);
+  assert.equal(failed.next_decision, 'resolve_failures');
+
+  const unfinal = projectLocalOutcomeCardV1(localRequest({
+    assignments: [{
+      assignment_id: WRITER,
+      provider: 'grok',
+      role: 'implement',
+      required: true,
+      outcome: 'unfinal',
+    }],
+    checks: [],
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: HEAD_SHA,
+    },
+  }));
+  assert.equal(unfinal.assignment_result, 'unfinal');
+  assert.equal(unfinal.codex_accepted, false);
+  assert.equal(unfinal.label, PUBLIC_LABEL_IN_PROGRESS);
+
+  const failedCheck = projectLocalOutcomeCardV1(localRequest({
+    checks: [{ id: 'unit', present: true, status: 'failed' }],
+    codex_acceptance: {
+      accepted: true,
+      authority: 'codex',
+      run_id: RUN_ID,
+      head: HEAD_SHA,
+    },
+  }));
+  assert.equal(failedCheck.assignment_result, 'completed');
+  assert.equal(failedCheck.codex_accepted, false);
+  assert.equal(failedCheck.label, PUBLIC_LABEL_REVIEW_NEEDED);
 });
