@@ -72,6 +72,7 @@ import {
   cancelSupervisorSameSessionReplyV1,
 } from './run-tool-adapter.mjs';
 import { createRunAdmissionRuntime } from './run-admission.mjs';
+import { RunContractV1Error } from './run-manifest.mjs';
 import { createRunAdmissionStore } from './run-admission-store.mjs';
 import {
   compileRunRequestV1,
@@ -2370,31 +2371,59 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
   async function reviseRun(request, reviseOptions = {}) {
     const runId = request?.run_id;
     const revision = parseOwnedRevisionRequestV1(request?.revision, 'revision');
-    const record = await loadRecord(runId);
+    let record = await loadRecord(runId);
     if (!record) {
-      throw Object.assign(new Error('The named producer assignment is not known.'), {
-        code: 'revision_producer_not_found',
-        path: 'run_id',
-      });
+      throw new RunContractV1Error(
+        'revision_producer_not_found',
+        'run_id',
+        'The named producer assignment is not known.',
+      );
     }
+    await runtime.inspectRun({ run_id: runId });
+    record = await loadRecord(runId);
     const assignment = record.compiled?.assignments?.find((entry) => entry.assignment_id === revision.assignment_id);
     const lane = record.lanes?.find((entry) => entry.assignment_id === revision.assignment_id);
     if (!assignment || !lane) {
-      throw Object.assign(new Error('The named producer assignment is not known.'), {
-        code: 'revision_producer_not_found',
-        path: 'revision.assignment_id',
-      });
+      throw new RunContractV1Error(
+        'revision_producer_not_found',
+        'revision.assignment_id',
+        'The named producer assignment is not known.',
+      );
     }
-    const workspace = await inspectWorkspace({
-      root,
-      run_id: runId,
-      assignment_id: revision.assignment_id,
-      task_id: lane.task_id,
-      workspace: lane.workspace,
-    }).catch(() => ({}));
+    if (typeof lane.task_id === 'string') {
+      try {
+        const { task } = await readTask(root, lane.task_id);
+        const classified = classifySupervisorTerminalReceipt(task);
+        if (classified.projected_status !== 'completed' && classified.projected_status !== 'succeeded') {
+          throw new RunContractV1Error(
+            'revision_lifecycle_unfinal',
+            'revision',
+            'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+          );
+        }
+      } catch (error) {
+        if (error instanceof RunContractV1Error) throw error;
+      }
+    }
+    let workspace;
+    try {
+      workspace = await inspectWorkspace({
+        root,
+        run_id: runId,
+        assignment_id: revision.assignment_id,
+        task_id: lane.task_id,
+        workspace: lane.workspace,
+      });
+    } catch {
+      workspace = null;
+    }
     const producer = projectOwnedProducerCandidateV1({ record, assignment, lane, workspace });
     const derived = deriveOwnedRevisionRequestV1(producer, revision);
-    return runtime.submitRunRequest(derived.run_request, reviseOptions);
+    const submitted = await runtime.submitRunRequest(derived.run_request, reviseOptions);
+    return Object.freeze({
+      ...submitted,
+      correction: derived.correction,
+    });
   }
   return Object.freeze({
     ...runtime,

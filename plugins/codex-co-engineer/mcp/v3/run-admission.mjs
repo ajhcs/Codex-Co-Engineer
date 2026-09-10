@@ -752,7 +752,13 @@ function boundedHandoff(value, fallback) {
   return freezeData(candidate);
 }
 
-function laneReceipt(lane) {
+function laneReceipt(lane, compiled) {
+  const assignment = Array.isArray(compiled?.assignments)
+    ? compiled.assignments.find((entry) => entry?.assignment_id === lane.assignment_id)
+    : null;
+  const head = typeof lane.handoff?.current_head === 'string'
+    ? lane.handoff.current_head.toLowerCase()
+    : null;
   return {
     assignment_id: lane.assignment_id,
     task_id: lane.task_id,
@@ -760,6 +766,9 @@ function laneReceipt(lane) {
     model: lane.model,
     role: lane.role,
     access: lane.access,
+    write_scope: Array.isArray(assignment?.write_scope)
+      ? [...assignment.write_scope]
+      : (Array.isArray(lane.write_scope) ? [...lane.write_scope] : []),
     required: lane.required,
     phase: lane.phase,
     status: laneStatus(lane.phase),
@@ -780,6 +789,10 @@ function laneReceipt(lane) {
     provider_run_identity_digest: lane.provider_run_identity?.digest ?? null,
     workspace_identity_digest: lane.workspace_identity?.digest ?? null,
     workspace_identity: lane.workspace_identity ?? null,
+    request_idempotency_key: compiled?.request_idempotency_key ?? null,
+    head,
+    clean: typeof lane.handoff?.clean === 'boolean' ? lane.handoff.clean : null,
+    artifact_refs: Array.isArray(lane.artifact_refs) ? lane.artifact_refs : [],
     error: lane.error ?? null,
     recovery_classification: lane.recovery_classification ?? null,
     handoff: lane.handoff ?? null,
@@ -796,18 +809,20 @@ function receipt(record, extras = {}) {
     schema: RUN_ADMISSION_SCHEMA_ID,
     version: RUN_ADMISSION_VERSION,
     run_id: record.run_id,
+    persisted: true,
     phase: record.phase,
     status: record.phase,
     revision: record.revision,
     cursor: String(record.revision),
     objective: record.compiled.objective,
     base_sha: record.compiled.git.base_sha,
+    request_idempotency_key: record.compiled.request_idempotency_key ?? null,
     git: {
       base_sha: record.compiled.git.base_sha,
       digest: record.compiled.git_identity.digest,
     },
     assignment_count: record.lanes.length,
-    lanes: record.lanes.map(laneReceipt),
+    lanes: record.lanes.map((lane) => laneReceipt(lane, record.compiled)),
     consent: record.consent_request
       ? { status: record.consent_status, request: record.consent_request }
       : {

@@ -93,9 +93,7 @@ import { openRunStore } from './run-store.mjs';
 import { boundProviderResult, utf8Head } from './compact-task.mjs';
 import { inspectDelegationPreferencesV1 } from './delegation-preferences.mjs';
 import {
-  deriveOwnedRevisionRequestV1,
   parseOwnedRevisionRequestV1,
-  producerFromRunReceiptV1,
   OWNED_REVISION_REQUEST_KEYS,
 } from './owned-delegation.mjs';
 import { projectRunCoordinationResponseV1 } from './run-coordination-response.mjs';
@@ -326,6 +324,10 @@ const CONTENT_FREE = capturedFreeze({
   revision_producer_stale: 'expected_head does not match the exact producer HEAD.',
   revision_identity_mismatch: 'expected_idempotency_key does not match the producer request identity.',
   revision_producer_not_found: 'The named producer assignment is not known.',
+  revision_unsupported: 'Owned revision requires the supervisor reviseRun capability.',
+  revision_workspace_unsupported: 'Remote candidate revision is not supported; a local inspectable HEAD is required.',
+  revision_workspace_uninspectable: 'A revision requires a fresh successful workspace inspection.',
+  revision_lifecycle_unfinal: 'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
 });
 
 export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
@@ -366,6 +368,10 @@ export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
   'revision_producer_stale',
   'revision_identity_mismatch',
   'revision_producer_not_found',
+  'revision_unsupported',
+  'revision_workspace_unsupported',
+  'revision_workspace_uninspectable',
+  'revision_lifecycle_unfinal',
 ]);
 
 const ADAPTER_DEPENDENCY_KEYS = capturedFreeze([
@@ -1269,6 +1275,7 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
   const cleanupBlocked = cleanupNeedsAttention(receipt, unconfirmed);
   const attention = receipt.attention;
   const attentionRequired = attention?.status === 'open'
+    || attention?.status === 'blocked'
     || lanes.some((lane) => lane.status === 'needs_attention');
   const candidate = compactSemanticCandidate(runtimeReceipt, receipt.candidate);
   const verification = runtimeReceipt?.verification?.authority === 'p35'
@@ -1290,6 +1297,8 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
     revision: receipt.revision,
     assignment_count: receipt.assignment_count,
     authoritative_required_dispatch: receipt.authoritative_required_dispatch === true,
+    ...(runtimeReceipt?.persisted === false ? { persisted: false } : {}),
+    ...(runtimeReceipt?.correction ? { correction: sanitizeModelFacing(runtimeReceipt.correction) } : {}),
     lanes,
     ...(attentionRequired || attention?.status === 'reply_committed' || attention?.status === 'resolved'
       ? { attention }
@@ -1376,37 +1385,7 @@ function compactProviderResult(result, taskId) {
 }
 
 function preferenceAttentionReceipt(runId, request, preferenceView) {
-  const assignments = ARRAY_IS_ARRAY(request?.assignments) ? request.assignments : [];
-  const lanes = assignments.length > 0
-    ? assignments.map((assignment, index) => {
-      const assignmentId = typeof assignment?.assignment_id === 'string' && assignment.assignment_id.length > 0
-        ? assignment.assignment_id
-        : `pending-${index + 1}`;
-      return {
-        assignment_id: assignmentId,
-        task_id: `pending-${assignmentId}`.slice(0, 80),
-        provider: typeof assignment?.provider === 'string' ? assignment.provider : null,
-        model: typeof assignment?.model === 'string' ? assignment.model : null,
-        role: typeof assignment?.role === 'string' ? assignment.role : null,
-        required: assignment?.required !== false,
-        phase: 'needs_attention',
-        status: 'needs_attention',
-        prompt_dispatched: false,
-        dispatch_confidence: 'not_sent',
-      };
-    })
-    : [{
-      assignment_id: 'pending-preference',
-      task_id: 'pending-preference',
-      provider: null,
-      model: null,
-      role: null,
-      required: true,
-      phase: 'needs_attention',
-      status: 'needs_attention',
-      prompt_dispatched: false,
-      dispatch_confidence: 'not_sent',
-    }];
+  void request;
   const items = ARRAY_IS_ARRAY(preferenceView?.attention?.items)
     ? preferenceView.attention.items
     : [];
@@ -1414,28 +1393,29 @@ function preferenceAttentionReceipt(runId, request, preferenceView) {
     schema: 'codex-co-engineer.run-admission.v1',
     version: 1,
     run_id: runId,
-    phase: 'needs_attention',
-    status: 'needs_attention',
+    persisted: false,
+    phase: 'not_admitted',
+    status: 'not_admitted',
     revision: 0,
     cursor: '0',
-    assignment_count: lanes.length,
-    lanes,
+    assignment_count: 0,
+    lanes: [],
     complete_candidate_blocked: true,
     error: {
       code: 'preferred_provider_unavailable',
       message: CONTENT_FREE.preferred_provider_unavailable,
     },
     attention: {
-      status: 'open',
+      status: 'blocked',
       code: 'preferred_provider_unavailable',
       next_action: 'supply_explicit_provider',
       items,
-      wake: true,
+      wake: false,
     },
     consent: null,
     admission: null,
     dispatched_assignment_ids: [],
-    undispatched_assignment_ids: lanes.map((lane) => lane.assignment_id),
+    undispatched_assignment_ids: [],
     dispatch_uncertain_assignment_ids: [],
     authoritative_required_dispatch: false,
     already_terminal: false,
@@ -1476,6 +1456,11 @@ function malformedRuntimeReceipt(runId) {
 function isRuntimeReceipt(value, expectedRunId) {
   if (value === undefined || value === null || typeof value !== 'object'
     || ARRAY_IS_ARRAY(value) || IS_PROXY(value)) return false;
+  if (value.persisted === false) {
+    if (typeof value.run_id !== 'string'
+      || (typeof expectedRunId === 'string' && value.run_id !== expectedRunId)) return false;
+    return typeof value.phase === 'string' || typeof value.status === 'string';
+  }
   if (typeof value.run_id !== 'string'
     || (typeof expectedRunId === 'string' && value.run_id !== expectedRunId)) return false;
   if (!ARRAY_IS_ARRAY(value.lanes)
@@ -2132,17 +2117,11 @@ export function createRunToolAdapter(dependencies) {
         quarantineObject(ownDataValue(args, 'revision', 'revision'), 'revision', REVISION_REQUEST_KEYS),
         'revision',
       );
-      if (typeof simpleRuntime.reviseRun === 'function') {
-        counters.submit += 1;
-        runtimeReceipt = await simpleRuntime.reviseRun({ run_id: runId, revision }, { signal });
-      } else {
-        const inspected = await simpleRuntime.inspectRun({ run_id: runId });
-        const producer = producerFromRunReceiptV1(inspected, revision.assignment_id, 'revision');
-        const derived = deriveOwnedRevisionRequestV1(producer, revision);
-        counters.submit += 1;
-        runtimeReceipt = await simpleRuntime.submitRunRequest(derived.run_request, { signal });
-        simpleRunIds.add(derived.run_request.run_id);
+      if (typeof simpleRuntime.reviseRun !== 'function') {
+        failAdapter('revision_unsupported', 'revision', CONTENT_FREE.revision_unsupported);
       }
+      counters.submit += 1;
+      runtimeReceipt = await simpleRuntime.reviseRun({ run_id: runId, revision }, { signal });
       if (typeof runtimeReceipt?.run_id === 'string') {
         simpleRunIds.add(runtimeReceipt.run_id);
         requestedRunId = runtimeReceipt.run_id;

@@ -1089,137 +1089,139 @@ test('unknown preferred providers return attention and do not dispatch', async (
       }],
     },
   });
-  assert.equal(receipt.phase, 'needs_attention');
+  assert.equal(receipt.persisted, false);
+  assert.equal(receipt.phase, 'not_admitted');
   assert.equal(receipt.attention.code, 'preferred_provider_unavailable');
+  assert.equal(receipt.coordination.next_action.action, 'resubmit');
+  assert.equal(receipt.coordination.persisted, false);
+  assert.equal(receipt.coordination.run_id, null);
   assert.equal(submitCalls.length, 0);
-  assert.equal(receipt.lanes.every((lane) => lane.prompt_dispatched !== true), true);
+  assert.equal(receipt.lanes.length, 0);
 });
 
-test('task revision derives a bounded correction and duplicate calls stay idempotent', async () => {
-  const HEAD = 'b'.repeat(40);
-  const IDEMPOTENCY = `sha256:${'d'.repeat(64)}`;
-  const producerReceipt = {
-    schema: 'codex-co-engineer.run-admission.v1',
-    version: 1,
-    run_id: 'vale-hardening',
-    phase: 'completed',
-    status: 'completed',
-    revision: 3,
-    cursor: '3',
-    request_idempotency_key: IDEMPOTENCY,
-    repo: '/tmp/repo',
-    git: { head: HEAD, base_sha: 'a'.repeat(40) },
-    assignment_count: 1,
-    lanes: [{
-      assignment_id: 'social-implementation',
-      task_id: 'ce-vale-hardening-social',
-      provider: 'grok',
-      model: 'grok-4',
-      role: 'implement',
-      access: 'writer',
-      write_scope: ['src/**'],
-      required: true,
-      phase: 'completed',
-      status: 'completed',
-      prompt_dispatched: true,
-      dispatch_confidence: 'authoritative',
-      expected_duration_ms: 900_000,
-      handoff: { current_head: HEAD, clean: true },
-    }],
-    complete_candidate_blocked: false,
-    attention: null,
-    consent: null,
-    admission: null,
-    dispatched_assignment_ids: ['social-implementation'],
-    undispatched_assignment_ids: [],
-    dispatch_uncertain_assignment_ids: [],
-    authoritative_required_dispatch: true,
-  };
+test('unused unknown preferences and exact assignment overrides still dispatch', async () => {
   const submitCalls = [];
   const legacy = createAdapter();
   const simpleRuntime = {
-    hasRun: (value) => value === 'vale-hardening' || String(value).startsWith('rev-'),
     submitRunRequest: async (value) => {
       submitCalls.push(value);
       return {
-        ...producerReceipt,
+        schema: 'codex-co-engineer.run-admission.v1',
+        version: 1,
         run_id: value.run_id,
-        phase: 'preparing_workspaces',
-        status: 'preparing_workspaces',
+        phase: 'running',
+        status: 'running',
+        assignment_count: 1,
         lanes: [{
-          ...producerReceipt.lanes[0],
           assignment_id: value.assignments[0].assignment_id,
-          provider: value.assignments[0].provider,
-          model: value.assignments[0].model,
-          write_scope: value.assignments[0].write_scope,
-          phase: 'prepared',
-          status: 'prepared',
-          prompt_dispatched: false,
+          task_id: 'ce-social',
+          provider: 'grok',
+          status: 'running',
+          phase: 'running',
+          prompt_dispatched: true,
         }],
       };
     },
-    inspectRun: async () => producerReceipt,
-    resumeRun: async () => producerReceipt,
-    replyRun: async () => producerReceipt,
-    cancelRun: async () => producerReceipt,
-    waitRun: async () => producerReceipt,
+    inspectRun: async () => ({}),
+    resumeRun: async () => ({}),
+    replyRun: async () => ({}),
+    cancelRun: async () => ({}),
+    waitRun: async () => ({}),
   };
   const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
-  const revision = {
-    assignment_id: 'social-implementation',
-    feedback: 'Fix the failing unit tests.',
-    expected_head: HEAD,
-    expected_idempotency_key: IDEMPOTENCY,
-  };
-  const first = await adapter.dispatch('task', { run_id: 'vale-hardening', revision });
-  const second = await adapter.dispatch('task', { run_id: 'vale-hardening', revision });
+  const unused = await adapter.dispatch('delegate', {
+    run_request: {
+      run_id: 'vale-unused-review',
+      repo: '/tmp/repo',
+      objective: 'Implement the slice.',
+      preferences: {
+        implement: { provider: 'grok' },
+        review: { provider: 'claude' },
+      },
+      assignments: [{
+        assignment_id: 'social-implementation',
+        role: 'implement',
+        prompt: 'Implement the slice.',
+      }],
+    },
+  });
+  assert.equal(unused.phase, 'running');
+  const overridden = await adapter.dispatch('delegate', {
+    run_request: {
+      run_id: 'vale-explicit-override',
+      repo: '/tmp/repo',
+      objective: 'Implement the slice.',
+      preferences: { implement: { provider: 'claude' } },
+      assignments: [{
+        assignment_id: 'social-implementation',
+        role: 'implement',
+        provider: 'grok',
+        prompt: 'Implement the slice.',
+      }],
+    },
+  });
+  assert.equal(overridden.phase, 'running');
   assert.equal(submitCalls.length, 2);
-  assert.equal(submitCalls[0].run_id, submitCalls[1].run_id);
-  assert.equal(submitCalls[0].assignments[0].provider, 'grok');
-  assert.equal(submitCalls[0].assignments[0].model, 'grok-4');
-  assert.deepEqual(submitCalls[0].assignments[0].write_scope, ['src/**']);
-  assert.equal(first.run_id, submitCalls[0].run_id);
-  assert.equal(second.run_id, first.run_id);
-  assert.equal(first.coordination.next_action.action, 'wait');
+});
+
+test('task revision without reviseRun reports unsupported instead of reconstructing stale receipts', async () => {
+  const HEAD = 'b'.repeat(40);
+  const IDEMPOTENCY = `sha256:${'d'.repeat(64)}`;
+  const submitCalls = [];
+  const legacy = createAdapter();
+  const simpleRuntime = {
+    submitRunRequest: async (value) => {
+      submitCalls.push(value);
+      return value;
+    },
+    inspectRun: async () => ({
+      schema: 'codex-co-engineer.run-admission.v1',
+      run_id: 'vale-hardening',
+      phase: 'completed',
+      status: 'completed',
+      lanes: [{ assignment_id: 'social-implementation', task_id: 'ce-social', status: 'completed' }],
+    }),
+    resumeRun: async () => ({}),
+    replyRun: async () => ({}),
+    cancelRun: async () => ({}),
+    waitRun: async () => ({}),
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+  const error = await errorOf(() => adapter.dispatch('task', {
+    run_id: 'vale-hardening',
+    revision: {
+      assignment_id: 'social-implementation',
+      feedback: 'Fix the failing unit tests.',
+      expected_head: HEAD,
+      expected_idempotency_key: IDEMPOTENCY,
+    },
+  }));
+  assert.equal(error.code, 'revision_unsupported');
+  assert.equal(submitCalls.length, 0);
 });
 
 test('dirty or active revision requests fail closed without a new dispatch', async () => {
   const HEAD = 'b'.repeat(40);
   const IDEMPOTENCY = `sha256:${'d'.repeat(64)}`;
-  const dirty = {
-    schema: 'codex-co-engineer.run-admission.v1',
-    run_id: 'vale-hardening',
-    phase: 'completed',
-    status: 'completed',
-    request_idempotency_key: IDEMPOTENCY,
-    repo: '/tmp/repo',
-    assignment_count: 1,
-    lanes: [{
-      assignment_id: 'social-implementation',
-      task_id: 'ce-vale-hardening-social',
-      provider: 'grok',
-      model: 'grok-4',
-      role: 'implement',
-      write_scope: ['src/**'],
-      phase: 'completed',
-      status: 'completed',
-      prompt_dispatched: true,
-      dispatch_confidence: 'authoritative',
-      handoff: { current_head: HEAD, clean: false },
-    }],
-  };
   const submitCalls = [];
   const legacy = createAdapter();
   const simpleRuntime = {
     submitRunRequest: async (value) => {
       submitCalls.push(value);
-      return dirty;
+      return value;
     },
-    inspectRun: async () => dirty,
-    resumeRun: async () => dirty,
-    replyRun: async () => dirty,
-    cancelRun: async () => dirty,
-    waitRun: async () => dirty,
+    inspectRun: async () => ({}),
+    resumeRun: async () => ({}),
+    replyRun: async () => ({}),
+    cancelRun: async () => ({}),
+    waitRun: async () => ({}),
+    reviseRun: async () => {
+      throw Object.assign(new RunContractV1Error(
+        'revision_producer_dirty',
+        'revision',
+        'A revision requires a clean producer worktree.',
+      ), { code: 'revision_producer_dirty' });
+    },
   };
   const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
   const error = await errorOf(() => adapter.dispatch('task', {

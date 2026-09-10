@@ -42,13 +42,19 @@ structured/wait/diagnostic/reply/cancel behavior and response shapes.
 run mode is `decision_or_attention`. Routine progress never wakes.
 
 `task.revision` derives a new bounded correction from a completed, clean,
-exactly identified producer assignment. It preserves provider, model, and
-write scope, accepts concise feedback plus the expected HEAD and request
-idempotency identity, and uses a fresh durable revision identity. Active,
-uncertain, dirty, or stale producers fail closed and are never replayed.
-Duplicate calls with the same identity are idempotent. Compact run receipts
-include a machine-derived coordination packet: candidate Git identity,
-existing evidence refs, unresolved work, and the exact next action.
+exactly identified producer assignment. It preserves provider, model, write
+scope, access, capabilities, and enough original assignment context for a
+fresh worker, plus the correction feedback and reviewed HEAD. Public
+admission receipts and the compact coordination packet return the producer
+request identity (`request_idempotency_key`) and unambiguous per-assignment
+HEAD/status. Completed candidates next-action to `review`; `revision` is an
+available action only after a real correction finding. Completed-but-dirty,
+uncertain, or cleanup-incomplete evidence stays unresolved. Active,
+uncertain, dirty, stale, missing, remote, or unfinal producers fail closed
+and are never replayed. Duplicate calls with the same identity, including
+concurrent duplicates, dispatch once. Compact packets include retrievable
+artifact refs when those artifacts exist; identity hashes are not presented
+as retrievable artifacts.
 
 Mixing a run body with 3.2.1 `task_id` / `workspace_mode` / `create_pr` /
 `reply` fields fails closed.
@@ -82,10 +88,13 @@ Omitting access and supplying its equivalent explicit value produce the same
 normalized request. Multiple writer lanes need explicit disjoint write scopes.
 
 Optional `preferences` reuse provider ownership by role so eligible
-assignments may omit `provider` / `model`. Exact assignment selections win.
-Unknown or unavailable preferred providers return attention instead of a
-silent post-dispatch substitution. Omitted preferences keep the explicit
-provider path unchanged.
+assignments may omit `provider` / `model`. Exact assignment selections win,
+including when they override an unknown role preference. Unknown or
+unavailable preferred providers are reported only when an assignment would
+use them; unused unknown role preferences do not block dispatch. Used
+unknown preferences return a pre-admission result with no persisted run and
+`next_action=resubmit` instead of a fake identity that asks for `reply`.
+Omitted preferences keep the explicit provider path unchanged.
 
 ```json
 {

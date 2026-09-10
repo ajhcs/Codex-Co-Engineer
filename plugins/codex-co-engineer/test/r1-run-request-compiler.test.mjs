@@ -296,3 +296,35 @@ test('invalid or missing preferences fail closed without substituting a provider
     (error) => error.code === 'preferred_provider_unavailable',
   );
 });
+
+test('unused unknown preferences and exact assignment overrides compile', async () => {
+  const unused = await compileRunRequestV1(request({
+    preferences: {
+      implement: { provider: 'grok' },
+      review: { provider: 'claude' },
+    },
+    assignments: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'write',
+      prompt: 'Implement the social ingestion slice.',
+      expected_duration_ms: 900_000,
+    }],
+  }), { observeGit });
+  assert.equal(unused.assignments[0].provider, 'grok');
+  assert.equal(unused.assignments[0].selection_source, 'preference');
+
+  const overridden = await compileRunRequestV1(request({
+    preferences: { implement: { provider: 'claude' } },
+    assignments: [{
+      assignment_id: 'social-implementation',
+      provider: 'grok',
+      role: 'implement',
+      access: 'write',
+      prompt: 'Implement the social ingestion slice.',
+      expected_duration_ms: 900_000,
+    }],
+  }), { observeGit });
+  assert.equal(overridden.assignments[0].provider, 'grok');
+  assert.equal(overridden.assignments[0].selection_source, 'explicit');
+});

@@ -186,45 +186,71 @@ export function assertOwnedRevisionProducerV1(producer, revision, field = 'revis
   return producer;
 }
 
+function collectRetrievableArtifactRefs(value, assignmentId, refs) {
+  if (!Array.isArray(value)) return;
+  for (const entry of value.slice(0, 8)) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (typeof entry.relative_path !== 'string' || typeof entry.artifact_kind !== 'string') continue;
+    const digest = typeof entry.sha256 === 'string'
+      ? entry.sha256
+      : (typeof entry.digest === 'string' ? entry.digest : null);
+    if (typeof digest !== 'string') continue;
+    refs.push(freezeData({
+      kind: 'artifact',
+      artifact_kind: entry.artifact_kind,
+      relative_path: entry.relative_path,
+      digest: digest.startsWith('sha256:') ? digest : `sha256:${digest}`,
+      ...(typeof assignmentId === 'string' ? { assignment_id: assignmentId } : {}),
+    }));
+  }
+}
+
 export function projectOwnedProducerCandidateV1({
   record,
   assignment,
   lane,
-  workspace = {},
+  workspace = null,
 } = {}) {
   if (!record || !assignment || !lane) {
     revisionError('revision_producer_not_found', 'producer', 'The named producer assignment is not known.');
   }
+  if (assignment.provider === 'cursor-cloud') {
+    revisionError(
+      'revision_workspace_unsupported',
+      'revision',
+      'Remote candidate revision is not supported; a local inspectable HEAD is required.',
+    );
+  }
+  if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) {
+    revisionError(
+      'revision_workspace_uninspectable',
+      'workspace',
+      'A revision requires a fresh successful workspace inspection.',
+    );
+  }
   const head = typeof workspace.current_head === 'string'
     ? workspace.current_head.toLowerCase()
-    : (typeof lane.handoff?.current_head === 'string' ? lane.handoff.current_head.toLowerCase() : null);
-  const clean = workspace.clean === true
-    || (workspace.clean !== false && lane.handoff?.clean === true);
+    : null;
+  if (!isSha40(head)) {
+    revisionError(
+      'revision_workspace_uninspectable',
+      'workspace.current_head',
+      'A revision requires a fresh exact HEAD from a successful workspace inspection.',
+    );
+  }
+  if (workspace.clean !== true && workspace.clean !== false) {
+    revisionError(
+      'revision_workspace_uninspectable',
+      'workspace.clean',
+      'A revision requires fresh clean proof from a successful workspace inspection.',
+    );
+  }
+  const manifestAssignment = Array.isArray(record.compiled?.manifest?.assignments)
+    ? record.compiled.manifest.assignments.find((entry) => entry?.assignment_id === assignment.assignment_id)
+    : null;
   const evidenceRefs = [];
-  if (typeof record.compiled?.git_identity?.digest === 'string') {
-    evidenceRefs.push({ kind: 'git_identity', digest: record.compiled.git_identity.digest });
-  }
-  if (typeof assignment.child_identity?.digest === 'string') {
-    evidenceRefs.push({
-      kind: 'child_identity',
-      assignment_id: assignment.assignment_id,
-      digest: assignment.child_identity.digest,
-    });
-  }
-  if (typeof assignment.prompt_envelope_digest === 'string') {
-    evidenceRefs.push({
-      kind: 'prompt_envelope',
-      assignment_id: assignment.assignment_id,
-      digest: assignment.prompt_envelope_digest,
-    });
-  }
-  if (typeof assignment.provider_run_identity?.digest === 'string') {
-    evidenceRefs.push({
-      kind: 'provider_run',
-      assignment_id: assignment.assignment_id,
-      digest: assignment.provider_run_identity.digest,
-    });
-  }
+  collectRetrievableArtifactRefs(lane.artifact_refs, assignment.assignment_id, evidenceRefs);
+  collectRetrievableArtifactRefs(record.artifact_refs, assignment.assignment_id, evidenceRefs);
   return freezeData({
     run_id: record.run_id,
     assignment_id: assignment.assignment_id,
@@ -238,13 +264,18 @@ export function projectOwnedProducerCandidateV1({
     expected_duration_ms: assignment.expected_duration_ms,
     repo: record.compiled?.repo ?? record.compiled?.git?.repository_path ?? null,
     objective: record.compiled?.objective ?? null,
+    prompt: typeof assignment.prompt === 'string' ? assignment.prompt : null,
+    acceptance: Array.isArray(manifestAssignment?.acceptance) ? [...manifestAssignment.acceptance] : [],
+    required_evidence: Array.isArray(manifestAssignment?.required_evidence)
+      ? [...manifestAssignment.required_evidence]
+      : [],
     request_idempotency_key: record.compiled?.request_idempotency_key ?? null,
     phase: lane.phase ?? lane.status ?? null,
     status: lane.status ?? lane.phase ?? null,
     prompt_dispatched: lane.prompt_dispatched === true,
     dispatch_confidence: lane.dispatch_confidence ?? null,
     head,
-    clean,
+    clean: workspace.clean === true,
     evidence_refs: evidenceRefs,
   });
 }
@@ -260,6 +291,13 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
     write_scope: producer.write_scope,
     provider: producer.provider,
     model: producer.model,
+    access: producer.access,
+    capabilities: producer.capabilities,
+    objective: producer.objective,
+    original_prompt: producer.prompt,
+    acceptance: producer.acceptance,
+    required_evidence: producer.required_evidence,
+    expected_head: revision.expected_head,
   });
   if (typeof prompt !== 'string' || prompt.length < 1 || prompt.length > PROMPT_MAX_BYTES) {
     revisionError('invalid_format', 'revision.feedback', 'The derived correction prompt is outside the assignment bound.');
@@ -279,11 +317,20 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
       : {}),
   };
   if (producer.access !== undefined) assignment.access = producer.access === 'writer' ? 'write' : producer.access;
+  const correction = freezeData({
+    schema: OWNED_DELEGATION_SCHEMA_ID,
+    version: OWNED_DELEGATION_VERSION,
+    lineage: 'owned_revision',
+    producer_run_id: producer.run_id,
+    producer_assignment_id: producer.assignment_id,
+    reviewed_head: revision.expected_head,
+  });
   return freezeData({
     schema: OWNED_DELEGATION_SCHEMA_ID,
     version: OWNED_DELEGATION_VERSION,
     identity,
     producer_run_id: producer.run_id,
+    correction,
     run_request: freezeData({
       run_id: identity.run_id,
       repo: producer.repo,

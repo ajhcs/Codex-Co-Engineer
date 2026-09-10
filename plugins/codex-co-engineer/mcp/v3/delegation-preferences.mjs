@@ -81,33 +81,18 @@ export function parseDelegationPreferencesV1(value, field = 'run_request.prefere
   assertPlainObject(value, 'invalid_type', field, 'preferences');
   assertDirectJsonClosure(value, field);
   const byRole = {};
-  const unknown = [];
   for (const key of capturedOwnKeys(value)) {
     if (typeof key !== 'string') preferenceError('symbol_key_denied', field);
     if (!capturedIncludes(DELEGATION_PREFERENCE_ROLES, key) || !isKnownRole(key)) {
       preferenceError('unknown_key', `${field}.${key}`, 'Preferences are keyed by implement, review, or verify.');
     }
-    const entry = parseEntry(ownDataValue(value, key, `${field}.${key}`), `${field}.${key}`);
-    byRole[key] = entry;
-    if (entry.known !== true) {
-      unknown.push(freezeData({
-        role: key,
-        provider: entry.provider,
-        code: 'preferred_provider_unavailable',
-      }));
-    }
+    byRole[key] = parseEntry(ownDataValue(value, key, `${field}.${key}`), `${field}.${key}`);
   }
-  const attention = unknown.length === 0 ? null : freezeData({
-    status: 'open',
-    code: 'preferred_provider_unavailable',
-    next_action: 'supply_explicit_provider',
-    items: unknown,
-  });
   return freezeData({
     schema: DELEGATION_PREFERENCES_SCHEMA_ID,
     version: DELEGATION_PREFERENCES_VERSION,
     by_role: freezeData(byRole),
-    attention,
+    attention: null,
   });
 }
 
@@ -169,17 +154,11 @@ export function inspectDelegationPreferencesV1(request, field = 'run_request') {
     ? ownDataValue(request, 'preferences', `${field}.preferences`)
     : undefined;
   const preferences = parseDelegationPreferencesV1(raw, `${field}.preferences`);
-  if (preferences.attention) {
-    return freezeData({
-      preferences,
-      attention: preferences.attention,
-      resolved: [],
-    });
-  }
   const assignments = capturedHasOwn(request, 'assignments')
     ? ownDataValue(request, 'assignments', `${field}.assignments`)
     : undefined;
   const resolved = [];
+  const usedUnknown = [];
   if (Array.isArray(assignments)) {
     for (let index = 0; index < assignments.length; index += 1) {
       const assignmentField = `${field}.assignments[${index}]`;
@@ -194,6 +173,17 @@ export function inspectDelegationPreferencesV1(request, field = 'run_request') {
       const model = capturedHasOwn(assignment, 'model')
         ? ownDataValue(assignment, 'model', `${assignmentField}.model`)
         : undefined;
+      const preference = role && preferences.by_role && capturedHasOwn(preferences.by_role, role)
+        ? preferences.by_role[role]
+        : undefined;
+      if (provider === undefined && preference && preference.known !== true) {
+        usedUnknown.push(freezeData({
+          role,
+          provider: preference.provider,
+          code: 'preferred_provider_unavailable',
+        }));
+        continue;
+      }
       resolved.push(resolveAssignmentPreferenceV1(
         { role, provider, model },
         preferences,
@@ -201,9 +191,18 @@ export function inspectDelegationPreferencesV1(request, field = 'run_request') {
       ));
     }
   }
+  const attention = usedUnknown.length === 0 ? null : freezeData({
+    status: 'blocked',
+    code: 'preferred_provider_unavailable',
+    next_action: 'supply_explicit_provider',
+    items: usedUnknown,
+  });
   return freezeData({
-    preferences,
-    attention: preferences.attention,
+    preferences: freezeData({
+      ...preferences,
+      attention,
+    }),
+    attention,
     resolved,
   });
 }

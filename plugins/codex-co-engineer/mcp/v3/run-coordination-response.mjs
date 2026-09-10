@@ -26,7 +26,7 @@ const ACTIVE = capturedFreeze([
   'prepared', 'planned',
 ]);
 const NEXT_ACTIONS = capturedFreeze([
-  'wait', 'reply', 'revision', 'review', 'inspect', 'none',
+  'wait', 'reply', 'revision', 'review', 'inspect', 'none', 'resubmit',
 ]);
 
 function compactSha(value) {
@@ -49,73 +49,97 @@ function laneStatus(lane) {
 function pushRef(refs, seen, entry) {
   const digest = compactDigest(entry.digest);
   if (digest === null) return;
-  const key = `${entry.kind}:${entry.assignment_id ?? ''}:${digest}`;
+  const relativePath = typeof entry.relative_path === 'string' ? entry.relative_path : null;
+  const key = `${entry.kind}:${entry.assignment_id ?? ''}:${relativePath ?? ''}:${digest}`;
   if (seen.has(key)) return;
   seen.add(key);
   refs.push(freezeData({
     kind: entry.kind,
     digest,
     ...(typeof entry.assignment_id === 'string' ? { assignment_id: entry.assignment_id } : {}),
+    ...(typeof entry.artifact_kind === 'string' ? { artifact_kind: entry.artifact_kind } : {}),
+    ...(relativePath ? { relative_path: relativePath } : {}),
   }));
+}
+
+function isRetrievableArtifactRef(ref) {
+  if (!ref || typeof ref !== 'object') return false;
+  const kind = typeof ref.artifact_kind === 'string' ? ref.artifact_kind : null;
+  const relativePath = typeof ref.relative_path === 'string' ? ref.relative_path : null;
+  const digest = compactDigest(ref.sha256 ?? ref.digest);
+  return kind !== null && relativePath !== null && digest !== null;
 }
 
 function collectEvidenceRefs(receipt) {
   const refs = [];
   const seen = new Set();
-  const gitDigest = compactDigest(receipt?.git?.digest);
-  if (gitDigest) pushRef(refs, seen, { kind: 'git_identity', digest: gitDigest });
   const lanes = Array.isArray(receipt?.lanes) ? receipt.lanes : [];
   for (const lane of lanes) {
     const assignmentId = typeof lane?.assignment_id === 'string' ? lane.assignment_id : undefined;
-    pushRef(refs, seen, {
-      kind: 'child_identity',
-      assignment_id: assignmentId,
-      digest: lane?.child_identity_digest ?? lane?.child_identity?.digest,
-    });
-    pushRef(refs, seen, {
-      kind: 'prompt_envelope',
-      assignment_id: assignmentId,
-      digest: lane?.prompt_envelope_digest,
-    });
-    pushRef(refs, seen, {
-      kind: 'provider_run',
-      assignment_id: assignmentId,
-      digest: lane?.provider_run_identity_digest ?? lane?.provider_run_identity?.digest,
-    });
-    const extra = Array.isArray(lane?.evidence_refs) ? lane.evidence_refs : [];
+    const extra = [
+      ...(Array.isArray(lane?.artifact_refs) ? lane.artifact_refs : []),
+      ...(Array.isArray(lane?.evidence_refs) ? lane.evidence_refs : []),
+    ];
     for (const ref of extra.slice(0, 8)) {
-      if (!ref || typeof ref !== 'object') continue;
+      if (!isRetrievableArtifactRef(ref)) continue;
       pushRef(refs, seen, {
-        kind: typeof ref.kind === 'string' ? ref.kind : 'evidence',
+        kind: 'artifact',
         assignment_id: assignmentId,
-        digest: ref.digest,
+        digest: ref.sha256 ?? ref.digest,
+        artifact_kind: ref.artifact_kind,
+        relative_path: ref.relative_path,
       });
     }
   }
-  const top = Array.isArray(receipt?.evidence_refs) ? receipt.evidence_refs : [];
+  const top = [
+    ...(Array.isArray(receipt?.artifact_refs) ? receipt.artifact_refs : []),
+    ...(Array.isArray(receipt?.evidence_refs) ? receipt.evidence_refs : []),
+  ];
   for (const ref of top.slice(0, 8)) {
-    if (!ref || typeof ref !== 'object') continue;
+    if (!isRetrievableArtifactRef(ref)) continue;
     pushRef(refs, seen, {
-      kind: typeof ref.kind === 'string' ? ref.kind : 'evidence',
-      digest: ref.digest,
+      kind: 'artifact',
+      digest: ref.sha256 ?? ref.digest,
       assignment_id: typeof ref.assignment_id === 'string' ? ref.assignment_id : undefined,
+      artifact_kind: ref.artifact_kind,
+      relative_path: ref.relative_path,
     });
   }
   return refs.slice(0, 16);
 }
 
-function collectUnresolved(lanes) {
+function laneClean(lane) {
+  if (typeof lane?.clean === 'boolean') return lane.clean;
+  if (typeof lane?.handoff?.clean === 'boolean') return lane.handoff.clean;
+  return null;
+}
+
+function laneCleanupIncomplete(lane, receipt) {
+  if (lane?.task_final === false && capturedIncludes(COMPLETED, laneStatus(lane))) return true;
+  if (lane?.status === 'lifecycle_pending' || lane?.phase === 'lifecycle_pending') return true;
+  const cleanup = receipt?.cleanup;
+  if (cleanup?.proof_bound === false) return true;
+  if (Array.isArray(cleanup?.unresolved) && cleanup.unresolved.length > 0) return true;
+  if (receipt?.blockers?.cleanup === true) return true;
+  return false;
+}
+
+function collectUnresolved(lanes, receipt) {
   const unresolved = [];
   for (const lane of lanes.slice(0, 8)) {
     const status = laneStatus(lane);
-    if (status === null || capturedIncludes(COMPLETED, status)) continue;
     const required = lane?.required !== false;
-    let reason = 'unresolved';
-    if (capturedIncludes(ATTENTION, status)) reason = 'needs_attention';
+    const clean = laneClean(lane);
+    let reason = null;
+    if (laneCleanupIncomplete(lane, receipt)) reason = 'cleanup';
+    else if (clean === false) reason = 'dirty';
+    else if (lane?.dispatch_confidence === 'uncertain') reason = 'uncertain';
+    else if (status === null) reason = 'unresolved';
+    else if (capturedIncludes(ATTENTION, status)) reason = 'needs_attention';
     else if (capturedIncludes(FAILED, status)) reason = 'failed';
     else if (capturedIncludes(ACTIVE, status)) reason = 'active';
-    else if (lane?.dispatch_confidence === 'uncertain') reason = 'uncertain';
-    else if (lane?.handoff?.clean === false) reason = 'dirty';
+    else if (capturedIncludes(COMPLETED, status)) continue;
+    else reason = 'unresolved';
     unresolved.push(freezeData({
       assignment_id: typeof lane?.assignment_id === 'string' ? lane.assignment_id : null,
       status,
@@ -126,8 +150,29 @@ function collectUnresolved(lanes) {
   return unresolved;
 }
 
+function hasCorrectionFinding(receipt, lanes) {
+  if (receipt?.correction_finding === true) return true;
+  return lanes.some((lane) => {
+    const result = lane?.result;
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      if (result.needs_correction === true || result.correction_finding === true) return true;
+      if (typeof result.finding === 'string' && result.finding.length > 0) return true;
+    }
+    const status = laneStatus(lane);
+    return (lane?.role === 'review' || lane?.role === 'verify') && capturedIncludes(FAILED, status);
+  });
+}
+
 function chooseNextAction(receipt, lanes, unresolved) {
   const runId = typeof receipt?.run_id === 'string' ? receipt.run_id : null;
+  if (receipt?.persisted === false) {
+    return freezeData({
+      tool: 'delegate',
+      operation: 'submit',
+      run_id: null,
+      action: 'resubmit',
+    });
+  }
   if (receipt?.attention?.status === 'open' || unresolved.some((item) => item.reason === 'needs_attention')) {
     return freezeData({
       tool: 'task',
@@ -144,7 +189,7 @@ function chooseNextAction(receipt, lanes, unresolved) {
       action: 'wait',
     });
   }
-  const failed = unresolved.find((item) => item.reason === 'failed' || item.reason === 'dirty');
+  const failed = unresolved.find((item) => item.reason === 'failed' || item.reason === 'dirty' || item.reason === 'cleanup');
   if (failed) {
     return freezeData({
       tool: 'task',
@@ -152,20 +197,6 @@ function chooseNextAction(receipt, lanes, unresolved) {
       run_id: runId,
       assignment_id: failed.assignment_id,
       action: 'inspect',
-    });
-  }
-  const completedWriter = lanes.find((lane) => (
-    capturedIncludes(COMPLETED, laneStatus(lane))
-    && (lane?.access === 'writer' || lane?.access === 'write' || lane?.role === 'implement')
-    && lane?.handoff?.clean !== false
-  ));
-  if (completedWriter && unresolved.length === 0) {
-    return freezeData({
-      tool: 'task',
-      operation: 'revision',
-      run_id: runId,
-      assignment_id: completedWriter.assignment_id ?? null,
-      action: 'revision',
     });
   }
   if (unresolved.length === 0 && lanes.some((lane) => capturedIncludes(COMPLETED, laneStatus(lane)))) {
@@ -184,13 +215,48 @@ function chooseNextAction(receipt, lanes, unresolved) {
   });
 }
 
+function collectProducers(receipt, lanes) {
+  const requestKey = compactDigest(receipt?.request_idempotency_key);
+  return lanes.slice(0, 8).map((lane) => freezeData({
+    assignment_id: typeof lane?.assignment_id === 'string' ? lane.assignment_id : null,
+    status: laneStatus(lane),
+    head: compactSha(lane?.head)
+      ?? compactSha(lane?.handoff?.current_head)
+      ?? compactSha(lane?.handoff?.head),
+    clean: laneClean(lane),
+    request_idempotency_key: compactDigest(lane?.request_idempotency_key) ?? requestKey,
+    role: typeof lane?.role === 'string' ? lane.role : null,
+    access: typeof lane?.access === 'string' ? lane.access : null,
+  }));
+}
+
+function collectAvailableActions(nextAction, receipt, lanes, unresolved) {
+  const actions = [];
+  if (typeof nextAction?.action === 'string' && capturedIncludes(NEXT_ACTIONS, nextAction.action)
+    && nextAction.action !== 'none') {
+    actions.push(nextAction.action);
+  }
+  const completedCleanWriter = unresolved.length === 0 && lanes.some((lane) => (
+    capturedIncludes(COMPLETED, laneStatus(lane))
+    && (lane?.access === 'writer' || lane?.access === 'write' || lane?.role === 'implement')
+    && laneClean(lane) !== false
+  ));
+  if (completedCleanWriter && hasCorrectionFinding(receipt, lanes) && !actions.includes('revision')) {
+    actions.push('revision');
+  }
+  return actions;
+}
+
 export function projectRunCoordinationResponseV1(receipt) {
   if (!receipt || typeof receipt !== 'object') {
     return freezeData({
       schema: RUN_COORDINATION_RESPONSE_SCHEMA_ID,
       version: RUN_COORDINATION_RESPONSE_VERSION,
       run_id: null,
+      persisted: false,
+      request_idempotency_key: null,
       git: null,
+      producers: [],
       evidence_refs: [],
       unresolved: [],
       next_action: freezeData({
@@ -199,33 +265,34 @@ export function projectRunCoordinationResponseV1(receipt) {
         run_id: null,
         action: 'none',
       }),
+      available_actions: [],
     });
   }
   const lanes = Array.isArray(receipt.lanes) ? receipt.lanes : [];
-  const handoff = receipt.handoff && typeof receipt.handoff === 'object' ? receipt.handoff : null;
-  const laneHead = lanes
-    .map((lane) => compactSha(lane?.handoff?.current_head) ?? compactSha(lane?.handoff?.head))
-    .find((value) => value !== null) ?? null;
   const git = freezeData({
-    head: compactSha(receipt.git?.head)
-      ?? compactSha(handoff?.current_head)
-      ?? laneHead,
+    head: compactSha(receipt.git?.head) ?? compactSha(receipt.candidate?.head) ?? null,
     base_sha: compactSha(receipt.git?.base_sha) ?? compactSha(receipt.base_sha),
     digest: compactDigest(receipt.git?.digest),
-    clean: typeof handoff?.clean === 'boolean'
-      ? handoff.clean
-      : (typeof receipt.clean === 'boolean' ? receipt.clean : null),
+    clean: typeof receipt.candidate?.clean === 'boolean'
+      ? receipt.candidate.clean
+      : (typeof receipt.git?.clean === 'boolean' ? receipt.git.clean : null),
   });
-  const unresolved = collectUnresolved(lanes);
+  const unresolved = collectUnresolved(lanes, receipt);
   const nextAction = chooseNextAction(receipt, lanes, unresolved);
   return freezeData({
     schema: RUN_COORDINATION_RESPONSE_SCHEMA_ID,
     version: RUN_COORDINATION_RESPONSE_VERSION,
-    run_id: typeof receipt.run_id === 'string' ? receipt.run_id : null,
+    run_id: receipt.persisted === false
+      ? null
+      : (typeof receipt.run_id === 'string' ? receipt.run_id : null),
+    persisted: receipt.persisted !== false,
+    request_idempotency_key: compactDigest(receipt.request_idempotency_key),
     git,
+    producers: collectProducers(receipt, lanes),
     evidence_refs: collectEvidenceRefs(receipt),
     unresolved,
     next_action: nextAction,
+    available_actions: collectAvailableActions(nextAction, receipt, lanes, unresolved),
   });
 }
 

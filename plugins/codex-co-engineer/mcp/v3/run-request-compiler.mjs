@@ -521,13 +521,6 @@ export async function compileRunRequestV1(request, options = {}) {
     readOptional(request, 'preferences', 'run_request.preferences'),
     'run_request.preferences',
   );
-  if (preferences.attention) {
-    compilerError(
-      'preferred_provider_unavailable',
-      'run_request.preferences',
-      'A preferred provider is unknown or unavailable; supply an explicit four-slot provider instead of substituting.',
-    );
-  }
   const rawAssignments = readRequired(request, 'assignments', 'run_request.assignments');
   assertArray(rawAssignments, 'run_request.assignments', MIN_ASSIGNMENTS, MAX_ASSIGNMENTS);
   const observed = typeof options.observeGit === 'function'

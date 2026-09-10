@@ -733,7 +733,49 @@ export function parseChildEnvelopeV1(envelopeText) {
   });
 }
 
-const CORRECTION_PROMPT_PREFIX = 'Correct the existing assignment in place. Preserve the provider, model, and write scope. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
+const CORRECTION_PROMPT_PREFIX = 'Correct the existing assignment in place. Preserve the provider, model, write scope, access, and capabilities. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
+const CORRECTION_ORIGINAL_OBJECTIVE_MAX = 1_024;
+const CORRECTION_ORIGINAL_PROMPT_MAX = 4_096;
+const CORRECTION_ACCEPTANCE_MAX = 1_024;
+
+function boundCorrectionText(value, maxBytes) {
+  if (typeof value !== 'string' || value.length === 0) return '';
+  if (utf8ByteLength(value) <= maxBytes) return value;
+  const buffer = Buffer.from(value, 'utf8');
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString('utf8');
+}
+
+function correctionScopeSection(writeScope, access) {
+  const readOnly = access === 'read_only' || access === 'read';
+  if (readOnly) return 'Write access: read-only; no write scope.';
+  if (!Array.isArray(writeScope) || writeScope.length === 0) {
+    return 'Write scope: none.';
+  }
+  return ['Write scope:', ...writeScope.map((pattern) => `- ${pattern}`)].join('\n');
+}
+
+function correctionAcceptanceSection(acceptance, requiredEvidence) {
+  const lines = ['Acceptance constraints:'];
+  if (Array.isArray(acceptance) && acceptance.length > 0) {
+    for (const entry of acceptance.slice(0, 16)) {
+      if (typeof entry === 'string' && entry.length > 0) {
+        lines.push(`- ${entry}`);
+        continue;
+      }
+      if (!entry || typeof entry !== 'object') continue;
+      const commandId = typeof entry.command_id === 'string' ? entry.command_id : null;
+      if (commandId) lines.push(`- ${commandId}`);
+    }
+  } else {
+    lines.push('- none specified');
+  }
+  if (Array.isArray(requiredEvidence) && requiredEvidence.length > 0) {
+    lines.push(`Required evidence: ${requiredEvidence.filter((kind) => typeof kind === 'string').join(', ')}`);
+  }
+  return boundCorrectionText(lines.join('\n'), CORRECTION_ACCEPTANCE_MAX);
+}
 
 /**
  * Build the opaque assignment.prompt for an owned correction. The child
@@ -746,6 +788,13 @@ export function compileOwnedCorrectionPromptV1({
   write_scope: writeScope,
   provider,
   model,
+  access,
+  capabilities,
+  objective,
+  original_prompt: originalPrompt,
+  acceptance,
+  required_evidence: requiredEvidence,
+  expected_head: expectedHead,
 } = {}) {
   if (typeof producerAssignmentId !== 'string' || !ASSIGNMENT_ID_PATTERN.test(producerAssignmentId)) {
     fail('invalid_format', 'producer_assignment_id', 'A correction prompt requires the exact producer assignment_id.');
@@ -756,21 +805,37 @@ export function compileOwnedCorrectionPromptV1({
     path: 'feedback',
     label: 'feedback',
   });
-  const scopeLines = Array.isArray(writeScope) && writeScope.length > 0
-    ? writeScope.map((pattern) => `- ${pattern}`).join('\n')
-    : '- **';
   const identityLine = typeof producerRunId === 'string'
     ? `Producer: ${producerRunId}/${producerAssignmentId}`
     : `Producer assignment: ${producerAssignmentId}`;
-  const executionLine = typeof provider === 'string'
-    ? `Execution remains ${provider}${typeof model === 'string' ? `/${model}` : ''}.`
-    : 'Execution remains the producer provider and model.';
+  const reviewedHead = typeof expectedHead === 'string' && SHA40_PATTERN.test(expectedHead)
+    ? `Reviewed HEAD: ${expectedHead}`
+    : null;
+  const executionParts = [];
+  if (typeof provider === 'string') {
+    executionParts.push(`Execution remains ${provider}${typeof model === 'string' ? `/${model}` : ''}.`);
+  } else {
+    executionParts.push('Execution remains the producer provider and model.');
+  }
+  if (typeof access === 'string') executionParts.push(`Access remains ${access}.`);
+  if (Array.isArray(capabilities) && capabilities.length > 0) {
+    executionParts.push(`Capabilities remain ${capabilities.join(', ')}.`);
+  }
+  const originalObjective = boundCorrectionText(objective, CORRECTION_ORIGINAL_OBJECTIVE_MAX);
+  const originalAssignment = boundCorrectionText(originalPrompt, CORRECTION_ORIGINAL_PROMPT_MAX);
+  const lineage = typeof producerRunId === 'string'
+    ? `Correction lineage: fresh owned revision of ${producerRunId}/${producerAssignmentId}.`
+    : `Correction lineage: fresh owned revision of ${producerAssignmentId}.`;
   const prompt = [
     CORRECTION_PROMPT_PREFIX,
     identityLine,
-    executionLine,
-    'Write scope:',
-    scopeLines,
+    ...(reviewedHead ? [reviewedHead] : []),
+    executionParts.join(' '),
+    correctionScopeSection(writeScope, access),
+    ...(originalObjective ? ['Original objective:', originalObjective] : []),
+    ...(originalAssignment ? ['Original assignment:', originalAssignment] : []),
+    correctionAcceptanceSection(acceptance, requiredEvidence),
+    lineage,
     'Feedback:',
     feedback,
   ].join('\n');

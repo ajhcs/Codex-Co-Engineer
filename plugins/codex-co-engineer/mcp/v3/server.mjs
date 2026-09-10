@@ -212,7 +212,7 @@ const TOOLS = [
             preferences: {
               type: 'object',
               additionalProperties: false,
-              description: 'Optional reusable provider ownership by role. Omitted assignment provider/model fields are filled from the matching role. Exact assignment selections win. Unknown or unavailable preferred providers return attention instead of substituting a different slot.',
+              description: 'Optional reusable provider ownership by role. Omitted assignment provider/model fields are filled from the matching role. Exact assignment selections win. Unknown or unavailable preferred providers are reported only when an assignment would use them; unused unknown role preferences are ignored.',
               properties: {
                 implement: {
                   type: 'object',
@@ -423,7 +423,7 @@ const TOOLS = [
           type: 'object',
           additionalProperties: false,
           required: ['assignment_id', 'feedback', 'expected_head', 'expected_idempotency_key'],
-          description: 'Derive a new bounded correction assignment from a completed, clean producer. Preserves provider, model, and write scope. Uses a fresh revision identity and never replays an active or uncertain task. Same expected head, identity, and feedback are idempotent.',
+          description: 'Derive a new bounded correction assignment from a completed, clean producer. Preserves provider, model, write scope, and original assignment context. Uses the public producer request identity, exact per-assignment HEAD, and a fresh revision identity. Never replays an active, uncertain, dirty, uninspectable, or unfinal producer. Same expected head, identity, and feedback are idempotent.',
           properties: {
             assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
             feedback: { type: 'string', minLength: 1, maxLength: 4096 },

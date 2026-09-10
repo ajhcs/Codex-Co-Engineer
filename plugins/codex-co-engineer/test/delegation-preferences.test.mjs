@@ -56,8 +56,8 @@ test('invalid preferences fail closed', () => {
 
 test('unknown preferred providers become honest attention instead of a substitute slot', () => {
   const parsed = parseDelegationPreferencesV1({ implement: { provider: 'claude' } });
-  assert.equal(parsed.attention.code, 'preferred_provider_unavailable');
-  assert.equal(parsed.attention.items[0].provider, 'claude');
+  assert.equal(parsed.attention, null);
+  assert.equal(parsed.by_role.implement.known, false);
   const inspected = inspectDelegationPreferencesV1({
     run_id: 'vale-hardening',
     repo: '/tmp/repo',
@@ -70,5 +70,42 @@ test('unknown preferred providers become honest attention instead of a substitut
     }],
   });
   assert.equal(inspected.attention.code, 'preferred_provider_unavailable');
+  assert.equal(inspected.attention.next_action, 'supply_explicit_provider');
   assert.deepEqual(inspected.resolved, []);
+});
+
+test('unused unknown preferences and exact assignment overrides do not block dispatch', () => {
+  const unused = inspectDelegationPreferencesV1({
+    run_id: 'vale-hardening',
+    repo: '/tmp/repo',
+    objective: 'Implement the slice.',
+    preferences: {
+      implement: { provider: 'grok' },
+      review: { provider: 'claude' },
+    },
+    assignments: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      prompt: 'Implement the slice.',
+    }],
+  });
+  assert.equal(unused.attention, null);
+  assert.equal(unused.resolved[0].provider, 'grok');
+  assert.equal(unused.resolved[0].source, 'preference');
+
+  const overridden = inspectDelegationPreferencesV1({
+    run_id: 'vale-hardening',
+    repo: '/tmp/repo',
+    objective: 'Implement the slice.',
+    preferences: { implement: { provider: 'claude' } },
+    assignments: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      provider: 'grok',
+      prompt: 'Implement the slice.',
+    }],
+  });
+  assert.equal(overridden.attention, null);
+  assert.equal(overridden.resolved[0].provider, 'grok');
+  assert.equal(overridden.resolved[0].source, 'explicit');
 });
