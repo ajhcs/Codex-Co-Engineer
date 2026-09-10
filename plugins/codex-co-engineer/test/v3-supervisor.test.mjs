@@ -1536,11 +1536,16 @@ test('supervisor correction rounds stay bounded, follow one child, and retain li
     assert.equal(firstDone.phase, 'completed');
     assert.equal(firstDone.correction.round, 1);
 
-    const branched = await harness.adapter.dispatch('task', {
+    await assert.rejects(harness.adapter.dispatch('task', {
       run_id: submitted.run_id,
       revision: revisionFromPacket(original.coordination, 'social-implementation', 'A different correction against the original.'),
+    }), error => error.code === 'revision_child_exists'
+      && error.message.includes(first.run_id)
+      && error.message.includes('Feedback was not applied'));
+    const repeated = await harness.adapter.dispatch('task', {
+      run_id: submitted.run_id, revision: firstRevision,
     });
-    assert.equal(branched.run_id, first.run_id);
+    assert.equal(repeated.run_id, first.run_id);
     assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id === first.run_id).length, 1);
 
     const secondRevision = revisionFromPacket(firstDone.coordination, 'social-implementation', 'Keep the tests green after the first correction.');

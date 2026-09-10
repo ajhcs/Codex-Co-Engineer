@@ -36,9 +36,10 @@ case without live providers.
 prompt in ordinary language. Do not weaken `check.mjs` to force a pass. Do not
 add paid-provider or npm-package prerequisites.
 
-**Acceptance:** After a complete `lib/summarize-checks.cjs` (or an agreed
-extension), `node check.mjs` passes from that directory. The example still
-copies cleanly into a fresh Git repository per the README.
+**Acceptance:** Keep the shipped implementation incomplete so it remains an
+assignment. Demonstrate the added case with a temporary completed implementation
+and retain the intentionally failing baseline. Do not commit the answer to the
+starter exercise. The example still copies into a fresh Git repository.
 
 **Check:**
 
@@ -108,22 +109,23 @@ behavior regresses, and passes on the current tree.
 node --no-warnings --test plugins/codex-co-engineer/test/<your-contract-test>.mjs
 ```
 
-## 6. Capture a small evaluation recipe outline
+## 6. Add one small frozen comparison case
 
-**Problem:** Reproducible comparisons need shared task inputs and acceptance
-checks before any paid cohort runs.
+**Problem:** Reproducible comparisons need useful shared tasks and decisive
+acceptance checks before any paid cohort runs.
 
-**Scope:** Draft one short evaluation outline in `docs/` describing task
-inputs, base commit discipline, acceptance checks, and what must stay fixed
-across arms. Do not publish invented percentages or endorsement claims.
+**Scope:** Add one case under `benchmarks/cases/` and update its fixture coverage
+in `scripts/compare-coengineer-runs.test.mjs`. Follow `benchmarks/README.md` to
+materialize the initial commit and retain its input digest. Keep the task small.
 
-**Acceptance:** A maintainer can run the deterministic fixture parts without a
-paid provider. Paid comparisons are explicitly optional and out of CI.
+**Acceptance:** The initial input has the intended failure or review finding;
+an independently checked solution satisfies the frozen acceptance. Repeated
+materialization produces the same base commit. Unrun arms remain unrun; synthetic
+measurements stay labeled. No paid providers are needed for this contribution.
 
 **Check:**
 
 ```bash
-git diff --check
-node scripts/compare-coengineer-runs.mjs --validate-cases --cases benchmarks/cases
+node scripts/compare-coengineer-runs.mjs --validate-cases benchmarks/cases
 node --no-warnings --test scripts/compare-coengineer-runs.test.mjs
 ```
