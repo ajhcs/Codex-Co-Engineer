@@ -1,0 +1,30 @@
+{
+  "schema": "codex-co-engineer.benchmark-case.v1",
+  "id": "review-driven-correction",
+  "title": "Apply a named review finding to a parser helper",
+  "summary": "Rename parseCount to parseNonNegativeCount and reject negative values with a frozen unit check.",
+  "base_sha": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+  "comparable": {
+    "host_model": "codex-default",
+    "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+    "provider_configuration": { "implement": "grok", "review": "cursor-local" }
+  },
+  "inputs": {
+    "files": {
+      "parse-count.mjs": "export function parseCount(text) {\n  return Number.parseInt(text, 10);\n}\n",
+      "finding.md": "Finding: parseCount accepts negatives. Rename to parseNonNegativeCount and throw RangeError when the parsed value is less than 0.\n",
+      "parse-count.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { parseNonNegativeCount } from './parse-count.mjs';\n\ntest('parses a non-negative count', () => {\n  assert.equal(parseNonNegativeCount('3'), 3);\n});\n\ntest('rejects negatives', () => {\n  assert.throws(() => parseNonNegativeCount('-1'), RangeError);\n});\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "unit",
+        "command": ["node", "--test", "parse-count.test.mjs"],
+        "expect_exit": 0
+      }
+    ],
+    "required_files": ["parse-count.mjs", "parse-count.test.mjs"],
+    "forbidden_paths": []
+  }
+}

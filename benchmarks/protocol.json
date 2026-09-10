@@ -1,0 +1,46 @@
+{
+  "schema": "codex-co-engineer.benchmark-protocol.v1",
+  "version": 1,
+  "title": "Codex-Co-Engineer 3.4.3 comparison protocol",
+  "arms": {
+    "required": ["native-codex", "published-3.4.2", "candidate-3.4.3"],
+    "optional": ["direct-delegation"]
+  },
+  "comparable": {
+    "all_arms": ["case_id", "base_sha", "host_model", "host_settings"],
+    "coengineer_arms": ["provider_configuration"]
+  },
+  "attempt_kinds": ["initial", "correction", "native_helper"],
+  "metrics": [
+    { "key": "native_input_tokens", "unit": "tokens", "label": "native input tokens" },
+    { "key": "native_output_tokens", "unit": "tokens", "label": "native output tokens" },
+    { "key": "native_helper_calls", "unit": "count", "label": "native helper calls" },
+    { "key": "correction_rounds", "unit": "count", "label": "correction rounds" },
+    { "key": "elapsed_ms", "unit": "milliseconds", "label": "elapsed time" },
+    { "key": "provider_input_tokens", "unit": "tokens", "label": "provider-reported input tokens" },
+    { "key": "provider_output_tokens", "unit": "tokens", "label": "provider-reported output tokens" },
+    { "key": "provider_cost_millicents", "unit": "millicents", "label": "provider-reported cost" },
+    { "key": "model_facing_bytes", "unit": "bytes", "label": "host-measured model-facing bytes" },
+    { "key": "evidence_bytes", "unit": "bytes", "label": "retrievable evidence bytes" }
+  ],
+  "rules": {
+    "include_every_attempt": true,
+    "include_corrections": true,
+    "include_native_helpers": true,
+    "avoid_double_count_cumulative": true,
+    "failed_attempts_in_usage_per_accepted": true,
+    "acceptance_rate_with_coverage": true,
+    "zero_accepted_is_not_zero_cost": true,
+    "unknown_is_not_zero": true,
+    "never_invent_measured_results": true,
+    "label_unrun_and_unmatched": true,
+    "paid_repeated_trials_opt_in": true,
+    "live_jobs_not_implemented": true
+  },
+  "sources": {
+    "host_measured": "host_authoritative",
+    "provider_report": "provider_untrusted",
+    "evidence_bytes": "host_authoritative",
+    "unknown": "unknown"
+  }
+}

@@ -25,6 +25,12 @@ import {
   unknownUsageMetricV1,
   usageIdentityFromTelemetryV1,
   validateUsageLedgerV1,
+  MAX_USAGE_SUMMARY_BYTES,
+  MAX_USAGE_SUMMARY_TEXT_BYTES,
+  detailUsageLedgerV1,
+  projectUsageReportV1,
+  summarizeUsageLedgerV1,
+  unknownUsageReportV1,
 } from '../mcp/v3/usage-ledger.mjs';
 import { makeSubmission } from './fixtures/r1-run-store-fixtures.mjs';
 import {
@@ -534,4 +540,73 @@ test('run-runtime accepts and reopens the maximum eight-lane usage ledger', asyn
   assert.equal(inspected.usage.receipts.length, 8);
   assert.equal(inspected.usage.digest, submitted.usage.digest);
   assert.equal(inspected.usage.totals.identity_count, 8);
+});
+
+test('usage summary stays bounded, omits receipts, and does not infer savings', () => {
+  const telemetry = makeSubmission().telemetry;
+  const recorded = appendUsageReceiptV1(openUsageLedgerV1({ budgets: [] }), observation({
+    telemetry,
+    provider_usage: providerUsage({
+      input_tokens: providerReportedMetricV1(11),
+      output_tokens: providerReportedMetricV1(5),
+    }),
+    host_usage: hostUsage({
+      model_facing_bytes: hostMeasuredMetricV1(128),
+      retrievable_evidence_bytes: evidenceBytesMetricV1(64),
+      submissions: hostMeasuredMetricV1(1),
+    }),
+  }));
+  const summary = summarizeUsageLedgerV1(recorded);
+  const encoded = Buffer.byteLength(JSON.stringify(summary), 'utf8');
+  assert.equal(summary.view, 'summary');
+  assert.equal(summary.present, true);
+  assert.ok(encoded <= MAX_USAGE_SUMMARY_BYTES, encoded);
+  assert.ok(Buffer.byteLength(summary.text, 'utf8') <= MAX_USAGE_SUMMARY_TEXT_BYTES);
+  assert.equal(Object.hasOwn(summary, 'receipts'), false);
+  assert.equal(summary.savings, 'not_inferred');
+  assert.equal(summary.subscription, 'unknown');
+  assert.equal(Object.hasOwn(summary, 'native_tokens'), false);
+  const input = summary.metrics.find((row) => row.key === 'input_tokens');
+  const bytes = summary.metrics.find((row) => row.key === 'model_facing_bytes');
+  const evidence = summary.metrics.find((row) => row.key === 'retrievable_evidence_bytes');
+  assert.equal(input.source, 'provider_report');
+  assert.equal(input.trust, 'provider_untrusted');
+  assert.equal(input.unit, 'tokens');
+  assert.equal(bytes.source, 'host_measured');
+  assert.equal(bytes.unit, 'bytes');
+  assert.equal(evidence.source, 'evidence_bytes');
+  assert.equal(evidence.unit, 'bytes');
+  assert.equal(summary.unknown.includes('cost_millicents'), true);
+  assert.equal(projectUsageReportV1(recorded).view, 'summary');
+});
+
+test('missing metrics stay unknown and are never hidden zeros', () => {
+  const missing = unknownUsageReportV1('summary');
+  assert.equal(missing.present, false);
+  assert.equal(missing.identities, null);
+  assert.equal(missing.observations, null);
+  assert.equal(missing.metrics.length, 0);
+  assert.equal(missing.unknown.includes('input_tokens'), true);
+  assert.equal(JSON.stringify(missing).includes('"value":0'), false);
+  const empty = summarizeUsageLedgerV1(openUsageLedgerV1({ budgets: [] }));
+  assert.equal(empty.present, true);
+  assert.equal(empty.identities, 0);
+  assert.equal(empty.metrics.length, 0);
+  assert.equal(empty.unknown.includes('input_tokens'), true);
+  const telemetry = makeSubmission().telemetry;
+  const recorded = appendUsageReceiptV1(openUsageLedgerV1({ budgets: [] }), observation({
+    telemetry,
+    host_usage: hostUsage({ submissions: hostMeasuredMetricV1(1) }),
+  }));
+  const summary = summarizeUsageLedgerV1(recorded);
+  assert.equal(summary.metrics.find((row) => row.key === 'submissions').value, 1);
+  assert.equal(summary.unknown.includes('input_tokens'), true);
+  assert.equal(summary.metrics.some((row) => row.key === 'input_tokens'), false);
+  const detailed = detailUsageLedgerV1(recorded);
+  const input = detailed.metrics.find((row) => row.key === 'input_tokens');
+  assert.equal(input.value, null);
+  assert.equal(input.source, 'unknown');
+  assert.equal(input.trust, 'unknown');
+  assert.equal(detailed.unknown.includes('input_tokens'), true);
+  assert.equal(detailed.view, 'detail');
 });

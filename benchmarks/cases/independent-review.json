@@ -1,0 +1,29 @@
+{
+  "schema": "codex-co-engineer.benchmark-case.v1",
+  "id": "independent-review",
+  "title": "Review a claimed bugfix for a missed equality case",
+  "summary": "Report the missing equal-boundary finding against the frozen candidate. Do not implement the fix in this case.",
+  "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "comparable": {
+    "host_model": "codex-default",
+    "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+    "provider_configuration": { "implement": null, "review": "cursor-local" }
+  },
+  "inputs": {
+    "files": {
+      "clamp.mjs": "export function clamp(value, min, max) {\n  if (value < min) return min;\n  if (value > max) return max;\n  return value;\n}\n",
+      "candidate.diff": "--- a/clamp.mjs\n+++ b/clamp.mjs\n@@ -1,5 +1,5 @@\n export function clamp(value, min, max) {\n-  if (value < min) return min;\n+  if (value <= min) return min;\n   if (value > max) return max;\n   return value;\n }\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "required-finding",
+        "kind": "review_finding",
+        "must_include": "equal min boundary still returns min, but the claimed fix does not change behavior for value === min"
+      }
+    ],
+    "required_files": ["clamp.mjs", "candidate.diff"],
+    "forbidden_paths": ["clamp.mjs"]
+  }
+}

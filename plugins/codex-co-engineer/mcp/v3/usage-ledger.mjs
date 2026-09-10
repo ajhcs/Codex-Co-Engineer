@@ -131,6 +131,36 @@ export const USAGE_AGGREGATE_ROW_KEYS = capturedFreeze([
 export const USAGE_TOTALS_KEYS = capturedFreeze([
   'identity_count', 'observation_count', 'provider_usage', 'host_usage',
 ]);
+export const USAGE_SUMMARY_SCHEMA_ID = 'codex-co-engineer.usage-summary.v1';
+export const USAGE_DETAIL_SCHEMA_ID = 'codex-co-engineer.usage-detail.v1';
+export const USAGE_REPORT_VIEWS = capturedFreeze(['summary', 'detail']);
+export const MAX_USAGE_SUMMARY_BYTES = 1536;
+export const MAX_USAGE_SUMMARY_TEXT_BYTES = 512;
+export const MAX_USAGE_DETAIL_BYTES = 8192;
+export const USAGE_SAVINGS_NONCLAIM = 'not_inferred';
+export const USAGE_SUBSCRIPTION_UNKNOWN = 'unknown';
+export const USAGE_SUMMARY_METRIC_KEYS = capturedFreeze([
+  'input_tokens', 'output_tokens', 'cache_tokens', 'cost_millicents',
+  'model_facing_bytes', 'retrievable_evidence_bytes', 'submissions', 'elapsed_ms',
+]);
+export const USAGE_METRIC_UNITS = capturedFreeze(Object.assign(capturedCreate(null), {
+  input_tokens: 'tokens',
+  output_tokens: 'tokens',
+  cache_tokens: 'tokens',
+  cost_millicents: 'millicents',
+  model_facing_bytes: 'bytes',
+  retrievable_evidence_bytes: 'bytes',
+  submissions: 'count',
+  provider_invocations: 'count',
+  aggregate_waits: 'count',
+  attention_rounds: 'count',
+  tool_calls: 'count',
+  elapsed_ms: 'milliseconds',
+  retry_count: 'count',
+  no_replay_count: 'count',
+  luna_wake_events: 'count',
+  sol_wake_events: 'count',
+}));
 
 export const MIN_USAGE_SEQ = 1;
 export const MIN_USAGE_GENERATION = 1;
@@ -1271,6 +1301,168 @@ export function recordRuntimeUsageObservationV1(previousValue, observation) {
   });
 }
 
+function metricUnit(key) {
+  return USAGE_METRIC_UNITS[key] ?? 'count';
+}
+
+function metricFromTotals(totals, key) {
+  if (capturedIncludes(PROVIDER_USAGE_KEYS, key)) return totals.provider_usage[key];
+  return totals.host_usage[key];
+}
+
+function labeledMetric(key, metric) {
+  const unknown = metric == null || metric.source === 'unknown' || metric.value === null;
+  return {
+    key,
+    value: unknown ? null : metric.value,
+    unit: metricUnit(key),
+    source: unknown ? 'unknown' : metric.source,
+    trust: unknown ? 'unknown' : metric.trust,
+  };
+}
+
+function detailedMetric(key, metric) {
+  const labeled = labeledMetric(key, metric);
+  return {
+    ...labeled,
+    reported_sum: metric?.reported_sum ?? null,
+    reported_count: NUMBER_IS_SAFE_INTEGER(metric?.reported_count) ? metric.reported_count : 0,
+    unknown_count: NUMBER_IS_SAFE_INTEGER(metric?.unknown_count) ? metric.unknown_count : 0,
+  };
+}
+
+function clipUsageText(text, maxBytes) {
+  if (BUFFER_BYTE_LENGTH(text, 'utf8') <= maxBytes) return text;
+  const encoded = NodeBuffer.from(text, 'utf8');
+  let end = maxBytes - 3;
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return `${encoded.subarray(0, end).toString('utf8')}…`;
+}
+
+function compactUsageText(metrics, unknownKeys, present) {
+  if (present !== true) {
+    return 'usage unknown; savings=not_inferred; subscription=unknown';
+  }
+  const known = [];
+  for (const metric of metrics) {
+    known.push(`${metric.key}=${STRING(metric.value)}${metric.unit === 'bytes' ? 'B' : ''}`);
+  }
+  const unknown = unknownKeys.length > 0 ? ` unknown=${unknownKeys.join(',')}` : '';
+  const body = known.length > 0 ? known.join(' ') : 'no measured metrics';
+  return `${body}${unknown}; savings=not_inferred; subscription=unknown`;
+}
+
+function collectMetrics(totals, keys, detailed) {
+  const metrics = [];
+  const unknown = [];
+  for (const key of keys) {
+    const metric = metricFromTotals(totals, key);
+    const row = detailed ? detailedMetric(key, metric) : labeledMetric(key, metric);
+    if (row.source === 'unknown' || row.value === null) {
+      unknown.push(key);
+      if (detailed) metrics.push(row);
+    } else {
+      metrics.push(row);
+    }
+  }
+  return { metrics, unknown };
+}
+
+function snapshotUsageReport(record, maxBytes, path) {
+  const encoded = canonicalExtendedJsonStringify(record);
+  if (BUFFER_BYTE_LENGTH(encoded, 'utf8') > maxBytes) {
+    fail('out_of_range', path, `Usage ${record.view} report exceeds ${maxBytes} bytes.`);
+  }
+  return freezeData(JSON_PARSE(encoded));
+}
+
+function emptyUnknownTotals() {
+  const providerUsage = capturedCreate(null);
+  const hostUsage = capturedCreate(null);
+  for (const key of PROVIDER_USAGE_KEYS) providerUsage[key] = emptyAggregateMetric();
+  for (const key of HOST_USAGE_KEYS) hostUsage[key] = emptyAggregateMetric();
+  return { provider_usage: providerUsage, host_usage: hostUsage };
+}
+
+export function unknownUsageReportV1(view = 'summary') {
+  assertEnum(view, USAGE_REPORT_VIEWS, 'usage_report.view');
+  const keys = view === 'detail' ? USAGE_BUDGET_METRICS : USAGE_SUMMARY_METRIC_KEYS;
+  const { metrics, unknown } = collectMetrics(emptyUnknownTotals(), keys, view === 'detail');
+  const record = {
+    schema: view === 'detail' ? USAGE_DETAIL_SCHEMA_ID : USAGE_SUMMARY_SCHEMA_ID,
+    view,
+    present: false,
+    identities: null,
+    observations: null,
+    metrics,
+    unknown,
+    savings: USAGE_SAVINGS_NONCLAIM,
+    subscription: USAGE_SUBSCRIPTION_UNKNOWN,
+    text: clipUsageText(compactUsageText(metrics, unknown, false), MAX_USAGE_SUMMARY_TEXT_BYTES),
+  };
+  if (view === 'detail') record.native_tokens = 'unknown';
+  return snapshotUsageReport(
+    record,
+    view === 'detail' ? MAX_USAGE_DETAIL_BYTES : MAX_USAGE_SUMMARY_BYTES,
+    'usage_report',
+  );
+}
+
+export function summarizeUsageLedgerV1(ledgerValue) {
+  if (ledgerValue == null) return unknownUsageReportV1('summary');
+  const ledger = validateUsageLedgerV1(ledgerValue);
+  const { metrics, unknown } = collectMetrics(ledger.totals, USAGE_SUMMARY_METRIC_KEYS, false);
+  const record = {
+    schema: USAGE_SUMMARY_SCHEMA_ID,
+    view: 'summary',
+    present: true,
+    identities: ledger.totals.identity_count,
+    observations: ledger.totals.observation_count,
+    metrics,
+    unknown,
+    savings: USAGE_SAVINGS_NONCLAIM,
+    subscription: USAGE_SUBSCRIPTION_UNKNOWN,
+    text: clipUsageText(
+      compactUsageText(metrics, unknown, true),
+      MAX_USAGE_SUMMARY_TEXT_BYTES,
+    ),
+  };
+  return snapshotUsageReport(record, MAX_USAGE_SUMMARY_BYTES, 'usage_summary');
+}
+
+export function detailUsageLedgerV1(ledgerValue) {
+  if (ledgerValue == null) return unknownUsageReportV1('detail');
+  const ledger = validateUsageLedgerV1(ledgerValue);
+  const { metrics, unknown } = collectMetrics(ledger.totals, USAGE_BUDGET_METRICS, true);
+  const record = {
+    schema: USAGE_DETAIL_SCHEMA_ID,
+    view: 'detail',
+    present: true,
+    identities: ledger.totals.identity_count,
+    observations: ledger.totals.observation_count,
+    metrics,
+    unknown,
+    savings: USAGE_SAVINGS_NONCLAIM,
+    subscription: USAGE_SUBSCRIPTION_UNKNOWN,
+    native_tokens: 'unknown',
+    text: clipUsageText(compactUsageText(
+      metrics.filter((row) => row.value !== null),
+      unknown,
+      true,
+    ), 480),
+  };
+  return snapshotUsageReport(record, MAX_USAGE_DETAIL_BYTES, 'usage_detail');
+}
+
+export function projectUsageReportV1(ledgerValue, options) {
+  const view = options == null ? 'summary' : options.view;
+  const selected = view == null ? 'summary' : view;
+  assertEnum(selected, USAGE_REPORT_VIEWS, 'usage_report.view');
+  return selected === 'detail'
+    ? detailUsageLedgerV1(ledgerValue)
+    : summarizeUsageLedgerV1(ledgerValue);
+}
+
 capturedFreeze(validateUsageIdentityV1);
 capturedFreeze(buildUsageIdentityV1);
 capturedFreeze(validateUsageReceiptV1);
@@ -1291,5 +1483,9 @@ capturedFreeze(canonicalUsageTimestampV1);
 capturedFreeze(correlateUsageModelV1);
 capturedFreeze(correlateUsageAssignmentV1);
 capturedFreeze(recordRuntimeUsageObservationV1);
+capturedFreeze(unknownUsageReportV1);
+capturedFreeze(summarizeUsageLedgerV1);
+capturedFreeze(detailUsageLedgerV1);
+capturedFreeze(projectUsageReportV1);
 
 export { IDENTITY_LABELS, TELEMETRY_CORRELATION_SCHEMA_ID };

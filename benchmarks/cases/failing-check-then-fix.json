@@ -1,0 +1,29 @@
+{
+  "schema": "codex-co-engineer.benchmark-case.v1",
+  "id": "failing-check-then-fix",
+  "title": "Count a failed check attempt before the accepted fix",
+  "summary": "isEven currently uses remainder 1. Failed attempts remain in the cohort usage-per-accepted-result denominator after the later fix.",
+  "base_sha": "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+  "comparable": {
+    "host_model": "codex-default",
+    "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+    "provider_configuration": { "implement": "grok", "review": null }
+  },
+  "inputs": {
+    "files": {
+      "even.mjs": "export function isEven(value) {\n  return value % 2 === 1;\n}\n",
+      "even.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { isEven } from './even.mjs';\n\ntest('zero is even', () => {\n  assert.equal(isEven(0), true);\n});\n\ntest('two is even', () => {\n  assert.equal(isEven(2), true);\n});\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "unit",
+        "command": ["node", "--test", "even.test.mjs"],
+        "expect_exit": 0
+      }
+    ],
+    "required_files": ["even.mjs", "even.test.mjs"],
+    "forbidden_paths": []
+  }
+}

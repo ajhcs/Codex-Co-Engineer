@@ -23,10 +23,19 @@ import {
   SOL_CAS_CHECKS,
   SOL_REGULAR_MERGE_ACTOR,
   describeFinalDecisionCardV1,
+  LOCAL_OUTCOME_RESULT_SCHEMA_ID,
+  LOCAL_OUTCOME_SCHEMA_ID,
+  LOCAL_OUTCOME_VERSION,
+  PUBLIC_LABEL_REVIEW_NEEDED,
+  PUBLIC_LABEL_UNRESOLVED,
+  PUBLIC_LABEL_FAILED,
+  PUBLIC_LABEL_IN_PROGRESS,
   projectFinalDecisionCardV1,
+  projectLocalOutcomeCardV1,
 } from '../mcp/v3/final-decision-card.mjs';
 import { RunContractV1Error } from '../mcp/v3/run-manifest.mjs';
 import {
+  BASE_SHA,
   BRANCH,
   HEAD_SHA,
   PR_HOST,
@@ -262,4 +271,105 @@ test('unknown schema and missing required keys fail closed', () => {
   const missing = validRequest();
   delete missing.verifier;
   assert.equal(errorOf(() => projectFinalDecisionCardV1(missing)).code, 'missing_key');
+});
+
+function localRequest(overrides = {}) {
+  return {
+    schema: LOCAL_OUTCOME_SCHEMA_ID,
+    version: LOCAL_OUTCOME_VERSION,
+    identity: { run_id: RUN_ID, base_sha: BASE_SHA },
+    candidate: {
+      branch: BRANCH,
+      head: HEAD_SHA,
+      tree: TREE_SHA,
+      composed: true,
+    },
+    assignments: [{
+      assignment_id: WRITER,
+      provider: 'grok',
+      role: 'implement',
+      required: true,
+      outcome: 'completed',
+    }],
+    checks: [{ id: 'unit', present: true, status: 'passed' }],
+    ...overrides,
+  };
+}
+
+test('local completed candidate is not Codex accepted and does not become PR-ready', () => {
+  const ready = projectFinalDecisionCardV1(validRequest());
+  assert.equal(ready.ready_for_sol_merge, true);
+  const local = projectLocalOutcomeCardV1(localRequest());
+  assert.equal(local.schema, LOCAL_OUTCOME_RESULT_SCHEMA_ID);
+  assert.equal(local.assignment_result, 'completed');
+  assert.equal(local.codex_accepted, false);
+  assert.equal(local.review_needed, true);
+  assert.equal(local.next_decision, 'review_candidate');
+  assert.equal(local.label, PUBLIC_LABEL_REVIEW_NEEDED);
+  assert.equal(Object.hasOwn(local, 'ready_for_sol_merge'), false);
+  assert.equal(Object.hasOwn(local, 'pr'), false);
+  assert.equal(Object.hasOwn(local, 'ci'), false);
+  assert.equal(ready.ready_for_sol_merge, true);
+  const inventory = describeFinalDecisionCardV1();
+  assert.equal(inventory.api.includes('projectLocalOutcomeCardV1'), true);
+  assert.equal(inventory.api.includes('projectFinalDecisionCardV1'), true);
+});
+
+test('provider pass and unfinal or failed states stay honest', () => {
+  const providerPass = projectLocalOutcomeCardV1(localRequest({
+    checks: [{ id: 'provider-tests', present: true, status: 'provider_pass' }],
+  }));
+  assert.equal(providerPass.codex_accepted, false);
+  assert.equal(providerPass.review_needed, true);
+
+  const failed = projectLocalOutcomeCardV1(localRequest({
+    candidate: { branch: null, head: null, tree: null, composed: false },
+    assignments: [{
+      assignment_id: WRITER,
+      provider: 'grok',
+      role: 'implement',
+      required: true,
+      outcome: 'failed',
+    }],
+    checks: [{ id: 'unit', present: true, status: 'failed' }],
+  }));
+  assert.equal(failed.assignment_result, 'failed');
+  assert.equal(failed.label, PUBLIC_LABEL_FAILED);
+  assert.equal(failed.next_decision, 'resolve_failures');
+  assert.equal(failed.codex_accepted, false);
+
+  const uncertain = projectLocalOutcomeCardV1(localRequest({
+    assignments: [{
+      assignment_id: WRITER,
+      provider: 'grok',
+      role: 'implement',
+      required: true,
+      outcome: 'uncertain',
+    }],
+    checks: [{ id: 'unit', present: false, status: 'unknown' }],
+  }));
+  assert.equal(uncertain.assignment_result, 'uncertain');
+  assert.equal(uncertain.unresolved, true);
+  assert.equal(uncertain.label, PUBLIC_LABEL_UNRESOLVED);
+  assert.equal(uncertain.next_decision, 'inspect_unresolved');
+
+  const unfinal = projectLocalOutcomeCardV1(localRequest({
+    candidate: { branch: BRANCH, head: null, tree: null, composed: false },
+    assignments: [{
+      assignment_id: WRITER,
+      provider: 'grok',
+      role: 'implement',
+      required: true,
+      outcome: 'unfinal',
+    }],
+    checks: [],
+  }));
+  assert.equal(unfinal.assignment_result, 'unfinal');
+  assert.equal(unfinal.label, PUBLIC_LABEL_IN_PROGRESS);
+  assert.equal(unfinal.next_decision, 'wait_for_completion');
+
+  const forged = projectLocalOutcomeCardV1(localRequest({
+    codex_acceptance: { accepted: true, authority: null },
+  }));
+  assert.equal(forged.codex_accepted, false);
 });

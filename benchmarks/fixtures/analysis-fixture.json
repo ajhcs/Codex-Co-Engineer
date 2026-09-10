@@ -1,0 +1,103 @@
+{
+  "schema": "codex-co-engineer.benchmark-trials.v1",
+  "note": "Sanitized fixture records for offline analysis. These are not live provider results.",
+  "trials": [
+    {
+      "schema": "codex-co-engineer.benchmark-trial.v1",
+      "trial_id": "bugfix-native-1",
+      "case_id": "single-file-bugfix",
+      "arm": "native-codex",
+      "base_sha": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "host_model": "codex-default",
+      "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+      "provider_configuration": { "implement": "native" },
+      "accepted": true,
+      "attempts": [
+        {
+          "attempt_id": "native-initial",
+          "kind": "initial",
+          "outcome": "completed_unaccepted",
+          "usage": {
+            "native_input_tokens": { "value": 80, "source": "host_measured", "trust": "host_authoritative" },
+            "native_output_tokens": { "value": 40, "source": "host_measured", "trust": "host_authoritative" },
+            "native_helper_calls": { "value": 0, "source": "host_measured", "trust": "host_authoritative" },
+            "elapsed_ms": { "value": 4000, "source": "host_measured", "trust": "host_authoritative" }
+          }
+        },
+        {
+          "attempt_id": "native-helper",
+          "kind": "native_helper",
+          "outcome": "accepted",
+          "usage": {
+            "native_input_tokens": { "value": 20, "source": "host_measured", "trust": "host_authoritative" },
+            "native_output_tokens": { "value": 10, "source": "host_measured", "trust": "host_authoritative" },
+            "native_helper_calls": { "value": 1, "source": "host_measured", "trust": "host_authoritative" },
+            "elapsed_ms": { "value": 900, "source": "host_measured", "trust": "host_authoritative" }
+          }
+        }
+      ]
+    },
+    {
+      "schema": "codex-co-engineer.benchmark-trial.v1",
+      "trial_id": "bugfix-342-1",
+      "case_id": "single-file-bugfix",
+      "arm": "published-3.4.2",
+      "base_sha": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "host_model": "codex-default",
+      "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+      "provider_configuration": { "implement": "grok", "review": null },
+      "accepted": true,
+      "attempts": [
+        {
+          "attempt_id": "ce342-initial",
+          "kind": "initial",
+          "outcome": "accepted",
+          "usage": {
+            "native_input_tokens": { "value": 30, "source": "host_measured", "trust": "host_authoritative" },
+            "native_output_tokens": { "value": 12, "source": "host_measured", "trust": "host_authoritative" },
+            "provider_input_tokens": { "value": 50, "source": "provider_report", "trust": "provider_untrusted" },
+            "model_facing_bytes": { "value": 900, "source": "host_measured", "trust": "host_authoritative" },
+            "elapsed_ms": { "value": 8000, "source": "host_measured", "trust": "host_authoritative" }
+          }
+        }
+      ]
+    },
+    {
+      "schema": "codex-co-engineer.benchmark-trial.v1",
+      "trial_id": "bugfix-343-1",
+      "case_id": "single-file-bugfix",
+      "arm": "candidate-3.4.3",
+      "base_sha": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "host_model": "codex-default",
+      "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+      "provider_configuration": { "implement": "grok", "review": null },
+      "accepted": true,
+      "attempts": [
+        {
+          "attempt_id": "ce343-failed",
+          "kind": "initial",
+          "outcome": "failed",
+          "usage": {
+            "native_input_tokens": { "value": 22, "source": "host_measured", "trust": "host_authoritative" },
+            "native_output_tokens": { "value": 8, "source": "host_measured", "trust": "host_authoritative" },
+            "provider_input_tokens": { "value": 40, "source": "provider_report", "trust": "provider_untrusted" },
+            "correction_rounds": { "value": 0, "source": "host_measured", "trust": "host_authoritative" },
+            "elapsed_ms": { "value": 5000, "source": "host_measured", "trust": "host_authoritative" }
+          }
+        },
+        {
+          "attempt_id": "ce343-fix",
+          "kind": "correction",
+          "outcome": "accepted",
+          "usage": {
+            "native_input_tokens": { "value": 18, "source": "host_measured", "trust": "host_authoritative" },
+            "native_output_tokens": { "value": 7, "source": "host_measured", "trust": "host_authoritative" },
+            "provider_input_tokens": { "value": 35, "source": "provider_report", "trust": "provider_untrusted" },
+            "correction_rounds": { "value": 1, "source": "host_measured", "trust": "host_authoritative" },
+            "elapsed_ms": { "value": 4200, "source": "host_measured", "trust": "host_authoritative" }
+          }
+        }
+      ]
+    }
+  ]
+}
