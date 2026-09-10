@@ -223,3 +223,76 @@ test('multiple writers accept disjoint static scope prefixes and reject overlapp
     (error) => error.code === 'overlapping_writer_scope',
   );
 });
+
+test('reusable preferences fill omitted providers and match explicit identity', async () => {
+  const preferred = await compileRunRequestV1(request({
+    preferences: { implement: { provider: 'grok' } },
+    assignments: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'write',
+      prompt: 'Implement the social ingestion slice.',
+      expected_duration_ms: 900_000,
+    }],
+  }), { observeGit });
+  const explicit = await compileRunRequestV1(request(), { observeGit });
+
+  assert.equal(preferred.assignments[0].provider, 'grok');
+  assert.equal(preferred.assignments[0].model, 'grok-4');
+  assert.equal(preferred.assignments[0].selection_source, 'preference');
+  assert.equal(explicit.assignments[0].selection_source, 'explicit');
+  assert.equal(preferred.request_idempotency_key, explicit.request_idempotency_key);
+  assert.equal(preferred.assignments[0].task_id, explicit.assignments[0].task_id);
+});
+
+test('exact assignment provider wins over a conflicting role preference', async () => {
+  const compiled = await compileRunRequestV1(request({
+    preferences: { implement: { provider: 'grok', model: 'grok-4' } },
+    assignments: [{
+      assignment_id: 'social-implementation',
+      provider: 'cursor-local',
+      role: 'implement',
+      access: 'write',
+      prompt: 'Implement the social ingestion slice.',
+      expected_duration_ms: 900_000,
+    }],
+  }), { observeGit });
+
+  assert.equal(compiled.assignments[0].provider, 'cursor-local');
+  assert.equal(compiled.assignments[0].model, 'composer-1');
+  assert.equal(compiled.assignments[0].selection_source, 'explicit');
+});
+
+test('invalid or missing preferences fail closed without substituting a provider', async () => {
+  await assert.rejects(
+    compileRunRequestV1(request({
+      assignments: [{
+        assignment_id: 'social-implementation',
+        role: 'implement',
+        access: 'write',
+        prompt: 'Implement the social ingestion slice.',
+        expected_duration_ms: 900_000,
+      }],
+    }), { observeGit }),
+    (error) => error.code === 'missing_key',
+  );
+  await assert.rejects(
+    compileRunRequestV1(request({
+      preferences: { implement: { provider: 'grok' }, rank: 1 },
+    }), { observeGit }),
+    (error) => error.code === 'unknown_key' || error.code === 'learned_routing_denied',
+  );
+  await assert.rejects(
+    compileRunRequestV1(request({
+      preferences: { implement: { provider: 'claude' } },
+      assignments: [{
+        assignment_id: 'social-implementation',
+        role: 'implement',
+        access: 'write',
+        prompt: 'Implement the social ingestion slice.',
+        expected_duration_ms: 900_000,
+      }],
+    }), { observeGit }),
+    (error) => error.code === 'preferred_provider_unavailable',
+  );
+});

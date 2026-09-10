@@ -34,11 +34,21 @@ structured/wait/diagnostic/reply/cancel behavior and response shapes.
 | wait | `task` or `tasks` | `run_id` plus `wait_until: "decision_or_attention"` |
 | attention | `task` | `run_id` plus `attention` |
 | reply | `task` | `run_id` plus `run_reply` |
+| revision | `task` | `run_id` plus `revision` |
 | cancel | `cancel` | `run_id` plus optional `assignment_ids` |
 | cleanup | `cancel` | `run_id` plus `cleanup: true` |
 
 `wait_until` remains `progress` and `terminal` for 3.2.1. The additive
 run mode is `decision_or_attention`. Routine progress never wakes.
+
+`task.revision` derives a new bounded correction from a completed, clean,
+exactly identified producer assignment. It preserves provider, model, and
+write scope, accepts concise feedback plus the expected HEAD and request
+idempotency identity, and uses a fresh durable revision identity. Active,
+uncertain, dirty, or stale producers fail closed and are never replayed.
+Duplicate calls with the same identity are idempotent. Compact run receipts
+include a machine-derived coordination packet: candidate Git identity,
+existing evidence refs, unresolved work, and the exact next action.
 
 Mixing a run body with 3.2.1 `task_id` / `workspace_mode` / `create_pr` /
 `reply` fields fails closed.
@@ -70,6 +80,33 @@ Assignment `access` is optional: `implement` derives `writer`, while `review`
 and `verify` derive `read_only`. An explicit value must agree with the role.
 Omitting access and supplying its equivalent explicit value produce the same
 normalized request. Multiple writer lanes need explicit disjoint write scopes.
+
+Optional `preferences` reuse provider ownership by role so eligible
+assignments may omit `provider` / `model`. Exact assignment selections win.
+Unknown or unavailable preferred providers return attention instead of a
+silent post-dispatch substitution. Omitted preferences keep the explicit
+provider path unchanged.
+
+```json
+{
+  "run_request": {
+    "run_id": "vale-hardening",
+    "repo": "/absolute/repository/path",
+    "objective": "Implement and review the hardening plan.",
+    "preferences": {
+      "implement": { "provider": "grok" },
+      "review": { "provider": "cursor-local" }
+    },
+    "assignments": [
+      {
+        "assignment_id": "social-implementation",
+        "role": "implement",
+        "prompt": "Implement the social ingestion slice."
+      }
+    ]
+  }
+}
+```
 
 The server observes the clean exact Git identity, resolves the provider model,
 and derives the request idempotency key, manifest/prompt-envelope/lane

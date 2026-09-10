@@ -108,7 +108,7 @@ test('advertises only the thin public tool surface', async () => {
   assert.deepEqual(Object.keys(taskTool.inputSchema.properties), [
     'task_id', 'wait_ms', 'wait_until', 'wake_on_needs_attention', 'view', 'cursor', 'max_bytes',
     'extend_expected_duration_ms', 'extend_reason', 'reply', 'response_mode',
-    'run_id', 'assignment_id', 'attention', 'run_reply',
+    'run_id', 'assignment_id', 'attention', 'run_reply', 'revision',
   ]);
   assert.equal(taskTool.inputSchema.properties.wait_ms.maximum, 14400000);
   assert.equal(taskTool.inputSchema.properties.wait_until.enum[0], 'progress');
@@ -157,8 +157,14 @@ test('advertises only the thin public tool surface', async () => {
   assert.equal(delegateTool.inputSchema.properties.run.properties.assignments.maxItems, 8);
   const runRequestAssignment = delegateTool.inputSchema.properties.run_request.properties.assignments.items;
   assert.equal(runRequestAssignment.required.includes('role'), true);
+  assert.equal(runRequestAssignment.required.includes('provider'), false);
   assert.equal(runRequestAssignment.required.includes('access'), false);
   assert.equal(runRequestAssignment.required.includes('expected_duration_ms'), false);
+  assert.ok(Object.hasOwn(delegateTool.inputSchema.properties.run_request.properties, 'preferences'));
+  assert.ok(Object.hasOwn(taskTool.inputSchema.properties, 'revision'));
+  assert.deepEqual(taskTool.inputSchema.properties.revision.required, [
+    'assignment_id', 'feedback', 'expected_head', 'expected_idempotency_key',
+  ]);
   assert.equal(runRequestAssignment.properties.expected_duration_ms.default, 600000);
   assert.match(runRequestAssignment.properties.access.description, /derived from role/u);
   assert.match(taskTool.description, /event_cursor/u);

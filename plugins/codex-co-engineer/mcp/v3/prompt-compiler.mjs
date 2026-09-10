@@ -732,3 +732,53 @@ export function parseChildEnvelopeV1(envelopeText) {
     envelope_text: envelopeText,
   });
 }
+
+const CORRECTION_PROMPT_PREFIX = 'Correct the existing assignment in place. Preserve the provider, model, and write scope. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
+
+/**
+ * Build the opaque assignment.prompt for an owned correction. The child
+ * envelope template is unchanged; this text is framed as the prompt block.
+ */
+export function compileOwnedCorrectionPromptV1({
+  producer_run_id: producerRunId,
+  producer_assignment_id: producerAssignmentId,
+  feedback,
+  write_scope: writeScope,
+  provider,
+  model,
+} = {}) {
+  if (typeof producerAssignmentId !== 'string' || !ASSIGNMENT_ID_PATTERN.test(producerAssignmentId)) {
+    fail('invalid_format', 'producer_assignment_id', 'A correction prompt requires the exact producer assignment_id.');
+  }
+  assertBoundedText(feedback, {
+    min: 1,
+    max: PROMPT_MAX_BYTES,
+    path: 'feedback',
+    label: 'feedback',
+  });
+  const scopeLines = Array.isArray(writeScope) && writeScope.length > 0
+    ? writeScope.map((pattern) => `- ${pattern}`).join('\n')
+    : '- **';
+  const identityLine = typeof producerRunId === 'string'
+    ? `Producer: ${producerRunId}/${producerAssignmentId}`
+    : `Producer assignment: ${producerAssignmentId}`;
+  const executionLine = typeof provider === 'string'
+    ? `Execution remains ${provider}${typeof model === 'string' ? `/${model}` : ''}.`
+    : 'Execution remains the producer provider and model.';
+  const prompt = [
+    CORRECTION_PROMPT_PREFIX,
+    identityLine,
+    executionLine,
+    'Write scope:',
+    scopeLines,
+    'Feedback:',
+    feedback,
+  ].join('\n');
+  assertBoundedText(prompt, {
+    min: PROMPT_MIN_BYTES,
+    max: PROMPT_MAX_BYTES,
+    path: 'prompt',
+    label: 'owned correction prompt',
+  });
+  return prompt;
+}

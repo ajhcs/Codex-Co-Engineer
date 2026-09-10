@@ -108,6 +108,9 @@ export function providerCapabilities(provider) {
   });
 }
 
+export const MAX_REVISION_FEEDBACK_BYTES = 4_096;
+export const MIN_REVISION_FEEDBACK_BYTES = 1;
+
 export function mcpPendingCallReport() {
   return Object.freeze({
     advertised_budget_ms: MCP_PENDING_CALL_BUDGET_MS,

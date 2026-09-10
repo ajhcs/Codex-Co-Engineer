@@ -91,6 +91,14 @@ import {
 import { createRunScheduler } from './run-scheduler.mjs';
 import { openRunStore } from './run-store.mjs';
 import { boundProviderResult, utf8Head } from './compact-task.mjs';
+import { inspectDelegationPreferencesV1 } from './delegation-preferences.mjs';
+import {
+  deriveOwnedRevisionRequestV1,
+  parseOwnedRevisionRequestV1,
+  producerFromRunReceiptV1,
+  OWNED_REVISION_REQUEST_KEYS,
+} from './owned-delegation.mjs';
+import { projectRunCoordinationResponseV1 } from './run-coordination-response.mjs';
 import { projectExperience } from './response.mjs';
 import {
   assertDirectJsonClosure,
@@ -117,7 +125,7 @@ export const PUBLIC_MCP_CATALOG = capturedFreeze([
   'status', 'delegate', 'task', 'tasks', 'cancel',
 ]);
 export const RUN_TOOL_OPERATIONS = capturedFreeze([
-  'submit', 'status', 'wait', 'attention', 'reply', 'cancel', 'cleanup',
+  'submit', 'status', 'wait', 'attention', 'reply', 'revision', 'cancel', 'cleanup',
 ]);
 export const RUN_TOOL_MODES = capturedFreeze(['legacy', 'run']);
 export const ADDITIVE_WAIT_UNTIL = 'decision_or_attention';
@@ -128,7 +136,7 @@ export const WAIT_UNTIL_VALUES = capturedFreeze([
 export const ADDITIVE_STATUS_KEYS = capturedFreeze(['run_id']);
 export const ADDITIVE_DELEGATE_KEYS = capturedFreeze(['run', 'run_request']);
 export const ADDITIVE_TASK_KEYS = capturedFreeze([
-  'run_id', 'assignment_id', 'attention', 'run_reply',
+  'run_id', 'assignment_id', 'attention', 'run_reply', 'revision',
 ]);
 export const ADDITIVE_TASKS_KEYS = capturedFreeze(['run_id']);
 export const ADDITIVE_CANCEL_KEYS = capturedFreeze([
@@ -156,11 +164,12 @@ export const ATTENTION_REQUEST_KEYS = capturedFreeze(['expected_revision', 'item
 export const RUN_REPLY_KEYS = capturedFreeze([
   'approval_ref', 'batch_id', 'expected_revision', 'reply', 'request_consent',
 ]);
+export const REVISION_REQUEST_KEYS = OWNED_REVISION_REQUEST_KEYS;
 export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'audience', 'candidate', 'checks',
   'cleanup', 'complete_candidate_blocked', 'decision_or_attention',
   'dispatch_uncertain_assignment_ids', 'dispatched_assignment_ids',
-  'consent', 'cursor', 'error', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
+  'consent', 'coordination', 'cursor', 'error', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
   'revision',
   'remote_mutated', 'run_id', 'schema', 'side_effects', 'status', 'tool',
   'undispatched_assignment_ids', 'version', 'wait_until', 'waited_ms', 'wake',
@@ -311,6 +320,12 @@ const CONTENT_FREE = capturedFreeze({
   unknown_provider: 'The provider is not an accepted four-slot registry entry.',
   unknown_tool: 'The public catalog remains status, delegate, task, tasks, cancel.',
   simple_runtime_unavailable: 'The 3.4.2 simple run runtime is unavailable.',
+  preferred_provider_unavailable: 'The preferred provider is unknown or unavailable; supply an explicit provider.',
+  revision_producer_active: 'A revision requires a completed, certain producer.',
+  revision_producer_dirty: 'A revision requires a clean producer worktree.',
+  revision_producer_stale: 'expected_head does not match the exact producer HEAD.',
+  revision_identity_mismatch: 'expected_idempotency_key does not match the producer request identity.',
+  revision_producer_not_found: 'The named producer assignment is not known.',
 });
 
 export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
@@ -345,6 +360,12 @@ export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
   'unknown_provider',
   'unknown_tool',
   'simple_runtime_unavailable',
+  'preferred_provider_unavailable',
+  'revision_producer_active',
+  'revision_producer_dirty',
+  'revision_producer_stale',
+  'revision_identity_mismatch',
+  'revision_producer_not_found',
 ]);
 
 const ADAPTER_DEPENDENCY_KEYS = capturedFreeze([
@@ -760,14 +781,16 @@ function resolveOperation(tool, args) {
   if (tool === 'task') {
     const hasAttention = capturedHasOwn(args, 'attention');
     const hasReply = capturedHasOwn(args, 'run_reply');
+    const hasRevision = capturedHasOwn(args, 'revision');
     const waitUntil = waitUntilValue(args);
-    const flagged = [hasAttention, hasReply, waitUntil === ADDITIVE_WAIT_UNTIL]
+    const flagged = [hasAttention, hasReply, hasRevision, waitUntil === ADDITIVE_WAIT_UNTIL]
       .filter(Boolean).length;
     if (flagged > 1) {
       failAdapter('mixed_run_operation', 'task', CONTENT_FREE.mixed_run_operation);
     }
     if (hasAttention) return 'attention';
     if (hasReply) return 'reply';
+    if (hasRevision) return 'revision';
     if (waitUntil === ADDITIVE_WAIT_UNTIL || capturedHasOwn(args, 'wait_ms')) return 'wait';
     return 'status';
   }
@@ -1278,6 +1301,7 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
       ? { result_truncated: true }
       : {}),
     ...(candidate ? { candidate } : {}),
+    coordination: projectRunCoordinationResponseV1(runtimeReceipt),
     ...(verification ? { verification } : {}),
     ...(receipt.operation === 'wait' ? {
       wait_until: receipt.wait_until,
@@ -1348,6 +1372,75 @@ function compactProviderResult(result, taskId) {
     truncated: true,
     detail_task_id: typeof taskId === 'string' ? taskId : null,
     preview: utf8Head(serialized ?? '', 768),
+  };
+}
+
+function preferenceAttentionReceipt(runId, request, preferenceView) {
+  const assignments = ARRAY_IS_ARRAY(request?.assignments) ? request.assignments : [];
+  const lanes = assignments.length > 0
+    ? assignments.map((assignment, index) => {
+      const assignmentId = typeof assignment?.assignment_id === 'string' && assignment.assignment_id.length > 0
+        ? assignment.assignment_id
+        : `pending-${index + 1}`;
+      return {
+        assignment_id: assignmentId,
+        task_id: `pending-${assignmentId}`.slice(0, 80),
+        provider: typeof assignment?.provider === 'string' ? assignment.provider : null,
+        model: typeof assignment?.model === 'string' ? assignment.model : null,
+        role: typeof assignment?.role === 'string' ? assignment.role : null,
+        required: assignment?.required !== false,
+        phase: 'needs_attention',
+        status: 'needs_attention',
+        prompt_dispatched: false,
+        dispatch_confidence: 'not_sent',
+      };
+    })
+    : [{
+      assignment_id: 'pending-preference',
+      task_id: 'pending-preference',
+      provider: null,
+      model: null,
+      role: null,
+      required: true,
+      phase: 'needs_attention',
+      status: 'needs_attention',
+      prompt_dispatched: false,
+      dispatch_confidence: 'not_sent',
+    }];
+  const items = ARRAY_IS_ARRAY(preferenceView?.attention?.items)
+    ? preferenceView.attention.items
+    : [];
+  return {
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: runId,
+    phase: 'needs_attention',
+    status: 'needs_attention',
+    revision: 0,
+    cursor: '0',
+    assignment_count: lanes.length,
+    lanes,
+    complete_candidate_blocked: true,
+    error: {
+      code: 'preferred_provider_unavailable',
+      message: CONTENT_FREE.preferred_provider_unavailable,
+    },
+    attention: {
+      status: 'open',
+      code: 'preferred_provider_unavailable',
+      next_action: 'supply_explicit_provider',
+      items,
+      wake: true,
+    },
+    consent: null,
+    admission: null,
+    dispatched_assignment_ids: [],
+    undispatched_assignment_ids: lanes.map((lane) => lane.assignment_id),
+    dispatch_uncertain_assignment_ids: [],
+    authoritative_required_dispatch: false,
+    already_terminal: false,
+    telemetry: null,
+    cleanup: null,
   };
 }
 
@@ -1863,9 +1956,16 @@ export function createRunToolAdapter(dependencies) {
           base_sha: parsed.context.base_sha,
           digest: null,
         });
-        counters.submit += 1;
-        runtimeReceipt = await simpleRuntime.submitRunRequest(parsed.simpleRequest, { signal });
-        simpleRunIds.add(parsed.runId);
+        const preferenceView = inspectDelegationPreferencesV1(parsed.simpleRequest);
+        if (preferenceView.attention) {
+          runtimeReceipt = preferenceAttentionReceipt(
+            parsed.runId, parsed.simpleRequest, preferenceView,
+          );
+        } else {
+          counters.submit += 1;
+          runtimeReceipt = await simpleRuntime.submitRunRequest(parsed.simpleRequest, { signal });
+          simpleRunIds.add(parsed.runId);
+        }
       } else {
       if (parsed.catalogSnapshot !== null && parsed.catalogSnapshot !== undefined) {
         pendingRunCatalogSnapshots.set(parsed.runId, parsed.catalogSnapshot);
@@ -2022,6 +2122,31 @@ export function createRunToolAdapter(dependencies) {
         assignment_ids: assignmentIds,
         cleanup: operation === 'cleanup',
       }));
+    } else if (operation === 'revision') {
+      if (simpleRuntime === null) {
+        failAdapter('simple_runtime_unavailable', 'revision', CONTENT_FREE.simple_runtime_unavailable);
+      }
+      const runId = requireRunId(args);
+      requestedRunId = runId;
+      const revision = parseOwnedRevisionRequestV1(
+        quarantineObject(ownDataValue(args, 'revision', 'revision'), 'revision', REVISION_REQUEST_KEYS),
+        'revision',
+      );
+      if (typeof simpleRuntime.reviseRun === 'function') {
+        counters.submit += 1;
+        runtimeReceipt = await simpleRuntime.reviseRun({ run_id: runId, revision }, { signal });
+      } else {
+        const inspected = await simpleRuntime.inspectRun({ run_id: runId });
+        const producer = producerFromRunReceiptV1(inspected, revision.assignment_id, 'revision');
+        const derived = deriveOwnedRevisionRequestV1(producer, revision);
+        counters.submit += 1;
+        runtimeReceipt = await simpleRuntime.submitRunRequest(derived.run_request, { signal });
+        simpleRunIds.add(derived.run_request.run_id);
+      }
+      if (typeof runtimeReceipt?.run_id === 'string') {
+        simpleRunIds.add(runtimeReceipt.run_id);
+        requestedRunId = runtimeReceipt.run_id;
+      }
     } else {
       failAdapter('unknown_operation', 'tool', CONTENT_FREE.unknown_operation);
     }

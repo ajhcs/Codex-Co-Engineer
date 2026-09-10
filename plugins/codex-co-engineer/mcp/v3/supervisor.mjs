@@ -77,6 +77,11 @@ import {
   compileRunRequestV1,
   RUN_REQUEST_DEFAULT_MODELS,
 } from './run-request-compiler.mjs';
+import {
+  deriveOwnedRevisionRequestV1,
+  parseOwnedRevisionRequestV1,
+  projectOwnedProducerCandidateV1,
+} from './owned-delegation.mjs';
 import { loadReadinessSnapshot, saveReadinessSnapshot } from './readiness-snapshot.mjs';
 import { buildGitIdentityV1, buildWorkspaceIdentityV1 } from './protected-identity.mjs';
 import { assertRuntimeEntrypoints } from './runtime-entrypoints.mjs';
@@ -2359,7 +2364,42 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     loadRecord: options.loadRecord ?? admissionStore.load,
     persistRecord: options.persistRecord ?? admissionStore.save,
   };
-  return createRunAdmissionRuntime(simpleDeps);
+  const runtime = createRunAdmissionRuntime(simpleDeps);
+  const loadRecord = simpleDeps.loadRecord;
+  const inspectWorkspace = simpleDeps.inspectWorkspace;
+  async function reviseRun(request, reviseOptions = {}) {
+    const runId = request?.run_id;
+    const revision = parseOwnedRevisionRequestV1(request?.revision, 'revision');
+    const record = await loadRecord(runId);
+    if (!record) {
+      throw Object.assign(new Error('The named producer assignment is not known.'), {
+        code: 'revision_producer_not_found',
+        path: 'run_id',
+      });
+    }
+    const assignment = record.compiled?.assignments?.find((entry) => entry.assignment_id === revision.assignment_id);
+    const lane = record.lanes?.find((entry) => entry.assignment_id === revision.assignment_id);
+    if (!assignment || !lane) {
+      throw Object.assign(new Error('The named producer assignment is not known.'), {
+        code: 'revision_producer_not_found',
+        path: 'revision.assignment_id',
+      });
+    }
+    const workspace = await inspectWorkspace({
+      root,
+      run_id: runId,
+      assignment_id: revision.assignment_id,
+      task_id: lane.task_id,
+      workspace: lane.workspace,
+    }).catch(() => ({}));
+    const producer = projectOwnedProducerCandidateV1({ record, assignment, lane, workspace });
+    const derived = deriveOwnedRevisionRequestV1(producer, revision);
+    return runtime.submitRunRequest(derived.run_request, reviseOptions);
+  }
+  return Object.freeze({
+    ...runtime,
+    reviseRun,
+  });
 }
 
 const AUTHENTICATION_FAILURE_PATTERN = /not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu;

@@ -1192,3 +1192,80 @@ test('invokeRunTool preserves omitted 3.2.1 mode and R-TRUTH lifecycle authority
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('supervisor owned revision preserves provider, model, and write scope', async () => {
+  const HEAD = 'b'.repeat(40);
+  const IDEMPOTENCY = `sha256:${'d'.repeat(64)}`;
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-owned-rev-'));
+  try {
+    const inspectCalls = [];
+    const simpleRuntime = {
+      hasRun: (value) => value === 'vale-hardening' || String(value).startsWith('rev-'),
+      submitRunRequest: async () => {
+        throw new Error('submitRunRequest should not be used when reviseRun is present');
+      },
+      inspectRun: async () => {
+        throw new Error('inspectRun should not be used when reviseRun is present');
+      },
+      resumeRun: async () => ({}),
+      replyRun: async () => ({}),
+      cancelRun: async () => ({}),
+      waitRun: async () => ({}),
+      reviseRun: async (request) => {
+        inspectCalls.push(request);
+        return {
+          schema: 'codex-co-engineer.run-admission.v1',
+          version: 1,
+          run_id: 'rev-aaaaaaaaaaaaaaaa',
+          phase: 'preparing_workspaces',
+          status: 'preparing_workspaces',
+          revision: 0,
+          cursor: '0',
+          assignment_count: 1,
+          lanes: [{
+            assignment_id: request.revision.assignment_id,
+            task_id: 'ce-rev-social',
+            provider: 'grok',
+            model: 'grok-4',
+            role: 'implement',
+            access: 'writer',
+            write_scope: ['src/**'],
+            required: true,
+            phase: 'prepared',
+            status: 'prepared',
+            prompt_dispatched: false,
+          }],
+          complete_candidate_blocked: false,
+          attention: null,
+          consent: null,
+          admission: null,
+          dispatched_assignment_ids: [],
+          undispatched_assignment_ids: [request.revision.assignment_id],
+          dispatch_uncertain_assignment_ids: [],
+          authoritative_required_dispatch: false,
+        };
+      },
+    };
+    const adapter = await createSupervisorRunToolAdapter({
+      root,
+      simpleRuntime,
+      inProcess: true,
+    });
+    const receipt = await adapter.dispatch('task', {
+      run_id: 'vale-hardening',
+      revision: {
+        assignment_id: 'social-implementation',
+        feedback: 'Fix the failing tests.',
+        expected_head: HEAD,
+        expected_idempotency_key: IDEMPOTENCY,
+      },
+    });
+    assert.equal(inspectCalls.length, 1);
+    assert.equal(inspectCalls[0].revision.assignment_id, 'social-implementation');
+    assert.equal(receipt.run_id, 'rev-aaaaaaaaaaaaaaaa');
+    assert.equal(receipt.lanes[0].provider, 'grok');
+    assert.equal(receipt.operation, 'revision');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
