@@ -7,6 +7,7 @@ import {
   capturedIncludes,
   capturedTest,
 } from './grammar.mjs';
+import { ownedCorrectionBudgetRemainingV1 } from './owned-delegation.mjs';
 import { freezeData } from './selection-json.mjs';
 
 export const RUN_COORDINATION_RESPONSE_SCHEMA_ID = 'codex-co-engineer.run-coordination-response.v1';
@@ -164,6 +165,14 @@ function isProvenCompletedCleanWriter(lane) {
     && lane?.prompt_dispatched === true;
 }
 
+function firstFollowRunId(lanes) {
+  for (const lane of lanes) {
+    const childRunId = lane?.correction_follow?.child_run_id;
+    if (typeof childRunId === 'string' && childRunId.length > 0) return childRunId;
+  }
+  return null;
+}
+
 function chooseNextAction(receipt, lanes, unresolved) {
   const runId = typeof receipt?.run_id === 'string' ? receipt.run_id : null;
   if (receipt?.persisted === false) {
@@ -205,6 +214,15 @@ function chooseNextAction(receipt, lanes, unresolved) {
       action: 'inspect',
     });
   }
+  const followRunId = firstFollowRunId(lanes);
+  if (followRunId && unresolved.length === 0) {
+    return freezeData({
+      tool: 'task',
+      operation: 'status',
+      run_id: followRunId,
+      action: 'inspect',
+    });
+  }
   if (unresolved.length === 0 && lanes.some((lane) => capturedIncludes(COMPLETED, laneStatus(lane)))) {
     return freezeData({
       tool: 'task',
@@ -236,15 +254,20 @@ function collectProducers(receipt, lanes) {
   }));
 }
 
-function collectAvailableActions(nextAction, lanes, unresolved) {
+function collectAvailableActions(nextAction, lanes, unresolved, receipt) {
   const actions = [];
   if (typeof nextAction?.action === 'string' && capturedIncludes(NEXT_ACTIONS, nextAction.action)
     && nextAction.action !== 'none') {
     actions.push(nextAction.action);
   }
   const completedCleanWriter = unresolved.length === 0 && lanes.some(isProvenCompletedCleanWriter);
-  if (completedCleanWriter && !actions.includes('revision')) {
+  const followRunId = firstFollowRunId(lanes);
+  const budgetRemaining = ownedCorrectionBudgetRemainingV1(receipt?.correction);
+  if (completedCleanWriter && !followRunId && budgetRemaining && !actions.includes('revision')) {
     actions.push('revision');
+  }
+  if (completedCleanWriter && !followRunId && !budgetRemaining && !actions.includes('resubmit')) {
+    actions.push('resubmit');
   }
   return actions;
 }
@@ -294,9 +317,10 @@ export function projectRunCoordinationResponseV1(receipt) {
     evidence_refs: collectEvidenceRefs(receipt),
     unresolved,
     next_action: nextAction,
-    available_actions: collectAvailableActions(nextAction, lanes, unresolved),
+    available_actions: collectAvailableActions(nextAction, lanes, unresolved, receipt),
   });
 }
 
 capturedFreeze(projectRunCoordinationResponseV1);
+capturedFreeze(firstFollowRunId);
 capturedFreeze(NEXT_ACTIONS);

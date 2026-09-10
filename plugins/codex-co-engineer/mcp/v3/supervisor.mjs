@@ -2441,6 +2441,9 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
       );
     }
     const derived = deriveOwnedRevisionRequestV1(producer, revision);
+    if (typeof runtime.submitOwnedRevision === 'function') {
+      return runtime.submitOwnedRevision(record.run_id, derived, reviseOptions);
+    }
     return runtime.submitRunRequest(derived.run_request, {
       ...reviseOptions,
       correction: derived.correction,

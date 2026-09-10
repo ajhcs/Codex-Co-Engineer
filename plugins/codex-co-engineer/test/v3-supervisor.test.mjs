@@ -1388,6 +1388,9 @@ test('supervisor owned revision dispatches from the public packet and rejects un
     assert.equal(inspected.correction.lineage, 'owned_revision');
     assert.equal(inspected.correction.reviewed_head, candidateHead);
     assert.equal(inspected.correction.producer_run_id, submitted.run_id);
+    assert.equal(inspected.correction.original_run_id, submitted.run_id);
+    assert.equal(inspected.correction.round, 1);
+    assert.equal(inspected.correction.limit, 3);
   } finally {
     await harness.close();
   }
@@ -1517,5 +1520,75 @@ test('owned revision does not dispatch dirty, stale, missing, active, uncertain,
     assert.equal(missingTask.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 0);
   } finally {
     await missingTask.close();
+  }
+});
+
+test('supervisor correction rounds stay bounded, follow one child, and retain lineage after restart', async () => {
+  const harness = await createOwnedRevisionHarness({ run_id: 'vale-bounded' });
+  try {
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    const original = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    const firstRevision = revisionFromPacket(original.coordination, 'social-implementation', 'Fix the failing unit tests without widening scope.');
+    const first = await harness.adapter.dispatch('task', { run_id: submitted.run_id, revision: firstRevision });
+    assert.equal(first.correction.round, 1);
+    assert.equal(first.correction.original_run_id, submitted.run_id);
+    const firstDone = await harness.adapter.dispatch('task', { run_id: first.run_id });
+    assert.equal(firstDone.phase, 'completed');
+    assert.equal(firstDone.correction.round, 1);
+
+    const branched = await harness.adapter.dispatch('task', {
+      run_id: submitted.run_id,
+      revision: revisionFromPacket(original.coordination, 'social-implementation', 'A different correction against the original.'),
+    });
+    assert.equal(branched.run_id, first.run_id);
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id === first.run_id).length, 1);
+
+    const secondRevision = revisionFromPacket(firstDone.coordination, 'social-implementation', 'Keep the tests green after the first correction.');
+    const second = await harness.adapter.dispatch('task', { run_id: first.run_id, revision: secondRevision });
+    assert.equal(second.correction.round, 2);
+    assert.equal(second.correction.original_run_id, submitted.run_id);
+    const secondDone = await harness.adapter.dispatch('task', { run_id: second.run_id });
+
+    const thirdRevision = revisionFromPacket(secondDone.coordination, 'social-implementation', 'Final bounded correction.');
+    const third = await harness.adapter.dispatch('task', { run_id: second.run_id, revision: thirdRevision });
+    assert.equal(third.correction.round, 3);
+    assert.equal(third.correction.limit, 3);
+    const thirdDone = await harness.adapter.dispatch('task', { run_id: third.run_id });
+    assert.equal(thirdDone.phase, 'completed');
+    assert.equal(thirdDone.coordination.next_action.action, 'review');
+    assert.equal(thirdDone.coordination.available_actions.includes('revision'), false);
+    assert.equal(thirdDone.coordination.available_actions.includes('resubmit'), true);
+
+    const correctionDispatches = harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id);
+    assert.equal(correctionDispatches.length, 3);
+    await assert.rejects(
+      harness.adapter.dispatch('task', {
+        run_id: third.run_id,
+        revision: revisionFromPacket(thirdDone.coordination, 'social-implementation', 'This exceeds the fixed ceiling.'),
+      }),
+      (error) => error.code === 'revision_budget_exhausted'
+        && /submit a new bounded assignment/u.test(error.message),
+    );
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 3);
+
+    const restarted = await createSupervisorRunToolAdapter({
+      root: harness.root,
+      inProcess: true,
+      requestConsent: async () => ({ approved: true }),
+      providerReady: async () => ({ ready: true }),
+      processBoundaryReady: async () => ({ ready: true }),
+      verifyRepository: async () => ({ verified: true }),
+    });
+    const inspected = await restarted.dispatch('task', { run_id: third.run_id });
+    assert.equal(inspected.correction.round, 3);
+    assert.equal(inspected.correction.limit, 3);
+    assert.equal(inspected.correction.original_run_id, submitted.run_id);
+    assert.equal(inspected.correction.producer_run_id, second.run_id);
+    assert.equal(inspected.correction.reviewed_head, secondDone.coordination.producers[0].head);
+    const inspectedOriginal = await restarted.dispatch('task', { run_id: submitted.run_id });
+    assert.equal(inspectedOriginal.coordination.next_action.action, 'inspect');
+    assert.equal(inspectedOriginal.coordination.next_action.run_id, first.run_id);
+  } finally {
+    await harness.close();
   }
 });

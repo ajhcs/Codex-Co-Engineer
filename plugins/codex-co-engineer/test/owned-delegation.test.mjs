@@ -2,8 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  OWNED_CORRECTION_ROUND_LIMIT,
+  assertOwnedCorrectionBudgetV1,
   assertOwnedRevisionProducerV1,
+  compactOwnedCorrectionFollowV1,
+  compactOwnedCorrectionLineageV1,
   deriveOwnedRevisionRequestV1,
+  ownedCorrectionBudgetRemainingV1,
+  ownedCorrectionPolicyV1,
   ownedRevisionIdentityV1,
   parseOwnedRevisionRequestV1,
   producerFromRunReceiptV1,
@@ -71,6 +77,12 @@ test('valid clean revision preserves authority and derives a fresh identity', ()
   assert.equal(derived.producer_run_id, 'vale-hardening');
   assert.equal(derived.correction.lineage, 'owned_revision');
   assert.equal(derived.correction.reviewed_head, HEAD);
+  assert.equal(derived.correction.original_run_id, 'vale-hardening');
+  assert.equal(derived.correction.original_assignment_id, 'social-implementation');
+  assert.equal(derived.correction.round, 1);
+  assert.equal(derived.correction.limit, OWNED_CORRECTION_ROUND_LIMIT);
+  assert.equal(derived.correction.limit, 3);
+  assert.equal(derived.run_request.assignments[0].expected_duration_ms, 900_000);
 });
 
 test('empty reviewer scope is not presented as unrestricted write access', () => {
@@ -337,6 +349,61 @@ test('coordination packets expose per-assignment identity and review as the comp
   assert.equal(unknownClean.next_action.action, 'inspect');
   assert.equal(unknownClean.available_actions.includes('revision'), false);
 
+  const followed = projectRunCoordinationResponseV1({
+    run_id: 'vale-hardening',
+    request_idempotency_key: IDEMPOTENCY,
+    lanes: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'writer',
+      status: 'completed',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      head: HEAD,
+      clean: true,
+      correction_follow: {
+        child_run_id: 'rev-abcd1234abcd1234',
+        child_assignment_id: 'social-implementation',
+        identity_digest: `sha256:${'2'.repeat(64)}`,
+      },
+      handoff: { current_head: HEAD, clean: true },
+    }],
+  });
+  assert.equal(followed.next_action.action, 'inspect');
+  assert.equal(followed.next_action.run_id, 'rev-abcd1234abcd1234');
+  assert.equal(followed.available_actions.includes('revision'), false);
+
+  const exhausted = projectRunCoordinationResponseV1({
+    run_id: 'rev-abcd1234abcd1234',
+    request_idempotency_key: IDEMPOTENCY,
+    correction: {
+      schema: 'codex-co-engineer.owned-delegation.v1',
+      version: 1,
+      lineage: 'owned_revision',
+      producer_run_id: 'vale-hardening',
+      producer_assignment_id: 'social-implementation',
+      reviewed_head: HEAD,
+      original_run_id: 'vale-hardening',
+      original_assignment_id: 'social-implementation',
+      round: 3,
+      limit: 3,
+    },
+    lanes: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'writer',
+      status: 'completed',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      head: HEAD,
+      clean: true,
+      handoff: { current_head: HEAD, clean: true },
+    }],
+  });
+  assert.equal(exhausted.next_action.action, 'review');
+  assert.equal(exhausted.available_actions.includes('revision'), false);
+  assert.equal(exhausted.available_actions.includes('resubmit'), true);
+
   const missingConfidence = projectRunCoordinationResponseV1({
     run_id: 'vale-hardening',
     request_idempotency_key: IDEMPOTENCY,
@@ -354,4 +421,82 @@ test('coordination packets expose per-assignment identity and review as the comp
   assert.equal(missingConfidence.unresolved[0].reason, 'unresolved');
   assert.equal(missingConfidence.next_action.action, 'inspect');
   assert.equal(missingConfidence.available_actions.includes('revision'), false);
+});
+
+test('correction rounds are a fixed chain-depth ceiling independent of duration', () => {
+  const first = deriveOwnedRevisionRequestV1(producer(), revision());
+  assert.equal(first.correction.round, 1);
+  assert.equal(first.correction.limit, 3);
+  assert.equal(first.run_request.assignments[0].expected_duration_ms, 900_000);
+
+  const secondProducer = producer({
+    run_id: first.identity.run_id,
+    correction: first.correction,
+  });
+  const second = deriveOwnedRevisionRequestV1(secondProducer, revision());
+  assert.equal(second.correction.round, 2);
+  assert.equal(second.correction.original_run_id, 'vale-hardening');
+  assert.equal(second.correction.producer_run_id, first.identity.run_id);
+  assert.equal(second.run_request.assignments[0].expected_duration_ms, 900_000);
+
+  const thirdProducer = producer({
+    run_id: second.identity.run_id,
+    correction: second.correction,
+  });
+  const third = deriveOwnedRevisionRequestV1(thirdProducer, revision());
+  assert.equal(third.correction.round, 3);
+  assert.equal(ownedCorrectionBudgetRemainingV1(third.correction), false);
+
+  assert.throws(
+    () => deriveOwnedRevisionRequestV1(producer({
+      run_id: third.identity.run_id,
+      correction: third.correction,
+    }), revision()),
+    (error) => error.code === 'revision_budget_exhausted'
+      && /submit a new bounded assignment/u.test(error.message)
+      && /does not start that assignment/u.test(error.message),
+  );
+
+  const policy = ownedCorrectionPolicyV1(producer({
+    run_id: third.identity.run_id,
+    correction: third.correction,
+  }));
+  assert.equal(policy.round, 4);
+  assert.throws(
+    () => assertOwnedCorrectionBudgetV1(policy),
+    (error) => error.code === 'revision_budget_exhausted',
+  );
+});
+
+test('lineage and follow records persist original root, round, and child identity', () => {
+  const derived = deriveOwnedRevisionRequestV1(producer(), revision());
+  const compacted = compactOwnedCorrectionLineageV1(derived.correction);
+  assert.equal(compacted.original_run_id, 'vale-hardening');
+  assert.equal(compacted.round, 1);
+  assert.equal(compacted.limit, 3);
+  const follow = compactOwnedCorrectionFollowV1({
+    child_run_id: derived.identity.run_id,
+    child_assignment_id: 'social-implementation',
+    identity_digest: derived.identity.digest,
+  });
+  assert.equal(follow.child_run_id, derived.identity.run_id);
+  assert.equal(follow.identity_digest, derived.identity.digest);
+  assert.throws(
+    () => compactOwnedCorrectionLineageV1({
+      ...derived.correction,
+      round: 4,
+    }),
+    (error) => error.code === 'invalid_format',
+  );
+  assert.throws(
+    () => compactOwnedCorrectionLineageV1({
+      schema: 'codex-co-engineer.owned-delegation.v1',
+      version: 1,
+      lineage: 'owned_revision',
+      producer_run_id: 'vale-hardening',
+      producer_assignment_id: 'social-implementation',
+      reviewed_head: HEAD,
+    }),
+    (error) => error.code === 'missing_key',
+  );
 });

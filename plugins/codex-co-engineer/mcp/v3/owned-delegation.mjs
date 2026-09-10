@@ -1,6 +1,13 @@
 // OwnedDelegationV1 — derive a fresh bounded correction assignment from a
 // completed, clean, exactly identified producer. Never replay an active or
 // uncertain task. Provider, model, and write scope are preserved.
+//
+// Correction rounds are a fixed chain-depth ceiling of three, independent of
+// each assignment's duration. One admitted correction child per producer;
+// different feedback against the same producer follows that child instead of
+// branching a new first-round candidate. Exhausted budget rejects before
+// provider dispatch and requires a deliberate new bounded assignment. An
+// admitted child that later fails does not replenish its consumed round.
 
 import { createHash } from 'node:crypto';
 
@@ -39,11 +46,17 @@ export const OWNED_REVISION_REQUEST_KEYS = capturedFreeze([
 ]);
 export const OWNED_CORRECTION_LINEAGE_KEYS = capturedFreeze([
   'schema', 'version', 'lineage', 'producer_run_id', 'producer_assignment_id', 'reviewed_head',
+  'original_run_id', 'original_assignment_id', 'round', 'limit',
 ]);
+export const OWNED_CORRECTION_FOLLOW_KEYS = capturedFreeze([
+  'child_run_id', 'child_assignment_id', 'identity_digest',
+]);
+export const OWNED_CORRECTION_ROUND_LIMIT = 3;
 export const MAX_REVISION_FEEDBACK_BYTES = 4_096;
 export const MIN_REVISION_FEEDBACK_BYTES = 1;
 export const IDEMPOTENCY_KEY_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 export const AUTHORITATIVE_DISPATCH_CONFIDENCE = 'authoritative';
+export const REVISION_BUDGET_EXHAUSTED_MESSAGE = `Owned correction rounds are exhausted (${OWNED_CORRECTION_ROUND_LIMIT} of ${OWNED_CORRECTION_ROUND_LIMIT}); submit a new bounded assignment. This path does not start that assignment.`;
 
 const COMPLETED_PRODUCER_PHASES = capturedFreeze(['completed']);
 const ACTIVE_OR_UNCERTAIN_PHASES = capturedFreeze([
@@ -146,6 +159,24 @@ export function compactOwnedCorrectionLineageV1(value, field = 'correction') {
   }
   const reviewedHead = ownDataValue(value, 'reviewed_head', `${field}.reviewed_head`);
   assertBaseSha(reviewedHead, `${field}.reviewed_head`);
+  const originalRunId = ownDataValue(value, 'original_run_id', `${field}.original_run_id`);
+  assertRunId(originalRunId, `${field}.original_run_id`);
+  const originalAssignmentId = ownDataValue(value, 'original_assignment_id', `${field}.original_assignment_id`);
+  if (typeof originalAssignmentId !== 'string' || !isAssignmentId(originalAssignmentId)) {
+    revisionError('invalid_format', `${field}.original_assignment_id`, 'original_assignment_id is not valid.');
+  }
+  const round = ownDataValue(value, 'round', `${field}.round`);
+  const limit = ownDataValue(value, 'limit', `${field}.limit`);
+  if (!Number.isSafeInteger(limit) || limit !== OWNED_CORRECTION_ROUND_LIMIT) {
+    revisionError(
+      'invalid_format',
+      `${field}.limit`,
+      `Correction round limit is the fixed ceiling of ${OWNED_CORRECTION_ROUND_LIMIT}.`,
+    );
+  }
+  if (!Number.isSafeInteger(round) || round < 1 || round > limit) {
+    revisionError('invalid_format', `${field}.round`, 'Correction round is outside the fixed ceiling.');
+  }
   return freezeData({
     schema: OWNED_DELEGATION_SCHEMA_ID,
     version: OWNED_DELEGATION_VERSION,
@@ -153,7 +184,102 @@ export function compactOwnedCorrectionLineageV1(value, field = 'correction') {
     producer_run_id: producerRunId,
     producer_assignment_id: producerAssignmentId,
     reviewed_head: reviewedHead,
+    original_run_id: originalRunId,
+    original_assignment_id: originalAssignmentId,
+    round,
+    limit,
   });
+}
+
+export function compactOwnedCorrectionFollowV1(value, field = 'correction_follow') {
+  assertNotProxy(value, field);
+  assertPlainObject(value, 'invalid_type', field, 'correction follow');
+  assertDirectJsonClosure(value, field);
+  for (const key of capturedOwnKeys(value)) {
+    if (typeof key !== 'string') revisionError('symbol_key_denied', field);
+    if (!capturedIncludes(OWNED_CORRECTION_FOLLOW_KEYS, key)) {
+      revisionError('unknown_key', `${field}.${key}`, 'Correction follow is a closed machine record.');
+    }
+  }
+  for (const key of OWNED_CORRECTION_FOLLOW_KEYS) {
+    if (!capturedHasOwn(value, key)) {
+      revisionError('missing_key', `${field}.${key}`, 'Correction follow is incomplete.');
+    }
+  }
+  const childRunId = ownDataValue(value, 'child_run_id', `${field}.child_run_id`);
+  assertRunId(childRunId, `${field}.child_run_id`);
+  const childAssignmentId = ownDataValue(value, 'child_assignment_id', `${field}.child_assignment_id`);
+  if (typeof childAssignmentId !== 'string' || !isAssignmentId(childAssignmentId)) {
+    revisionError('invalid_format', `${field}.child_assignment_id`, 'child_assignment_id is not valid.');
+  }
+  const identityDigest = ownDataValue(value, 'identity_digest', `${field}.identity_digest`);
+  if (typeof identityDigest !== 'string' || !capturedTest(IDEMPOTENCY_KEY_PATTERN, identityDigest)) {
+    revisionError('invalid_format', `${field}.identity_digest`, 'identity_digest must be an exact sha256 digest.');
+  }
+  return freezeData({
+    child_run_id: childRunId,
+    child_assignment_id: childAssignmentId,
+    identity_digest: identityDigest,
+  });
+}
+
+export function ownedCorrectionPolicyV1(producer, field = 'revision') {
+  if (!producer || typeof producer !== 'object') {
+    revisionError('revision_producer_not_found', field, 'The named producer assignment is not known.');
+  }
+  if (typeof producer.run_id !== 'string') {
+    revisionError('revision_producer_not_found', field, 'The named producer assignment is not known.');
+  }
+  assertRunId(producer.run_id, `${field}.run_id`);
+  if (typeof producer.assignment_id !== 'string' || !isAssignmentId(producer.assignment_id)) {
+    revisionError('invalid_format', `${field}.assignment_id`, 'assignment_id is not valid.');
+  }
+  if (producer.correction != null) {
+    const parent = compactOwnedCorrectionLineageV1(producer.correction, `${field}.correction`);
+    return freezeData({
+      original_run_id: parent.original_run_id,
+      original_assignment_id: parent.original_assignment_id,
+      producer_run_id: producer.run_id,
+      producer_assignment_id: producer.assignment_id,
+      round: parent.round + 1,
+      limit: parent.limit,
+    });
+  }
+  return freezeData({
+    original_run_id: producer.run_id,
+    original_assignment_id: producer.assignment_id,
+    producer_run_id: producer.run_id,
+    producer_assignment_id: producer.assignment_id,
+    round: 1,
+    limit: OWNED_CORRECTION_ROUND_LIMIT,
+  });
+}
+
+export function assertOwnedCorrectionBudgetV1(policy, field = 'revision') {
+  if (!policy || typeof policy !== 'object'
+    || !Number.isSafeInteger(policy.round)
+    || !Number.isSafeInteger(policy.limit)
+    || policy.limit !== OWNED_CORRECTION_ROUND_LIMIT) {
+    revisionError('invalid_format', field, 'Correction round policy is invalid.');
+  }
+  if (policy.round > policy.limit) {
+    revisionError('revision_budget_exhausted', field, REVISION_BUDGET_EXHAUSTED_MESSAGE);
+  }
+  if (policy.round < 1) {
+    revisionError('invalid_format', `${field}.round`, 'Correction round is outside the fixed ceiling.');
+  }
+  return policy;
+}
+
+export function ownedCorrectionBudgetRemainingV1(correction) {
+  if (correction == null) return true;
+  if (typeof correction !== 'object') return false;
+  const round = correction.round;
+  const limit = correction.limit;
+  if (!Number.isSafeInteger(round) || !Number.isSafeInteger(limit) || limit !== OWNED_CORRECTION_ROUND_LIMIT) {
+    return false;
+  }
+  return round < limit;
 }
 
 export function ownedRevisionIdentityV1({ producer, revision }) {
@@ -331,12 +457,14 @@ export function projectOwnedProducerCandidateV1({
     head,
     clean: workspace.clean === true,
     evidence_refs: evidenceRefs,
+    ...(record.correction ? { correction: record.correction } : {}),
   });
 }
 
 export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
   const revision = parseOwnedRevisionRequestV1(revisionInput);
   assertOwnedRevisionProducerV1(producer, revision);
+  const policy = assertOwnedCorrectionBudgetV1(ownedCorrectionPolicyV1(producer));
   const identity = ownedRevisionIdentityV1({ producer, revision });
   const prompt = compileOwnedCorrectionPromptV1({
     producer_run_id: producer.run_id,
@@ -375,6 +503,10 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
     producer_run_id: producer.run_id,
     producer_assignment_id: producer.assignment_id,
     reviewed_head: revision.expected_head,
+    original_run_id: policy.original_run_id,
+    original_assignment_id: policy.original_assignment_id,
+    round: policy.round,
+    limit: policy.limit,
   });
   return freezeData({
     schema: OWNED_DELEGATION_SCHEMA_ID,
@@ -434,12 +566,17 @@ export function producerFromRunReceiptV1(receipt, assignmentId, field = 'revisio
     head,
     clean,
     evidence_refs: Array.isArray(lane.evidence_refs) ? lane.evidence_refs : [],
+    ...(receipt.correction ? { correction: receipt.correction } : {}),
   });
 }
 
 capturedFreeze(parseOwnedRevisionRequestV1);
 capturedFreeze(ownedRevisionIdentityV1);
 capturedFreeze(compactOwnedCorrectionLineageV1);
+capturedFreeze(compactOwnedCorrectionFollowV1);
+capturedFreeze(ownedCorrectionPolicyV1);
+capturedFreeze(assertOwnedCorrectionBudgetV1);
+capturedFreeze(ownedCorrectionBudgetRemainingV1);
 capturedFreeze(assertOwnedRevisionProducerV1);
 capturedFreeze(projectOwnedProducerCandidateV1);
 capturedFreeze(deriveOwnedRevisionRequestV1);

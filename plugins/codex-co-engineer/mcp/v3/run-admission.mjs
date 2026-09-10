@@ -47,7 +47,12 @@ import {
   validateRunIdentityV1,
   validateWorkspaceIdentityV1,
 } from './protected-identity.mjs';
-import { compactOwnedCorrectionLineageV1 } from './owned-delegation.mjs';
+import {
+  compactOwnedCorrectionFollowV1,
+  compactOwnedCorrectionLineageV1,
+  ownedCorrectionPolicyV1,
+  assertOwnedCorrectionBudgetV1,
+} from './owned-delegation.mjs';
 
 export const RUN_ADMISSION_SCHEMA_ID = 'codex-co-engineer.run-admission.v1';
 export const RUN_ADMISSION_VERSION = 1;
@@ -584,6 +589,20 @@ function validatePersistedRecord(record, runId) {
           'Persisted workspace identity is invalid.');
       }
     }
+    if (capturedHasOwn(lane, 'correction_follow') && lane.correction_follow != null) {
+      try {
+        lane.correction_follow = compactOwnedCorrectionFollowV1(
+          lane.correction_follow,
+          `persisted_run.lanes[${index}].correction_follow`,
+        );
+      } catch (error) {
+        if (error instanceof RunContractV1Error) {
+          admissionError('durable_state_mismatch', `persisted_run.lanes[${index}].correction_follow`,
+            'Persisted correction follow is invalid.');
+        }
+        throw error;
+      }
+    }
   }
   if (capturedHasOwn(record, 'correction') && record.correction != null) {
     try {
@@ -808,6 +827,7 @@ function laneReceipt(lane, compiled) {
     error: lane.error ?? null,
     recovery_classification: lane.recovery_classification ?? null,
     handoff: lane.handoff ?? null,
+    ...(lane.correction_follow ? { correction_follow: lane.correction_follow } : {}),
   };
 }
 
@@ -1780,6 +1800,94 @@ export function createRunAdmissionRuntime(overrides = {}) {
     });
   }
 
+  async function submitOwnedRevision(producerRunId, derived, options = {}) {
+    assertRunId(producerRunId, 'producer_run_id');
+    if (!derived || typeof derived !== 'object' || Array.isArray(derived)) {
+      admissionError('invalid_type', 'correction', 'Owned revision derivation is invalid.');
+    }
+    const identity = derived.identity;
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+      || typeof identity.run_id !== 'string'
+      || typeof identity.assignment_id !== 'string'
+      || typeof identity.digest !== 'string') {
+      admissionError('invalid_format', 'correction', 'Owned revision identity is incomplete.');
+    }
+    assertRunId(identity.run_id, 'owned_revision.run_id');
+    if (!isAssignmentId(identity.assignment_id)) {
+      admissionError('invalid_format', 'owned_revision.assignment_id', 'assignment_id is not valid.');
+    }
+    const correction = compactOwnedCorrectionLineageV1(derived.correction, 'correction');
+    const follow = compactOwnedCorrectionFollowV1({
+      child_run_id: identity.run_id,
+      child_assignment_id: identity.assignment_id,
+      identity_digest: identity.digest,
+    }, 'correction_follow');
+    if (identity.run_id === producerRunId) {
+      admissionError('run_identity_conflict', 'owned_revision.run_id',
+        'A correction child cannot reuse the producer run identity.');
+    }
+    return enqueue(producerRunId, async () => {
+      const producer = await loadRecord(producerRunId);
+      if (!producer) admissionError('revision_producer_not_found', 'run_id',
+        'The named producer assignment is not known.');
+      const lane = producer.lanes.find((entry) => entry.assignment_id === correction.producer_assignment_id);
+      if (!lane || correction.producer_run_id !== producer.run_id) {
+        admissionError('revision_producer_not_found', 'revision.assignment_id',
+          'The named producer assignment is not known.');
+      }
+      const existingFollow = lane.correction_follow
+        ? compactOwnedCorrectionFollowV1(lane.correction_follow, 'correction_follow')
+        : null;
+      if (existingFollow) {
+        if (existingFollow.identity_digest === follow.identity_digest
+          && existingFollow.child_run_id === follow.child_run_id
+          && existingFollow.child_assignment_id === follow.child_assignment_id) {
+          return submitRunRequest(derived.run_request, { ...options, correction });
+        }
+        const child = await loadRecord(existingFollow.child_run_id);
+        if (!child) {
+          admissionError(
+            'revision_child_exists',
+            'revision',
+            `Follow the admitted correction child ${existingFollow.child_run_id}; this producer already consumed its correction slot.`,
+          );
+        }
+        if (isTerminalRun(child) || child.phase === 'awaiting_consent') return receipt(child);
+        return enqueue(child.run_id, async () => reconcile(child));
+      }
+      const expected = assertOwnedCorrectionBudgetV1(ownedCorrectionPolicyV1({
+        run_id: producer.run_id,
+        assignment_id: correction.producer_assignment_id,
+        ...(producer.correction ? { correction: producer.correction } : {}),
+      }));
+      if (correction.round !== expected.round
+        || correction.limit !== expected.limit
+        || correction.original_run_id !== expected.original_run_id
+        || correction.original_assignment_id !== expected.original_assignment_id) {
+        admissionError('durable_state_mismatch', 'correction',
+          'Derived correction lineage does not match the producer round policy.');
+      }
+      lane.correction_follow = follow;
+      bump(producer);
+      await persist(producer);
+      try {
+        return await submitRunRequest(derived.run_request, { ...options, correction });
+      } catch (error) {
+        const child = await loadRecord(identity.run_id);
+        if (!child) {
+          delete lane.correction_follow;
+          bump(producer);
+          try {
+            await persist(producer);
+          } catch {
+            // Keep the fail-closed reservation rather than masking the original error.
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
   async function inspectRun(request) {
     const parsed = ownObject(request, 'request');
     assertKeys(parsed, ['run_id'], 'request');
@@ -2004,6 +2112,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
 
   return capturedFreeze({
     submitRunRequest,
+    submitOwnedRevision,
     inspectRun,
     resumeRun,
     replyRun,
