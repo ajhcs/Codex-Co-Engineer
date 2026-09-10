@@ -335,3 +335,258 @@ process.once('SIGTERM', () => process.exit(0));
     await runtime.close({ handle, reason: 'test_cleanup' }).catch(() => {});
   }
 });
+
+test('concurrent turns isolate AbortSignals across two active sessions', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-acpx-signal-isolation-'));
+  const cwd = path.join(root, 'worktree');
+  const stateDir = path.join(root, 'state');
+  await mkdir(cwd);
+  await mkdir(stateDir);
+  const agentPath = path.join(root, 'signal-isolation-agent.mjs');
+  await writeFile(agentPath, `import { createInterface } from 'node:readline';
+function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
+function response(id, result) { send({ jsonrpc: '2.0', id, result }); }
+function promptText(params) {
+  const block = params?.prompt?.[0];
+  return typeof block?.text === 'string' ? block.text : '';
+}
+const pending = new Map();
+async function handle(message) {
+  const { id, method, params = {} } = message;
+  if (method === 'initialize') {
+    return response(id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+    });
+  }
+  if (method === 'notifications/initialized' || method === 'initialized') return;
+  if (method === 'session/new') {
+    return response(id, { sessionId: 'iso-' + Math.random().toString(16).slice(2) });
+  }
+  if (method === 'session/close') return response(id, {});
+  if (method === 'session/cancel') {
+    for (const [promptId] of pending) {
+      response(promptId, { stopReason: 'cancelled' });
+      pending.delete(promptId);
+    }
+    return;
+  }
+  if (method === 'session/prompt') {
+    const text = promptText(params);
+    send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: text.includes('complete-me') ? 'session-b-live' : 'session-a-hold' },
+        },
+      },
+    });
+    if (text.includes('complete-me')) {
+      setTimeout(() => response(id, { stopReason: 'end_turn' }), 400);
+      return;
+    }
+    pending.set(id, params.sessionId);
+  }
+}
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+process.stdin.resume();
+input.on('line', (line) => { try { handle(JSON.parse(line)); } catch {} });
+process.once('SIGTERM', () => process.exit(0));
+`);
+  const runtime = createAcpRuntime({
+    cwd,
+    sessionStore: createRuntimeStore({ stateDir }),
+    agentRegistry: createAgentRegistry({
+      overrides: { grok: [process.execPath, agentPath] },
+    }),
+    mcpServers: [],
+    permissionMode: 'approve-all',
+    timeoutMs: 5_000,
+  });
+  const handleA = await runtime.ensureSession({
+    sessionKey: 'signal-iso-a',
+    agent: 'grok',
+    mode: 'persistent',
+    cwd,
+  });
+  const handleB = await runtime.ensureSession({
+    sessionKey: 'signal-iso-b',
+    agent: 'grok',
+    mode: 'persistent',
+    cwd,
+  });
+  const controllerA = new AbortController();
+  const controllerB = new AbortController();
+  const unhandled = [];
+  const onUnhandled = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const turnA = runtime.startTurn({
+      handle: handleA,
+      text: 'cancel-me',
+      mode: 'prompt',
+      requestId: 'iso-a',
+      timeoutMs: 0,
+      signal: controllerA.signal,
+    });
+    const turnB = runtime.startTurn({
+      handle: handleB,
+      text: 'complete-me',
+      mode: 'prompt',
+      requestId: 'iso-b',
+      timeoutMs: 0,
+      signal: controllerB.signal,
+    });
+    const drain = async (turn) => {
+      for await (const _event of turn.events) {
+        // Drain so close is not blocked on an open iterator.
+      }
+    };
+    const drainA = drain(turnA);
+    const drainB = drain(turnB);
+    await delay(100);
+    controllerA.abort();
+    const [resultA, resultB] = await Promise.all([
+      Promise.race([
+        turnA.result,
+        delay(3_000).then(() => { throw new Error('session A cancel did not settle'); }),
+      ]),
+      Promise.race([
+        turnB.result,
+        delay(3_000).then(() => { throw new Error('session B turn did not settle'); }),
+      ]),
+    ]);
+    await Promise.all([drainA, drainB]);
+    assert.equal(resultA.status, 'cancelled');
+    assert.equal(resultA.stopReason, 'cancelled');
+    assert.equal(resultB.status, 'completed');
+    assert.equal(resultB.stopReason, 'end_turn');
+    assert.equal(controllerB.signal.aborted, false);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    await runtime.close({ handle: handleA, reason: 'test_cleanup' }).catch(() => {});
+    await runtime.close({ handle: handleB, reason: 'test_cleanup' }).catch(() => {});
+  }
+});
+
+test('pre-aborted signal and hostile late prompt settlement stay closed', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-acpx-hostile-settle-'));
+  const cwd = path.join(root, 'worktree');
+  const stateDir = path.join(root, 'state');
+  await mkdir(cwd);
+  await mkdir(stateDir);
+  const agentPath = path.join(root, 'hostile-settle-agent.mjs');
+  await writeFile(agentPath, `import { createInterface } from 'node:readline';
+function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
+function response(id, result) { send({ jsonrpc: '2.0', id, result }); }
+async function handle(message) {
+  const { id, method, params = {} } = message;
+  if (method === 'initialize') {
+    return response(id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+    });
+  }
+  if (method === 'notifications/initialized' || method === 'initialized') return;
+  if (method === 'session/new') return response(id, { sessionId: 'hostile-settle-session' });
+  if (method === 'session/close') return response(id, {});
+  if (method === 'session/cancel') return; // hostile: ignore cancel
+  if (method === 'session/prompt') {
+    send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hostile-partial' },
+        },
+      },
+    });
+    setTimeout(() => response(id, { stopReason: 'end_turn' }), 600);
+  }
+}
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+process.stdin.resume();
+input.on('line', (line) => { try { handle(JSON.parse(line)); } catch {} });
+process.once('SIGTERM', () => process.exit(0));
+`);
+  const runtime = createAcpRuntime({
+    cwd,
+    sessionStore: createRuntimeStore({ stateDir }),
+    agentRegistry: createAgentRegistry({
+      overrides: { grok: [process.execPath, agentPath] },
+    }),
+    mcpServers: [],
+    permissionMode: 'approve-all',
+    timeoutMs: 5_000,
+  });
+
+  const preAborted = new AbortController();
+  preAborted.abort();
+  const preHandle = await runtime.ensureSession({
+    sessionKey: 'hostile-preabort',
+    agent: 'grok',
+    mode: 'persistent',
+    cwd,
+  });
+  const preTurn = runtime.startTurn({
+    handle: preHandle,
+    text: 'already aborted',
+    mode: 'prompt',
+    requestId: 'preabort',
+    timeoutMs: 0,
+    signal: preAborted.signal,
+  });
+  for await (const _event of preTurn.events) {}
+  const preResult = await preTurn.result;
+  assert.equal(preResult.status, 'cancelled');
+  await runtime.close({ handle: preHandle, reason: 'test_cleanup' }).catch(() => {});
+
+  const handle = await runtime.ensureSession({
+    sessionKey: 'hostile-late-settle',
+    agent: 'grok',
+    mode: 'persistent',
+    cwd,
+  });
+  const controller = new AbortController();
+  const unhandled = [];
+  const onUnhandled = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const turn = runtime.startTurn({
+      handle,
+      text: 'hostile ignore cancel then settle',
+      mode: 'prompt',
+      requestId: 'hostile-late',
+      timeoutMs: 0,
+      signal: controller.signal,
+    });
+    const events = (async () => {
+      for await (const _event of turn.events) {}
+    })();
+    await delay(100);
+    controller.abort();
+    const result = await Promise.race([
+      turn.result,
+      delay(3_000).then(() => { throw new Error('hostile cancel did not settle'); }),
+    ]);
+    await events;
+    await delay(700);
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.stopReason, 'cancelled');
+    assert.notEqual(result.status, 'completed');
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    await runtime.close({ handle, reason: 'test_cleanup' }).catch(() => {});
+  }
+});

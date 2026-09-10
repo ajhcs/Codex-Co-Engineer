@@ -476,25 +476,27 @@ AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRun
  *   1. races the prompt against the turn AbortSignal (worker-owned deadline)
  *   2. never promotes TimeoutError / interrupt into a synthetic end_turn
  * Session startup and bounded cleanup keep using their own withTimeout paths.
+ *
+ * The turn signal is propagated with AsyncLocalStorage so overlapping turns
+ * (and managers) cannot overwrite each other's AbortSignal across awaits.
+ * A module-global would race: turn B could steal turn A's signal, or A's
+ * finally could restore a stale value while B is still awaiting.
  */
-let coEngineerActiveTurnSignal = null;
+const { AsyncLocalStorage: CoEngineerAsyncLocalStorage } = process.getBuiltinModule('node:async_hooks');
+const coEngineerTurnSignalStore = new CoEngineerAsyncLocalStorage();
 
 const coEngineerOriginalRunRuntimeTurnTask = AcpRuntimeManager.prototype.runRuntimeTurnTask;
-AcpRuntimeManager.prototype.runRuntimeTurnTask = async function coEngineerRunRuntimeTurnTask(task) {
-  const previous = coEngineerActiveTurnSignal;
-  coEngineerActiveTurnSignal = task?.input?.signal ?? null;
-  try {
-    return await coEngineerOriginalRunRuntimeTurnTask.call(this, task);
-  } finally {
-    coEngineerActiveTurnSignal = previous;
-  }
+AcpRuntimeManager.prototype.runRuntimeTurnTask = function coEngineerRunRuntimeTurnTask(task) {
+  return coEngineerTurnSignalStore.run(
+    task?.input?.signal ?? null,
+    () => coEngineerOriginalRunRuntimeTurnTask.call(this, task),
+  );
 };
 
 async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } = {}) {
   const hasTimeout = timeoutMs != null && timeoutMs > 0;
   const hasSignal = signal != null;
   if (!hasTimeout && !hasSignal) return await promise;
-  if (signal?.aborted) throw new InterruptedError();
   return await new Promise((resolve, reject) => {
     let settled = false;
     let timer;
@@ -515,24 +517,30 @@ async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } 
       // Hostile agents that ignore cancel still fail after this short grace.
       abortTimer = setTimeout(() => finish(reject, new InterruptedError()), 200);
     };
-    if (hasSignal) signal.addEventListener('abort', onAbort, { once: true });
-    if (hasTimeout) {
-      timer = setTimeout(() => finish(reject, new TimeoutError(timeoutMs)), timeoutMs);
-    }
+    // Observe the prompt before any early abort path so a pre-aborted signal
+    // or hostile late settlement cannot become an unhandled rejection.
     promise.then(
       (value) => finish(resolve, value),
       (error) => finish(reject, error),
     );
+    if (signal?.aborted) {
+      finish(reject, new InterruptedError());
+      return;
+    }
+    if (hasSignal) signal.addEventListener('abort', onAbort, { once: true });
+    if (hasTimeout) {
+      timer = setTimeout(() => finish(reject, new TimeoutError(timeoutMs)), timeoutMs);
+    }
   });
 }
 
 runPromptTurn = async function coEngineerRunPromptTurn(params) {
+  const promptPromise = params.client.prompt(params.sessionId, params.prompt);
   try {
-    const promptPromise = params.client.prompt(params.sessionId, params.prompt);
     await params.onPromptStarted?.();
     const response = await coEngineerAwaitPromptWithDeadline(promptPromise, {
       timeoutMs: params.timeoutMs,
-      signal: params.signal ?? coEngineerActiveTurnSignal,
+      signal: params.signal ?? coEngineerTurnSignalStore.getStore(),
     });
     await params.client.waitForSessionUpdatesIdle?.({
       idleMs: SESSION_REPLY_IDLE_MS,
@@ -541,6 +549,11 @@ runPromptTurn = async function coEngineerRunPromptTurn(params) {
     recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
     return { stopReason: response.stopReason, source: 'rpc' };
   } catch (error) {
+    // Absorb late prompt settlement after interrupt/timeout; never replay.
+    void promptPromise.then(() => {}, () => {});
+    if (error instanceof InterruptedError) {
+      return { stopReason: 'cancelled', source: 'signal' };
+    }
     throw error;
   }
 };
