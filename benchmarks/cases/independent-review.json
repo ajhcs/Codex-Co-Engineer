@@ -1,9 +1,10 @@
 {
   "schema": "codex-co-engineer.benchmark-case.v1",
   "id": "independent-review",
+  "input_digest": "c599d6dec91d5a60e926929134c6cd651db80718c43ba3bc04076c8c6c6e01b8",
+  "base_sha": "5e818a5633788aa841eba133d6d7449b761502e4",
   "title": "Review a claimed bugfix for a missed equality case",
   "summary": "Report the missing equal-boundary finding against the frozen candidate. Do not implement the fix in this case.",
-  "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
   "comparable": {
     "host_model": "codex-default",
     "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },

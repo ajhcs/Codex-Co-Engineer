@@ -1,9 +1,10 @@
 {
   "schema": "codex-co-engineer.benchmark-case.v1",
   "id": "single-file-bugfix",
+  "input_digest": "54bd89a12cdbb1a66e662467f71d96bfc5e596bafced30f6a0c715c68a71d368",
+  "base_sha": "df49c63059159a79646258358850bef0590ca583",
   "title": "Repair an off-by-one in a sum helper",
   "summary": "Make inclusiveRangeSum(start, end) include the end bound and keep the frozen unit check green.",
-  "base_sha": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
   "comparable": {
     "host_model": "codex-default",
     "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },

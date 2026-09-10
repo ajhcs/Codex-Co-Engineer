@@ -1,9 +1,10 @@
 {
   "schema": "codex-co-engineer.benchmark-case.v1",
   "id": "review-driven-correction",
+  "input_digest": "32a9a5be9d1ad43ba596799a61c64a6c9d83bd5e2c875c76eac8635ef1b9fa7d",
+  "base_sha": "12b72cb6d8e6c6cfe6b107d09750acebcf2371fa",
   "title": "Apply a named review finding to a parser helper",
   "summary": "Rename parseCount to parseNonNegativeCount and reject negative values with a frozen unit check.",
-  "base_sha": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
   "comparable": {
     "host_model": "codex-default",
     "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },

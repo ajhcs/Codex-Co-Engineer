@@ -1,9 +1,10 @@
 {
   "schema": "codex-co-engineer.benchmark-case.v1",
   "id": "failing-check-then-fix",
+  "input_digest": "aaabbdcfefffc059272f37df1181bb41f9386a2a1d0a32987de04bfb688f7a06",
+  "base_sha": "b53a14fb12a19a5e35e35ff7eb084a48e6132e6a",
   "title": "Count a failed check attempt before the accepted fix",
   "summary": "isEven currently uses remainder 1. Failed attempts remain in the cohort usage-per-accepted-result denominator after the later fix.",
-  "base_sha": "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
   "comparable": {
     "host_model": "codex-default",
     "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
