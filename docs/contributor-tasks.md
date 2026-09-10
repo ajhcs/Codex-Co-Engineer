@@ -6,12 +6,6 @@ focused fixture check over a full suite while iterating. Complex provider
 integrations and cancellation-boundary redesigns need maintainer guidance and
 are omitted here.
 
-Focused check used below:
-
-```bash
-node --no-warnings --test plugins/codex-co-engineer/test/r1-final-decision-card.test.mjs
-```
-
 ## 1. Clarify one local setup error path
 
 **Problem:** A first-time user on a supported Linux host hits a missing
@@ -34,14 +28,17 @@ node scripts/validate-package-docs.mjs
 
 ## 2. Extend the first-outcome example
 
-**Problem:** `examples/first-outcome` is intentionally tiny; contributors can
-add one more deterministic file or acceptance assertion without live providers.
+**Problem:** `examples/first-outcome` ships a useful but tiny summarize-checks
+stub; contributors can deepen the utility or add one more frozen acceptance
+case without live providers.
 
 **Scope:** Edit only files under `examples/first-outcome/**`. Keep the starter
-prompt in ordinary language. Do not add paid-provider prerequisites.
+prompt in ordinary language. Do not weaken `check.mjs` to force a pass. Do not
+add paid-provider or npm-package prerequisites.
 
-**Acceptance:** `node check.mjs` passes from that directory after following the
-README. The example still copies cleanly into a fresh Git repository.
+**Acceptance:** After a complete `lib/summarize-checks.cjs` (or an agreed
+extension), `node check.mjs` passes from that directory. The example still
+copies cleanly into a fresh Git repository per the README.
 
 **Check:**
 
@@ -78,8 +75,10 @@ omit checks and limits.
 `.github/pull_request_template.md`. Keep required fields minimal; keep the
 private security route; do not claim Discussions is enabled.
 
-**Acceptance:** YAML forms still validate structurally; security stays a
-contact link to the private advisory route; questions remain issue-based.
+**Acceptance:** Required bug fields and security advisory routing remain
+present; PR template still has Problem / Result / Checks / Limits headings;
+questions remain issue-based. These grep checks confirm key phrases—they are
+not a YAML schema validator.
 
 **Check:**
 
@@ -105,8 +104,8 @@ behavior regresses, and passes on the current tree.
 **Check:**
 
 ```bash
-node --no-warnings --test plugins/codex-co-engineer/test/r1-final-decision-card.test.mjs
-# plus the specific test file you added or changed
+# Run only the test file you added or changed, for example:
+node --no-warnings --test plugins/codex-co-engineer/test/<your-contract-test>.mjs
 ```
 
 ## 6. Capture a small evaluation recipe outline
@@ -125,5 +124,10 @@ paid provider. Paid comparisons are explicitly optional and out of CI.
 
 ```bash
 git diff --check
-node --no-warnings --test plugins/codex-co-engineer/test/r1-final-decision-card.test.mjs
+# Depends on scripts/compare-coengineer-runs.mjs (planned companion script).
+# If that file is absent in this tree, skip the comparison CLI and rely on
+# the outline's documented fixture steps plus git diff --check only.
+test -f scripts/compare-coengineer-runs.mjs \
+  && node scripts/compare-coengineer-runs.mjs --help \
+  || echo "compare-coengineer-runs.mjs not present yet; outline-only check"
 ```

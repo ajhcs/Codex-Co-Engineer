@@ -33,8 +33,10 @@ From a source clone, copy `examples/first-outcome` into a clean Git
 repository (see that folder's README). Then ask Codex with your chosen
 provider:
 
-> Use Grok Co-Engineer to set `lib/version.js` so it exports
-> `1.0.0-first-outcome` and make `node check.mjs` pass. Commit the result.
+> Use Grok Co-Engineer to implement `lib/summarize-checks.cjs` so
+> `node summarize-checks.mjs` summarizes named check JSON (passed / failed /
+> skipped counts and failure names) and make the frozen `node check.mjs`
+> pass without editing the checker. Commit the result.
 
 Replace Grok with Cursor or Muse when that is your provider. Acceptance is
 local and deterministic: `node check.mjs`. No MCP payloads.
@@ -121,8 +123,9 @@ Codex:
 
 ## 6. Chat, correct, or cancel
 
-`Chatting with Co-Engineer` never starts a run. It inspects, continues,
-answers grouped attention, or cancels work that already exists.
+`Chatting with Co-Engineer` manages an existing assignment: inspect,
+continue, answer grouped attention, or cancel. Unrelated new work needs an
+explicit new delegation, not chat.
 
 If Codex groups questions from more than one assignment:
 

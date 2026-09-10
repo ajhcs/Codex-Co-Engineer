@@ -13,7 +13,7 @@ Thanks for using Codex-Co-Engineer. This page explains where to ask for help and
 
 GitHub Discussions is **not** enabled on this repository. Questions use Issues until maintainers enable Discussions and update this page.
 
-Do not invent other support channels. Maintainers reply when they can; there is no promised response time.
+Maintainers reply when they can; there is no promised response time.
 
 ## What helps
 

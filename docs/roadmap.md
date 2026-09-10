@@ -7,7 +7,7 @@ later ideas. It is not a usage forecast, adoption claim, or endorsement.
 
 | Theme | Intent |
 | --- | --- |
-| Ownership and deadlines | Finish complete external ownership through bounded correction, with truthful deadline and revision behavior. Parent runtime work owns the implementation; this package documents the contribution path around it. |
+| Ownership and deadlines | Finish complete external ownership through bounded correction, with truthful deadline and revision behavior. |
 | Demonstrable outcomes | Make a reviewed candidate understandable: assignment outcome, changes, decisive checks, review state, and unresolved decisions. |
 | Onboarding | A short first-success path: host compatibility, one chosen provider, and a tiny public example under `examples/first-outcome`. |
 | Contribution and evaluation package | Issue forms, PR template, `SUPPORT.md`, welcoming contributor guide, starter tasks, and a place to grow reproducible evaluations without paid-provider CI. |
