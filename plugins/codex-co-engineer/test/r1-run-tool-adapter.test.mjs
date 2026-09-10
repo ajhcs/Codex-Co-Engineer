@@ -1200,6 +1200,73 @@ test('task revision without reviseRun reports unsupported instead of reconstruct
   assert.equal(submitCalls.length, 0);
 });
 
+test('task inspect retains persisted correction lineage from reviseRun', async () => {
+  const HEAD = 'b'.repeat(40);
+  const IDEMPOTENCY = `sha256:${'d'.repeat(64)}`;
+  const correction = {
+    schema: 'codex-co-engineer.owned-delegation.v1',
+    version: 1,
+    lineage: 'owned_revision',
+    producer_run_id: 'vale-hardening',
+    producer_assignment_id: 'social-implementation',
+    reviewed_head: HEAD,
+  };
+  let stored = null;
+  const legacy = createAdapter();
+  const simpleRuntime = {
+    submitRunRequest: async () => {
+      throw new Error('submitRunRequest must not reconstruct a correction');
+    },
+    inspectRun: async ({ run_id: runId }) => {
+      if (stored && stored.run_id === runId) return stored;
+      return {
+        schema: 'codex-co-engineer.run-admission.v1',
+        run_id: runId,
+        phase: 'completed',
+        status: 'completed',
+        lanes: [{ assignment_id: 'social-implementation', task_id: 'ce-social', status: 'completed' }],
+      };
+    },
+    resumeRun: async () => ({}),
+    replyRun: async () => ({}),
+    cancelRun: async () => ({}),
+    waitRun: async () => ({}),
+    reviseRun: async () => {
+      stored = {
+        schema: 'codex-co-engineer.run-admission.v1',
+        run_id: 'rev-abcd1234abcd1234',
+        phase: 'running',
+        status: 'running',
+        persisted: true,
+        correction,
+        lanes: [{
+          assignment_id: 'social-implementation',
+          task_id: 'ce-rev-social',
+          status: 'running',
+          phase: 'running',
+          prompt_dispatched: true,
+        }],
+      };
+      return stored;
+    },
+  };
+  const adapter = createRunToolAdapter({ runtime: legacy.runtime, simpleRuntime });
+  const revised = await adapter.dispatch('task', {
+    run_id: 'vale-hardening',
+    revision: {
+      assignment_id: 'social-implementation',
+      feedback: 'Fix the failing unit tests.',
+      expected_head: HEAD,
+      expected_idempotency_key: IDEMPOTENCY,
+    },
+  });
+  assert.equal(revised.correction.lineage, 'owned_revision');
+  assert.equal(revised.correction.reviewed_head, HEAD);
+  const inspected = await adapter.dispatch('task', { run_id: revised.run_id });
+  assert.equal(inspected.correction.lineage, 'owned_revision');
+  assert.equal(inspected.correction.producer_run_id, 'vale-hardening');
+});
+
 test('dirty or active revision requests fail closed without a new dispatch', async () => {
   const HEAD = 'b'.repeat(40);
   const IDEMPOTENCY = `sha256:${'d'.repeat(64)}`;

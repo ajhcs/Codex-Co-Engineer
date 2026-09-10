@@ -16,7 +16,6 @@ import {
 import { canonicalJsonStringify } from './identity.mjs';
 import { compileOwnedCorrectionPromptV1 } from './prompt-compiler.mjs';
 import {
-  PROMPT_MAX_BYTES,
   RunContractV1Error,
   assertBaseSha,
   assertBoundedText,
@@ -38,9 +37,13 @@ export const OWNED_REVISION_IDENTITY_DOMAIN = 'codex-co-engineer.owned-revision.
 export const OWNED_REVISION_REQUEST_KEYS = capturedFreeze([
   'assignment_id', 'feedback', 'expected_head', 'expected_idempotency_key',
 ]);
+export const OWNED_CORRECTION_LINEAGE_KEYS = capturedFreeze([
+  'schema', 'version', 'lineage', 'producer_run_id', 'producer_assignment_id', 'reviewed_head',
+]);
 export const MAX_REVISION_FEEDBACK_BYTES = 4_096;
 export const MIN_REVISION_FEEDBACK_BYTES = 1;
 export const IDEMPOTENCY_KEY_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+export const AUTHORITATIVE_DISPATCH_CONFIDENCE = 'authoritative';
 
 const COMPLETED_PRODUCER_PHASES = capturedFreeze(['completed']);
 const ACTIVE_OR_UNCERTAIN_PHASES = capturedFreeze([
@@ -48,7 +51,6 @@ const ACTIVE_OR_UNCERTAIN_PHASES = capturedFreeze([
   'needs_attention', 'accepted', 'starting', 'cancelling', 'dispatching',
   'validating', 'preparing_workspaces', 'awaiting_consent',
 ]);
-const UNCERTAIN_CONFIDENCE = capturedFreeze(['uncertain', 'not_sent']);
 
 function revisionError(code, field, message) {
   throw new RunContractV1Error(code, field, message);
@@ -109,6 +111,51 @@ export function parseOwnedRevisionRequestV1(value, field = 'revision') {
   });
 }
 
+export function compactOwnedCorrectionLineageV1(value, field = 'correction') {
+  assertNotProxy(value, field);
+  assertPlainObject(value, 'invalid_type', field, 'correction');
+  assertDirectJsonClosure(value, field);
+  for (const key of capturedOwnKeys(value)) {
+    if (typeof key !== 'string') revisionError('symbol_key_denied', field);
+    if (!capturedIncludes(OWNED_CORRECTION_LINEAGE_KEYS, key)) {
+      revisionError('unknown_key', `${field}.${key}`, 'Correction lineage is a closed machine record.');
+    }
+  }
+  for (const key of OWNED_CORRECTION_LINEAGE_KEYS) {
+    if (!capturedHasOwn(value, key)) {
+      revisionError('missing_key', `${field}.${key}`, 'Correction lineage is incomplete.');
+    }
+  }
+  const schema = ownDataValue(value, 'schema', `${field}.schema`);
+  if (schema !== OWNED_DELEGATION_SCHEMA_ID) {
+    revisionError('invalid_format', `${field}.schema`, 'Correction lineage schema is invalid.');
+  }
+  const version = ownDataValue(value, 'version', `${field}.version`);
+  if (version !== OWNED_DELEGATION_VERSION) {
+    revisionError('invalid_format', `${field}.version`, 'Correction lineage version is invalid.');
+  }
+  const lineage = ownDataValue(value, 'lineage', `${field}.lineage`);
+  if (lineage !== 'owned_revision') {
+    revisionError('invalid_format', `${field}.lineage`, 'Correction lineage must be owned_revision.');
+  }
+  const producerRunId = ownDataValue(value, 'producer_run_id', `${field}.producer_run_id`);
+  assertRunId(producerRunId, `${field}.producer_run_id`);
+  const producerAssignmentId = ownDataValue(value, 'producer_assignment_id', `${field}.producer_assignment_id`);
+  if (typeof producerAssignmentId !== 'string' || !isAssignmentId(producerAssignmentId)) {
+    revisionError('invalid_format', `${field}.producer_assignment_id`, 'producer_assignment_id is not valid.');
+  }
+  const reviewedHead = ownDataValue(value, 'reviewed_head', `${field}.reviewed_head`);
+  assertBaseSha(reviewedHead, `${field}.reviewed_head`);
+  return freezeData({
+    schema: OWNED_DELEGATION_SCHEMA_ID,
+    version: OWNED_DELEGATION_VERSION,
+    lineage: 'owned_revision',
+    producer_run_id: producerRunId,
+    producer_assignment_id: producerAssignmentId,
+    reviewed_head: reviewedHead,
+  });
+}
+
 export function ownedRevisionIdentityV1({ producer, revision }) {
   const digestHex = sha256Hex({
     producer_run_id: producer.run_id,
@@ -149,14 +196,21 @@ export function assertOwnedRevisionProducerV1(producer, revision, field = 'revis
   }
   const phase = producerPhase(producer);
   const confidence = producer.dispatch_confidence;
-  const uncertain = producer.prompt_dispatched !== true
-    || capturedIncludes(UNCERTAIN_CONFIDENCE, confidence)
+  const unproven = producer.prompt_dispatched !== true
+    || confidence !== AUTHORITATIVE_DISPATCH_CONFIDENCE
     || capturedIncludes(ACTIVE_OR_UNCERTAIN_PHASES, phase);
-  if (uncertain || !capturedIncludes(COMPLETED_PRODUCER_PHASES, phase)) {
+  if (unproven || !capturedIncludes(COMPLETED_PRODUCER_PHASES, phase)) {
     revisionError(
       'revision_producer_active',
       field,
       'A revision requires a completed, certain producer; active or uncertain tasks are never replayed.',
+    );
+  }
+  if (typeof producer.task_id !== 'string' || producer.task_id.length === 0) {
+    revisionError(
+      'revision_lifecycle_unfinal',
+      field,
+      'A revision requires proven terminal lifecycle; a missing task is not a completed producer.',
     );
   }
   if (producer.clean !== true) {
@@ -299,9 +353,6 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
     required_evidence: producer.required_evidence,
     expected_head: revision.expected_head,
   });
-  if (typeof prompt !== 'string' || prompt.length < 1 || prompt.length > PROMPT_MAX_BYTES) {
-    revisionError('invalid_format', 'revision.feedback', 'The derived correction prompt is outside the assignment bound.');
-  }
   const objective = `Correct ${producer.assignment_id}: ${revision.feedback}`.slice(0, 4096);
   const assignment = {
     assignment_id: producer.assignment_id,
@@ -317,7 +368,7 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
       : {}),
   };
   if (producer.access !== undefined) assignment.access = producer.access === 'writer' ? 'write' : producer.access;
-  const correction = freezeData({
+  const correction = compactOwnedCorrectionLineageV1({
     schema: OWNED_DELEGATION_SCHEMA_ID,
     version: OWNED_DELEGATION_VERSION,
     lineage: 'owned_revision',
@@ -388,6 +439,7 @@ export function producerFromRunReceiptV1(receipt, assignmentId, field = 'revisio
 
 capturedFreeze(parseOwnedRevisionRequestV1);
 capturedFreeze(ownedRevisionIdentityV1);
+capturedFreeze(compactOwnedCorrectionLineageV1);
 capturedFreeze(assertOwnedRevisionProducerV1);
 capturedFreeze(projectOwnedProducerCandidateV1);
 capturedFreeze(deriveOwnedRevisionRequestV1);

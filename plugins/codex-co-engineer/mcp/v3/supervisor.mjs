@@ -79,6 +79,7 @@ import {
   RUN_REQUEST_DEFAULT_MODELS,
 } from './run-request-compiler.mjs';
 import {
+  assertOwnedRevisionProducerV1,
   deriveOwnedRevisionRequestV1,
   parseOwnedRevisionRequestV1,
   projectOwnedProducerCandidateV1,
@@ -2390,21 +2391,6 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
         'The named producer assignment is not known.',
       );
     }
-    if (typeof lane.task_id === 'string') {
-      try {
-        const { task } = await readTask(root, lane.task_id);
-        const classified = classifySupervisorTerminalReceipt(task);
-        if (classified.projected_status !== 'completed' && classified.projected_status !== 'succeeded') {
-          throw new RunContractV1Error(
-            'revision_lifecycle_unfinal',
-            'revision',
-            'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
-          );
-        }
-      } catch (error) {
-        if (error instanceof RunContractV1Error) throw error;
-      }
-    }
     let workspace;
     try {
       workspace = await inspectWorkspace({
@@ -2418,10 +2404,45 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
       workspace = null;
     }
     const producer = projectOwnedProducerCandidateV1({ record, assignment, lane, workspace });
+    assertOwnedRevisionProducerV1(producer, revision);
+    if (typeof lane.task_id !== 'string' || lane.task_id.length === 0) {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; a missing task is not a completed producer.',
+      );
+    }
+    let task;
+    try {
+      ({ task } = await readTask(root, lane.task_id));
+    } catch {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; a missing task is not a completed producer.',
+      );
+    }
+    if (!task || typeof task !== 'object' || Array.isArray(task)
+      || task.id !== lane.task_id
+      || task.run_id !== record.run_id
+      || task.assignment_id !== assignment.assignment_id) {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+      );
+    }
+    const classified = classifySupervisorTerminalReceipt(task);
+    if (classified.projected_status !== 'completed' && classified.projected_status !== 'succeeded') {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+      );
+    }
     const derived = deriveOwnedRevisionRequestV1(producer, revision);
-    const submitted = await runtime.submitRunRequest(derived.run_request, reviseOptions);
-    return Object.freeze({
-      ...submitted,
+    return runtime.submitRunRequest(derived.run_request, {
+      ...reviseOptions,
       correction: derived.correction,
     });
   }

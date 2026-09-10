@@ -1205,12 +1205,18 @@ async function makeGitRepo(prefix) {
   return { dir, head: String(stdout).trim().toLowerCase() };
 }
 
+function worktreeKey(runId, assignmentId) {
+  return `${runId}:${assignmentId}`;
+}
+
 async function createOwnedRevisionHarness(options = {}) {
   const repo = await makeGitRepo('co-engineer-owned-src-');
   const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-owned-rev-'));
   const worktrees = new Map();
   const dispatchCalls = [];
+  const createdTasks = new Set();
   let inspectStatus = options.inspectStatus ?? 'completed';
+  const createTerminalTask = options.createTerminalTask !== false;
   const dispatchResult = options.dispatchResult ?? {
     dispatched: true,
     confidence: 'authoritative',
@@ -1226,7 +1232,8 @@ async function createOwnedRevisionHarness(options = {}) {
     prepareWorkspace: async ({ run_id: runId, assignment, git }) => {
       const dest = path.join(root, 'worktrees', `${runId}-${assignment.assignment_id}`);
       await mkdir(path.dirname(dest), { recursive: true });
-      await run('git', ['clone', '--', git.repository_path, dest]);
+      await run('git', ['-C', git.repository_path, 'worktree', 'add', '--detach', dest, git.base_sha]);
+      worktrees.set(worktreeKey(runId, assignment.assignment_id), dest);
       worktrees.set(assignment.assignment_id, dest);
       return {
         prepared: true,
@@ -1251,10 +1258,35 @@ async function createOwnedRevisionHarness(options = {}) {
       });
       return dispatchResult;
     },
-    inspectLane: async ({ assignment_id: assignmentId }) => {
-      const worktree = worktrees.get(assignmentId);
+    inspectLane: async ({ run_id: runId, assignment_id: assignmentId, task_id: taskId }) => {
+      const worktree = worktrees.get(worktreeKey(runId, assignmentId)) ?? worktrees.get(assignmentId);
       if (inspectStatus !== 'completed' || typeof worktree !== 'string') {
         return { status: inspectStatus, cursor: '1' };
+      }
+      const candidatePath = path.join(worktree, 'src', 'slice.txt');
+      try {
+        await readFile(candidatePath);
+      } catch {
+        await mkdir(path.dirname(candidatePath), { recursive: true });
+        await writeFile(candidatePath, 'producer candidate\n');
+        await run('git', ['-C', worktree, 'add', '.']);
+        await run('git', ['-C', worktree, 'commit', '-m', 'producer candidate']);
+      }
+      if (createTerminalTask && typeof taskId === 'string' && !createdTasks.has(taskId)) {
+        await createTask({
+          root,
+          prompt: 'completed producer',
+          record: {
+            id: taskId,
+            status: 'completed',
+            provider: 'grok',
+            run_id: runId,
+            assignment_id: assignmentId,
+            cwd: worktree,
+            cleanup: { status: 'normal', boundary: 'released', lock: 'released' },
+          },
+        });
+        createdTasks.add(taskId);
       }
       const [{ stdout: headOut }, { stdout: statusOut }] = await Promise.all([
         run('git', ['-C', worktree, 'rev-parse', 'HEAD']),
@@ -1315,21 +1347,29 @@ function revisionFromPacket(packet, assignmentId, feedback) {
 test('supervisor owned revision dispatches from the public packet and rejects unsafe inputs', async () => {
   const harness = await createOwnedRevisionHarness();
   try {
+    const originalBase = harness.repo.head;
     const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
     assert.equal(submitted.phase, 'running');
     const completed = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
     assert.equal(completed.phase, 'completed');
     assert.equal(completed.coordination.next_action.action, 'review');
-    assert.equal(completed.coordination.producers[0].head, harness.repo.head);
+    const candidateHead = completed.coordination.producers[0].head;
+    assert.match(candidateHead, /^[0-9a-f]{40}$/u);
+    assert.notEqual(candidateHead, originalBase);
     assert.match(completed.coordination.request_idempotency_key, /^sha256:[0-9a-f]{64}$/u);
     assert.equal(completed.coordination.git.head, null);
     const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix the failing unit tests without widening scope.');
-    const first = await harness.adapter.dispatch('task', { run_id: submitted.run_id, revision });
+    const [first, concurrent] = await Promise.all([
+      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+    ]);
+    assert.equal(concurrent.run_id, first.run_id);
     const producerDispatches = harness.dispatchCalls.filter((entry) => entry.run_id === submitted.run_id);
     const correctionDispatches = harness.dispatchCalls.filter((entry) => entry.run_id === first.run_id);
     assert.equal(producerDispatches.length, 1);
     assert.equal(correctionDispatches.length, 1);
-    assert.equal(correctionDispatches[0].base_sha, harness.repo.head);
+    assert.equal(correctionDispatches[0].base_sha, candidateHead);
+    assert.notEqual(correctionDispatches[0].base_sha, originalBase);
     assert.equal(correctionDispatches[0].provider, 'grok');
     assert.equal(correctionDispatches[0].model, 'grok-4');
     assert.deepEqual(correctionDispatches[0].write_scope, ['src/**']);
@@ -1338,15 +1378,16 @@ test('supervisor owned revision dispatches from the public packet and rejects un
     assert.match(correctionDispatches[0].prompt, /Fix the failing unit tests/u);
     assert.match(correctionDispatches[0].prompt, /fresh owned revision/u);
     assert.equal(first.correction.lineage, 'owned_revision');
-    assert.equal(first.correction.reviewed_head, harness.repo.head);
-
-    const [second, third] = await Promise.all([
-      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
-      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
-    ]);
-    assert.equal(second.run_id, first.run_id);
-    assert.equal(third.run_id, first.run_id);
-    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id === first.run_id).length, 1);
+    assert.equal(first.correction.reviewed_head, candidateHead);
+    assert.equal(concurrent.correction.lineage, 'owned_revision');
+    const correctionWorkspace = harness.worktrees.get(worktreeKey(first.run_id, 'social-implementation'));
+    assert.equal(typeof correctionWorkspace, 'string');
+    const { stdout: correctionHeadOut } = await run('git', ['-C', correctionWorkspace, 'rev-parse', 'HEAD']);
+    assert.equal(String(correctionHeadOut).trim().toLowerCase(), candidateHead);
+    const inspected = await harness.adapter.dispatch('task', { run_id: first.run_id });
+    assert.equal(inspected.correction.lineage, 'owned_revision');
+    assert.equal(inspected.correction.reviewed_head, candidateHead);
+    assert.equal(inspected.correction.producer_run_id, submitted.run_id);
   } finally {
     await harness.close();
   }
@@ -1450,16 +1491,8 @@ test('owned revision does not dispatch dirty, stale, missing, active, uncertain,
     const submitted = await unfinal.adapter.dispatch('delegate', { run_request: unfinal.request() });
     const completed = await unfinal.adapter.dispatch('task', { run_id: submitted.run_id });
     const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
-    await createTask({
-      root: unfinal.root,
-      prompt: 'unfinal producer',
-      record: {
-        id: completed.lanes[0].task_id,
-        status: 'completed',
-        provider: 'grok',
-        cwd: unfinal.worktrees.get('social-implementation'),
-        cleanup: { status: 'pending', boundary: 'unknown', lock: 'unknown' },
-      },
+    await updateTask(unfinal.root, completed.lanes[0].task_id, {
+      cleanup: { status: 'pending', boundary: 'unknown', lock: 'unknown' },
     });
     await assert.rejects(
       unfinal.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
@@ -1467,5 +1500,22 @@ test('owned revision does not dispatch dirty, stale, missing, active, uncertain,
     );
   } finally {
     await unfinal.close();
+  }
+
+  const missingTask = await createOwnedRevisionHarness({
+    run_id: 'vale-missing-task',
+    createTerminalTask: false,
+  });
+  try {
+    const submitted = await missingTask.adapter.dispatch('delegate', { run_request: missingTask.request() });
+    const completed = await missingTask.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await assert.rejects(
+      missingTask.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_lifecycle_unfinal',
+    );
+    assert.equal(missingTask.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 0);
+  } finally {
+    await missingTask.close();
   }
 });

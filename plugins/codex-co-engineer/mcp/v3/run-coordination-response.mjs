@@ -133,13 +133,19 @@ function collectUnresolved(lanes, receipt) {
     let reason = null;
     if (laneCleanupIncomplete(lane, receipt)) reason = 'cleanup';
     else if (clean === false) reason = 'dirty';
-    else if (lane?.dispatch_confidence === 'uncertain') reason = 'uncertain';
-    else if (status === null) reason = 'unresolved';
+    else if (lane?.dispatch_confidence === 'uncertain' || lane?.dispatch_confidence === 'not_sent') {
+      reason = 'uncertain';
+    } else if (status === null) reason = 'unresolved';
     else if (capturedIncludes(ATTENTION, status)) reason = 'needs_attention';
     else if (capturedIncludes(FAILED, status)) reason = 'failed';
     else if (capturedIncludes(ACTIVE, status)) reason = 'active';
-    else if (capturedIncludes(COMPLETED, status)) continue;
-    else reason = 'unresolved';
+    else if (capturedIncludes(COMPLETED, status)) {
+      if (clean !== true || lane?.dispatch_confidence !== 'authoritative' || lane?.prompt_dispatched !== true) {
+        reason = 'unresolved';
+      } else {
+        continue;
+      }
+    } else reason = 'unresolved';
     unresolved.push(freezeData({
       assignment_id: typeof lane?.assignment_id === 'string' ? lane.assignment_id : null,
       status,
@@ -150,17 +156,12 @@ function collectUnresolved(lanes, receipt) {
   return unresolved;
 }
 
-function hasCorrectionFinding(receipt, lanes) {
-  if (receipt?.correction_finding === true) return true;
-  return lanes.some((lane) => {
-    const result = lane?.result;
-    if (result && typeof result === 'object' && !Array.isArray(result)) {
-      if (result.needs_correction === true || result.correction_finding === true) return true;
-      if (typeof result.finding === 'string' && result.finding.length > 0) return true;
-    }
-    const status = laneStatus(lane);
-    return (lane?.role === 'review' || lane?.role === 'verify') && capturedIncludes(FAILED, status);
-  });
+function isProvenCompletedCleanWriter(lane) {
+  return capturedIncludes(COMPLETED, laneStatus(lane))
+    && (lane?.access === 'writer' || lane?.access === 'write' || lane?.role === 'implement')
+    && laneClean(lane) === true
+    && lane?.dispatch_confidence === 'authoritative'
+    && lane?.prompt_dispatched === true;
 }
 
 function chooseNextAction(receipt, lanes, unresolved) {
@@ -189,7 +190,12 @@ function chooseNextAction(receipt, lanes, unresolved) {
       action: 'wait',
     });
   }
-  const failed = unresolved.find((item) => item.reason === 'failed' || item.reason === 'dirty' || item.reason === 'cleanup');
+  const failed = unresolved.find((item) => (
+    item.reason === 'failed'
+    || item.reason === 'dirty'
+    || item.reason === 'cleanup'
+    || item.reason === 'unresolved'
+  ));
   if (failed) {
     return freezeData({
       tool: 'task',
@@ -230,18 +236,14 @@ function collectProducers(receipt, lanes) {
   }));
 }
 
-function collectAvailableActions(nextAction, receipt, lanes, unresolved) {
+function collectAvailableActions(nextAction, lanes, unresolved) {
   const actions = [];
   if (typeof nextAction?.action === 'string' && capturedIncludes(NEXT_ACTIONS, nextAction.action)
     && nextAction.action !== 'none') {
     actions.push(nextAction.action);
   }
-  const completedCleanWriter = unresolved.length === 0 && lanes.some((lane) => (
-    capturedIncludes(COMPLETED, laneStatus(lane))
-    && (lane?.access === 'writer' || lane?.access === 'write' || lane?.role === 'implement')
-    && laneClean(lane) !== false
-  ));
-  if (completedCleanWriter && hasCorrectionFinding(receipt, lanes) && !actions.includes('revision')) {
+  const completedCleanWriter = unresolved.length === 0 && lanes.some(isProvenCompletedCleanWriter);
+  if (completedCleanWriter && !actions.includes('revision')) {
     actions.push('revision');
   }
   return actions;
@@ -292,7 +294,7 @@ export function projectRunCoordinationResponseV1(receipt) {
     evidence_refs: collectEvidenceRefs(receipt),
     unresolved,
     next_action: nextAction,
-    available_actions: collectAvailableActions(nextAction, receipt, lanes, unresolved),
+    available_actions: collectAvailableActions(nextAction, lanes, unresolved),
   });
 }
 

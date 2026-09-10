@@ -734,18 +734,6 @@ export function parseChildEnvelopeV1(envelopeText) {
 }
 
 const CORRECTION_PROMPT_PREFIX = 'Correct the existing assignment in place. Preserve the provider, model, write scope, access, and capabilities. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
-const CORRECTION_ORIGINAL_OBJECTIVE_MAX = 1_024;
-const CORRECTION_ORIGINAL_PROMPT_MAX = 4_096;
-const CORRECTION_ACCEPTANCE_MAX = 1_024;
-
-function boundCorrectionText(value, maxBytes) {
-  if (typeof value !== 'string' || value.length === 0) return '';
-  if (utf8ByteLength(value) <= maxBytes) return value;
-  const buffer = Buffer.from(value, 'utf8');
-  let end = maxBytes;
-  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
-  return buffer.subarray(0, end).toString('utf8');
-}
 
 function correctionScopeSection(writeScope, access) {
   const readOnly = access === 'read_only' || access === 'read';
@@ -759,7 +747,7 @@ function correctionScopeSection(writeScope, access) {
 function correctionAcceptanceSection(acceptance, requiredEvidence) {
   const lines = ['Acceptance constraints:'];
   if (Array.isArray(acceptance) && acceptance.length > 0) {
-    for (const entry of acceptance.slice(0, 16)) {
+    for (const entry of acceptance) {
       if (typeof entry === 'string' && entry.length > 0) {
         lines.push(`- ${entry}`);
         continue;
@@ -774,7 +762,7 @@ function correctionAcceptanceSection(acceptance, requiredEvidence) {
   if (Array.isArray(requiredEvidence) && requiredEvidence.length > 0) {
     lines.push(`Required evidence: ${requiredEvidence.filter((kind) => typeof kind === 'string').join(', ')}`);
   }
-  return boundCorrectionText(lines.join('\n'), CORRECTION_ACCEPTANCE_MAX);
+  return lines.join('\n');
 }
 
 /**
@@ -821,8 +809,8 @@ export function compileOwnedCorrectionPromptV1({
   if (Array.isArray(capabilities) && capabilities.length > 0) {
     executionParts.push(`Capabilities remain ${capabilities.join(', ')}.`);
   }
-  const originalObjective = boundCorrectionText(objective, CORRECTION_ORIGINAL_OBJECTIVE_MAX);
-  const originalAssignment = boundCorrectionText(originalPrompt, CORRECTION_ORIGINAL_PROMPT_MAX);
+  const originalObjective = typeof objective === 'string' && objective.length > 0 ? objective : '';
+  const originalAssignment = typeof originalPrompt === 'string' && originalPrompt.length > 0 ? originalPrompt : '';
   const lineage = typeof producerRunId === 'string'
     ? `Correction lineage: fresh owned revision of ${producerRunId}/${producerAssignmentId}.`
     : `Correction lineage: fresh owned revision of ${producerAssignmentId}.`;
@@ -839,6 +827,14 @@ export function compileOwnedCorrectionPromptV1({
     'Feedback:',
     feedback,
   ].join('\n');
+  const promptBytes = utf8ByteLength(prompt);
+  if (promptBytes > PROMPT_MAX_BYTES) {
+    fail(
+      'bounded_context_overflow',
+      'prompt',
+      `The derived correction prompt is ${promptBytes} bytes and cannot preserve original constraints within the ${PROMPT_MAX_BYTES}-byte assignment bound.`,
+    );
+  }
   assertBoundedText(prompt, {
     min: PROMPT_MIN_BYTES,
     max: PROMPT_MAX_BYTES,

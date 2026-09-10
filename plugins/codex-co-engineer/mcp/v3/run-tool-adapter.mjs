@@ -328,6 +328,7 @@ const CONTENT_FREE = capturedFreeze({
   revision_workspace_unsupported: 'Remote candidate revision is not supported; a local inspectable HEAD is required.',
   revision_workspace_uninspectable: 'A revision requires a fresh successful workspace inspection.',
   revision_lifecycle_unfinal: 'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+  bounded_context_overflow: 'The derived correction prompt cannot preserve original constraints within the assignment bound.',
 });
 
 export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
@@ -372,6 +373,7 @@ export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
   'revision_workspace_unsupported',
   'revision_workspace_uninspectable',
   'revision_lifecycle_unfinal',
+  'bounded_context_overflow',
 ]);
 
 const ADAPTER_DEPENDENCY_KEYS = capturedFreeze([

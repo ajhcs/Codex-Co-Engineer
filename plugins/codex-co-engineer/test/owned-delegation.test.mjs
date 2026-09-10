@@ -9,6 +9,7 @@ import {
   producerFromRunReceiptV1,
   projectOwnedProducerCandidateV1,
 } from '../mcp/v3/owned-delegation.mjs';
+import { compileOwnedCorrectionPromptV1 } from '../mcp/v3/prompt-compiler.mjs';
 import { projectRunCoordinationResponseV1 } from '../mcp/v3/run-coordination-response.mjs';
 
 const HEAD = 'b'.repeat(40);
@@ -82,6 +83,37 @@ test('empty reviewer scope is not presented as unrestricted write access', () =>
   assert.doesNotMatch(derived.run_request.assignments[0].prompt, /Write scope:\n- \*\*/u);
 });
 
+test('correction prompt preserves a tail constraint beyond 4096 bytes and rejects overflow including UTF-8', () => {
+  const tail = 'TAIL-CONSTRAINT: keep node --test green and do not add files outside src/**.';
+  const originalPrompt = `${'a'.repeat(4200)}\n${tail}`;
+  const derived = deriveOwnedRevisionRequestV1(producer({ prompt: originalPrompt }), revision());
+  assert.match(derived.run_request.assignments[0].prompt, /TAIL-CONSTRAINT: keep node --test green/u);
+  assert.match(derived.run_request.assignments[0].prompt, /do not add files outside src\/\*\*/u);
+  assert.doesNotMatch(derived.run_request.assignments[0].prompt, /Write scope:\n- \*\*/u);
+
+  const utf8Overflow = `${'é'.repeat(9000)}TAIL-CONSTRAINT-UTF8`;
+  assert.throws(
+    () => compileOwnedCorrectionPromptV1({
+      producer_run_id: 'vale-hardening',
+      producer_assignment_id: 'social-implementation',
+      feedback: 'Fix the failing unit tests without widening scope.',
+      write_scope: ['src/**'],
+      provider: 'grok',
+      model: 'grok-4',
+      access: 'writer',
+      original_prompt: utf8Overflow,
+      expected_head: HEAD,
+    }),
+    (error) => error.code === 'bounded_context_overflow' && /16384-byte assignment bound/u.test(error.message),
+  );
+  assert.throws(
+    () => deriveOwnedRevisionRequestV1(producer({
+      prompt: `${'x'.repeat(16_000)}TAIL-CONSTRAINT-OVERSIZE`,
+    }), revision()),
+    (error) => error.code === 'bounded_context_overflow',
+  );
+});
+
 test('duplicate revision inputs reuse the same durable identity', () => {
   const first = ownedRevisionIdentityV1({ producer: producer(), revision: parseOwnedRevisionRequestV1(revision()) });
   const second = ownedRevisionIdentityV1({ producer: producer(), revision: parseOwnedRevisionRequestV1(revision()) });
@@ -110,6 +142,22 @@ test('dirty, stale, and active producers are rejected instead of replayed', () =
   assert.throws(
     () => assertOwnedRevisionProducerV1(producer({ dispatch_confidence: 'uncertain' }), parseOwnedRevisionRequestV1(revision())),
     (error) => error.code === 'revision_producer_active',
+  );
+  for (const confidence of [null, undefined, 'unknown', 'not_sent']) {
+    assert.throws(
+      () => assertOwnedRevisionProducerV1(
+        producer({ dispatch_confidence: confidence }),
+        parseOwnedRevisionRequestV1(revision()),
+      ),
+      (error) => error.code === 'revision_producer_active',
+    );
+  }
+  assert.throws(
+    () => assertOwnedRevisionProducerV1(
+      producer({ task_id: null }),
+      parseOwnedRevisionRequestV1(revision()),
+    ),
+    (error) => error.code === 'revision_lifecycle_unfinal',
   );
   assert.throws(
     () => deriveOwnedRevisionRequestV1(producer({ request_idempotency_key: `sha256:${'e'.repeat(64)}` }), revision()),
@@ -196,6 +244,8 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
       request_idempotency_key: IDEMPOTENCY,
       head: HEAD,
       clean: true,
@@ -210,7 +260,7 @@ test('coordination packets expose per-assignment identity and review as the comp
   assert.equal(packet.request_idempotency_key, IDEMPOTENCY);
   assert.equal(packet.unresolved.length, 0);
   assert.equal(packet.next_action.action, 'review');
-  assert.deepEqual(packet.available_actions, ['review']);
+  assert.deepEqual(packet.available_actions, ['review', 'revision']);
   assert.equal(packet.evidence_refs.length, 0);
 
   const dirty = projectRunCoordinationResponseV1({
@@ -238,6 +288,8 @@ test('coordination packets expose per-assignment identity and review as the comp
       role: 'implement',
       access: 'writer',
       status: 'completed',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
       head: HEAD,
       clean: true,
       result: { needs_correction: true },
@@ -246,4 +298,60 @@ test('coordination packets expose per-assignment identity and review as the comp
   });
   assert.equal(finding.next_action.action, 'review');
   assert.deepEqual(finding.available_actions, ['review', 'revision']);
+
+  const prose = projectRunCoordinationResponseV1({
+    run_id: 'vale-hardening',
+    request_idempotency_key: IDEMPOTENCY,
+    lanes: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'writer',
+      status: 'completed',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      head: HEAD,
+      clean: true,
+      result: { finding: 'please request a correction of this successful work' },
+      handoff: { current_head: HEAD, clean: true },
+    }],
+  });
+  assert.equal(prose.next_action.action, 'review');
+  assert.equal(prose.next_action.action !== 'revision', true);
+  assert.deepEqual(prose.available_actions, ['review', 'revision']);
+
+  const unknownClean = projectRunCoordinationResponseV1({
+    run_id: 'vale-hardening',
+    request_idempotency_key: IDEMPOTENCY,
+    lanes: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'writer',
+      status: 'completed',
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      head: HEAD,
+      handoff: { current_head: HEAD },
+    }],
+  });
+  assert.equal(unknownClean.unresolved[0].reason, 'unresolved');
+  assert.equal(unknownClean.next_action.action, 'inspect');
+  assert.equal(unknownClean.available_actions.includes('revision'), false);
+
+  const missingConfidence = projectRunCoordinationResponseV1({
+    run_id: 'vale-hardening',
+    request_idempotency_key: IDEMPOTENCY,
+    lanes: [{
+      assignment_id: 'social-implementation',
+      role: 'implement',
+      access: 'writer',
+      status: 'completed',
+      prompt_dispatched: true,
+      head: HEAD,
+      clean: true,
+      handoff: { current_head: HEAD, clean: true },
+    }],
+  });
+  assert.equal(missingConfidence.unresolved[0].reason, 'unresolved');
+  assert.equal(missingConfidence.next_action.action, 'inspect');
+  assert.equal(missingConfidence.available_actions.includes('revision'), false);
 });

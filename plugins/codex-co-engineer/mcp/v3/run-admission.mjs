@@ -47,6 +47,7 @@ import {
   validateRunIdentityV1,
   validateWorkspaceIdentityV1,
 } from './protected-identity.mjs';
+import { compactOwnedCorrectionLineageV1 } from './owned-delegation.mjs';
 
 export const RUN_ADMISSION_SCHEMA_ID = 'codex-co-engineer.run-admission.v1';
 export const RUN_ADMISSION_VERSION = 1;
@@ -584,6 +585,17 @@ function validatePersistedRecord(record, runId) {
       }
     }
   }
+  if (capturedHasOwn(record, 'correction') && record.correction != null) {
+    try {
+      record.correction = compactOwnedCorrectionLineageV1(record.correction, 'persisted_run.correction');
+    } catch (error) {
+      if (error instanceof RunContractV1Error) {
+        admissionError('durable_state_mismatch', 'persisted_run.correction',
+          'Persisted correction lineage is invalid.');
+      }
+      throw error;
+    }
+  }
   if (seen.size !== assignments.length) {
     admissionError('durable_state_mismatch', 'persisted_run.lanes',
       'Persisted run does not contain every compiled assignment exactly once.');
@@ -845,6 +857,7 @@ function receipt(record, extras = {}) {
     // are immutable snapshots, while later cancellation/reconciliation still
     // needs to update the record's counters.
     telemetry: { ...record.telemetry },
+    ...(record.correction ? { correction: record.correction } : {}),
     ...extras,
   });
 }
@@ -1008,12 +1021,13 @@ export function createRunAdmissionRuntime(overrides = {}) {
     record.updated_at = nowIso(injected.clock);
   }
 
-  function makeRecord(compiled) {
+  function makeRecord(compiled, correction = null) {
     return {
       schema: RUN_ADMISSION_SCHEMA_ID,
       version: RUN_ADMISSION_VERSION,
       run_id: compiled.run_id,
       compiled,
+      ...(correction ? { correction } : {}),
       phase: 'validating',
       revision: 0,
       created_at: nowIso(injected.clock),
@@ -1744,6 +1758,9 @@ export function createRunAdmissionRuntime(overrides = {}) {
   async function submitRunRequest(request, options = {}) {
     const compiled = await injected.compile(request, options.compile_options ?? {});
     const { runId } = validateCompiled(compiled);
+    const correction = capturedHasOwn(options, 'correction') && options.correction != null
+      ? compactOwnedCorrectionLineageV1(options.correction, 'correction')
+      : null;
     return enqueue(runId, async () => {
       const existing = await loadRecord(runId);
       if (existing) {
@@ -1752,7 +1769,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
         }
         return receipt(existing, { idempotent: true });
       }
-      const record = makeRecord(compiled);
+      const record = makeRecord(compiled, correction);
       records.set(runId, record);
       bump(record);
       await persist(record);
