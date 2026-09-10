@@ -1,0 +1,33 @@
+name: Feature or improvement
+description: Suggest an outcome or improvement without designing the implementation.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the outcome you want. You do not need to design the implementation.
+
+        Questions and usage help belong in a [Question](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=question.yml) issue. Security reports stay on the private [Security](https://github.com/ajhcs/Codex-Co-Engineer/security/advisories/new) route.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should become possible or easier?
+      placeholder: After a failed setup on a supported host, the error should name the missing requirement and the next check to run…
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior or workaround (optional)
+      description: What happens today, or how you work around it.
+    validations:
+      required: false
+  - type: textarea
+    id: example
+    attributes:
+      label: Example (optional)
+      description: A short scenario, sample prompt, or before/after sketch. Avoid implementation prescriptions unless you are offering a concrete patch later.
+    validations:
+      required: false

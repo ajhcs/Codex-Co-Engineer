@@ -2,15 +2,44 @@
 
 Give Codex a team of external co-engineers without giving up control.
 
-This is the 60-second path after
+Start with **compatibility**, then **one chosen provider**, then one useful
+first outcome. Speak in ordinary language. You do not write tool payloads.
+
+## 1. Confirm the host
+
+Local Grok, Cursor Local, and Muse workers need:
+
+- Linux with a working `systemd --user` manager
+- `systemd-run` 244 or newer and unified cgroup v2
+- Node.js 24+
+- Python 3.11+ for bundled setup
+- A current Codex CLI with plugin support
+
+Cursor Cloud runs remotely and does not need that local process boundary.
+
+Follow
 [install and authentication](../README.md#install-and-authentication).
-Speak in ordinary language. You do not write tool payloads.
+Bundled setup may install **shared** package prerequisites. Authenticate only
+the **one** provider you plan to use first. Do not assume setup installs
+providers selectively.
 
 Start a **new** Codex session after the plugin add. Any extra Co-Engineer
-panel is optional, feature-detected, and host-specific. If this host has
-no panel, keep talking in Codex CLI. That headless path is complete.
+panel is optional, feature-detected, and host-specific. If this host has no
+panel, keep talking in Codex CLI. That headless path is complete.
 
-## Delegate one assignment
+## 2. One useful first outcome
+
+From a source clone, copy `examples/first-outcome` into a clean Git
+repository (see that folder's README). Then ask Codex with your chosen
+provider:
+
+> Use Grok Co-Engineer to set `lib/version.js` so it exports
+> `1.0.0-first-outcome` and make `node check.mjs` pass. Commit the result.
+
+Replace Grok with Cursor or Muse when that is your provider. Acceptance is
+local and deterministic: `node check.mjs`. No MCP payloads.
+
+## 3. Delegate one assignment
 
 You:
 
@@ -31,10 +60,10 @@ Codex waits once. When the work is complete, Codex inspects it:
 You still decide whether to keep, change, or discard the result. That
 sentence is Codex's review, not a merge, push, or pull request.
 
-## Delegate several independent assignments
+## 4. Independent assignments and review order
 
-Independent means the assignments do not share a writer path. The bound
-is eight. This is still one bounded run and one coordinated wait.
+Independent means the assignments do not share a writer path. The bound is
+eight. This is still one bounded run and one coordinated wait.
 
 You:
 
@@ -60,9 +89,17 @@ Codex:
 > Using Muse Co-Engineer. Using Cursor Co-Engineer. Co-Engineer is
 > preparing 3 assignments.
 
-## Ask once when nothing is named
+For multi-provider recipes, **review the resulting immutable candidate**. Do
+not run a dependent review concurrently against the shared base while writers
+are still producing it.
 
-If you want a team and have no saved profile and no named co-engineers:
+Provider preferences on a run request reuse ownership **for that request** by
+role. Exact assignment provider or model choices win. Preferences are not
+saved global Codex settings.
+
+## 5. Ask once when nothing is named
+
+If you want a team and have no named co-engineers on the request:
 
 You:
 
@@ -82,7 +119,7 @@ Codex:
 > I am delegating this to Co-Engineer. Using Grok Co-Engineer.
 > Using Muse Co-Engineer. Co-Engineer is preparing 2 assignments.
 
-## Chat with existing work
+## 6. Chat, correct, or cancel
 
 `Chatting with Co-Engineer` never starts a run. It inspects, continues,
 answers grouped attention, or cancels work that already exists.
@@ -92,6 +129,10 @@ If Codex groups questions from more than one assignment:
 > Co-Engineer needs one decision from you.
 
 Answer once. That is not a second delegation.
+
+To correct a **completed** candidate, ask Codex to return bounded findings to
+the same external owner. That uses a fresh scoped `task.revision`, not a
+terminal `run_reply`. `run_reply` is for pending questions or consent only.
 
 If a required assignment fails or stays unresolved, Codex does not say
 Co-Engineer finished, and I verified the candidate. You may cancel:
@@ -103,8 +144,9 @@ Co-Engineer finished, and I verified the candidate. You may cancel:
 The honest shape is up to eight isolated external co-engineers, one
 bounded run, one coordinated wait, one verified decision.
 
-Codex remains chief engineer and reviewer. External workers may commit within
-their assigned scope. Publication and merge require user authorization and Codex review.
+The public MCP catalog remains five tools: `status`, `delegate`, `task`,
+`tasks`, and `cancel`. Codex remains chief engineer and reviewer.
+External workers may commit within their assigned scope. Publication and merge require user authorization and Codex review.
 Review exact commit and tree identities, verification results, and current CI
 before integration. The user retains version, tag, release, and protected-ref authority.
 
