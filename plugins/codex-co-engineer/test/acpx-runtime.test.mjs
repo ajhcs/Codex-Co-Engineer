@@ -149,6 +149,49 @@ test('retains the persistent ACP client before turn result settles', async () =>
   }
 });
 
+test('abort during post-prompt drain settles and reaps ask-user-unsupported agent', async () => {
+  const value = await fixture('ask-user-unsupported', 8_000);
+  let agentPid;
+  let closed = false;
+  try {
+    const controller = new AbortController();
+    const turn = value.runtime.startTurn({
+      handle: value.handle,
+      text: 'ask-user-unsupported',
+      mode: 'prompt',
+      requestId: 'unsupported-drain-abort',
+      timeoutMs: 0,
+      signal: controller.signal,
+    });
+    const events = (async () => {
+      for await (const event of turn.events) {
+        if (event?.type === 'tool_call' || event?.title === 'ask_user_question') {
+          // Abort inside the post-prompt idle/drain window after the agent has
+          // already finished emitting the unsupported-question transcript.
+          controller.abort();
+        }
+      }
+    })();
+    const started = Date.now();
+    const [result] = await Promise.all([turn.result, events]);
+    const elapsedMs = Date.now() - started;
+    agentPid = Number(readFileSync(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
+    assert.ok(
+      result.status === 'cancelled' || result.status === 'completed',
+      `turn must settle after drain abort, got ${result.status}`,
+    );
+    assert.ok(elapsedMs < 6_000, `drain abort must not hang past the idle cap (${elapsedMs}ms)`);
+    await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
+    closed = true;
+    assert.equal(await waitForProcessExit(agentPid, 2_000), true);
+  } finally {
+    if (!closed) await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' }).catch(() => {});
+    if (agentPid && processAlive(agentPid)) {
+      try { process.kill(agentPid, 'SIGKILL'); } catch {}
+    }
+  }
+});
+
 test('kills hostile detached ACP descendants during runtime close', async () => {
   const value = await fixture('normal', 3_000);
   let descendantPid;

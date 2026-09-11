@@ -442,15 +442,30 @@ AcpClient.prototype.spawnAgentProcess = async function coEngineerSpawnAgentProce
 
 AcpClient.prototype.terminateAgentProcess = async function coEngineerTerminateAgentProcess(child) {
   const stdinCloseGraceMs = resolveAgentCloseAfterStdinEndMs(this.options.agentCommand);
-  await coEngineerRememberAgentDescendants(child);
-  this.endAgentStdin(child);
-  let exited = await coEngineerWaitForAgentTree(child, stdinCloseGraceMs);
-  exited = await this.killAgentIfRunning(child, exited, 'SIGTERM', AGENT_CLOSE_TERM_GRACE_MS);
-  if (!exited) {
-    this.log('agent did not exit after ' + AGENT_CLOSE_TERM_GRACE_MS + 'ms; forcing SIGKILL');
-    exited = await this.killAgentIfRunning(child, exited, 'SIGKILL', AGENT_CLOSE_KILL_GRACE_MS);
+  // Descendant discovery is best-effort. A /proc inspection failure must not
+  // skip stdin-end, signaling, or detach — otherwise a live ACP child keeps
+  // stdio handles and pins the hosting test/worker event loop.
+  try {
+    await coEngineerRememberAgentDescendants(child);
+  } catch (error) {
+    this.log(
+      'ACP descendant discovery failed before terminate: '
+      + (error instanceof Error ? error.message : String(error)),
+    );
   }
-  this.detachAgentHandles(child, !exited);
+  try {
+    this.endAgentStdin(child);
+    let exited = await coEngineerWaitForAgentTree(child, stdinCloseGraceMs);
+    exited = await this.killAgentIfRunning(child, exited, 'SIGTERM', AGENT_CLOSE_TERM_GRACE_MS);
+    if (!exited) {
+      this.log('agent did not exit after ' + AGENT_CLOSE_TERM_GRACE_MS + 'ms; forcing SIGKILL');
+      exited = await this.killAgentIfRunning(child, exited, 'SIGKILL', AGENT_CLOSE_KILL_GRACE_MS);
+    }
+    this.detachAgentHandles(child, !exited);
+  } catch (error) {
+    try { this.detachAgentHandles(child, true); } catch {}
+    throw error;
+  }
 };
 
 AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRunning(
@@ -463,6 +478,11 @@ AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRun
   try {
     await coEngineerSignalAgentTree(child, signal);
   } catch {
+    // Fall through to the exact ChildProcess handle below.
+  }
+  // Exact ChildProcess.kill is identity-safe (not a recycled pid guess) and
+  // covers agents that are not (yet) process-group leaders.
+  if (isChildProcessRunning(child)) {
     try { child.kill(signal); } catch {}
   }
   return coEngineerWaitForAgentTree(child, waitMs);
@@ -489,23 +509,63 @@ const coEngineerTurnSignalStore = new CoEngineerAsyncLocalStorage();
  * Upstream settles turn.result before finalizeRuntimeTurn retains (or closes)
  * the persistent client. Callers that await result then close() race an empty
  * pendingPersistentClients map, so close returns without terminating the ACP
- * agent or its detached descendants. Defer settlement until after the upstream
- * turn task — including finalize — completes so retention precedes result.
+ * agent or its detached descendants.
+ *
+ * Defer settlement only until retain/close finishes inside finalize, then
+ * settle before queue.close(). Settling after the entire turn task (including
+ * queue.close) delayed cancellation visibility for error/unsupported paths and
+ * is unnecessary once retain precedes result at the finalize boundary.
  */
+const CO_ENGINEER_TURN_SETTLE = Symbol('co-engineer-turn-settle');
 const coEngineerOriginalRunRuntimeTurnTask = AcpRuntimeManager.prototype.runRuntimeTurnTask;
 AcpRuntimeManager.prototype.runRuntimeTurnTask = function coEngineerRunRuntimeTurnTask(task) {
   const originalSettleResult = task.settleResult;
   let deferredSettlement;
+  let settled = false;
+  const settleIfNeeded = () => {
+    if (settled || deferredSettlement === undefined) return;
+    settled = true;
+    originalSettleResult(deferredSettlement);
+    deferredSettlement = undefined;
+  };
   task.settleResult = (next) => {
     if (deferredSettlement === undefined) deferredSettlement = next;
   };
+  task[CO_ENGINEER_TURN_SETTLE] = settleIfNeeded;
   return coEngineerTurnSignalStore.run(task?.input?.signal ?? null, async () => {
     try {
       await coEngineerOriginalRunRuntimeTurnTask.call(this, task);
     } finally {
-      if (deferredSettlement !== undefined) originalSettleResult(deferredSettlement);
+      // Finalize normally settles; this covers prepare/connect failures where
+      // finalize still closed the queue without a deferred payload hook.
+      try {
+        task[CO_ENGINEER_TURN_SETTLE]?.();
+      } finally {
+        delete task[CO_ENGINEER_TURN_SETTLE];
+      }
     }
   });
+};
+
+AcpRuntimeManager.prototype.finalizeRuntimeTurn = async function coEngineerFinalizeRuntimeTurn(task, turn) {
+  try {
+    task.state.turnActive = false;
+    task.input.signal?.removeEventListener('abort', task.abortHandler);
+    turn?.client.clearEventHandlers();
+    if (turn) {
+      const retained = await this.finalizeRuntimeTurnRecord(turn);
+      if (!retained) await turn.client.close().catch(() => {});
+      this.activeControllers.delete(turn.record.acpxRecordId);
+      this.closingActiveRecords.delete(turn.record.acpxRecordId);
+    }
+  } finally {
+    try {
+      task[CO_ENGINEER_TURN_SETTLE]?.();
+    } finally {
+      delete task[CO_ENGINEER_TURN_SETTLE];
+      task.queue.close();
+    }
+  }
 };
 
 async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } = {}) {
@@ -549,18 +609,42 @@ async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } 
   });
 }
 
+function coEngineerSignalAbortPromise(signal) {
+  if (signal == null) return null;
+  if (signal.aborted) return Promise.resolve('abort');
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve('abort'), { once: true });
+  });
+}
+
+async function coEngineerAwaitSessionUpdatesIdle(client, signal) {
+  const idle = client?.waitForSessionUpdatesIdle?.({
+    idleMs: SESSION_REPLY_IDLE_MS,
+    timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
+  })?.catch(() => {}) ?? Promise.resolve();
+  // Upstream drain can await an in-flight sessionUpdateChain past its own
+  // deadline. Cap to the configured drain window and honor turn cancellation
+  // so unsupported/error completion cannot pin finalize behind a stuck idle.
+  const capMs = Math.max(SESSION_REPLY_IDLE_MS, SESSION_REPLY_DRAIN_TIMEOUT_MS) + 50;
+  const races = [
+    idle.then(() => 'idle'),
+    new Promise((resolve) => setTimeout(() => resolve('cap'), capMs)),
+  ];
+  const abort = coEngineerSignalAbortPromise(signal);
+  if (abort) races.push(abort);
+  await Promise.race(races);
+}
+
 runPromptTurn = async function coEngineerRunPromptTurn(params) {
   const promptPromise = params.client.prompt(params.sessionId, params.prompt);
+  const signal = params.signal ?? coEngineerTurnSignalStore.getStore();
   try {
     await params.onPromptStarted?.();
     const response = await coEngineerAwaitPromptWithDeadline(promptPromise, {
       timeoutMs: params.timeoutMs,
-      signal: params.signal ?? coEngineerTurnSignalStore.getStore(),
+      signal,
     });
-    await params.client.waitForSessionUpdatesIdle?.({
-      idleMs: SESSION_REPLY_IDLE_MS,
-      timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
-    }).catch(() => {});
+    await coEngineerAwaitSessionUpdatesIdle(params.client, signal);
     recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
     return { stopReason: response.stopReason, source: 'rpc' };
   } catch (error) {

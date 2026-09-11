@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -290,14 +291,40 @@ test('live ACP unsupported ask_user_question transcript fails and keeps question
     prompt: 'ask one A/B question before any work',
     id: 'grok-unsupported-live',
   });
-  const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
-  assert.equal(terminal.status, 'failed');
-  assert.notEqual(terminal.status, 'completed');
-  assert.equal(liveQuestionId(terminal.attention), null);
-  assert.equal(terminal.error.code, QUESTION_BRIDGE_UNAVAILABLE_CODE);
-  assert.match(String(terminal.result ?? ''), /I will not continue until answered/u);
-  const classified = classifySupervisorTerminalReceipt(terminal);
-  assert.notEqual(classified.public_state, 'succeeded');
+  let agentPid;
+  try {
+    const terminal = await runAcpTask({ root: value.root, taskId: value.taskId });
+    try {
+      agentPid = Number(readFileSync(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
+    } catch {
+      agentPid = undefined;
+    }
+    assert.equal(terminal.status, 'failed');
+    assert.notEqual(terminal.status, 'completed');
+    assert.equal(liveQuestionId(terminal.attention), null);
+    assert.equal(terminal.error.code, QUESTION_BRIDGE_UNAVAILABLE_CODE);
+    assert.match(String(terminal.result ?? ''), /I will not continue until answered/u);
+    const classified = classifySupervisorTerminalReceipt(terminal);
+    assert.notEqual(classified.public_state, 'succeeded');
+    if (Number.isInteger(agentPid) && agentPid > 0) {
+      const deadline = Date.now() + 2_000;
+      let alive = true;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(agentPid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        } catch {
+          alive = false;
+          break;
+        }
+      }
+      assert.equal(alive, false, 'unsupported-question fixture agent must be reaped after runAcpTask');
+    }
+  } finally {
+    if (Number.isInteger(agentPid) && agentPid > 0) {
+      try { process.kill(agentPid, 'SIGKILL'); } catch { /* already reaped */ }
+    }
+  }
 });
 
 test('live ACP structured question bridge latches identity and one reply resumes the session', async () => {
