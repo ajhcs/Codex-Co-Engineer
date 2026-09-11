@@ -149,6 +149,70 @@ test('retains the persistent ACP client before turn result settles', async () =>
   }
 });
 
+test('close during finalization cannot retain a live client or reopen its record', { timeout: 20_000 }, async () => {
+  const value = await fixture('ask-user-unsupported', 8_000);
+  const manager = await value.runtime.getManager();
+  const originalFinalize = manager.finalizeRuntimeTurn;
+  const originalRefresh = manager.refreshClosedState;
+  let finalizing = false;
+  let paused = false;
+  let release;
+  let reached;
+  let timer;
+  let agentPid;
+  const barrier = new Promise((resolve) => { release = resolve; });
+  const entered = new Promise((resolve) => { reached = resolve; });
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('close/finalization regression exceeded 15 seconds')), 15_000);
+  });
+  manager.finalizeRuntimeTurn = function (...args) {
+    finalizing = true;
+    return originalFinalize.apply(this, args);
+  };
+  manager.refreshClosedState = async function (record) {
+    const closed = await originalRefresh.call(this, record);
+    if (finalizing && !paused && !closed) {
+      paused = true;
+      reached();
+      await barrier;
+    }
+    return closed;
+  };
+  try {
+    const turn = value.runtime.startTurn({
+      handle: value.handle,
+      text: 'ask-user-unsupported',
+      mode: 'prompt',
+      requestId: 'close-during-finalization',
+      timeoutMs: 8_000,
+    });
+    const events = (async () => { for await (const _event of turn.events) {} })();
+    await Promise.race([entered, deadline]);
+    agentPid = Number(readFileSync(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
+    // Hold finalization after its closed-state check, then complete a real
+    // close before allowing finalization to save/retain the same client.
+    await Promise.race([value.runtime.close({ handle: value.handle, reason: 'test_close_during_finalize' }), deadline]);
+    release();
+    const [result] = await Promise.race([Promise.all([turn.result, events]), deadline]);
+    const record = await manager.options.sessionStore.load(value.handle.acpxRecordId);
+    assert.deepEqual({
+      status: result.status,
+      retained: manager.pendingPersistentClients.has(value.handle.acpxRecordId),
+      agentAlive: processAlive(agentPid),
+      storedClosed: record.closed === true,
+    }, { status: 'completed', retained: false, agentAlive: false, storedClosed: true });
+  } finally {
+    release();
+    manager.finalizeRuntimeTurn = originalFinalize;
+    manager.refreshClosedState = originalRefresh;
+    clearTimeout(timer);
+    await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' }).catch(() => {});
+    if (agentPid && processAlive(agentPid)) {
+      try { process.kill(agentPid, 'SIGKILL'); } catch {}
+    }
+  }
+});
+
 test('kills hostile detached ACP descendants during runtime close', async () => {
   const value = await fixture('normal', 3_000);
   let descendantPid;
