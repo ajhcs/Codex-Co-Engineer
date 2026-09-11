@@ -6,32 +6,44 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  CASE_SCHEMA_ID,
   loadCases,
-  parseCase,
+  parseTrial,
 } from './compare-coengineer-runs.mjs';
 import {
-  CANDIDATE_SHA,
   CASE_IDS,
+  DEADLINE_SOURCE_SHA,
   FIVE_TOOLS,
   ORDERING_SEED,
   PAID_CEILING_USD,
+  PLACEHOLDER_HOST_MODEL,
   PUBLISHED_342_SHA,
+  QUALIFICATION_ARMS,
+  QUALIFICATION_CASE_SCHEMA_ID,
   RESULT_SOURCE_SHA,
   checkKnownBad,
+  evaluateQualificationCohort,
   extractSource,
   generateSchedule,
   loadQualificationCases,
   main,
   materializeQualificationCase,
   packCase,
-  scanWorkerLeakage,
+  parseExecutionManifest,
+  parseQualificationTrial,
+  protocolRecord,
+  scanOverlayLeakage,
 } from './prepare-coengineer-qualification.mjs';
 import { PUBLIC_MCP_TOOLS } from '../plugins/codex-co-engineer/mcp/v3/response.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXISTING_CASES = path.join(ROOT, 'benchmarks/cases');
 const QUAL_CASES = path.join(ROOT, 'benchmarks/qualification/cases');
+const QUAL_PROTOCOL = path.join(ROOT, 'benchmarks/qualification/protocol.json');
+const QUAL_MANIFEST = path.join(ROOT, 'benchmarks/qualification/operator-manifest.json');
+const CANDIDATE_FIXTURE_SHA = 'c0ffeeabc0ffeeabc0ffeeabc0ffeeabc0ffeeab';
+const PUBLISHED_FIXTURE_TREE = 'd0ffeeabc0ffeeabc0ffeeabc0ffeeabc0ffeeab';
+const ASTRA_MODEL = 'grok-4-1-fast-recorded';
+const HOST_MODEL = 'gpt-5.3-codex-recorded';
 
 function io() {
   const stdout = [];
@@ -42,6 +54,155 @@ function io() {
     chunks: stdout,
     errors: stderr,
   };
+}
+
+function settings() {
+  return { reasoning: 'high', sandbox: 'workspace-write' };
+}
+
+function metric(value, source = 'host_measured') {
+  return {
+    value,
+    source,
+    trust: source === 'provider_report' ? 'provider_untrusted' : 'host_authoritative',
+  };
+}
+
+function recordedManifest(cases) {
+  return {
+    schema: 'codex-co-engineer.qualification-execution-manifest.v1',
+    version: 1,
+    status: 'recorded',
+    candidate: { sha: CANDIDATE_FIXTURE_SHA, tree: PUBLISHED_FIXTURE_TREE },
+    published_3_4_2: { sha: PUBLISHED_342_SHA },
+    host: {
+      host_model: HOST_MODEL,
+      host_settings: settings(),
+    },
+    astra: { provider: 'grok', model: ASTRA_MODEL },
+    provider_configuration: {
+      implement: 'grok',
+      review: 'cursor-local',
+      astra_model: ASTRA_MODEL,
+    },
+    approaches: {
+      'native-codex': { external_jobs: false },
+      'published-3.4.2': { external_jobs: true },
+      'candidate-3.4.3': { external_jobs: true },
+      'direct-delegation': { external_jobs: true },
+    },
+    input_digests: Object.fromEntries(cases.map((entry) => [entry.id, entry.input_digest])),
+    check_digests: Object.fromEntries(cases.map((entry) => [entry.id, entry.check_digest])),
+  };
+}
+
+function attemptId(label) {
+  return label.replaceAll('.', '-');
+}
+
+function makeTrial(plan, caseRecord, manifest, {
+  accepted = true,
+  nativeOutput = 40,
+  wall = 1000,
+  failedThenCorrect = false,
+  helper = false,
+  astraOutput = null,
+  hostModel = manifest.host.host_model,
+  inputDigest = caseRecord.input_digest,
+  source = null,
+} = {}) {
+  const attempts = [];
+  if (failedThenCorrect) {
+    attempts.push({
+      attempt_id: attemptId('initial'),
+      kind: 'initial',
+      outcome: 'failed',
+      usage: {
+        native_output_tokens: metric(10),
+        elapsed_ms: metric(400),
+      },
+    });
+    attempts.push({
+      attempt_id: attemptId('correction'),
+      kind: 'correction',
+      outcome: accepted ? 'accepted' : 'failed',
+      usage: {
+        native_output_tokens: metric(Math.max(0, nativeOutput - 10)),
+        elapsed_ms: metric(800),
+      },
+    });
+  } else {
+    attempts.push({
+      attempt_id: attemptId('initial'),
+      kind: 'initial',
+      outcome: accepted ? 'accepted' : 'failed',
+      usage: {
+        native_output_tokens: metric(helper ? Math.max(0, nativeOutput - 8) : nativeOutput),
+        elapsed_ms: metric(1000),
+      },
+    });
+  }
+  if (helper) {
+    attempts.push({
+      attempt_id: attemptId('helper'),
+      kind: 'native_helper',
+      outcome: 'accepted',
+      usage: {
+        native_helper_calls: metric(1),
+        native_output_tokens: metric(8),
+        elapsed_ms: metric(200),
+      },
+    });
+  }
+  if (astraOutput != null) {
+    const target = attempts.find((attempt) => attempt.kind !== 'native_helper') ?? attempts[0];
+    target.provider = manifest.astra.provider;
+    target.model = manifest.astra.model;
+    target.usage.provider_input_tokens = metric(4, 'provider_report');
+    target.usage.provider_output_tokens = metric(astraOutput, 'provider_report');
+  }
+  const armSource = source ?? (plan.arm === 'native-codex'
+    ? { kind: 'native', value: 'native-codex' }
+    : {
+      kind: 'git_commit',
+      value: plan.arm === 'published-3.4.2' ? manifest.published_3_4_2.sha : manifest.candidate.sha,
+    });
+  return {
+    schema: 'codex-co-engineer.benchmark-trial.v1',
+    trial_id: plan.trial_id,
+    case_id: plan.case_id,
+    arm: plan.arm,
+    base_sha: caseRecord.base_sha,
+    input_digest: inputDigest,
+    coengineer_source: armSource,
+    host_model: hostModel,
+    host_settings: manifest.host.host_settings,
+    provider_configuration: plan.arm === 'native-codex'
+      ? { implement: 'native' }
+      : manifest.provider_configuration,
+    accepted,
+    wall_elapsed_ms: metric(wall),
+    attempts,
+    ...(helper ? { native_parent_excludes_helpers: true } : {}),
+  };
+}
+
+function cohortTrials(cases, manifest, customize = {}) {
+  const schedule = generateSchedule();
+  const caseById = new Map(cases.map((entry) => [entry.id, entry]));
+  return schedule.canonical.map((plan) => {
+    const key = `${plan.case_id}:${plan.arm}:r${plan.rep}`;
+    const override = customize[key] ?? customize[plan.case_id] ?? customize[plan.arm] ?? {};
+    const defaults = {
+      accepted: true,
+      nativeOutput: plan.arm === 'native-codex' ? 100 : plan.arm === 'published-3.4.2' ? 80 : 40,
+      wall: plan.arm === 'candidate-3.4.3' ? 1500 : plan.arm === 'native-codex' ? 1000 : 900,
+      astraOutput: plan.arm === 'published-3.4.2' ? 50 : (plan.arm === 'native-codex' ? null : 20),
+      failedThenCorrect: plan.arm === 'candidate-3.4.3' && plan.rep === 1,
+      helper: plan.arm === 'native-codex' && plan.rep === 1,
+    };
+    return makeTrial(plan, caseById.get(plan.case_id), manifest, { ...defaults, ...override });
+  });
 }
 
 test('existing four comparator fixtures still load unchanged', async () => {
@@ -56,20 +217,29 @@ test('existing four comparator fixtures still load unchanged', async () => {
   assert.deepEqual([...PUBLIC_MCP_TOOLS], [...FIVE_TOOLS]);
 });
 
-test('packed qualification cases bind real source, digest, and materialized base SHA', async () => {
+test('packed qualification cases bind real source SHAs without future candidate identity', async () => {
   const packed = await loadQualificationCases();
   assert.equal(packed.raw.length, 3);
-  assert.equal(packed.raw[0].qualification.status, 'unrun');
-  assert.equal(packed.raw[0].qualification.source_sha, PUBLISHED_342_SHA);
-  assert.equal(packed.raw[1].qualification.source_sha, RESULT_SOURCE_SHA);
-  assert.equal(packed.raw[2].qualification.source_sha, RESULT_SOURCE_SHA);
+  assert.deepEqual(packed.raw.map((entry) => entry.id), [...CASE_IDS]);
+  assert.equal(packed.raw[0].source_sha, DEADLINE_SOURCE_SHA);
+  assert.equal(packed.raw[0].source_sha, PUBLISHED_342_SHA);
+  assert.equal(packed.raw[1].source_sha, RESULT_SOURCE_SHA);
+  assert.equal(packed.raw[2].source_sha, RESULT_SOURCE_SHA);
   for (const record of packed.raw) {
-    assert.equal(record.schema, CASE_SCHEMA_ID);
-    assert.equal(record.qualification.candidate_sha, CANDIDATE_SHA);
+    assert.equal(record.schema, QUALIFICATION_CASE_SCHEMA_ID);
+    assert.equal(record.status, 'unrun');
+    assert.equal(record.retrospective, true);
+    assert.equal(Object.hasOwn(record, 'candidate_sha'), false);
+    assert.equal(record.comparable == null, true);
     assert.match(record.base_sha, /^[0-9a-f]{40}$/u);
     assert.match(record.input_digest, /^[0-9a-f]{64}$/u);
-    assert.equal(record.qualification.invented_backend_ids, false);
-    parseCase(record);
+    assert.match(record.check_digest, /^[0-9a-f]{64}$/u);
+    assert.equal(Object.hasOwn(record.overlay.files, 'TASK.md'), true);
+    assert.equal(Object.hasOwn(record.overlay.files, record.acceptance.checks[0].command[2]), true);
+    assert.equal(Object.hasOwn(record.overlay.files, 'turn-runner.mjs'), false);
+    assert.equal(Object.hasOwn(record.overlay.files, 'project-result.mjs'), false);
+    assert.equal(Object.hasOwn(record.overlay.files, 'account-trials.mjs'), false);
+    scanOverlayLeakage(record.overlay.files);
   }
 });
 
@@ -87,27 +257,31 @@ test('materializeQualificationCase is reproducible and rejects a second write', 
     assert.equal(first.base_sha, record.base_sha);
     assert.equal(second.base_sha, record.base_sha);
     assert.equal(first.input_digest, record.input_digest);
-    const written = await readFile(path.join(dest1, 'project-result.mjs'), 'utf8');
-    assert.equal(written, record.inputs.files['project-result.mjs']);
+    const evidence = await readFile(
+      path.join(dest1, 'plugins/codex-co-engineer/mcp/v3/run-result-evidence.mjs'),
+      'utf8',
+    );
+    assert.equal(evidence.includes('projectRunResultEvidenceV1'), true);
     await assert.rejects(() => materializeQualificationCase(record, dest1), { code: 'destination_not_empty' });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('stale source, candidate, and digest identities are rejected', async () => {
+test('stale source, digest, placeholder, and candidate identities are rejected', async () => {
   const packed = await loadQualificationCases();
   const root = await mkdtemp(path.join(os.tmpdir(), 'ce-qual-stale-'));
   try {
     const candidateAsSource = structuredClone(packed.raw[0]);
-    candidateAsSource.qualification.source_sha = CANDIDATE_SHA;
+    candidateAsSource.source_sha = CANDIDATE_FIXTURE_SHA;
+    await mkdir(path.join(root, 'candidate'));
     await assert.rejects(
       () => materializeQualificationCase(candidateAsSource, path.join(root, 'candidate')),
-      { code: 'solution_leakage' },
+      { code: 'stale_identity' },
     );
 
     const digestTamper = structuredClone(packed.raw[0]);
-    digestTamper.qualification.input_digest = 'ab'.repeat(32);
+    digestTamper.input_digest = 'ab'.repeat(32);
     await mkdir(path.join(root, 'digest'));
     await assert.rejects(
       () => materializeQualificationCase(digestTamper, path.join(root, 'digest')),
@@ -115,18 +289,34 @@ test('stale source, candidate, and digest identities are rejected', async () => 
     );
 
     const shaTamper = structuredClone(packed.raw[1]);
-    shaTamper.qualification.source_sha = PUBLISHED_342_SHA;
+    shaTamper.source_sha = PUBLISHED_342_SHA;
     await mkdir(path.join(root, 'source'));
     await assert.rejects(
       () => materializeQualificationCase(shaTamper, path.join(root, 'source')),
       { code: 'stale_identity' },
+    );
+
+    const boundCandidate = structuredClone(packed.raw[0]);
+    boundCandidate.candidate_sha = CANDIDATE_FIXTURE_SHA;
+    await mkdir(path.join(root, 'future'));
+    await assert.rejects(
+      () => materializeQualificationCase(boundCandidate, path.join(root, 'future')),
+      { code: 'stale_identity' },
+    );
+
+    const placeholder = structuredClone(packed.raw[0]);
+    placeholder.comparable = { host_model: PLACEHOLDER_HOST_MODEL, host_settings: settings() };
+    await mkdir(path.join(root, 'placeholder'));
+    await assert.rejects(
+      () => materializeQualificationCase(placeholder, path.join(root, 'placeholder')),
+      { code: 'identity_mismatch' },
     );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('acceptance fails on the known-bad source for every retrospective case', async () => {
+test('acceptance fails on the known-bad source for every retrospective case', { timeout: 180_000 }, async () => {
   const packed = await loadQualificationCases();
   for (const record of packed.raw) {
     const result = await checkKnownBad(record);
@@ -135,19 +325,20 @@ test('acceptance fails on the known-bad source for every retrospective case', as
   }
 });
 
-test('worker materialization does not leak solutions or extra paths', async () => {
+test('worker overlay does not leak solutions or extra paths', async () => {
   const packed = await loadQualificationCases();
   for (const record of packed.raw) {
-    scanWorkerLeakage(record.inputs.files);
-    assert.equal(Object.hasOwn(record.inputs.files, 'solution.mjs'), false);
-    for (const text of Object.values(record.inputs.files)) {
-      assert.equal(text.includes(CANDIDATE_SHA), false);
+    scanOverlayLeakage(record.overlay.files);
+    assert.equal(Object.hasOwn(record.overlay.files, 'solution.mjs'), false);
+    for (const text of Object.values(record.overlay.files)) {
+      assert.equal(text.includes(CANDIDATE_FIXTURE_SHA), false);
       assert.equal(text.includes('AsyncLocalStorage'), false);
+      assert.equal(text.includes('timeoutMs: 0'), false);
     }
   }
-  const leaked = structuredClone(packed.raw[0].inputs.files);
-  leaked['turn-runner.mjs'] += '\nexport const hint = "AsyncLocalStorage";\n';
-  assert.throws(() => scanWorkerLeakage(leaked), { code: 'solution_leakage' });
+  const leaked = structuredClone(packed.raw[0].overlay.files);
+  leaked['TASK.md'] += '\nSee AsyncLocalStorage in the later fix.\n';
+  assert.throws(() => scanOverlayLeakage(leaked), { code: 'solution_leakage' });
 });
 
 test('extract-source copies only the immutable allowlist from the pre-fix SHA', async () => {
@@ -161,7 +352,17 @@ test('extract-source copies only the immutable allowlist from the pre-fix SHA', 
     assert.equal(extracted.source_sha, RESULT_SOURCE_SHA);
     assert.equal(extracted.worker_context, false);
     assert.equal(extracted.contains_solution, false);
-    assert.deepEqual(extracted.files, ['scripts/compare-coengineer-runs.mjs']);
+    assert.deepEqual(extracted.files, [
+      'plugins/codex-co-engineer/mcp/v3/assignment-manifest.mjs',
+      'plugins/codex-co-engineer/mcp/v3/contract.mjs',
+      'plugins/codex-co-engineer/mcp/v3/grammar.mjs',
+      'plugins/codex-co-engineer/mcp/v3/identity.mjs',
+      'plugins/codex-co-engineer/mcp/v3/prompt-compiler.mjs',
+      'plugins/codex-co-engineer/mcp/v3/repo-path-matcher.mjs',
+      'plugins/codex-co-engineer/mcp/v3/run-manifest.mjs',
+      'plugins/codex-co-engineer/mcp/v3/run-policy.mjs',
+      'scripts/compare-coengineer-runs.mjs',
+    ]);
     const text = await readFile(path.join(dest, 'scripts/compare-coengineer-runs.mjs'), 'utf8');
     assert.equal(text.includes('export async function materializeCase'), false);
     await assert.rejects(() => extractSource({
@@ -173,13 +374,14 @@ test('extract-source copies only the immutable allowlist from the pre-fix SHA', 
   }
 });
 
-test('seed 43 schedule has 24 unrun trials and live jobs are refused', async () => {
+test('seed 43 schedule has 24 unrun required-arm trials and live jobs are refused', async () => {
   const schedule = generateSchedule(ORDERING_SEED);
   assert.equal(schedule.trial_count, 24);
   assert.equal(schedule.ordered.length, 24);
   assert.equal(schedule.ordered.every((row) => row.status === 'unrun'), true);
   assert.equal(schedule.ordered.every((row) => row.retrospective === true), true);
   assert.equal(new Set(schedule.ordered.map((row) => row.trial_id)).size, 24);
+  assert.deepEqual([...new Set(schedule.canonical.map((row) => row.arm))].sort(), [...QUALIFICATION_ARMS].sort());
   const reshuffled = generateSchedule(ORDERING_SEED);
   assert.deepEqual(reshuffled.ordered, schedule.ordered);
   assert.notDeepEqual(schedule.ordered.map((row) => row.trial_id), schedule.canonical.map((row) => row.trial_id));
@@ -200,6 +402,7 @@ test('CLI validates packed cases and materializes through the public helper', as
   const scheduled = await main(['--schedule'], captured);
   assert.equal(scheduled, 0);
   assert.equal(captured.stdout.text().includes('"seed": 43'), true);
+  assert.equal(captured.stdout.text().includes('candidate_sha'), false);
 
   const root = await mkdtemp(path.join(os.tmpdir(), 'ce-qual-cli-'));
   try {
@@ -212,18 +415,258 @@ test('CLI validates packed cases and materializes through the public helper', as
     ], captured);
     assert.equal(code, 0);
     const task = await readFile(path.join(dest, 'TASK.md'), 'utf8');
-    assert.equal(task.includes('Repair `turn-runner.mjs`'), true);
+    assert.equal(task.includes('checks/deadline-concurrent.test.mjs'), true);
+    const check = await readFile(path.join(dest, 'checks/deadline-concurrent.test.mjs'), 'utf8');
+    assert.equal(check.includes('runAcpTask'), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('packCase keeps comparator-compatible identity without fictional hashes', async () => {
+test('packCase keeps qualification identity without fictional hashes or future SHAs', async () => {
   const packed = await packCase('acp-deadline-concurrent-cancel');
-  assert.equal(packed.qualification.source_sha, PUBLISHED_342_SHA);
-  assert.equal(packed.base_sha, packed.qualification.base_sha);
-  assert.notEqual(packed.base_sha, CANDIDATE_SHA);
-  assert.notEqual(packed.base_sha, PUBLISHED_342_SHA);
-  const parsed = parseCase(packed);
-  assert.equal(parsed.input_digest, packed.input_digest);
+  assert.equal(packed.source_sha, PUBLISHED_342_SHA);
+  assert.match(packed.base_sha, /^[0-9a-f]{40}$/u);
+  assert.notEqual(packed.base_sha, packed.source_sha);
+  assert.equal(Object.hasOwn(packed, 'candidate_sha'), false);
+  assert.equal(packed.schema, QUALIFICATION_CASE_SCHEMA_ID);
+  const dotted = generateSchedule().canonical.find((row) => row.arm === 'candidate-3.4.3');
+  const parsedTrial = parseQualificationTrial({
+    schema: 'codex-co-engineer.benchmark-trial.v1',
+    trial_id: dotted.trial_id,
+    case_id: packed.id,
+    arm: 'candidate-3.4.3',
+    base_sha: packed.base_sha,
+    input_digest: packed.input_digest,
+    coengineer_source: { kind: 'git_commit', value: CANDIDATE_FIXTURE_SHA },
+    host_model: HOST_MODEL,
+    host_settings: settings(),
+    provider_configuration: { implement: 'grok', review: 'cursor-local' },
+    accepted: true,
+    wall_elapsed_ms: metric(1000),
+    attempts: [{
+      attempt_id: 'initial',
+      kind: 'initial',
+      outcome: 'accepted',
+      usage: { native_output_tokens: metric(10) },
+    }],
+  });
+  assert.equal(parsedTrial.trial_id, dotted.trial_id);
+  assert.throws(() => parseTrial({
+    schema: 'codex-co-engineer.benchmark-trial.v1',
+    trial_id: dotted.trial_id,
+    case_id: packed.id,
+    arm: 'candidate-3.4.3',
+    base_sha: packed.base_sha,
+    input_digest: packed.input_digest,
+    coengineer_source: { kind: 'git_commit', value: CANDIDATE_FIXTURE_SHA },
+    host_model: HOST_MODEL,
+    host_settings: settings(),
+    provider_configuration: { implement: 'grok', review: 'cursor-local' },
+    accepted: true,
+    wall_elapsed_ms: metric(1000),
+    attempts: [{
+      attempt_id: 'initial',
+      kind: 'initial',
+      outcome: 'accepted',
+      usage: { native_output_tokens: metric(10) },
+    }],
+  }), { code: 'invalid_format' });
+});
+
+test('tracked protocol requires all four arms and leaves candidate identity external', async () => {
+  const protocol = protocolRecord();
+  assert.deepEqual(protocol.approaches, [...QUALIFICATION_ARMS]);
+  assert.deepEqual(protocol.arms.required, [...QUALIFICATION_ARMS]);
+  assert.deepEqual(protocol.arms.optional, []);
+  assert.equal(Object.hasOwn(protocol, 'candidate_sha'), false);
+  assert.equal(protocol.execution_identity.bound_in, 'external_execution_manifest');
+  const written = JSON.parse(await readFile(QUAL_PROTOCOL, 'utf8'));
+  assert.equal(Object.hasOwn(written, 'candidate_sha'), false);
+  assert.equal(written.arms.optional.length, 0);
+  const manifest = JSON.parse(await readFile(QUAL_MANIFEST, 'utf8'));
+  assert.equal(Object.hasOwn(manifest, 'candidate_sha'), false);
+  assert.equal(manifest.schedule.length, 24);
+  assert.throws(() => parseExecutionManifest({
+    schema: 'codex-co-engineer.qualification-execution-manifest.v1',
+    status: 'recorded',
+    candidate: { sha: CANDIDATE_FIXTURE_SHA },
+    published_3_4_2: { sha: PUBLISHED_342_SHA },
+    host: { host_model: PLACEHOLDER_HOST_MODEL, host_settings: settings() },
+    astra: { model: ASTRA_MODEL },
+    provider_configuration: { implement: 'grok' },
+    approaches: {
+      'native-codex': { external_jobs: false },
+      'published-3.4.2': { external_jobs: true },
+      'candidate-3.4.3': { external_jobs: true },
+      'direct-delegation': { external_jobs: true },
+    },
+  }), { code: 'identity_mismatch' });
+});
+
+test('evaluator accepts 6/6 with task-level medians, Astra decrease, failures, corrections, and helpers', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const trials = cohortTrials(packed.raw, manifest);
+  const comparison = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials,
+    executionManifest: manifest,
+  });
+  assert.equal(comparison.decision, 'pass');
+  assert.equal(comparison.candidate_accepted, '6/6');
+  assert.equal(comparison.compared_identities, 24);
+  assert.ok(comparison.metrics.task_median_native_output_per_accepted_vs_native <= 0.5);
+  assert.ok(comparison.metrics.task_median_native_output_per_accepted_vs_published <= 0.75);
+  assert.equal(comparison.metrics.astra_own_native_output.decreased, true);
+  assert.ok(comparison.metrics.median_turnaround_vs_native <= 2);
+  assert.ok(comparison.metrics.native_overhead_vs_direct <= 1.25);
+  const candidateArm = comparison.cases[0].arms['candidate-3.4.3'];
+  assert.ok(candidateArm.failed_attempt_count >= 1);
+  assert.ok(candidateArm.correction_count >= 1);
+  const nativeArm = comparison.cases[0].arms['native-codex'];
+  assert.ok(nativeArm.native_helper_count >= 1);
+  assert.equal(nativeArm.astra_own_native_output.includes_helpers, false);
+});
+
+test('evaluator uses task-level median rather than a pooled ratio', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const byCase = {
+    'acp-deadline-concurrent-cancel': { nativeOutput: 10, astraOutput: 20 },
+    'run-result-outcome-acceptance': { nativeOutput: 60, astraOutput: 20 },
+    'comparison-failed-helper-cumulative': { nativeOutput: 70, astraOutput: 20 },
+  };
+  const trials = cohortTrials(packed.raw, manifest, {
+    'candidate-3.4.3': {},
+  }).map((trial) => {
+    if (trial.arm !== 'candidate-3.4.3') return trial;
+    const plan = { trial_id: trial.trial_id, case_id: trial.case_id, arm: trial.arm, rep: 1 };
+    const caseRecord = packed.raw.find((entry) => entry.id === trial.case_id);
+    return makeTrial(plan, caseRecord, manifest, {
+      accepted: true,
+      nativeOutput: byCase[trial.case_id].nativeOutput,
+      wall: 1500,
+      failedThenCorrect: false,
+      astraOutput: 20,
+    });
+  });
+  const comparison = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials,
+    executionManifest: manifest,
+  });
+  assert.equal(comparison.decision, 'fail');
+  assert.equal(comparison.reasons.includes('task_median_vs_native_exceeds_0.5'), true);
+  assert.ok(comparison.metrics.task_median_native_output_per_accepted_vs_native > 0.5);
+  assert.ok(comparison.metrics.pooled_native_output_per_accepted_vs_native <= 0.5);
+});
+
+test('missing arms, missing acceptance, missing primary, and mismatched identities are inconclusive', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+
+  const omittedDirect = cohortTrials(packed.raw, manifest)
+    .filter((trial) => trial.arm !== 'direct-delegation');
+  const missingArm = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials: omittedDirect,
+    executionManifest: manifest,
+  });
+  assert.equal(missingArm.decision, 'inconclusive');
+  assert.equal(missingArm.reasons.some((reason) => reason.startsWith('omitted:')), true);
+
+  const missingAcceptanceTrials = cohortTrials(packed.raw, manifest);
+  delete missingAcceptanceTrials[0].accepted;
+  const missingAcceptance = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials: missingAcceptanceTrials,
+    executionManifest: manifest,
+  });
+  assert.equal(missingAcceptance.decision, 'inconclusive');
+  assert.equal(missingAcceptance.reasons.some((reason) => reason.startsWith('missing_acceptance:')), true);
+
+  const missingPrimaryTrials = cohortTrials(packed.raw, manifest);
+  missingPrimaryTrials[0].wall_elapsed_ms = { value: null, source: 'unknown', trust: 'unknown' };
+  const missingPrimary = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials: missingPrimaryTrials,
+    executionManifest: manifest,
+  });
+  assert.equal(missingPrimary.decision, 'inconclusive');
+  assert.equal(missingPrimary.reasons.some((reason) => reason.startsWith('missing_primary:')), true);
+
+  const mismatchedTrials = cohortTrials(packed.raw, manifest);
+  mismatchedTrials[0].host_model = 'other-host-model';
+  const mismatched = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials: mismatchedTrials,
+    executionManifest: manifest,
+  });
+  assert.equal(mismatched.decision, 'inconclusive');
+  assert.equal(mismatched.reasons.some((reason) => reason.includes('host_model_mismatch')), true);
+
+  const digestMismatchTrials = cohortTrials(packed.raw, manifest);
+  digestMismatchTrials[1].input_digest = 'ab'.repeat(32);
+  const digestMismatch = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials: digestMismatchTrials,
+    executionManifest: manifest,
+  });
+  assert.equal(digestMismatch.decision, 'inconclusive');
+  assert.equal(digestMismatch.reasons.some((reason) => reason.includes('input_digest_mismatch')), true);
+});
+
+test('candidate not 6/6 accepted fails when identities are otherwise comparable', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  let flipped = false;
+  const trials = cohortTrials(packed.raw, manifest).map((trial) => {
+    if (!flipped && trial.arm === 'candidate-3.4.3') {
+      flipped = true;
+      const caseRecord = packed.raw.find((entry) => entry.id === trial.case_id);
+      return makeTrial(trial, caseRecord, manifest, {
+        accepted: false,
+        nativeOutput: 40,
+        wall: 1500,
+        astraOutput: 20,
+        failedThenCorrect: false,
+      });
+    }
+    return trial;
+  });
+  const comparison = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials,
+    executionManifest: manifest,
+  });
+  assert.equal(comparison.decision, 'fail');
+  assert.equal(comparison.reasons.includes('candidate_not_6_of_6_accepted'), true);
+  assert.equal(comparison.candidate_accepted, '5/6');
+});
+
+test('unrecorded execution manifest is inconclusive and does not invent identities', async () => {
+  const packed = await loadQualificationCases();
+  const comparison = evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials: [],
+    executionManifest: {
+      schema: 'codex-co-engineer.qualification-execution-manifest.v1',
+      status: 'unrecorded',
+      candidate: null,
+      host: null,
+      astra: null,
+    },
+  });
+  assert.equal(comparison.decision, 'inconclusive');
+  assert.deepEqual(comparison.reasons, ['execution_manifest_unrecorded']);
 });

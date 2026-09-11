@@ -3,17 +3,14 @@
   "version": 1,
   "title": "Codex-Co-Engineer 3.4.3 retrospective qualification protocol",
   "status": "unrun",
-  "candidate_sha": "c50550e0a12e6ce8f7564d0e384f52c205640ce5",
-  "published_3_4_2_sha": "dede188029aff117c60e9a8c4299cc0ab0838be9",
   "arms": {
     "required": [
       "native-codex",
       "published-3.4.2",
-      "candidate-3.4.3"
-    ],
-    "optional": [
+      "candidate-3.4.3",
       "direct-delegation"
-    ]
+    ],
+    "optional": []
   },
   "approaches": [
     "native-codex",
@@ -49,6 +46,7 @@
   ],
   "repetitions": 2,
   "trial_count": 24,
+  "planned_identities": 24,
   "ordering": {
     "seed": 43,
     "algorithm": "mulberry32-fisher-yates"
@@ -59,25 +57,15 @@
   },
   "paid_ceiling_usd": 25,
   "live_jobs": "not_implemented",
-  "host": {
-    "record_at_execution": true,
-    "invented_backend_ids": false,
-    "astra": {
-      "status": "unrecorded",
-      "note": "Record exact Astra host settings and external model/routes at execution before freezing. Never invent backend IDs."
-    },
-    "placeholder_until_execution": {
-      "host_model": "codex-default",
-      "host_settings": {
-        "reasoning": "default",
-        "sandbox": "workspace-write"
-      }
-    }
+  "execution_identity": {
+    "bound_in": "external_execution_manifest",
+    "host_placeholders_forbidden": true,
+    "candidate_sha_not_tracked_here": true
   },
   "freeze_thresholds": {
     "candidate_accepted": "6/6",
-    "median_case_native_output_per_accepted_vs_native_max": 0.5,
-    "median_case_native_output_per_accepted_vs_published_342_max": 0.75,
+    "task_median_native_output_per_accepted_vs_native_max": 0.5,
+    "task_median_native_output_per_accepted_vs_published_342_max": 0.75,
     "astra_own_output_decreases_vs_published_342": true,
     "median_turnaround_vs_native_max": 2,
     "native_overhead_vs_direct_max": 1.25,
@@ -90,7 +78,10 @@
   "accounting": {
     "failed_attempts_in_numerator": true,
     "missing_primary_evidence": "inconclusive",
-    "reuse_offline_comparator": true
+    "reuse_offline_comparator_parsing": true,
+    "task_median_not_pooled": true,
+    "helpers_in_total_not_astra_unless_astra": true,
+    "all_four_approaches_required": true
   },
   "safeguards": {
     "public_mcp_tools": [

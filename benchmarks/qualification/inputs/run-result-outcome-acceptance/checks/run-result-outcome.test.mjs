@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { projectRunResult } from './project-result.mjs';
+import { ARTIFACT_REF_SCHEMA_ID } from '../plugins/codex-co-engineer/mcp/v3/artifact-ref.mjs';
+import {
+  RUN_ADMISSION_RECEIPT_SCHEMA_ID,
+  RUN_RESULT_EVIDENCE_SCHEMA_ID,
+  detailRunResultEvidenceV1,
+  projectRunResultEvidenceV1,
+  summarizeRunResultEvidenceV1,
+} from '../plugins/codex-co-engineer/mcp/v3/run-result-evidence.mjs';
 
 const RUN_ID = 'run-result-01';
 const BASE_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -9,6 +16,21 @@ const HEAD_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const OTHER_HEAD = 'cccccccccccccccccccccccccccccccccccccccc';
 const HOSTILE_PATH = '/tmp/secret-repo-do-not-leak';
 const HOSTILE_PROMPT = 'owner-only prompt with secret token';
+
+function artifactRef() {
+  return {
+    schema: ARTIFACT_REF_SCHEMA_ID,
+    run_id: RUN_ID,
+    assignment_id: 'lane-writer',
+    artifact_kind: 'git_diff',
+    artifact_class: 'sanitized',
+    relative_path: `runs/${RUN_ID}/lane-writer/diff-1.patch`,
+    byte_length: 128,
+    sha256: 'ab'.repeat(32),
+    media_type: 'text/plain',
+    content_encoding: 'identity',
+  };
+}
 
 function writerLane(overrides = {}) {
   return {
@@ -29,25 +51,40 @@ function writerLane(overrides = {}) {
       current_head: HEAD_SHA,
       branch: 'ce/lane-writer',
     },
+    artifact_refs: [artifactRef()],
     ...overrides,
   };
 }
 
 function receipt(overrides = {}) {
   const result = {
+    schema: RUN_ADMISSION_RECEIPT_SCHEMA_ID,
+    version: 1,
     run_id: RUN_ID,
     phase: 'completed',
     status: 'completed',
     base_sha: BASE_SHA,
+    git: { base_sha: BASE_SHA, digest: 'sha256:not-copied' },
     objective: HOSTILE_PROMPT,
+    complete_candidate_blocked: false,
     lanes: [writerLane()],
     ...overrides,
   };
-  return result;
+  return {
+    ...result,
+    lanes: result.lanes.map((lane) => ({
+      prompt_dispatched: true,
+      dispatch_confidence: 'authoritative',
+      task_final: true,
+      clean: true,
+      ...lane,
+    })),
+  };
 }
 
 test('completed admission work is not Codex acceptance', () => {
-  const summary = projectRunResult(receipt());
+  const summary = summarizeRunResultEvidenceV1(receipt());
+  assert.equal(summary.schema, RUN_RESULT_EVIDENCE_SCHEMA_ID);
   assert.equal(summary.assignment_result, 'completed');
   assert.equal(summary.codex_accepted, false);
   assert.equal(summary.review_needed, true);
@@ -58,7 +95,7 @@ test('completed admission work is not Codex acceptance', () => {
 });
 
 test('failed, uncertain, and unfinal states stay distinct', () => {
-  const failed = projectRunResult(receipt({
+  const failed = summarizeRunResultEvidenceV1(receipt({
     phase: 'failed',
     status: 'failed',
     lanes: [writerLane({
@@ -71,7 +108,7 @@ test('failed, uncertain, and unfinal states stay distinct', () => {
   assert.equal(failed.next_decision, 'resolve_failures');
   assert.equal(failed.codex_accepted, false);
 
-  const uncertain = projectRunResult(receipt({
+  const uncertain = summarizeRunResultEvidenceV1(receipt({
     phase: 'needs_attention',
     status: 'needs_attention',
     lanes: [writerLane({
@@ -84,7 +121,7 @@ test('failed, uncertain, and unfinal states stay distinct', () => {
   assert.equal(uncertain.unresolved, true);
   assert.equal(uncertain.next_decision, 'inspect_unresolved');
 
-  const unfinal = projectRunResult(receipt({
+  const unfinal = summarizeRunResultEvidenceV1(receipt({
     phase: 'running',
     status: 'running',
     lanes: [writerLane({
@@ -97,7 +134,7 @@ test('failed, uncertain, and unfinal states stay distinct', () => {
 });
 
 test('mismatched run and lane states stay coherent', () => {
-  const failedWithOutput = projectRunResult(receipt({
+  const failedWithOutput = summarizeRunResultEvidenceV1(receipt({
     phase: 'failed',
     status: 'failed',
     lanes: [writerLane()],
@@ -106,10 +143,8 @@ test('mismatched run and lane states stay coherent', () => {
   assert.equal(failedWithOutput.label, 'Failed');
   assert.equal(failedWithOutput.next_decision, 'resolve_failures');
   assert.equal(failedWithOutput.review_needed, false);
-  assert.equal(failedWithOutput.assignments[0].outcome, 'completed');
-  assert.equal(failedWithOutput.assignments[0].head, HEAD_SHA);
 
-  const pending = projectRunResult(receipt({
+  const pending = summarizeRunResultEvidenceV1(receipt({
     phase: 'lifecycle_pending',
     status: 'lifecycle_pending',
     lanes: [writerLane({ task_final: false })],
@@ -117,17 +152,17 @@ test('mismatched run and lane states stay coherent', () => {
   assert.equal(pending.assignment_result, 'uncertain');
   assert.equal(pending.next_decision, 'inspect_unresolved');
 
-  const unknownProof = projectRunResult(receipt({
+  const unknownProof = summarizeRunResultEvidenceV1(receipt({
     lanes: [writerLane({ dispatch_confidence: 'unknown' })],
   }));
   assert.equal(unknownProof.assignment_result, 'uncertain');
 
-  const dirty = projectRunResult(receipt({
+  const dirty = summarizeRunResultEvidenceV1(receipt({
     lanes: [writerLane({ clean: false })],
   }));
   assert.equal(dirty.assignment_result, 'uncertain');
 
-  const stillRunning = projectRunResult(receipt({
+  const stillRunning = summarizeRunResultEvidenceV1(receipt({
     phase: 'running',
     status: 'running',
     lanes: [
@@ -147,7 +182,7 @@ test('mismatched run and lane states stay coherent', () => {
 });
 
 test('completed verify work is not treated as a passed check', () => {
-  const detailed = projectRunResult(receipt({
+  const detailed = detailRunResultEvidenceV1(receipt({
     lanes: [{
       assignment_id: 'lane-verify',
       provider: 'grok',
@@ -171,7 +206,7 @@ test('completed verify work is not treated as a passed check', () => {
 });
 
 test('candidate heads stay unambiguous and composition must be explicit', () => {
-  const mixed = projectRunResult(receipt({
+  const mixed = summarizeRunResultEvidenceV1(receipt({
     lanes: [
       writerLane(),
       {
@@ -191,10 +226,8 @@ test('candidate heads stay unambiguous and composition must be explicit', () => 
   }));
   assert.equal(mixed.candidate.head, null);
   assert.equal(mixed.candidate.composed, false);
-  assert.equal(mixed.assignments.find((row) => row.assignment_id === 'lane-writer').head, HEAD_SHA);
-  assert.equal(mixed.assignments.find((row) => row.assignment_id === 'lane-docs').head, OTHER_HEAD);
 
-  const composed = projectRunResult({
+  const composed = projectRunResultEvidenceV1({
     receipt: receipt({
       lanes: [
         writerLane(),
@@ -223,24 +256,24 @@ test('candidate heads stay unambiguous and composition must be explicit', () => 
 });
 
 test('missing metrics stay unknown and shareable text omits owner-only data', () => {
-  const missing = projectRunResult(receipt());
+  const missing = summarizeRunResultEvidenceV1(receipt());
   assert.equal(missing.usage.present, false);
-  assert.equal(Object.hasOwn(missing.usage, 'native_output_tokens') && missing.usage.native_output_tokens === 0, false);
-  assert.equal(JSON.stringify(missing.usage).includes('"value":0') || missing.usage.input_tokens === 0, false);
+  assert.equal(JSON.stringify(missing.usage).includes('"value":0'), false);
   assert.equal(missing.text.includes(HOSTILE_PATH), false);
   assert.equal(missing.text.includes(HOSTILE_PROMPT), false);
   assert.equal(missing.text.includes('/tmp/'), false);
+  assert.equal(missing.text.includes('not_accepted'), false);
 });
 
 test('unbound or stale Codex acceptance cannot label Accepted', () => {
-  const flagOnly = projectRunResult({
+  const flagOnly = projectRunResultEvidenceV1({
     receipt: receipt(),
     codex_acceptance: { accepted: true, authority: 'codex' },
   });
   assert.equal(flagOnly.codex_accepted, false);
   assert.equal(flagOnly.label, 'Review needed');
 
-  const stale = projectRunResult({
+  const stale = projectRunResultEvidenceV1({
     receipt: receipt(),
     codex_acceptance: {
       accepted: true,
@@ -251,7 +284,7 @@ test('unbound or stale Codex acceptance cannot label Accepted', () => {
   });
   assert.equal(stale.codex_accepted, false);
 
-  const bound = projectRunResult({
+  const bound = projectRunResultEvidenceV1({
     receipt: receipt(),
     codex_acceptance: {
       accepted: true,
@@ -263,7 +296,7 @@ test('unbound or stale Codex acceptance cannot label Accepted', () => {
   assert.equal(bound.codex_accepted, true);
   assert.equal(bound.label, 'Accepted');
 
-  const failed = projectRunResult({
+  const failed = projectRunResultEvidenceV1({
     receipt: receipt({
       phase: 'failed',
       status: 'failed',

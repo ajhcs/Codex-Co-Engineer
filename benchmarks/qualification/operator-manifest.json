@@ -3,8 +3,7 @@
   "version": 1,
   "status": "unrun",
   "title": "Operator schedule for 3.4.3 retrospective qualification",
-  "candidate_sha": "c50550e0a12e6ce8f7564d0e384f52c205640ce5",
-  "note": "All 24 trials are unrun retrospective cases. Do not treat this manifest as measured evidence.",
+  "note": "All 24 trials are unrun retrospective cases. Do not treat this manifest as measured evidence. Candidate and published SHAs are bound in the external execution manifest, not here.",
   "assignments": {
     "acp-deadline-concurrent-cancel": {
       "implement": "cursor-local",
@@ -21,7 +20,6 @@
   },
   "paid_ceiling_usd": 25,
   "live_jobs": "not_implemented",
-  "host_and_astra": "record_at_execution",
   "ordering": {
     "seed": 43,
     "algorithm": "mulberry32-fisher-yates",

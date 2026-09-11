@@ -1,15 +1,12 @@
 # Failed, helper, and cumulative comparison accounting
 
-This frozen case reproduces the 3131f9ac7f6807eccb2ab68f027f1d98d3db3661
-offline comparator defects later corrected in the 3.4.3 candidate: usage per
-accepted result dropped incomplete acceptance coverage, mixed providers were
-blended, native helpers could double-count, wall time was confused with the
-sum of attempt durations, and cumulative snapshots could overwrite a terminal
-failure.
+This retrospective task uses a bounded pre-fix snapshot of public repository
+source. Repair the historical modules at their original paths so the frozen
+checks in `checks/failed-helper-cumulative.test.mjs` pass.
 
-Repair `account-trials.mjs` so the frozen checks in `account-trials.test.mjs`
-pass. Do not edit the test file, this prompt, or the recorded identity. Do not
-copy later corrected sources into the workspace.
+Do not edit the check file, this prompt, or recorded identity. Do not copy
+later corrected sources, Git history, or other trial outputs into the
+workspace.
 
 Required behavior:
 
@@ -32,4 +29,5 @@ Required behavior:
   provider/model totals are unknown/non-comparable, not one blended number.
 - An arm cannot mix `coengineer_source` identities.
 
-Acceptance is the frozen command `node --test account-trials.test.mjs`.
+Acceptance is the frozen command
+`node --test checks/failed-helper-cumulative.test.mjs`.

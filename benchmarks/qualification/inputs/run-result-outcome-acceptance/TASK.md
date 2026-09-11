@@ -1,15 +1,12 @@
 # Run-result outcome and acceptance
 
-This frozen case reproduces the 3131f9ac7f6807eccb2ab68f027f1d98d3db3661
-run-result projector defects later corrected in the 3.4.3 candidate: completed
-provider work was treated as Codex acceptance, failed/uncertain/unfinal states
-collapsed, verify completion was promoted to a passed check, mixed heads were
-described as one candidate, missing usage became zero, and an unbound
-acceptance flag could label the result Accepted.
+This retrospective task uses a bounded pre-fix snapshot of public repository
+source. Repair the historical modules at their original paths so the frozen
+checks in `checks/run-result-outcome.test.mjs` pass.
 
-Repair `project-result.mjs` so the frozen checks in `project-result.test.mjs`
-pass. Do not edit the test file, this prompt, or the recorded identity. Do not
-copy later corrected sources into the workspace.
+Do not edit the check file, this prompt, or recorded identity. Do not copy
+later corrected sources, Git history, or other trial outputs into the
+workspace.
 
 Required behavior:
 
@@ -18,7 +15,7 @@ Required behavior:
   bound to this run id and the exact candidate head.
 - Failed, uncertain, and unfinal remain distinct. A failed run stays failed
   even when a lane completed and produced a head. Uncertain proof
-  (lifecycle_pending, unknown dispatch confidence, dirty handoff) is not
+  (`lifecycle_pending`, unknown dispatch confidence, dirty handoff) is not
   completed. A still-running lane keeps the result unfinal.
 - Completed verify work is not a passed check. Checks stay empty unless an
   explicit check record is supplied.
@@ -30,4 +27,5 @@ Required behavior:
 - Stale or unbound Codex acceptance cannot label the result Accepted. A bound
   acceptance still cannot accept a failed assignment result.
 
-Acceptance is the frozen command `node --test project-result.test.mjs`.
+Acceptance is the frozen command
+`node --test checks/run-result-outcome.test.mjs`.

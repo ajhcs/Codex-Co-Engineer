@@ -1,25 +1,351 @@
 {
-  "schema": "codex-co-engineer.benchmark-case.v1",
+  "schema": "codex-co-engineer.qualification-case.v1",
   "id": "acp-deadline-concurrent-cancel",
   "title": "Honor deadline extensions and isolate concurrent ACP cancellation",
   "summary": "In-flight turns must follow the current recorded deadline, and overlapping sessions must not steal cancellation or promote timeout partials into completed end_turn.",
-  "input_digest": "b5ece29ed5b4f8ccbca074aa98ac6f688bcd5c7d5c36a8dc19f2c09c0e3e62e1",
-  "comparable": {
-    "host_model": "codex-default",
-    "host_settings": {
-      "reasoning": "default",
-      "sandbox": "workspace-write"
+  "input_digest": "85e28b36a39db8b6d10a3095e6f81e7b89a0ce1fd3af80056376006cdaffd258",
+  "check_digest": "6ed308603e9f87dff94d41cbca2a87ebc1b2130897ad9de75d5ddb779e818198",
+  "source_sha": "dede188029aff117c60e9a8c4299cc0ab0838be9",
+  "retrospective": true,
+  "status": "unrun",
+  "implement": "cursor-local",
+  "review": "grok",
+  "allowlist": [
+    {
+      "path": "plugins/codex-co-engineer/assets/acpx-runtime.mjs",
+      "git_sha256": "069bdae5541dd53876dfa806c2c3dbb2bd9bdbc1d3763fdbcd1f0e5e1efaf3b6",
+      "bytes": 704493
     },
-    "provider_configuration": {
-      "implement": "cursor-local",
-      "review": "grok"
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/acp-worker.mjs",
+      "git_sha256": "38eec6f9322b2afb0c1beb848399b33c190b9ac3d8176adb0584178556c9dcfd",
+      "bytes": 75115
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/aggregate-run-anchor.mjs",
+      "git_sha256": "46ffb5a49da5886933c31922049ad7ed510186ca8a16ea8837048faa9ae7dfd6",
+      "bytes": 89788
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-path.mjs",
+      "git_sha256": "ce9170fdbdfa84e526c01fa12e74c54da77b0b998359bbd45f6d614e4142c1b6",
+      "bytes": 14445
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-reader.mjs",
+      "git_sha256": "c18132a94b84b6cdd23cb76c89cb4f600c3af9cfdf1db40e7da3b1502e9f2240",
+      "bytes": 8331
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-ref.mjs",
+      "git_sha256": "94fcbb60974729a5c9c959b8236e1fbf2a9ff89957080769664b5181100a89b9",
+      "bytes": 16931
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-sanitizer.mjs",
+      "git_sha256": "b1db243b6d384aef51d1391fda570e35b28c2a050a1ab30b2db3554295baac80",
+      "bytes": 25636
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-store.mjs",
+      "git_sha256": "1904e94a5e5c32ed94ddeffc49e2a30e5918418a5a412be00b11e8a851da78d8",
+      "bytes": 70440
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/assignment-manifest.mjs",
+      "git_sha256": "b8b90746b059cea51933757b82334db64054fc5525f3d03692f23dc39d52470b",
+      "bytes": 14355
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/attention-batch.mjs",
+      "git_sha256": "624483b1d02c3b891fad4bf1b421573c5d08ea1a621d8a786fd381e03cef172d",
+      "bytes": 66225
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/capability-bridge.mjs",
+      "git_sha256": "555c7ce7f94a611240cd9ba9d1a59fa9e999071f3c2e6e6fbb984575b1f76f9a",
+      "bytes": 15421
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/compact-task.mjs",
+      "git_sha256": "cbff6f9269daae16d95ac180b36746cc2282321e2b568e3be6d29455116ea875",
+      "bytes": 25366
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/contract.mjs",
+      "git_sha256": "2b8f9e2060602ca25d0d9ef47e3048dc24d85ccc4fcc08b38361afc99e4576d4",
+      "bytes": 4090
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/credential-boundary.mjs",
+      "git_sha256": "2fbf82f9feee9078a9a2748c36da566e02801db402d7c112c786e98908e50a48",
+      "bytes": 30228
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/cursor-cloud-driver.mjs",
+      "git_sha256": "a024d4cce30e6a33342bf0912c612f8b1787bedc07ea853dfad1ea10619c92fe",
+      "bytes": 69100
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/cursor-cloud-result-source.mjs",
+      "git_sha256": "ac11d01ca37e7b62020caefe2446edcb091f129048c3d7e8af098411cfc56e07",
+      "bytes": 71165
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/cursor-cloud-worker.mjs",
+      "git_sha256": "5dba890ab29ef9515347030deb803520415aa137f0f5775eb9fb14d72b35ca98",
+      "bytes": 59053
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/cursor-local-driver.mjs",
+      "git_sha256": "62dfd95e9ec9f85e2b31f0cc5ef2c323d019fd6a87c559c876d69f229aa7d95f",
+      "bytes": 52546
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/deadline.mjs",
+      "git_sha256": "32ad2aa23647d28c54e071af0b946e4f9979d20597350858c9e17b2cb98806ea",
+      "bytes": 5784
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/diagnostics.mjs",
+      "git_sha256": "4c8ff587cb9eb4deca885b60d2e10f175491e243a83e5d62fe515680c010af98",
+      "bytes": 29106
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/dsh-acpx-driver.mjs",
+      "git_sha256": "56fad9485c3c3652abb4692ff76e0752f967b66ef433cbfe5c71868cd54a6c9a",
+      "bytes": 50308
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/evidence-bundle.mjs",
+      "git_sha256": "d46e5b40b2d32d332c3896db0c9fa3cd84a15664f0c021b872cf6f7b95d984d2",
+      "bytes": 44137
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/future-harness.mjs",
+      "git_sha256": "ab275b36824541d80d1cd3b9bbc9df187ab76589d03cb5da1b91e60f611704b9",
+      "bytes": 1019
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/git-authority.mjs",
+      "git_sha256": "b4b99984469278c7b3aaca3fe80e384a74a4a0d09f53af73fa7b74cd7c8a1817",
+      "bytes": 43691
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/git-identity.mjs",
+      "git_sha256": "398cb20f2837b3264400dbbce379f689701483531cefee0c017889c56dda2d57",
+      "bytes": 50731
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/grammar.mjs",
+      "git_sha256": "8b80015d521b7a39e8a1df41d489eb791d3ce6d2f8b05eea3e9c699a5b81da66",
+      "bytes": 5842
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/grok-acp-driver.mjs",
+      "git_sha256": "8ac3a33b31c5ffb5e3aa99966f8cf6d4822506d90b7122843fff6f43cad68379",
+      "bytes": 56530
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/grok-question-bridge.mjs",
+      "git_sha256": "9471dd302e2bb8e36bf6a1d5c6328f17479001f673548bffb4b7d786cb504a53",
+      "bytes": 5183
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/identity.mjs",
+      "git_sha256": "80382e0d552f0979859f1bb919b4ceae481743c49213e199e1891b7baab7ede5",
+      "bytes": 26760
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/local-provider-result-sink.mjs",
+      "git_sha256": "1c10f8cf42a0c06829dec7f58edd601b87e0716ec76832fdc6fbf7e7cbc570e6",
+      "bytes": 30199
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/mailbox.mjs",
+      "git_sha256": "25655372f055efcccf99aa44d972a7948a96cdffd8d0fb68b39a048fed374819",
+      "bytes": 13031
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/process-boundary.mjs",
+      "git_sha256": "e719cdb9423f0c592354ead27da0c09f287d66a7ff1f4a0430a39f41314e923b",
+      "bytes": 61795
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/profile.mjs",
+      "git_sha256": "ee841866394db7d9fd46e0f947e9be43ba48e5886f5464443b9d1ab85427e5f8",
+      "bytes": 60609
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/prompt-compiler.mjs",
+      "git_sha256": "cf9923a535c36ebc6a141226f0f244152d8afdb51abd59c383c3d337084fbc81",
+      "bytes": 33910
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/protected-identity.mjs",
+      "git_sha256": "114d9bd6fe03b6a07e515980b4edc1569e03decb72e747e096efec56479fad40",
+      "bytes": 28974
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/protected-telemetry.mjs",
+      "git_sha256": "cd778870f25278753c1f22059ac9f4ff80afde38484411bb7ed6ebdac266f837",
+      "bytes": 29889
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/provider-driver-conformance.mjs",
+      "git_sha256": "2c118c5eda353bd11b4b6df483344c32f9d0f68f50368041d338d743ee09dab9",
+      "bytes": 13727
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/provider-driver-template.mjs",
+      "git_sha256": "9ea5e3b094e9568ecd0a6b5340357e035ba47f23284a782750be2c0c07adaa0d",
+      "bytes": 15562
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/provider-driver.mjs",
+      "git_sha256": "0a58a3adc2c5eaca5f76d5f529433a739970c1bdd65bbbded84c7b3d67f6caa1",
+      "bytes": 35920
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/provider-registry.mjs",
+      "git_sha256": "f42f62b1abdc8c477ffd45ffd12092806d80cb4aacb65f0c11e0543f5d394507",
+      "bytes": 16185
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/provider-result.mjs",
+      "git_sha256": "49cdf3afefef9a8c623801e8e1839aeb11c455290f5ddf16538a63b7c1f50831",
+      "bytes": 15131
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/readiness-snapshot.mjs",
+      "git_sha256": "e9821ed77cc50bbd156d3b23271e45cd7526a31576e51a4f8368ed14ce0b5842",
+      "bytes": 5821
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/repo-path-matcher.mjs",
+      "git_sha256": "25ffd90555229733e90ede629ec2cf4aad728ee3377e1402eb5f7488f6e87df9",
+      "bytes": 31089
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/resolver.mjs",
+      "git_sha256": "f639567274c617cf63374f863af1d36d86ee2ee446a43ad61453d6059a1dde83",
+      "bytes": 59301
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/response.mjs",
+      "git_sha256": "8a3c576c5ed28c59d98eb19487adf63692b66e5542eefda418455008f0d33f6d",
+      "bytes": 62324
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-admission-store.mjs",
+      "git_sha256": "afe7cdce234afce847a20b40583f3b39c7610d2c17829520a47644699f1859a3",
+      "bytes": 8754
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-admission.mjs",
+      "git_sha256": "9b7e5891380214b0951ccd5aa7a45f04a997f607f4e5bf096d4c262f2b39bdad",
+      "bytes": 86834
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-artifact-bridge.mjs",
+      "git_sha256": "f0989dbdec064a39bc93cfbf61a872fc14b18c2f32501b6f6e8d8bc3aa77dd08",
+      "bytes": 43181
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-journal.mjs",
+      "git_sha256": "5ea73efe357d148ced8783ac033a026e3164b9b11b4b8e09f2a09ac8deacd351",
+      "bytes": 90460
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-manifest.mjs",
+      "git_sha256": "2ed6861654ab629cf5c1756cc3747feba45c047063fee4088973248bd55b4b44",
+      "bytes": 46207
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-orchestration.mjs",
+      "git_sha256": "c9db030067746594a417f79bdb35c73d45af97986550df84abe8d71ee5256032",
+      "bytes": 24752
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-policy.mjs",
+      "git_sha256": "aeed773fbff6b96ffdbf08555001a644aadf846155366325944360a9a6702948",
+      "bytes": 6727
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-preflight.mjs",
+      "git_sha256": "08fc4feeef0977413348a9703b83fde30f3a788693f688aa1730e33af8280d65",
+      "bytes": 32762
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-reducer.mjs",
+      "git_sha256": "310cbe35032049f67c77ff51230065bf5aa34c7ba978ce34d4d15a70f9e22556",
+      "bytes": 22267
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-request-compiler.mjs",
+      "git_sha256": "1f5dfaa7d82e3e0c4916215b9c2c2ecc477b79f5e1f1b18f2b66c1a016c2cb7c",
+      "bytes": 26723
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-runtime.mjs",
+      "git_sha256": "7a9132ba3b5c6439d47928c5081510444cd36312da1383771c0f1aac1a07fac9",
+      "bytes": 71632
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-scheduler.mjs",
+      "git_sha256": "9ec865f0d52e98448509d7fc689d2f4bed6eff63d38319ee358a9f7b08cca2cc",
+      "bytes": 44076
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-store.mjs",
+      "git_sha256": "3026015a306b16abea6459a541c2079641e2be9f67c8572b32628551710de5b2",
+      "bytes": 34763
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-tool-adapter.mjs",
+      "git_sha256": "6d6c724e469d9e15ae1d08163c5bb1306190069b87173aa891a09f320b636e4e",
+      "bytes": 120094
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/runtime-entrypoints.mjs",
+      "git_sha256": "708e73d68f1e9f4ece7e7598a7e98eb9f09dc9c8a2532b7fcba9b1f56a096e35",
+      "bytes": 1149
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/selection-json.mjs",
+      "git_sha256": "5baca38e0d5c85bf4081d6bf73179459b6770ce4f9a40118df23a28bceae23b5",
+      "bytes": 10148
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/supervisor.mjs",
+      "git_sha256": "65f0a7fe856479ff0c6412972437ba596a5bf3ce6347914c1bfea78a60506ea2",
+      "bytes": 128686
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/task-store.mjs",
+      "git_sha256": "dd5744ab3ad9784d059e6c51dba4a062fa5114ed99a209df97860cf763394376",
+      "bytes": 58123
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/usage-ledger.mjs",
+      "git_sha256": "2aef8295a0f37eeb6caae9eb64235928217caa7bd250acfe0748fa8efd14ba69",
+      "bytes": 49915
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/worktree-bootstrap-runtime.mjs",
+      "git_sha256": "56212fe20dc35c1fef34e9612a7d091121a90df90b6bab05aeeb71951397072f",
+      "bytes": 185
+    },
+    {
+      "path": "plugins/codex-co-engineer/vendor/worktree-bootstrap/worktree-bootstrap",
+      "git_sha256": "4138a49e42148db9e5c63dfd5386fdac235f19e445453e702f342b1a7002b813",
+      "bytes": 45617
     }
-  },
-  "inputs": {
+  ],
+  "overlay": {
     "files": {
-      "TASK.md": "# ACP deadline extension and concurrent cancellation\n\nThis frozen case reproduces two public 3.4.2 defects later corrected in the\n3.4.3 candidate: an in-flight ACP turn kept a fixed inner timeout that could\noutlive a recorded deadline extension and then settle as a completed\n`end_turn`, and overlapping turns shared cancellation so one session could\nsteal or drop another session's abort.\n\nRepair `turn-runner.mjs` so the frozen checks in `turn-runner.test.mjs` pass.\nDo not edit the test file, this prompt, or the recorded identity. Do not copy\nlater corrected sources into the workspace.\n\nRequired behavior:\n\n- `extendDeadline` must refuse an empty reason, refuse a silent roll after the\n  recorded deadline has already passed, and require the next deadline to be\n  strictly later than the recorded one.\n- An in-flight `runPromptTurn` is governed by the task's current deadline. An\n  audited extension must re-arm that bound. Hitting the original inner timeout\n  after a valid extension is not a successful completed turn.\n- Timeout or interrupt after partial output remains timeout/cancelled. Partial\n  text must not be promoted into `{ stopReason: 'end_turn' }`.\n- Concurrent turns keep independent cancellation. Aborting turn A must not\n  cancel turn B, and finishing A must not drop B's abort context.\n- A pre-aborted signal fails as cancelled. A prompt that settles later must\n  still be observed so it cannot become an unhandled rejection.\n\nAcceptance is the frozen command `node --test turn-runner.test.mjs`.\n",
-      "turn-runner.mjs": "// Known-bad isolated reproduction of dede188029aff117c60e9a8c4299cc0ab0838be9\n// ACP turn behavior: a fixed inner timer can outlive an audited deadline\n// extension and settle as completed end_turn, and overlapping turns share one\n// module-global cancellation slot.\n\nconst DURATION_MARGIN = 1.2;\n\nfunction fail(code, message) {\n  throw Object.assign(new Error(message), { code });\n}\n\nexport function createClock(startMs = 0) {\n  let now = startMs;\n  let nextId = 1;\n  const timers = new Map();\n  return {\n    now() {\n      return now;\n    },\n    setTimeout(fn, delayMs) {\n      const id = nextId;\n      nextId += 1;\n      timers.set(id, { fn, at: now + delayMs });\n      return id;\n    },\n    clearTimeout(id) {\n      timers.delete(id);\n    },\n    advance(ms) {\n      const target = now + ms;\n      while (timers.size > 0) {\n        let chosenId = null;\n        let chosen = null;\n        for (const [id, timer] of timers) {\n          if (timer.at > target) continue;\n          if (\n            chosen == null\n            || timer.at < chosen.at\n            || (timer.at === chosen.at && id < chosenId)\n          ) {\n            chosenId = id;\n            chosen = timer;\n          }\n        }\n        if (chosen == null) break;\n        now = chosen.at;\n        timers.delete(chosenId);\n        chosen.fn();\n      }\n      now = target;\n    },\n  };\n}\n\nfunction delay(clock, ms) {\n  return new Promise((resolve) => {\n    clock.setTimeout(resolve, ms);\n  });\n}\n\nexport function createTask({ expectedDurationMs, now }) {\n  if (!Number.isInteger(expectedDurationMs) || expectedDurationMs < 1) {\n    fail('invalid_expected_duration_ms', 'expectedDurationMs must be a positive integer.');\n  }\n  const timeoutMs = Math.ceil(expectedDurationMs * DURATION_MARGIN);\n  return {\n    expectedDurationMs,\n    timeoutMs,\n    deadlineAt: now + timeoutMs,\n    deadlineSource: 'margin',\n    deadlineExtensions: [],\n  };\n}\n\nexport function extendDeadline(task, { expectedDurationMs, reason, now }) {\n  if (!task || typeof task !== 'object') fail('invalid_task_record', 'Task record is invalid.');\n  if (typeof reason !== 'string' || reason.trim().length === 0) {\n    fail('invalid_extend_reason', 'extend_reason must be non-empty text describing why the deadline is changing.');\n  }\n  if (now >= task.deadlineAt) {\n    fail('deadline_expired', 'The recorded deadline has already passed; a silent roll-forward is not allowed.');\n  }\n  if (!Number.isInteger(expectedDurationMs) || expectedDurationMs < 1) {\n    fail('invalid_expected_duration_ms', 'expectedDurationMs must be a positive integer.');\n  }\n  const timeoutMs = Math.ceil(expectedDurationMs * DURATION_MARGIN);\n  const deadlineAt = now + timeoutMs;\n  if (deadlineAt <= task.deadlineAt) {\n    fail('deadline_not_extended', 'The new deadline must be strictly later than the recorded deadline.');\n  }\n  const previous = task.deadlineAt;\n  task.expectedDurationMs = expectedDurationMs;\n  task.timeoutMs = timeoutMs;\n  task.deadlineAt = deadlineAt;\n  task.deadlineSource = 'extended';\n  task.deadlineExtensions = [\n    ...task.deadlineExtensions,\n    {\n      at: now,\n      reason: reason.trim(),\n      previousDeadlineAt: previous,\n      deadlineAt,\n      timeoutMs,\n    },\n  ];\n  return task;\n}\n\nlet activeTurn = null;\n\nexport async function runPromptTurn({ task, signal, prompt, clock }) {\n  const innerTimeoutMs = task.timeoutMs;\n  let partial = '';\n  const emit = (text) => {\n    partial += String(text);\n  };\n\n  activeTurn = { task, cancelled: false };\n  const onAbort = () => {\n    if (activeTurn) activeTurn.cancelled = true;\n  };\n  if (signal?.aborted) onAbort();\n  else signal?.addEventListener('abort', onAbort, { once: true });\n\n  const promptPromise = Promise.resolve().then(() => prompt({ emit, signal }));\n\n  try {\n    const result = await Promise.race([\n      promptPromise,\n      delay(clock, innerTimeoutMs).then(() => {\n        const error = new Error('timeout');\n        error.code = 'timeout';\n        throw error;\n      }),\n    ]);\n    if (activeTurn?.cancelled) {\n      return { stopReason: 'cancelled', source: 'signal', text: partial };\n    }\n    return {\n      stopReason: 'end_turn',\n      source: 'rpc',\n      text: result == null ? partial : String(result),\n    };\n  } catch (error) {\n    if (error && error.code === 'timeout') {\n      return { stopReason: 'end_turn', source: 'session', text: partial };\n    }\n    if (activeTurn?.cancelled || signal?.aborted) {\n      return { stopReason: 'cancelled', source: 'signal', text: partial };\n    }\n    throw error;\n  } finally {\n    activeTurn = null;\n  }\n}\n",
-      "turn-runner.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\n\nimport {\n  createClock,\n  createTask,\n  extendDeadline,\n  runPromptTurn,\n} from './turn-runner.mjs';\n\nfunction hang() {\n  return new Promise(() => {});\n}\n\ntest('deadline extension is audited and refuses a silent roll after expiry', () => {\n  const task = createTask({ expectedDurationMs: 1000, now: 0 });\n  assert.equal(task.timeoutMs, 1200);\n  assert.equal(task.deadlineAt, 1200);\n\n  const extended = extendDeadline(task, {\n    expectedDurationMs: 3000,\n    reason: 'provider still making progress on tests',\n    now: 200,\n  });\n  assert.equal(extended.deadlineSource, 'extended');\n  assert.equal(extended.timeoutMs, 3600);\n  assert.equal(extended.deadlineAt, 3800);\n  assert.equal(extended.deadlineExtensions.length, 1);\n  assert.equal(extended.deadlineExtensions[0].previousDeadlineAt, 1200);\n\n  assert.throws(\n    () => extendDeadline(task, { expectedDurationMs: 5000, reason: 'too late', now: 3800 }),\n    (error) => error.code === 'deadline_expired',\n  );\n  assert.throws(\n    () => extendDeadline(task, { expectedDurationMs: 5000, now: 300 }),\n    (error) => error.code === 'invalid_extend_reason',\n  );\n  assert.throws(\n    () => extendDeadline(task, {\n      expectedDurationMs: 1000,\n      reason: 'would shrink the recorded deadline',\n      now: 300,\n    }),\n    (error) => error.code === 'deadline_not_extended',\n  );\n});\n\ntest('an in-flight turn is governed by the extended deadline, not the original inner timer', async () => {\n  const clock = createClock(0);\n  const task = createTask({ expectedDurationMs: 1000, now: 0 });\n  const turn = runPromptTurn({\n    task,\n    clock,\n    prompt: async ({ emit }) => {\n      emit('partial-progress');\n      await hang();\n    },\n  });\n  let settled = null;\n  turn.then((value) => {\n    settled = value;\n  }, (error) => {\n    settled = { error };\n  });\n\n  extendDeadline(task, {\n    expectedDurationMs: 3000,\n    reason: 'tests still running',\n    now: 200,\n  });\n  clock.advance(1200);\n  await Promise.resolve();\n  assert.equal(settled, null);\n\n  clock.advance(2600);\n  const result = await turn;\n  assert.notEqual(result.stopReason, 'end_turn');\n  assert.equal(['timeout', 'cancelled'].includes(result.stopReason), true);\n  assert.equal(result.text.includes('partial-progress'), true);\n});\n\ntest('timeout after partial output is not promoted to a completed end_turn', async () => {\n  const clock = createClock(0);\n  const task = createTask({ expectedDurationMs: 100, now: 0 });\n  const turn = runPromptTurn({\n    task,\n    clock,\n    prompt: async ({ emit }) => {\n      emit('chunk-one');\n      await hang();\n    },\n  });\n  clock.advance(120);\n  const result = await turn;\n  assert.notEqual(result.stopReason, 'end_turn');\n  assert.equal(['timeout', 'cancelled'].includes(result.stopReason), true);\n  assert.equal(result.source === 'session', false);\n  assert.equal(result.text, 'chunk-one');\n});\n\ntest('concurrent turns keep independent cancellation', async () => {\n  const clock = createClock(0);\n  const taskA = createTask({ expectedDurationMs: 5000, now: 0 });\n  const taskB = createTask({ expectedDurationMs: 5000, now: 0 });\n  const abortA = new AbortController();\n  const abortB = new AbortController();\n\n  const turnA = runPromptTurn({\n    task: taskA,\n    clock,\n    signal: abortA.signal,\n    prompt: () => hang(),\n  });\n  const turnB = runPromptTurn({\n    task: taskB,\n    clock,\n    signal: abortB.signal,\n    prompt: () => hang(),\n  });\n\n  let aSettled = null;\n  let bSettled = null;\n  turnA.then((value) => {\n    aSettled = value;\n  });\n  turnB.then((value) => {\n    bSettled = value;\n  });\n  abortA.abort();\n  await Promise.resolve();\n  if (aSettled == null) clock.advance(7000);\n  const resultA = await turnA;\n  await Promise.resolve();\n  assert.equal(resultA.stopReason, 'cancelled');\n  assert.equal(bSettled, null);\n\n  abortB.abort();\n  if (bSettled == null) clock.advance(1);\n  const resultB = await turnB;\n  assert.equal(resultB.stopReason, 'cancelled');\n});\n\ntest('a pre-aborted signal cancels and late prompt settlement is observed', async () => {\n  const clock = createClock(0);\n  const task = createTask({ expectedDurationMs: 1000, now: 0 });\n  const abort = new AbortController();\n  abort.abort();\n  let settledLate = false;\n  const prompt = () => new Promise((resolve) => {\n    queueMicrotask(() => {\n      settledLate = true;\n      resolve('late-text');\n    });\n  });\n  const result = await runPromptTurn({\n    task,\n    clock,\n    signal: abort.signal,\n    prompt,\n  });\n  assert.equal(result.stopReason, 'cancelled');\n  await Promise.resolve();\n  await Promise.resolve();\n  assert.equal(settledLate, true);\n});\n"
+      "TASK.md": "# ACP deadline extension and concurrent cancellation\n\nThis retrospective task uses a bounded pre-fix snapshot of public repository\nsource. Repair the historical modules at their original paths so the frozen\nchecks in `checks/deadline-concurrent.test.mjs` pass.\n\nDo not edit the check file, this prompt, or recorded identity. Do not copy\nlater corrected sources, Git history, or other trial outputs into the\nworkspace.\n\nRequired behavior:\n\n- `nextDeadlineExtension` must refuse an empty reason, refuse a silent roll\n  after the recorded deadline has already passed, and require the next\n  deadline to be strictly later than the recorded one.\n- An in-flight ACP turn is governed by the task's current deadline. An audited\n  extension must re-arm that bound. Hitting the original inner timeout after a\n  valid extension is not a successful completed turn.\n- Timeout or interrupt after partial output remains timeout/cancelled. Partial\n  text must not be promoted into a completed `end_turn`.\n- Concurrent turns keep independent cancellation. Aborting turn A must not\n  cancel turn B.\n- A pre-aborted signal fails as cancelled.\n\nAcceptance is the frozen command\n`node --test checks/deadline-concurrent.test.mjs`.\n",
+      "checks/deadline-concurrent.test.mjs": "import assert from 'node:assert/strict';\nimport { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';\nimport { tmpdir } from 'node:os';\nimport path from 'node:path';\nimport test from 'node:test';\n\nimport { runAcpTask } from '../plugins/codex-co-engineer/mcp/v3/acp-worker.mjs';\nimport { nextDeadlineExtension } from '../plugins/codex-co-engineer/mcp/v3/deadline.mjs';\nimport { createTask, readTask, updateTask } from '../plugins/codex-co-engineer/mcp/v3/task-store.mjs';\n\nasync function writeDeadlineAgent(root, behavior) {\n  const agentPath = path.join(root, `deadline-agent-${behavior}.mjs`);\n  await writeFile(agentPath, `import { createInterface } from 'node:readline';\nimport { writeFile } from 'node:fs/promises';\nimport { join } from 'node:path';\nconst behavior = ${JSON.stringify(behavior)};\nfunction send(message) { process.stdout.write(JSON.stringify(message) + '\\\\n'); }\nfunction response(id, result) { send({ jsonrpc: '2.0', id, result }); }\nconst pending = new Map();\nasync function handle(message) {\n  const { id, method, params = {} } = message;\n  if (method === 'initialize') {\n    return response(id, {\n      protocolVersion: 1,\n      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },\n    });\n  }\n  if (method === 'notifications/initialized' || method === 'initialized') return;\n  if (method === 'session/new') return response(id, { sessionId: 'deadline-session-' + behavior });\n  if (method === 'session/close') {\n    await writeFile(join(process.cwd(), '.acpx-fake-close.json'), JSON.stringify(params) + '\\\\n');\n    return response(id, {});\n  }\n  if (method === 'session/cancel') {\n    for (const [promptId, entry] of pending) {\n      if (entry.timer) clearTimeout(entry.timer);\n      response(promptId, { stopReason: 'cancelled' });\n      pending.delete(promptId);\n    }\n    return;\n  }\n  if (method === 'session/prompt') {\n    send({\n      jsonrpc: '2.0',\n      method: 'session/update',\n      params: {\n        sessionId: params.sessionId,\n        update: {\n          sessionUpdate: 'agent_message_chunk',\n          content: { type: 'text', text: 'partial-before-timeout' },\n        },\n      },\n    });\n    if (behavior === 'extend-complete') {\n      const timer = setTimeout(() => {\n        send({\n          jsonrpc: '2.0',\n          method: 'session/update',\n          params: {\n            sessionId: params.sessionId,\n            update: {\n              sessionUpdate: 'agent_message_chunk',\n              content: { type: 'text', text: '+done-after-extend' },\n            },\n          },\n        });\n        response(id, { stopReason: 'end_turn' });\n        pending.delete(id);\n      }, 1_500);\n      pending.set(id, { timer });\n      return;\n    }\n    if (behavior === 'slow-cooperative') {\n      const timer = setTimeout(() => {\n        response(id, { stopReason: 'end_turn' });\n        pending.delete(id);\n      }, 8_000);\n      pending.set(id, { timer });\n      return;\n    }\n    pending.set(id, { timer: null });\n    return;\n  }\n}\nconst rl = createInterface({ input: process.stdin });\nrl.on('line', (line) => {\n  const trimmed = line.trim();\n  if (!trimmed) return;\n  handle(JSON.parse(trimmed)).catch((error) => {\n    process.stderr.write(String(error) + '\\\\n');\n  });\n});\n`);\n  return agentPath;\n}\n\ntest('deadline extension is audited and refuses a silent roll after expiry', () => {\n  const task = {\n    status: 'running',\n    expected_duration_ms: 1000,\n    timeout_ms: 1200,\n    deadline_at: new Date(1_200).toISOString(),\n    deadline_source: 'margin',\n    deadline_extensions: [],\n  };\n  const extended = nextDeadlineExtension(task, {\n    expected_duration_ms: 3000,\n    reason: 'provider still making progress on tests',\n    now: 200,\n  });\n  assert.equal(extended.deadline_source, 'extended');\n  assert.equal(extended.timeout_ms, 3600);\n  assert.equal(Date.parse(extended.deadline_at), 3800);\n  assert.equal(extended.deadline_extensions.length, 1);\n\n  assert.throws(\n    () => nextDeadlineExtension(task, { expected_duration_ms: 5000, reason: 'too late', now: 3800 }),\n    (error) => error.code === 'deadline_expired',\n  );\n  assert.throws(\n    () => nextDeadlineExtension(task, { expected_duration_ms: 5000, now: 300 }),\n    (error) => error.code === 'invalid_extend_reason',\n  );\n  assert.throws(\n    () => nextDeadlineExtension({ ...task, deadline_at: new Date(3800).toISOString() }, {\n      expected_duration_ms: 1000,\n      reason: 'would shrink the recorded deadline',\n      now: 300,\n    }),\n    (error) => error.code === 'deadline_not_extended',\n  );\n});\n\ntest('an in-flight turn is governed by the extended deadline, not the original inner timer', async () => {\n  const root = await mkdtemp(path.join(tmpdir(), 'ce-qual-deadline-extend-'));\n  const cwd = path.join(root, 'worktree');\n  await mkdir(cwd);\n  const agent = await writeDeadlineAgent(root, 'extend-complete');\n  const now = Date.now();\n  const taskId = 'deadline-extend-complete';\n  await createTask({\n    root,\n    prompt: 'finish after extension',\n    record: {\n      id: taskId,\n      status: 'accepted',\n      provider: 'grok',\n      cwd,\n      agent_argv: [process.execPath, agent],\n      timeout_ms: 700,\n      deadline_at: new Date(now + 700).toISOString(),\n    },\n  });\n  setTimeout(() => {\n    updateTask(root, taskId, {\n      deadline_at: new Date(Date.now() + 2_500).toISOString(),\n      timeout_ms: 2_500,\n      deadline_source: 'extended',\n      deadline_extensions: [{ reason: 'provider still making progress', at: new Date().toISOString() }],\n    }).catch(() => {});\n  }, 250);\n  const terminal = await runAcpTask({ root, taskId });\n  assert.equal(terminal.status, 'completed');\n  assert.equal(String(terminal.result).includes('done-after-extend'), true);\n});\n\ntest('timeout after partial output is not promoted to a completed end_turn', async () => {\n  const root = await mkdtemp(path.join(tmpdir(), 'ce-qual-deadline-partial-'));\n  const cwd = path.join(root, 'worktree');\n  await mkdir(cwd);\n  const agent = await writeDeadlineAgent(root, 'partial-hostile');\n  const now = Date.now();\n  const taskId = 'deadline-extend-expire';\n  await createTask({\n    root,\n    prompt: 'expire at the new deadline',\n    record: {\n      id: taskId,\n      status: 'accepted',\n      provider: 'grok',\n      cwd,\n      agent_argv: [process.execPath, agent],\n      timeout_ms: 500,\n      deadline_at: new Date(now + 500).toISOString(),\n    },\n  });\n  setTimeout(() => {\n    updateTask(root, taskId, {\n      deadline_at: new Date(Date.now() + 800).toISOString(),\n      timeout_ms: 800,\n      deadline_source: 'extended',\n    }).catch(() => {});\n  }, 200);\n  const started = Date.now();\n  await assert.rejects(\n    runAcpTask({ root, taskId }),\n    (error) => error.code === 'timeout',\n  );\n  const elapsed = Date.now() - started;\n  assert.ok(elapsed >= 700, `expected expiry near the extended deadline, got ${elapsed}ms`);\n  assert.ok(elapsed < 2_500, `deadline watch should not wait on the original fixed turn timer drain (${elapsed}ms)`);\n  const { task } = await readTask(root, taskId);\n  assert.equal(task.status, 'timeout');\n  assert.notEqual(task.status, 'completed');\n  const events = await readFile(path.join(root, 'tasks', taskId, 'events.jsonl'), 'utf8');\n  assert.match(events, /partial-before-timeout/u);\n  assert.doesNotMatch(events, /\"status\":\"completed\"/u);\n});\n\ntest('concurrent turns keep independent cancellation', async () => {\n  const root = await mkdtemp(path.join(tmpdir(), 'ce-qual-deadline-concurrent-'));\n  const cwdA = path.join(root, 'worktree-a');\n  const cwdB = path.join(root, 'worktree-b');\n  await mkdir(cwdA);\n  await mkdir(cwdB);\n  const agentA = await writeDeadlineAgent(root, 'slow-cooperative');\n  const agentBDir = path.join(root, 'b-agent');\n  await mkdir(agentBDir);\n  const agentB = await writeDeadlineAgent(agentBDir, 'slow-cooperative');\n  await createTask({\n    root,\n    prompt: 'turn A',\n    record: {\n      id: 'turn-a',\n      status: 'accepted',\n      provider: 'grok',\n      cwd: cwdA,\n      agent_argv: [process.execPath, agentA],\n      timeout_ms: 8_000,\n      deadline_at: new Date(Date.now() + 8_000).toISOString(),\n    },\n  });\n  await createTask({\n    root,\n    prompt: 'turn B',\n    record: {\n      id: 'turn-b',\n      status: 'accepted',\n      provider: 'grok',\n      cwd: cwdB,\n      agent_argv: [process.execPath, agentB],\n      timeout_ms: 8_000,\n      deadline_at: new Date(Date.now() + 8_000).toISOString(),\n    },\n  });\n  const abortA = new AbortController();\n  const abortB = new AbortController();\n  const runningA = runAcpTask({ root, taskId: 'turn-a', signal: abortA.signal });\n  const runningB = runAcpTask({ root, taskId: 'turn-b', signal: abortB.signal });\n  await new Promise((resolve) => setTimeout(resolve, 250));\n  abortA.abort();\n  await assert.rejects(runningA, (error) => error.code === 'cancelled');\n  const { task: taskB } = await readTask(root, 'turn-b');\n  assert.notEqual(taskB.status, 'cancelled');\n  abortB.abort();\n  try {\n    await runningB;\n  } catch {\n    // Turn B may still be running; abort is cleanup, not the assertion.\n  }\n});\n\ntest('a pre-aborted signal cancels', async () => {\n  const root = await mkdtemp(path.join(tmpdir(), 'ce-qual-deadline-preabort-'));\n  const cwd = path.join(root, 'worktree');\n  await mkdir(cwd);\n  const agent = await writeDeadlineAgent(root, 'slow-cooperative');\n  await createTask({\n    root,\n    prompt: 'already cancelled',\n    record: {\n      id: 'pre-abort',\n      status: 'accepted',\n      provider: 'grok',\n      cwd,\n      agent_argv: [process.execPath, agent],\n      timeout_ms: 5_000,\n      deadline_at: new Date(Date.now() + 5_000).toISOString(),\n    },\n  });\n  const abort = new AbortController();\n  abort.abort();\n  await assert.rejects(\n    runAcpTask({ root, taskId: 'pre-abort', signal: abort.signal }),\n    (error) => error.code === 'cancelled',\n  );\n});\n"
     }
   },
   "acceptance": {
@@ -29,38 +355,21 @@
         "command": [
           "node",
           "--test",
-          "turn-runner.test.mjs"
+          "checks/deadline-concurrent.test.mjs"
         ],
         "expect_exit": 0
       }
     ],
     "required_files": [
       "TASK.md",
-      "turn-runner.mjs",
-      "turn-runner.test.mjs"
-    ],
-    "forbidden_paths": [
-      "turn-runner.test.mjs",
-      "TASK.md"
-    ]
-  },
-  "qualification": {
-    "retrospective": true,
-    "status": "unrun",
-    "source_sha": "dede188029aff117c60e9a8c4299cc0ab0838be9",
-    "candidate_sha": "c50550e0a12e6ce8f7564d0e384f52c205640ce5",
-    "source_kind": "git_commit",
-    "implement_provider": "cursor-local",
-    "review_provider": "grok",
-    "allowlist": [
+      "checks/deadline-concurrent.test.mjs",
       "plugins/codex-co-engineer/mcp/v3/acp-worker.mjs",
-      "plugins/codex-co-engineer/assets/acpx-runtime.mjs",
       "plugins/codex-co-engineer/mcp/v3/deadline.mjs"
     ],
-    "host_and_astra": "record_at_execution",
-    "invented_backend_ids": false,
-    "input_digest": "b5ece29ed5b4f8ccbca074aa98ac6f688bcd5c7d5c36a8dc19f2c09c0e3e62e1",
-    "base_sha": "6f56fa2c26a913959cebb37269a905393302fd94"
+    "forbidden_paths": [
+      "TASK.md",
+      "checks/deadline-concurrent.test.mjs"
+    ]
   },
-  "base_sha": "6f56fa2c26a913959cebb37269a905393302fd94"
+  "base_sha": "7c8374f6eacf39e683c17f3e80c48c96459c3982"
 }
