@@ -8,7 +8,7 @@ eight independent assignments and returns their results for Codex to inspect.
 You decide what ships.
 
 [Quickstart](docs/co-engineer-quickstart.md) · [Configuration](docs/configuration.md) ·
-[Troubleshooting](docs/co-engineer-troubleshooting.md) · [3.4.2 release notes](docs/releases/v3.4.2.md)
+[Troubleshooting](docs/co-engineer-troubleshooting.md) · [3.4.3 release notes](docs/releases/v3.4.3.md)
 
 > Use Grok Co-Engineer to review the latest change. Report actionable findings.
 
@@ -18,8 +18,9 @@ is a complete workflow. The stable plugin and MCP identifier is `codex-co-engine
 
 ## Complete engineering assignments
 
-The revision operation and result reporting below are in development for
-3.4.3; the release installation instructions still select published 3.4.2.
+The revision operation and result reporting below are part of the 3.4.3
+candidate; install commands select `v3.4.3`. Verification remains open and no
+savings claim is made here.
 
 Grok and Cursor can own preparation, implementation, meaningful checks, and
 requested corrections. Tell Codex your provider preferences once in the task;
@@ -50,13 +51,17 @@ The worktree tool is bundled; no separate `worktree-bootstrap` installation is n
 ### Install from a release clone
 
 ```bash
-git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
+git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
 cd Codex-Co-Engineer
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
+
+Until the public `v3.4.3` tag exists, clone the exact qualified candidate commit
+or release branch instead of the tag. Historical `v3.4.2` install examples remain
+in the [3.4.2 release notes](docs/releases/v3.4.2.md).
 
 Keep the clone as the registered marketplace source. Setup installs pinned ACPX
 0.13.0, Cursor SDK 1.0.28, and the DSH 0.1.0-rc.7 composition globally. Use a
@@ -94,8 +99,8 @@ local Linux boundary. Setup does not install or authenticate Grok or Cursor.
 Finish or cancel active runs, then update your clean registered source clone:
 
 ```bash
-git fetch origin tag v3.4.2
-git switch --detach v3.4.2
+git fetch origin tag v3.4.3
+git switch --detach v3.4.3
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin remove codex-co-engineer@codex-co-engineer
 codex plugin add codex-co-engineer@codex-co-engineer
@@ -105,6 +110,7 @@ npm --prefix plugins/codex-co-engineer run setup:check
 Restart the Codex session. Use the identity from `codex plugin list` if your
 marketplace name differs. Preserve dirty source clones and existing task state.
 Direct Meta Muse profiles need the [OpenRouter migration](docs/releases/v3.4.2.md#upgrading).
+Historical 3.4.2 upgrade commands remain in those notes.
 
 ## Execution and safety model
 
@@ -255,7 +261,7 @@ keep exact 3.2.1 single-task behavior. Run wait is a bounded
 `decision_or_attention` wait. See
 [the run tool API](docs/run-tool-api.md).
 
-For a bounded 3.4.2 run, `delegate` accepts the small semantic
+For a bounded 3.4.3 run, `delegate` accepts the small semantic
 `run_request` body. The server derives the clean Git identity, provider
 model, task/workspace/dispatch identities, prompt and manifest digests, and
 managed-workspace policy. Do not construct the legacy full `run` envelope or

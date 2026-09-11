@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 
-Target: 3.4.3. Source candidate; existing release and host acceptance gates apply.
+## [3.4.3] - UNRELEASED
+
+Candidate pending verification. Exact source identity: public
+[PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) (`c50550e`). No
+released or savings claim; link that PR for actual measurements when collected.
+Existing release and host acceptance gates still apply.
 
 ### Added
 

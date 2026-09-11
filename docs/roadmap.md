@@ -1,6 +1,6 @@
 # Roadmap
 
-Status: source candidate under review; no 3.4.3 publication or fresh-install
+Status: 3.4.3 candidate under review; no publication or fresh-install
 qualification is claimed. See the [release requirements](release.md).
 
 This roadmap distinguishes the **3.4.3 adoption and ownership package** from

@@ -21,6 +21,7 @@ export const PACKAGE_DOCUMENTS = Object.freeze([
   ['docs/releases/v3.3.0.md', 'releases/v3.3.0.md'],
   ['docs/releases/v3.4.1.md', 'releases/v3.4.1.md'],
   ['docs/releases/v3.4.2.md', 'releases/v3.4.2.md'],
+  ['docs/releases/v3.4.3.md', 'releases/v3.4.3.md'],
 ].map(([source, packageRelative]) => Object.freeze({ source, packageRelative })));
 
 export const PACKAGE_DOC_ROOT = 'plugins/codex-co-engineer/docs';

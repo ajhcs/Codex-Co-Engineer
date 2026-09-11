@@ -96,7 +96,7 @@ For multi-provider recipes, **review the resulting immutable candidate**. Do
 not run a dependent review concurrently against the shared base while writers
 are still producing it.
 
-The unreleased 3.4.3 candidate adds provider preferences and `task.revision`.
+The 3.4.3 candidate adds provider preferences and `task.revision`.
 Published 3.4.2 uses explicit fresh assignments for completed-candidate fixes.
 
 Provider preferences on a run request reuse ownership **for that request** by

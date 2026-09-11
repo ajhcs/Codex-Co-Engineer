@@ -15,7 +15,7 @@ import { validatePackageDocs } from './validate-package-docs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = 'plugins/codex-co-engineer';
-const RELEASE_VERSION = '3.4.2';
+const RELEASE_VERSION = '3.4.3';
 
 function fail(message) { throw new Error(message); }
 const absolute = (relative) => path.join(ROOT, relative);
@@ -49,6 +49,7 @@ const required = [
   'docs/threat-model.md', 'docs/releases/v3.1.0.md',
   'docs/releases/v3.1.1.md', 'docs/releases/v3.2.0.md', 'docs/releases/v3.2.1.md',
   'docs/releases/v3.3.0.md', 'docs/releases/v3.4.0.md', 'docs/releases/v3.4.1.md', 'docs/releases/v3.4.2.md',
+  'docs/releases/v3.4.3.md',
   'docs/assets/codex-co-engineer-3.1.0.svg', 'docs/assets/codex-co-engineer-3.1.0.jpg',
   '.agents/plugins/marketplace.json', 'scripts/mcp-pending-call-probe.mjs',
   '.codex/release-gate.toml', '.github/workflows/ci.yml',

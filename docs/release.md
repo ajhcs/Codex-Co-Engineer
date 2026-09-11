@@ -5,7 +5,7 @@ The authoritative gate runs once against one exact clean local candidate:
 ```sh
 release-gate plan --repo "$PWD"
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.2-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.4.3-release-gate.json
 ```
 
 The package supports Node.js 24 and newer. The release gate is intentionally
@@ -111,7 +111,9 @@ The lifecycle ownership decision is
 
 Keep every existing requirement above. The new result and comparison fixtures
 are provider-free; they do not establish paid evaluation results or replace
-live acceptance. The local gate and CI both run the comparison fixture suite.
+live acceptance. The local gate and CI both run the comparison fixture suite
+and the provider-free trial-usage and qualification unit stages when those
+scripts are present.
 
 For ownership changes, retain evidence of a completed producer, independent
 review, specific feedback, a corrected candidate, and Codex's acceptance.
@@ -128,10 +130,38 @@ comparison as live provider evidence. Fresh-user installation observations
 should record the chosen provider, host class, tested version, first successful
 outcome or failing step, and time to that result; keep private diagnostics local.
 
-For matched evaluations, follow the [benchmark protocol](../benchmarks/),
-including native helpers, failed attempts, and corrections. An explicit budget
-is required before paid cohorts; the deterministic CI suite does not launch
-them. Missing usage stays unknown in the [result report](run-results.md).
+### Required 3.4.3 evaluation cohort
+
+Before treating the candidate as evaluation-complete, run the matched
+comparison under these rules. Missing evidence is inconclusive, not a pass.
+Do not claim human-validation of agent onboarding.
+
+1. **Budget.** Cap TOTAL API/Cloud spend at **$25** with an enforceable cap or a
+   bounded maximum cost checked before dispatch. Refuse unpaid expansion once
+   the cap is reached.
+2. **Design.** Four approaches — native Codex, published 3.4.2, candidate
+   3.4.3, and direct delegation — times **three** representative retrospective
+   tasks times **two** repetitions = **24** trials. Use the seed43 case set and
+   bind exact source identities.
+3. **Accounting.** Record complete parent, helpers, reasoning, and compaction
+   usage. Count every attempt, correction, and native helper. Cap owned
+   corrections at **three** rounds. Enforce a **1-hour** total trial deadline.
+4. **Gate thresholds (all required).**
+   - Candidate: **6/6** accepted.
+   - Median task-level native output per accepted result: **≤ 50%** of native
+     and **≤ 75%** of published 3.4.2.
+   - Astra's own output decreases relative to the native baseline.
+   - Median wall clock: **≤ 2×** native.
+   - Native overhead versus direct: **≤ 1.25×**.
+5. **Onboarding.** Collect clean-environment agent onboarding evidence for the
+   candidate install path. Do not claim that a human validated the agent
+   onboarding path.
+
+Follow the [benchmark protocol](../benchmarks/) for materialization and
+analysis. Link [PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) for
+the exact candidate and for actual measurements when retained. Synthetic
+fixtures and this checklist do not establish savings. Missing usage stays
+unknown in the [result report](run-results.md).
 
 ## Handoff and cleanup
 
@@ -159,9 +189,10 @@ opened. Never create an empty PR.
 
 ## Authorized GitHub publication
 
-The release body is [releases/v3.4.2.md](releases/v3.4.2.md). Preserve all historical
-release notes, including [3.4.0](releases/v3.4.0.md). Documentation changes alone
-are not publication authorization; an explicit maintainer release instruction is.
+The release body is [releases/v3.4.3.md](releases/v3.4.3.md). Preserve all historical
+release notes, including [3.4.2](releases/v3.4.2.md) and [3.4.0](releases/v3.4.0.md).
+Documentation changes alone are not publication authorization; an explicit
+maintainer release instruction is.
 
 1. Fetch public main and reconcile it into the candidate. Both the published
    baseline and the accepted local fixes must be ancestors of the release.
@@ -173,8 +204,8 @@ are not publication authorization; an explicit maintainer release instruction is
 5. Merge the reviewed branch, capture the exact resulting main SHA, and verify
    that its tree matches the qualified candidate. If content changed, qualify
    the new candidate before tagging.
-6. Create `v3.4.2` at that reviewed main SHA and publish the body from
-   `docs/releases/v3.4.2.md`. Verify the remote tag, release body, source download,
+6. Create `v3.4.3` at that reviewed main SHA and publish the body from
+   `docs/releases/v3.4.3.md`. Verify the remote tag, release body, source download,
    and tag-based installation instructions after publication.
 
 The public release includes source and documentation. Never attach owner-only

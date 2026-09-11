@@ -7,7 +7,7 @@
 [![Node.js 24+](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Install](#install-and-authentication) · [Try it](#your-first-delegation) · [Providers](#provider-choices) · [Release notes](docs/releases/v3.4.2.md) · [Troubleshooting](#troubleshooting)
+[Install](#install-and-authentication) · [Try it](#your-first-delegation) · [Providers](#provider-choices) · [Release notes](docs/releases/v3.4.3.md) · [Troubleshooting](#troubleshooting)
 
 [Report a problem](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=bug.yml) · [Suggest an improvement](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=feature.yml) · [Ask or share a workflow](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=question.yml) · [Contribute](CONTRIBUTING.md)
 
@@ -38,9 +38,11 @@ Choose a provider, describe the work, and keep talking in the same Codex task.
 | Avoid repeated setup decisions | Existing provider choices and optional remembered repository/provider approval |
 | Review before integrating | Retained branches, output, and handoffs for Codex to inspect |
 
-**New in 3.4.2:** simpler launches, reusable consent, more reliable provider
-completion and cleanup, and concise Grok results. Read the
-[detailed release notes](docs/releases/v3.4.2.md) for compatibility and limits.
+**New in 3.4.3 (candidate):** external ownership through bounded corrections,
+truthful result evidence, deadline-governed ACP turns, and the onboarding /
+contributor package. This candidate is pending verification; it does not claim
+published savings. Read the [detailed release notes](docs/releases/v3.4.3.md)
+and historical [3.4.2 notes](docs/releases/v3.4.2.md) for compatibility and limits.
 
 ## Install and authentication
 
@@ -61,13 +63,17 @@ install or sign you into Grok or Cursor.
 Run these commands from the directory where you keep your projects:
 
 ```bash
-git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
+git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
 cd Codex-Co-Engineer
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
+
+Until the public `v3.4.3` tag exists, clone the exact qualified candidate commit
+or release branch instead of the tag. Historical installs may still use
+`v3.4.2` from the [3.4.2 notes](docs/releases/v3.4.2.md).
 
 Keep this clone: it is the registered local marketplace source. Setup installs
 pinned ACPX, Cursor SDK, and DSH dependencies globally and creates key-free DSH
@@ -180,9 +186,9 @@ It does not describe an incomplete run as a verified result.
 
 ## Autonomous engineering ownership
 
-**In development for 3.4.3.** The new revision operation and result reporting
-require this candidate; the installation instructions above still select the
-published 3.4.2 release. See the [scope and roadmap](docs/roadmap.md).
+**3.4.3 candidate.** The revision operation and result reporting require this
+candidate install. Verification and the budgeted comparison cohort remain open;
+see the [release notes](docs/releases/v3.4.3.md) and [scope and roadmap](docs/roadmap.md).
 
 Give Grok or Cursor the complete bounded assignment: relevant preparation,
 implementation, meaningful checks, and requested corrections. Use an independent
@@ -220,13 +226,13 @@ The [model-role guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/
 separates practical suggestions from official model documentation. Co-Engineer
 does not change your Codex model, reasoning effort, or experimental settings.
 
-## Upgrade to 3.4.2
+## Upgrade to 3.4.3
 
 Finish or cancel active runs first. In a **clean existing source clone**:
 
 ```bash
-git fetch origin tag v3.4.2
-git switch --detach v3.4.2
+git fetch origin tag v3.4.3
+git switch --detach v3.4.3
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin remove codex-co-engineer@codex-co-engineer
 codex plugin add codex-co-engineer@codex-co-engineer
@@ -240,7 +246,8 @@ identity shown by `codex plugin list`.
 
 Existing task receipts and provider accounts are retained. Users with a direct
 Meta Muse profile must migrate to OpenRouter; see the
-[upgrade notes](docs/releases/v3.4.2.md#upgrading).
+[upgrade notes](docs/releases/v3.4.3.md#upgrading). Historical upgrade steps for
+published 3.4.2 remain in the [3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
 
 ## Troubleshooting
 
@@ -292,5 +299,5 @@ Co-Engineer keeps coordination compact, but token parity with native subagents
 has not been established. The [efficiency guide](docs/efficient-dogfood.md) explains
 what to measure. Licensed under [MIT](LICENSE).
 
-Historical [3.4.0 notes](docs/releases/v3.4.0.md) and historical
-3.3.0 notes in [the release archive](docs/releases/v3.3.0.md) remain available.
+Historical [3.4.2 notes](docs/releases/v3.4.2.md), [3.4.0 notes](docs/releases/v3.4.0.md),
+and historical 3.3.0 notes in [the release archive](docs/releases/v3.3.0.md) remain available.
