@@ -608,3 +608,123 @@ test('completed status alone cannot hide missing dispatch or final-lifecycle pro
     assert.equal(report.codex_accepted, false);
   }
 });
+
+test('completed lanes require explicit clean proof and any dirty proof wins', () => {
+  const missing = receipt();
+  delete missing.lanes[0].clean;
+  assert.equal(summarizeRunResultEvidenceV1(missing).assignment_result, 'uncertain');
+
+  const unknown = receipt({
+    lanes: [writerLane({ clean: null, handoff: { current_head: HEAD_SHA } })],
+  });
+  assert.equal(summarizeRunResultEvidenceV1(unknown).assignment_result, 'uncertain');
+
+  const falseClean = summarizeRunResultEvidenceV1(receipt({
+    lanes: [writerLane({ clean: false })],
+  }));
+  assert.equal(falseClean.assignment_result, 'uncertain');
+
+  const conflictDirtyHandoff = summarizeRunResultEvidenceV1(receipt({
+    lanes: [writerLane({
+      clean: true,
+      handoff: { current_head: HEAD_SHA, clean: false },
+    })],
+  }));
+  assert.equal(conflictDirtyHandoff.assignment_result, 'uncertain');
+
+  const conflictDirtyLane = summarizeRunResultEvidenceV1(receipt({
+    lanes: [writerLane({
+      clean: false,
+      handoff: { current_head: HEAD_SHA, clean: true },
+    })],
+  }));
+  assert.equal(conflictDirtyLane.assignment_result, 'uncertain');
+
+  const proven = summarizeRunResultEvidenceV1(receipt({
+    lanes: [writerLane({
+      clean: true,
+      handoff: { current_head: HEAD_SHA, clean: true },
+    })],
+  }));
+  assert.equal(proven.assignment_result, 'completed');
+});
+
+test('failure and cancel outrank active lanes in result evidence', () => {
+  const failedActive = summarizeRunResultEvidenceV1(receipt({
+    phase: 'running',
+    status: 'running',
+    lanes: [
+      writerLane({ phase: 'failed', status: 'failed', required: true }),
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        phase: 'running',
+        status: 'running',
+      },
+    ],
+  }));
+  assert.equal(failedActive.assignment_result, 'failed');
+  assert.equal(failedActive.next_decision, 'resolve_failures');
+
+  const cancelledActive = summarizeRunResultEvidenceV1(receipt({
+    phase: 'running',
+    status: 'running',
+    lanes: [
+      writerLane({ phase: 'cancelled', status: 'cancelled', required: true }),
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        phase: 'running',
+        status: 'running',
+      },
+    ],
+  }));
+  assert.equal(cancelledActive.assignment_result, 'cancelled');
+
+  const completedActive = summarizeRunResultEvidenceV1(receipt({
+    phase: 'running',
+    status: 'running',
+    lanes: [
+      writerLane({ required: true }),
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        phase: 'running',
+        status: 'running',
+      },
+    ],
+  }));
+  assert.equal(completedActive.assignment_result, 'unfinal');
+
+  const mixed = summarizeRunResultEvidenceV1(receipt({
+    phase: 'needs_attention',
+    status: 'needs_attention',
+    lanes: [
+      writerLane({ phase: 'failed', status: 'failed', required: true }),
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: true,
+        phase: 'needs_attention',
+        status: 'needs_attention',
+        dispatch_confidence: 'uncertain',
+      },
+      {
+        assignment_id: 'lane-optional',
+        provider: 'grok',
+        role: 'implement',
+        required: false,
+        phase: 'running',
+        status: 'running',
+      },
+    ],
+  }));
+  assert.equal(mixed.assignment_result, 'failed');
+});

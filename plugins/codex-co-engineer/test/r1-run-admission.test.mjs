@@ -10,6 +10,7 @@ import {
   createRunAdmissionRuntime,
 } from '../mcp/v3/run-admission.mjs';
 import {
+  compactOwnedCorrectionFollowV1,
   OWNED_CORRECTION_ROUND_LIMIT,
   OWNED_DELEGATION_SCHEMA_ID,
   OWNED_DELEGATION_VERSION,
@@ -981,9 +982,35 @@ function derivedRevision({
   };
 }
 
+function createMemoryRevisionReservation() {
+  const reservations = new Map();
+  return async function reserveRevision(producerRunId, assignmentId, followInput) {
+    const follow = compactOwnedCorrectionFollowV1(followInput);
+    const key = `${producerRunId}\0${assignmentId}`;
+    const existing = reservations.get(key);
+    if (existing) return { reserved: false, follow: existing.follow };
+    const reservationId = `${producerRunId}:${assignmentId}:${follow.identity_digest}`;
+    reservations.set(key, { follow, reservationId });
+    return {
+      reserved: true,
+      follow,
+      release: async () => {
+        const current = reservations.get(key);
+        if (!current || current.reservationId !== reservationId) {
+          throw Object.assign(new Error('Correction reservation changed.'), { code: 'run_store_record_changed' });
+        }
+        reservations.delete(key);
+      },
+    };
+  };
+}
+
 function correctionDependencies(overrides = {}) {
   const store = new Map();
   const dispatches = [];
+  const rest = { ...overrides };
+  const omitReservation = rest.reserveRevision === null;
+  if (omitReservation) delete rest.reserveRevision;
   const { dependencies } = baseDependencies({
     requestConsent: async () => ({ status: 'approved' }),
     inspectLane: async () => ({ status: 'completed', cursor: '1' }),
@@ -998,7 +1025,8 @@ function correctionDependencies(overrides = {}) {
       dispatches.push({ run_id: runId, assignment_id: assignment.assignment_id });
       return { dispatched: true, confidence: 'authoritative', cursor: '1' };
     },
-    ...overrides,
+    ...(omitReservation ? {} : { reserveRevision: createMemoryRevisionReservation() }),
+    ...rest,
   });
   return { dependencies, store, dispatches };
 }
@@ -1216,4 +1244,54 @@ test('an abandoned durable reservation never automatically replays provider work
   });
   await assert.rejects(runtime.submitOwnedRevision(producer.run_id, derived), { code: 'revision_admission_pending' });
   assert.equal(dispatches.filter(row => row.run_id !== producer.run_id).length, 0);
+});
+
+test('custom persistence with explicit atomic reservation admits only one concurrent correction', async () => {
+  const reserveRevision = createMemoryRevisionReservation();
+  const { dependencies, dispatches } = correctionDependencies({ reserveRevision });
+  const first = createRunAdmissionRuntime(dependencies);
+  const second = createRunAdmissionRuntime(dependencies);
+  const original = await first.submitRunRequest(writerRequest('custom-correction-race'));
+  await first.inspectRun({ run_id: original.run_id });
+  await second.inspectRun({ run_id: original.run_id });
+  const a = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-custom-one', round: 1 });
+  const b = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-custom-two', round: 1 });
+  const replies = await Promise.allSettled([
+    first.submitOwnedRevision(original.run_id, a),
+    second.submitOwnedRevision(original.run_id, b),
+  ]);
+  assert.equal(replies.filter((row) => row.status === 'fulfilled').length, 1);
+  const failure = replies.find((row) => row.status === 'rejected').reason;
+  assert.ok(['revision_child_exists', 'revision_admission_pending'].includes(failure.code));
+  assert.equal(dispatches.filter((row) => row.run_id !== original.run_id).length, 1);
+});
+
+test('custom persistence without atomic reservation fails closed instead of double-admitting', async () => {
+  const { dependencies, dispatches } = correctionDependencies({ reserveRevision: null });
+  const first = createRunAdmissionRuntime(dependencies);
+  const second = createRunAdmissionRuntime(dependencies);
+  const original = await first.submitRunRequest(writerRequest('custom-correction-unreserved'));
+  await first.inspectRun({ run_id: original.run_id });
+  await second.inspectRun({ run_id: original.run_id });
+  const a = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-unreserved-one', round: 1 });
+  const b = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-unreserved-two', round: 1 });
+  await assert.rejects(first.submitOwnedRevision(original.run_id, a), { code: 'revision_reservation_unavailable' });
+  const replies = await Promise.allSettled([
+    first.submitOwnedRevision(original.run_id, a),
+    second.submitOwnedRevision(original.run_id, b),
+  ]);
+  assert.equal(replies.filter((row) => row.status === 'fulfilled').length, 0);
+  assert.equal(replies.every((row) => row.reason?.code === 'revision_reservation_unavailable'), true);
+  assert.equal(dispatches.filter((row) => row.run_id !== original.run_id).length, 0);
+});
+
+test('ordinary non-revision runtimes remain usable without a reservation seam', async () => {
+  const { dependencies, calls } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+  });
+  assert.equal(Object.hasOwn(dependencies, 'reserveRevision'), false);
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request({ run_id: 'ordinary-no-reserve' }));
+  assert.equal(submitted.phase, 'running');
+  assert.deepEqual(calls.dispatch, ['lane-one', 'lane-two']);
 });

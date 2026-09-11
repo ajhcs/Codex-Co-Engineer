@@ -26,6 +26,7 @@ import {
   PUBLIC_LABEL_UNRESOLVED,
   TRUNCATION_KEYS,
   projectLocalOutcomeCardV1,
+  rollupAssignmentResult,
 } from './final-decision-card.mjs';
 import {
   capturedFreeze,
@@ -162,13 +163,21 @@ function laneToken(lane) {
   return status ?? phase;
 }
 
-function laneIsDirty(lane) {
-  if (lane.clean === false) return true;
+function cleanProof(value) {
+  if (value === false) return 'dirty';
+  if (value === true) return 'clean';
+  return 'unknown';
+}
+
+function laneCleanliness(lane) {
+  const laneProof = cleanProof(lane.clean);
   const handoff = lane.handoff;
-  if (handoff && typeof handoff === 'object' && !capturedIsArray(handoff) && handoff.clean === false) {
-    return true;
-  }
-  return false;
+  const handoffProof = handoff && typeof handoff === 'object' && !capturedIsArray(handoff)
+    ? cleanProof(handoff.clean)
+    : 'unknown';
+  if (laneProof === 'dirty' || handoffProof === 'dirty') return 'dirty';
+  if (laneProof === 'clean' || handoffProof === 'clean') return 'clean';
+  return 'unknown';
 }
 
 function mapLaneOutcome(lane) {
@@ -180,10 +189,12 @@ function mapLaneOutcome(lane) {
   if (capturedIncludes(UNFINAL_OUTCOMES, token)) return 'unfinal';
   if (token === 'lifecycle_pending') return 'uncertain';
   if (lane.task_final === false) return 'uncertain';
-  if (laneIsDirty(lane)) return 'uncertain';
+  const cleanliness = laneCleanliness(lane);
+  if (cleanliness === 'dirty') return 'uncertain';
   if (confidence === 'uncertain' || confidence === 'unknown') return 'uncertain';
   if (token === 'completed') {
     return confidence === 'authoritative' && lane.prompt_dispatched === true && lane.task_final === true
+      && cleanliness === 'clean'
       ? 'completed' : 'uncertain';
   }
   if (capturedIncludes(UNCERTAIN_OUTCOMES, token)) return 'uncertain';
@@ -199,32 +210,6 @@ function mapRunOutcome(phase) {
   }
   if (capturedIncludes(UNFINAL_OUTCOMES, phase)) return 'unfinal';
   if (capturedIncludes(UNCERTAIN_OUTCOMES, phase)) return 'uncertain';
-  return 'uncertain';
-}
-
-function combineAssignmentResult(runOutcome, laneOutcomes) {
-  let hasActive = false;
-  let hasFailed = false;
-  let hasCancelled = false;
-  let hasUncertain = false;
-  let completedRequired = 0;
-  let requiredCount = 0;
-  for (let i = 0; i < laneOutcomes.length; i += 1) {
-    const row = laneOutcomes[i];
-    if (row.required === true) requiredCount += 1;
-    if (row.outcome === 'unfinal') hasActive = true;
-    else if (row.outcome === 'failed') hasFailed = true;
-    else if (row.outcome === 'cancelled') hasCancelled = true;
-    else if (row.outcome === 'uncertain') hasUncertain = true;
-    else if (row.outcome === 'completed' && row.required === true) completedRequired += 1;
-  }
-  if (runOutcome === 'failed' || hasFailed) return 'failed';
-  if (runOutcome === 'cancelled' || hasCancelled) return 'cancelled';
-  if (hasActive || runOutcome === 'unfinal') return 'unfinal';
-  if (runOutcome === 'uncertain' || hasUncertain) return 'uncertain';
-  if (runOutcome === 'completed' && requiredCount > 0 && completedRequired === requiredCount) {
-    return 'completed';
-  }
   return 'uncertain';
 }
 
@@ -688,7 +673,7 @@ export function projectRunResultEvidenceV1(source, options) {
     ...(hasOwn(wrapped, 'codex_acceptance') ? { codex_acceptance: wrapped.codex_acceptance } : {}),
   });
   const runOutcome = mapRunOutcome(phase);
-  const assignmentResult = combineAssignmentResult(runOutcome, lanes);
+  const assignmentResult = rollupAssignmentResult(lanes, runOutcome);
   const unresolved = assignmentResult === 'unfinal' || assignmentResult === 'uncertain';
   const reviewNeeded = outcome.codex_accepted !== true && assignmentResult === 'completed';
   const nextDecision = resultNextDecision(assignmentResult, reviewNeeded);

@@ -473,3 +473,96 @@ test('Codex acceptance is bound to the exact run and candidate head', () => {
   assert.equal(failedCheck.codex_accepted, false);
   assert.equal(failedCheck.label, PUBLIC_LABEL_REVIEW_NEEDED);
 });
+
+test('local outcome reduction ranks failure and cancel above active work', () => {
+  const failedActive = projectLocalOutcomeCardV1(localRequest({
+    assignments: [
+      {
+        assignment_id: WRITER,
+        provider: 'grok',
+        role: 'implement',
+        required: true,
+        outcome: 'failed',
+      },
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        outcome: 'unfinal',
+      },
+    ],
+  }));
+  assert.equal(failedActive.assignment_result, 'failed');
+  assert.equal(failedActive.next_decision, 'resolve_failures');
+  assert.equal(failedActive.label, PUBLIC_LABEL_FAILED);
+
+  const cancelledActive = projectLocalOutcomeCardV1(localRequest({
+    assignments: [
+      {
+        assignment_id: WRITER,
+        provider: 'grok',
+        role: 'implement',
+        required: true,
+        outcome: 'cancelled',
+      },
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        outcome: 'unfinal',
+      },
+    ],
+  }));
+  assert.equal(cancelledActive.assignment_result, 'cancelled');
+  assert.equal(cancelledActive.next_decision, 'resolve_failures');
+
+  const completedActive = projectLocalOutcomeCardV1(localRequest({
+    assignments: [
+      {
+        assignment_id: WRITER,
+        provider: 'grok',
+        role: 'implement',
+        required: true,
+        outcome: 'completed',
+      },
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: false,
+        outcome: 'unfinal',
+      },
+    ],
+  }));
+  assert.equal(completedActive.assignment_result, 'unfinal');
+  assert.equal(completedActive.next_decision, 'wait_for_completion');
+
+  const mixed = projectLocalOutcomeCardV1(localRequest({
+    assignments: [
+      {
+        assignment_id: WRITER,
+        provider: 'grok',
+        role: 'implement',
+        required: true,
+        outcome: 'failed',
+      },
+      {
+        assignment_id: 'lane-reviewer',
+        provider: 'cursor-local',
+        role: 'review',
+        required: true,
+        outcome: 'uncertain',
+      },
+      {
+        assignment_id: 'lane-optional',
+        provider: 'grok',
+        role: 'implement',
+        required: false,
+        outcome: 'unfinal',
+      },
+    ],
+  }));
+  assert.equal(mixed.assignment_result, 'failed');
+});

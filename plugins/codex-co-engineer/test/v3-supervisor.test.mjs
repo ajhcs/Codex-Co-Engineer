@@ -1222,6 +1222,8 @@ async function createOwnedRevisionHarness(options = {}) {
     confidence: 'authoritative',
     cursor: '1',
   };
+  const records = new Map();
+  const customPersist = options.customPersist === true;
   const adapter = await createSupervisorRunToolAdapter({
     root,
     inProcess: true,
@@ -1229,6 +1231,13 @@ async function createOwnedRevisionHarness(options = {}) {
     providerReady: async () => ({ ready: true }),
     processBoundaryReady: async () => ({ ready: true }),
     verifyRepository: async () => ({ verified: true }),
+    ...(customPersist ? {
+      loadRecord: async (runId) => (records.has(runId) ? JSON.parse(records.get(runId)) : null),
+      persistRecord: async (record) => { records.set(record.run_id, JSON.stringify(record)); },
+      ...(typeof options.reserveRevision === 'function'
+        ? { reserveRevision: options.reserveRevision }
+        : {}),
+    } : {}),
     prepareWorkspace: async ({ run_id: runId, assignment, git }) => {
       const dest = path.join(root, 'worktrees', `${runId}-${assignment.assignment_id}`);
       await mkdir(path.dirname(dest), { recursive: true });
@@ -1593,6 +1602,72 @@ test('supervisor correction rounds stay bounded, follow one child, and retain li
     const inspectedOriginal = await restarted.dispatch('task', { run_id: submitted.run_id });
     assert.equal(inspectedOriginal.coordination.next_action.action, 'inspect');
     assert.equal(inspectedOriginal.coordination.next_action.run_id, first.run_id);
+  } finally {
+    await harness.close();
+  }
+});
+
+function createMemoryRevisionReservation() {
+  const reservations = new Map();
+  return async function reserveRevision(producerRunId, assignmentId, follow) {
+    const key = `${producerRunId}\0${assignmentId}`;
+    const existing = reservations.get(key);
+    if (existing) return { reserved: false, follow: existing.follow };
+    const reservationId = `${producerRunId}:${assignmentId}:${follow.identity_digest}`;
+    reservations.set(key, { follow, reservationId });
+    return {
+      reserved: true,
+      follow,
+      release: async () => {
+        const current = reservations.get(key);
+        if (!current || current.reservationId !== reservationId) {
+          throw Object.assign(new Error('Correction reservation changed.'), { code: 'run_store_record_changed' });
+        }
+        reservations.delete(key);
+      },
+    };
+  };
+}
+
+test('supervisor custom persistence without reservation fails closed for revision', async () => {
+  const harness = await createOwnedRevisionHarness({
+    run_id: 'vale-custom-unreserved',
+    customPersist: true,
+  });
+  try {
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    const completed = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await assert.rejects(
+      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_reservation_unavailable',
+    );
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+test('supervisor custom persistence with explicit reservation still admits one correction', async () => {
+  const harness = await createOwnedRevisionHarness({
+    run_id: 'vale-custom-reserved',
+    customPersist: true,
+    reserveRevision: createMemoryRevisionReservation(),
+  });
+  try {
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    const completed = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix the failing unit tests.');
+    const child = await harness.adapter.dispatch('task', { run_id: submitted.run_id, revision });
+    assert.equal(child.correction.round, 1);
+    await assert.rejects(
+      harness.adapter.dispatch('task', {
+        run_id: submitted.run_id,
+        revision: revisionFromPacket(completed.coordination, 'social-implementation', 'Different feedback.'),
+      }),
+      (error) => error.code === 'revision_child_exists',
+    );
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 1);
   } finally {
     await harness.close();
   }

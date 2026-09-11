@@ -2365,9 +2365,19 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     })),
     loadRecord: options.loadRecord ?? admissionStore.load,
     persistRecord: options.persistRecord ?? admissionStore.save,
-    // Custom persistence fixtures may supply their own atomic reservation.
-    ...((options.reserveRevision || (!options.loadRecord && !options.persistRecord))
-      ? { reserveRevision: options.reserveRevision ?? admissionStore.reserveRevision } : {}),
+    // Custom persistence must supply its own atomic reservation. Do not mix a
+    // second disk store, and never fall back to an always-success reservation.
+    reserveRevision: options.reserveRevision ?? (
+      options.loadRecord || options.persistRecord
+        ? async () => {
+          throw new RunContractV1Error(
+            'revision_reservation_unavailable',
+            'reserveRevision',
+            'Revision admission requires an atomic reservation.',
+          );
+        }
+        : admissionStore.reserveRevision
+    ),
   };
   const runtime = createRunAdmissionRuntime(simpleDeps);
   const loadRecord = simpleDeps.loadRecord;
@@ -3036,6 +3046,7 @@ export async function createSupervisorRunToolAdapter(options = {}) {
       admissionStore: options.admissionStore,
       loadRecord: options.loadRecord,
       persistRecord: options.persistRecord,
+      reserveRevision: options.reserveRevision,
       waitForProgress: options.waitForProgress,
     });
   return createRunToolAdapter({

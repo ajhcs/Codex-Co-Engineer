@@ -119,3 +119,67 @@ test('eight real admission lanes keep result evidence inside the status transpor
     assert.equal(reply.result_evidence.assignment_result, 'completed');
   }
 });
+
+test('ordinary adapter results require explicit clean proof and dirty proof wins', async () => {
+  async function complete(runId, workspace, buildHandoff) {
+    const records = new Map();
+    const dependencies = {
+      compile: request => compileRunRequestV1(request, {
+        observeGit: async () => ({ base_sha: base, head_sha: base, tree_sha: 'c'.repeat(40),
+          branch: 'main', clean: true, remote_present: true, remote_count: 1 }),
+      }),
+      clock: () => timestamp,
+      requestConsent: async () => ({ approved: true }),
+      providerReady: async () => ({ ready: true }),
+      processBoundaryReady: async () => ({ ready: true }),
+      verifyRepository: async () => ({ verified: true }),
+      prepareWorkspace: async ({ assignment }) => ({ prepared: true, workspace: {
+        worktree_path: `/private/${assignment.assignment_id}`, branch: 'candidate', start_sha: base,
+      } }),
+      createSession: async () => ({ ready: true, session_id: 'session' }),
+      dispatchPrompt: async () => ({ dispatched: true, confidence: 'authoritative' }),
+      inspectLane: async () => ({ status: 'completed', result: 'done' }),
+      inspectWorkspace: async () => ({ ...workspace }),
+      ...(buildHandoff ? { buildHandoff } : {}),
+      verifyRun: async () => ({ verified: true }),
+      persistRecord: async record => { records.set(record.run_id, JSON.parse(JSON.stringify(record))); },
+      loadRecord: async runIdValue => records.has(runIdValue) ? structuredClone(records.get(runIdValue)) : null,
+    };
+    const adapter = createRunToolAdapter({
+      runtime: createAdapter().runtime,
+      simpleRuntime: createRunAdmissionRuntime(dependencies),
+    });
+    await adapter.dispatch('delegate', { run_request: {
+      run_id: runId, repo: '/private/repository', objective: 'Implement one bounded slice.',
+      assignments: [{
+        assignment_id: 'implementation', provider: 'grok', role: 'implement',
+        prompt: 'Implement the slice.', write_scope: ['src/**'],
+      }],
+    } });
+    return adapter.dispatch('task', { run_id: runId, view: 'diagnostics' });
+  }
+
+  const clean = await complete('ordinary-clean', {
+    current_head: head, clean: true, changed_files: [], commits: [head],
+  });
+  assert.equal(clean.result_evidence.assignment_result, 'completed');
+  assert.equal(clean.result_evidence.assignments[0].outcome, 'completed');
+
+  const dirty = await complete('ordinary-dirty', {
+    current_head: head, clean: false, changed_files: ['src/a.js'], commits: [head],
+  });
+  assert.equal(dirty.result_evidence.assignment_result, 'uncertain');
+  assert.equal(dirty.result_evidence.assignments[0].outcome, 'uncertain');
+
+  const unknown = await complete('ordinary-unknown', {
+    current_head: head, changed_files: [], commits: [head],
+  });
+  assert.equal(unknown.result_evidence.assignment_result, 'uncertain');
+  assert.equal(unknown.result_evidence.assignments[0].outcome, 'uncertain');
+
+  const conflict = await complete('ordinary-conflict', {
+    current_head: head, clean: true, changed_files: [], commits: [head],
+  }, async ({ fallback }) => ({ ...fallback, clean: false }));
+  assert.equal(conflict.result_evidence.assignment_result, 'uncertain');
+  assert.equal(conflict.result_evidence.assignments[0].outcome, 'uncertain');
+});

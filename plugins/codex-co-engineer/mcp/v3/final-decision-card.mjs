@@ -1256,30 +1256,33 @@ function honorCodexAcceptance(acceptance, identity, candidate, assignmentResult,
   return true;
 }
 
-function rollupAssignmentResult(assignments) {
-  let failed = false;
-  let cancelled = false;
-  let uncertain = false;
-  let unfinal = false;
+export function rollupAssignmentResult(assignments, runOutcome) {
+  let hasActive = false;
+  let hasFailed = false;
+  let hasCancelled = false;
+  let hasUncertain = false;
   let completedRequired = 0;
   let requiredCount = 0;
   for (let i = 0; i < assignments.length; i += 1) {
     const assignment = assignments[i];
     if (assignment.required === true) requiredCount += 1;
-    if (assignment.outcome === 'unfinal') unfinal = true;
-    else if (assignment.outcome === 'uncertain') uncertain = true;
-    else if (assignment.outcome === 'failed') failed = true;
-    else if (assignment.outcome === 'cancelled') cancelled = true;
+    if (assignment.outcome === 'unfinal') hasActive = true;
+    else if (assignment.outcome === 'failed') hasFailed = true;
+    else if (assignment.outcome === 'cancelled') hasCancelled = true;
+    else if (assignment.outcome === 'uncertain') hasUncertain = true;
     else if (assignment.outcome === 'completed' && assignment.required === true) {
       completedRequired += 1;
     }
   }
-  if (unfinal) return 'unfinal';
-  if (uncertain) return 'uncertain';
-  if (failed) return 'failed';
-  if (cancelled) return 'cancelled';
-  if (requiredCount > 0 && completedRequired === requiredCount) return 'completed';
-  return 'unfinal';
+  if (runOutcome === 'failed' || hasFailed) return 'failed';
+  if (runOutcome === 'cancelled' || hasCancelled) return 'cancelled';
+  if (hasActive || runOutcome === 'unfinal') return 'unfinal';
+  if (runOutcome === 'uncertain' || hasUncertain) return 'uncertain';
+  if ((runOutcome == null || runOutcome === 'completed')
+    && requiredCount > 0 && completedRequired === requiredCount) {
+    return 'completed';
+  }
+  return 'uncertain';
 }
 
 function deriveNextDecision(result, reviewNeeded, unresolved) {
@@ -1396,3 +1399,4 @@ export function projectLocalOutcomeCardV1(input) {
 capturedFreeze(projectFinalDecisionCardV1);
 capturedFreeze(describeFinalDecisionCardV1);
 capturedFreeze(projectLocalOutcomeCardV1);
+capturedFreeze(rollupAssignmentResult);

@@ -979,7 +979,13 @@ function createDefaultDependencies(overrides) {
     compile: compileRunRequestV1,
     loadRecord: async () => null,
     persistRecord: async () => {},
-    reserveRevision: async (_runId, _assignmentId, follow) => ({ reserved: true, follow, release: async () => {} }),
+    reserveRevision: async () => {
+      admissionError(
+        'revision_reservation_unavailable',
+        'reserveRevision',
+        'Revision admission requires an atomic reservation.',
+      );
+    },
   };
   for (const key of RUN_ADMISSION_DEPENDENCIES) {
     if (capturedHasOwn(overrides ?? {}, key)) {

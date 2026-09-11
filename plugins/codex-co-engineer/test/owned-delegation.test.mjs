@@ -12,7 +12,6 @@ import {
   ownedCorrectionPolicyV1,
   ownedRevisionIdentityV1,
   parseOwnedRevisionRequestV1,
-  producerFromRunReceiptV1,
   projectOwnedProducerCandidateV1,
 } from '../mcp/v3/owned-delegation.mjs';
 import { compileRunRequestV1 } from '../mcp/v3/run-request-compiler.mjs';
@@ -179,34 +178,6 @@ test('dirty, stale, and active producers are rejected instead of replayed', () =
   );
 });
 
-test('producer receipts keep write scope and git identity for correction handoff', () => {
-  const snapshot = producerFromRunReceiptV1({
-    run_id: 'vale-hardening',
-    repo: '/tmp/fixture-repo',
-    request_idempotency_key: IDEMPOTENCY,
-    git: { head: HEAD, base_sha: 'a'.repeat(40) },
-    clean: true,
-    lanes: [{
-      assignment_id: 'social-implementation',
-      task_id: 'ce-vale-hardening-social',
-      provider: 'grok',
-      model: 'grok-4',
-      role: 'implement',
-      access: 'writer',
-      write_scope: ['src/**'],
-      phase: 'completed',
-      status: 'completed',
-      task_final: true,
-      prompt_dispatched: true,
-      dispatch_confidence: 'authoritative',
-      handoff: { current_head: HEAD, clean: true },
-    }],
-  }, 'social-implementation');
-  assert.deepEqual(snapshot.write_scope, ['src/**']);
-  assert.equal(snapshot.head, HEAD);
-  assert.equal(snapshot.clean, true);
-});
-
 test('fresh workspace proof is required and stale handoff is not a substitute', () => {
   const record = {
     run_id: 'vale-hardening',
@@ -233,6 +204,8 @@ test('fresh workspace proof is required and stale handoff is not a substitute', 
   });
   assert.equal(projected.head, HEAD);
   assert.equal(projected.clean, true);
+  assert.deepEqual(projected.write_scope, ['src/**']);
+  assert.equal(projected.request_idempotency_key, IDEMPOTENCY);
   assert.throws(
     () => projectOwnedProducerCandidateV1({ record, assignment: producer(), lane, workspace: {} }),
     (error) => error.code === 'revision_workspace_uninspectable',

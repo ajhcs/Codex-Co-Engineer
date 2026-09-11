@@ -524,52 +524,6 @@ export function deriveOwnedRevisionRequestV1(producer, revisionInput) {
   });
 }
 
-export function producerFromRunReceiptV1(receipt, assignmentId, field = 'revision') {
-  if (!receipt || typeof receipt !== 'object' || !Array.isArray(receipt.lanes)) {
-    revisionError('revision_producer_not_found', field, 'The named producer assignment is not known.');
-  }
-  if (typeof assignmentId !== 'string' || !isAssignmentId(assignmentId)) {
-    revisionError('invalid_format', `${field}.assignment_id`, 'assignment_id is not valid.');
-  }
-  const lane = receipt.lanes.find((entry) => entry && entry.assignment_id === assignmentId);
-  if (!lane) {
-    revisionError('revision_producer_not_found', `${field}.assignment_id`, 'The named producer assignment is not known.');
-  }
-  const head = typeof lane.handoff?.current_head === 'string'
-    ? lane.handoff.current_head.toLowerCase()
-    : (typeof receipt.git?.head === 'string' ? receipt.git.head.toLowerCase() : (typeof lane.head === 'string' ? lane.head.toLowerCase() : null));
-  const clean = lane.clean === true
-    || lane.handoff?.clean === true
-    || (lane.handoff?.clean !== false && receipt.clean === true);
-  return freezeData({
-    run_id: receipt.run_id,
-    assignment_id: lane.assignment_id,
-    task_id: lane.task_id ?? null,
-    provider: lane.provider,
-    model: lane.model,
-    role: lane.role,
-    access: lane.access,
-    write_scope: Array.isArray(lane.write_scope)
-      ? [...lane.write_scope]
-      : (Array.isArray(receipt.write_scope) ? [...receipt.write_scope] : []),
-    capabilities: Array.isArray(lane.capabilities) ? [...lane.capabilities] : [],
-    expected_duration_ms: lane.expected_duration_ms ?? receipt.expected_duration_ms,
-    repo: receipt.repo ?? receipt.repository_path ?? lane.repo ?? null,
-    objective: receipt.objective ?? null,
-    request_idempotency_key: receipt.request_idempotency_key
-      ?? lane.request_idempotency_key
-      ?? null,
-    phase: lane.phase ?? lane.status ?? null,
-    status: lane.status ?? lane.phase ?? null,
-    prompt_dispatched: lane.prompt_dispatched === true,
-    dispatch_confidence: lane.dispatch_confidence ?? null,
-    head,
-    clean,
-    evidence_refs: Array.isArray(lane.evidence_refs) ? lane.evidence_refs : [],
-    ...(receipt.correction ? { correction: receipt.correction } : {}),
-  });
-}
-
 capturedFreeze(parseOwnedRevisionRequestV1);
 capturedFreeze(ownedRevisionIdentityV1);
 capturedFreeze(compactOwnedCorrectionLineageV1);
@@ -580,4 +534,3 @@ capturedFreeze(ownedCorrectionBudgetRemainingV1);
 capturedFreeze(assertOwnedRevisionProducerV1);
 capturedFreeze(projectOwnedProducerCandidateV1);
 capturedFreeze(deriveOwnedRevisionRequestV1);
-capturedFreeze(producerFromRunReceiptV1);
