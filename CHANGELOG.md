@@ -38,6 +38,9 @@ release and host acceptance gates still apply.
 
 ### Fixed
 
+- Point public Grok install docs at the official Grok Build overview and
+  document `grok login` / `grok login --device-auth` subscription login for
+  first-outcome work (no API key).
 - Make supported deadline extensions govern the active ACP turn and preserve
   timeout/cancellation truth after partial provider output.
 - Preserve empty capability restrictions and complete Unicode review feedback;

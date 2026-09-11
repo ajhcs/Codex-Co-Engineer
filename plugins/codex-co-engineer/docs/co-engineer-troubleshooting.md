@@ -95,7 +95,9 @@ natural language and do not replay the prompt automatically.
 No. Use normal provider login or the owner-only key files. Credentials
 must not appear in MCP arguments, prompts, receipts, fixtures, or Git.
 
-- Grok: `grok login`
+- Grok: `grok login`, or `grok login --device-auth` when a browser is
+  unavailable. Subscription login only; no API key is required for a Grok
+  first outcome.
 - Cursor Local: `cursor-agent login`
 - Muse and optional Ox Alpha: `OPENROUTER_API_KEY`,
   `CODEX_CO_ENGINEER_OPENROUTER_API_KEY_FILE`, or

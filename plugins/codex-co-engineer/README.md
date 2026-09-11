@@ -106,7 +106,7 @@ commands are `npm run setup` and `npm run setup:check`.
 
 | Route | Authentication |
 | --- | --- |
-| Grok | Install the official Grok Build CLI, then `grok login` |
+| Grok | Install the official [Grok Build](https://docs.x.ai/build/overview) CLI, then `grok login` (or `grok login --device-auth` when a browser is unavailable). Subscription login only; no API key is required for a Grok first outcome. |
 | Cursor Local | Install Cursor CLI, then `cursor-agent login` |
 | Cursor Cloud | `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or its owner-only key file |
 | Muse / DSH | From the clone, run `plugins/codex-co-engineer/bin/set-model-api-key` for OpenRouter |

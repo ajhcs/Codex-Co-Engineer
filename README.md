@@ -125,7 +125,7 @@ checked separately by `status`. The worktree tool is bundled; no separate
 
 | Provider | One-time authentication | Runs where? |
 | --- | --- | --- |
-| **Grok** | Install [Grok Build](https://docs.x.ai/build/cli), then run `grok login` | Local managed worktree |
+| **Grok** | Install [Grok Build](https://docs.x.ai/build/overview), then run `grok login` (or `grok login --device-auth` when a browser is unavailable). Subscription login only; no API key is required for a Grok first outcome. | Local managed worktree |
 | **Cursor Local** | Install [Cursor CLI](https://cursor.com/docs/cli/installation), then run `cursor-agent login` | Local managed worktree |
 | **Cursor Cloud** | Configure `CURSOR_API_KEY` or an owner-only key file; see [configuration](docs/configuration.md#cursor-cloud) | Cursor's remote environment |
 | **Muse** | From this clone, run `plugins/codex-co-engineer/bin/set-model-api-key` to save your OpenRouter key | Local DSH managed worktree |
