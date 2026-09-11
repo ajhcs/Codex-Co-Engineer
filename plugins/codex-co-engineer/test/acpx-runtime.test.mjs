@@ -110,6 +110,7 @@ test('bounds the queued ACP events instead of retaining unbounded output', async
 test('kills hostile detached ACP descendants during runtime close', async () => {
   const value = await fixture('normal', 3_000);
   let descendantPid;
+  let agentPid;
   let closed = false;
   const originalPath = process.env.PATH;
   try {
@@ -122,19 +123,26 @@ test('kills hostile detached ACP descendants during runtime close', async () => 
     });
     const result = await turn.result;
     assert.equal(result.status, 'completed');
+    agentPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
     descendantPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-descendant.pid'), 'utf8'));
+    assert.ok(processAlive(agentPid), 'fixture agent should still be running before close');
     assert.ok(processAlive(descendantPid), 'fixture descendant should still be running before close');
     // Linux cleanup must not depend on an external process-list command.
     if (process.platform === 'linux') process.env.PATH = path.join(value.root, 'no-process-list-command');
     await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
     closed = true;
     assert.equal(await waitForProcessExit(descendantPid), true);
+    assert.equal(await waitForProcessExit(agentPid, 1_000), true);
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
     if (!closed) await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' }).catch(() => {});
-    if (descendantPid && processAlive(descendantPid)) {
-      try { process.kill(descendantPid, 'SIGKILL'); } catch {}
+    // Leave no fixture children even when assertions fail; otherwise the Node
+    // test worker stays alive on the unreaped ACP agent and hangs the suite.
+    for (const pid of [descendantPid, agentPid]) {
+      if (pid && processAlive(pid)) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
     }
   }
 });

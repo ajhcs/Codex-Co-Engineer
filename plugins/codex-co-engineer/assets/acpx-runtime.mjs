@@ -272,15 +272,19 @@ async function coEngineerRememberAgentDescendants(child) {
   const descendants = child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS]
     ?? (child[CO_ENGINEER_ACPX_AGENT_DESCENDANTS] = new Map());
   if (process.platform === 'linux') {
-    const processTable = coEngineerReadLinuxProcessTable();
+    let processTable;
+    try {
+      processTable = coEngineerReadLinuxProcessTable();
+    } catch {
+      // A /proc scan failure must not abort containment; callers still signal
+      // the agent pid directly and any previously remembered descendants.
+      return descendants;
+    }
     const root = processTable.get(child.pid);
     if (!root) {
-      try {
-        process.kill(child.pid, 0);
-      } catch {
-        return descendants;
-      }
-      throw new Error('Could not inspect the live ACP agent in /proc.');
+      // Live but missing from this snapshot (TOCTOU / hidepid races). Keep any
+      // previously remembered descendants and let direct pid signaling proceed.
+      return descendants;
     }
     const children = new Map();
     for (const identity of processTable.values()) {
@@ -317,18 +321,18 @@ function coEngineerReadLinuxProcessIdentity(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const stateOffset = stat.lastIndexOf(')') + 2;
-    if (stateOffset <= 1) throw new Error(`Malformed /proc/${pid}/stat.`);
+    if (stateOffset <= 1) return null;
     const fields = stat.slice(stateOffset).trim().split(/\s+/u);
     const parentPid = Number(fields[1]);
     const processGroupId = Number(fields[2]);
     const startTime = fields[19];
     if (!Number.isInteger(parentPid) || !Number.isInteger(processGroupId) || !startTime) {
-      throw new Error(`Malformed /proc/${pid}/stat.`);
+      return null;
     }
     return { pid, state: fields[0], parentPid, processGroupId, startTime };
-  } catch (error) {
-    if (error?.code === 'ENOENT' || error?.code === 'ESRCH') return null;
-    throw error;
+  } catch {
+    // Skip vanished or unreadable entries; one bad pid must not abort cleanup.
+    return null;
   }
 }
 
@@ -375,7 +379,11 @@ async function coEngineerSignalAgentTree(child, signal) {
     for (const pid of descendants.keys()) await killWindowsProcessTree(pid, signal);
     return;
   }
+  // Always signal the agent pid itself. Process-group delivery is best-effort
+  // and can miss when the child is not (yet) a group leader; descendants in
+  // their own sessions never receive the group signal.
   if (isChildProcessRunning(child) && hasLiveProcessGroup(child.pid)) sendSignal(-child.pid, signal);
+  sendSignal(child.pid, signal);
   for (const [pid, startTime] of descendants) {
     if (process.platform === 'linux') {
       const identity = coEngineerReadLinuxProcessIdentity(pid);
@@ -534,7 +542,11 @@ AcpClient.prototype.spawnAgentProcess = async function coEngineerSpawnAgentProce
 
 AcpClient.prototype.terminateAgentProcess = async function coEngineerTerminateAgentProcess(child) {
   const stdinCloseGraceMs = resolveAgentCloseAfterStdinEndMs(this.options.agentCommand);
-  await coEngineerRememberAgentDescendants(child);
+  try {
+    await coEngineerRememberAgentDescendants(child);
+  } catch {
+    // Descendant discovery must not skip agent signaling.
+  }
   this.endAgentStdin(child);
   let exited = await coEngineerWaitForAgentTree(child, stdinCloseGraceMs);
   exited = await this.killAgentIfRunning(child, exited, 'SIGTERM', AGENT_CLOSE_TERM_GRACE_MS);
@@ -542,7 +554,20 @@ AcpClient.prototype.terminateAgentProcess = async function coEngineerTerminateAg
     this.log('agent did not exit after ' + AGENT_CLOSE_TERM_GRACE_MS + 'ms; forcing SIGKILL');
     exited = await this.killAgentIfRunning(child, exited, 'SIGKILL', AGENT_CLOSE_KILL_GRACE_MS);
   }
-  this.detachAgentHandles(child, !exited);
+  if (!exited && child?.pid) {
+    // Last-resort containment: never leave the event loop pinned on a live ACP
+    // child after close, and never skip the agent pid when group signaling fails.
+    try {
+      await coEngineerSignalAgentTree(child, 'SIGKILL');
+    } catch {
+      try { child.kill('SIGKILL'); } catch {}
+      sendSignal(child.pid, 'SIGKILL');
+    }
+    exited = await coEngineerWaitForAgentTree(child, AGENT_CLOSE_KILL_GRACE_MS);
+  }
+  // Always detach/unref after terminate attempts so a surviving handle cannot
+  // hang the hosting process; the signals above own containment.
+  this.detachAgentHandles(child, true);
 };
 
 AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRunning(
@@ -556,6 +581,10 @@ AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRun
     await coEngineerSignalAgentTree(child, signal);
   } catch {
     try { child.kill(signal); } catch {}
+    if (child?.pid) {
+      sendSignal(child.pid, signal);
+      if (process.platform !== 'win32') sendSignal(-child.pid, signal);
+    }
   }
   return coEngineerWaitForAgentTree(child, waitMs);
 };

@@ -26,6 +26,8 @@ const pendingPrompts = new Map();
 let nextId = 1;
 let descendant = null;
 
+await writeFile(join(process.cwd(), '.acpx-fake-agent.pid'), `${process.pid}\n`, { mode: 0o600 });
+
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
