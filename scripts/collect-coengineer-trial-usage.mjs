@@ -6,7 +6,7 @@
 // budget setup are out of scope.
 
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, stat } from 'node:fs/promises';
+import { lstat, readFile, realpath, writeFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +25,7 @@ const SHA40 = /^[0-9a-f]{40}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/u;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const SETTINGS_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const MAX_MANIFEST_BYTES = 262_144;
 const MAX_SESSION_BYTES = 8_388_608;
 const MAX_SESSIONS = 32;
@@ -33,13 +34,18 @@ const MAX_LINES = 200_000;
 const BOOLEAN_FLAGS = Object.freeze(['--help']);
 const VALUE_FLAGS = Object.freeze(['--manifest', '--write', '--sessions-root']);
 
-const USAGE_COUNTERS = Object.freeze([
+const REQUIRED_COUNTERS = Object.freeze([
   'input_tokens',
   'cached_input_tokens',
   'output_tokens',
   'reasoning_output_tokens',
   'total_tokens',
 ]);
+const OPTIONAL_COUNTERS = Object.freeze(['cache_write_input_tokens']);
+const USAGE_COUNTERS = Object.freeze([...REQUIRED_COUNTERS, ...OPTIONAL_COUNTERS]);
+
+const HOST_SETTINGS_KEYS = Object.freeze(['reasoning', 'sandbox']);
+const PROVIDER_CONFIGURATION_KEYS = Object.freeze(['implement', 'review']);
 
 // Forbid content-bearing keys in shareable aggregates. Configuration labels
 // such as host_settings.reasoning (effort enum) are allowed.
@@ -112,28 +118,36 @@ function unknownMetric() {
 }
 
 function emptyCounters() {
-  return {
+  const out = {
     input_tokens: 0,
     cached_input_tokens: 0,
     output_tokens: 0,
     reasoning_output_tokens: 0,
     total_tokens: 0,
   };
+  for (const key of OPTIONAL_COUNTERS) out[key] = 0;
+  return out;
 }
 
 function parseCounters(value, pathLabel) {
   const record = assertPlain(value, pathLabel);
   const out = emptyCounters();
-  for (const key of USAGE_COUNTERS) {
+  for (const key of REQUIRED_COUNTERS) {
     if (!Object.hasOwn(record, key)) {
       fail('missing_key', `${pathLabel}.${key} is required.`);
     }
     out[key] = ownInteger(record, key, pathLabel, 0, Number.MAX_SAFE_INTEGER);
   }
+  for (const key of OPTIONAL_COUNTERS) {
+    if (Object.hasOwn(record, key)) {
+      out[key] = ownInteger(record, key, pathLabel, 0, Number.MAX_SAFE_INTEGER);
+    }
+  }
   for (const key of Object.keys(record)) {
     if (!USAGE_COUNTERS.includes(key)) fail('unknown_key', `${pathLabel}.${key}`);
   }
   // Reasoning is a subset of output; never treat it as an additive summand.
+  // Cache counters stay separate from reasoning/output.
   if (out.reasoning_output_tokens > out.output_tokens) {
     fail('identity_mismatch', `${pathLabel} reasoning_output_tokens exceeds output_tokens.`);
   }
@@ -147,6 +161,10 @@ function countersEqual(left, right) {
 function addCounters(target, source) {
   for (const key of USAGE_COUNTERS) target[key] += source[key];
   return target;
+}
+
+function cloneCounters(source) {
+  return addCounters(emptyCounters(), source);
 }
 
 function sha256Hex(parts) {
@@ -178,6 +196,25 @@ function assertSafeRelativeSessionPath(rel, pathLabel) {
   return rel;
 }
 
+function assertBoundedShareableObject(value, pathLabel, allowedKeys) {
+  const record = assertPlain(value, pathLabel);
+  for (const key of Object.keys(record)) {
+    if (!allowedKeys.includes(key)) fail('unknown_key', `${pathLabel}.${key}`);
+    const child = record[key];
+    if (child === null) continue;
+    if (typeof child === 'boolean') continue;
+    if (typeof child === 'number' && Number.isSafeInteger(child)) continue;
+    if (typeof child === 'string') {
+      if (!SETTINGS_TOKEN.test(child) || child.includes('/') || child.includes('\\')) {
+        fail('privacy_leak', `${pathLabel}.${key} must be a bounded shareable token.`);
+      }
+      continue;
+    }
+    fail('invalid_type', `${pathLabel}.${key} must be a bounded shareable value.`);
+  }
+  return record;
+}
+
 function assertNoPrivacyLeak(value, pathLabel = 'report') {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertNoPrivacyLeak(entry, `${pathLabel}[${index}]`));
@@ -205,6 +242,21 @@ function assertNoPrivacyLeak(value, pathLabel = 'report') {
   }
 }
 
+function assertAcyclicParentGraph(sessions, sessionById, pathLabel) {
+  for (const session of sessions) {
+    const seen = new Set();
+    let current = session;
+    while (current.parent_id != null) {
+      if (seen.has(current.id)) {
+        fail('identity_mismatch', `${pathLabel} session parent graph contains a cycle.`);
+      }
+      seen.add(current.id);
+      current = sessionById.get(current.parent_id);
+      if (!current) break;
+    }
+  }
+}
+
 export function parseManifest(value, pathLabel = 'manifest') {
   const manifest = assertPlain(value, pathLabel);
   if (manifest.schema !== MANIFEST_SCHEMA_ID) {
@@ -222,6 +274,7 @@ export function parseManifest(value, pathLabel = 'manifest') {
   }
   const sessions = [];
   const sessionById = new Map();
+  const pathsSeen = new Set();
   for (let index = 0; index < sessionsInput.length; index += 1) {
     const entry = assertPlain(sessionsInput[index], `${pathLabel}.sessions[${index}]`);
     const id = ownString(entry, 'id', `${pathLabel}.sessions[${index}]`, SESSION_ID_PATTERN);
@@ -234,6 +287,10 @@ export function parseManifest(value, pathLabel = 'manifest') {
       ownString(entry, 'path', `${pathLabel}.sessions[${index}]`),
       `${pathLabel}.sessions[${index}].path`,
     );
+    if (pathsSeen.has(relativePath)) {
+      fail('duplicate_id', `${pathLabel}.sessions duplicate path ${relativePath}`);
+    }
+    pathsSeen.add(relativePath);
     let parentId = null;
     if (Object.hasOwn(entry, 'parent_id') && entry.parent_id != null) {
       parentId = ownString(entry, 'parent_id', `${pathLabel}.sessions[${index}]`, SESSION_ID_PATTERN);
@@ -253,6 +310,7 @@ export function parseManifest(value, pathLabel = 'manifest') {
       fail('identity_mismatch', `${pathLabel} session ${session.id} parent_id is not allowlisted.`);
     }
   }
+  assertAcyclicParentGraph(sessions, sessionById, pathLabel);
 
   const phasesInput = manifest.phases;
   if (!Array.isArray(phasesInput) || phasesInput.length < 1 || phasesInput.length > MAX_PHASES) {
@@ -330,9 +388,12 @@ export function parseManifest(value, pathLabel = 'manifest') {
     }
   }
 
-  const accepted = Object.hasOwn(trial, 'accepted')
-    ? (trial.accepted === null ? null : ownBoolean(trial, 'accepted', `${pathLabel}.trial`))
-    : null;
+  let accepted = undefined;
+  let acceptanceKnown = false;
+  if (Object.hasOwn(trial, 'accepted') && trial.accepted !== null) {
+    accepted = ownBoolean(trial, 'accepted', `${pathLabel}.trial`);
+    acceptanceKnown = true;
+  }
 
   return {
     schema: MANIFEST_SCHEMA_ID,
@@ -344,12 +405,18 @@ export function parseManifest(value, pathLabel = 'manifest') {
       input_digest: ownString(trial, 'input_digest', `${pathLabel}.trial`, SHA256),
       coengineer_source: assertPlain(trial.coengineer_source, `${pathLabel}.trial.coengineer_source`),
       host_model: ownString(trial, 'host_model', `${pathLabel}.trial`),
-      host_settings: assertPlain(trial.host_settings, `${pathLabel}.trial.host_settings`),
-      provider_configuration: assertPlain(
+      host_settings: assertBoundedShareableObject(
+        trial.host_settings,
+        `${pathLabel}.trial.host_settings`,
+        HOST_SETTINGS_KEYS,
+      ),
+      provider_configuration: assertBoundedShareableObject(
         trial.provider_configuration,
         `${pathLabel}.trial.provider_configuration`,
+        PROVIDER_CONFIGURATION_KEYS,
       ),
       accepted,
+      acceptanceKnown,
     },
     window: { start, end },
     sessions,
@@ -379,16 +446,78 @@ function collectResponseRecord(payload, pathLabel) {
   return { response_id: responseId, usage, thread_token_usage: thread };
 }
 
-async function readAllowlistedSession(absolutePath, relativePath, pathLabel) {
+function responseKey(sessionId, responseId) {
+  return `${sessionId}\0${responseId}`;
+}
+
+function phaseOwnsTimestamp(phase, timestampMs, phasesOnSession) {
+  if (timestampMs < phase.start.ms || timestampMs > phase.end.ms) return false;
+  if (timestampMs === phase.end.ms) {
+    // Endpoints are closed only when no adjacent same-session phase starts here.
+    const claimedByNext = phasesOnSession.some(
+      (other) => other.attempt_id !== phase.attempt_id && other.start.ms === phase.end.ms,
+    );
+    return !claimedByNext;
+  }
+  return true;
+}
+
+async function resolvePathInsideRoot(sessionsRoot, relativePath, pathLabel) {
+  let rootReal;
+  try {
+    rootReal = await realpath(sessionsRoot);
+  } catch {
+    fail('invalid_format', `${pathLabel} sessions root is not resolvable.`);
+  }
+  const absolute = path.resolve(sessionsRoot, relativePath);
+  let candidateReal;
+  try {
+    candidateReal = await realpath(absolute);
+  } catch {
+    // Absent files: resolve the deepest existing ancestor and reject escapes.
+    let cursor = path.dirname(absolute);
+    let resolvedParent = null;
+    while (true) {
+      try {
+        resolvedParent = await realpath(cursor);
+        break;
+      } catch {
+        const parent = path.dirname(cursor);
+        if (parent === cursor) break;
+        cursor = parent;
+      }
+    }
+    if (resolvedParent == null) {
+      fail('invalid_format', `${pathLabel} resolves outside sessions root.`);
+    }
+    if (resolvedParent !== rootReal && !resolvedParent.startsWith(rootReal + path.sep)) {
+      fail('invalid_format', `${pathLabel} resolves outside sessions root.`);
+    }
+    return { absolute, real: null, rootReal, present: false };
+  }
+  if (candidateReal !== rootReal && !candidateReal.startsWith(rootReal + path.sep)) {
+    fail('invalid_format', `${pathLabel} resolves outside sessions root.`);
+  }
+  const info = await lstat(absolute);
+  if (info.isSymbolicLink()) {
+    // Symlink targets were validated via realpath; keep the real path for reads.
+  }
+  return { absolute, real: candidateReal, rootReal, present: true };
+}
+
+async function readAllowlistedSession(resolved, relativePath, pathLabel) {
+  if (!resolved.present) {
+    return { status: 'absent', relativePath, bytes: null, digest: null, events: [], text: null, realPath: null };
+  }
   let info;
   try {
-    info = await stat(absolutePath);
+    info = await stat(resolved.real);
   } catch {
-    return { status: 'absent', relativePath, bytes: null, digest: null, events: [], text: null };
+    return { status: 'absent', relativePath, bytes: null, digest: null, events: [], text: null, realPath: null };
   }
   if (!info.isFile()) fail('invalid_type', `${pathLabel} is not a file.`);
   if (info.size > MAX_SESSION_BYTES) fail('bounds_exceeded', `${pathLabel} exceeds ${MAX_SESSION_BYTES} bytes.`);
-  const text = await readFile(absolutePath, 'utf8');
+  const text = await readFile(resolved.real, 'utf8');
   if (Buffer.byteLength(text, 'utf8') > MAX_SESSION_BYTES) {
     fail('bounds_exceeded', `${pathLabel} exceeds ${MAX_SESSION_BYTES} bytes.`);
   }
@@ -403,10 +532,11 @@ async function readAllowlistedSession(absolutePath, relativePath, pathLabel) {
     digest,
     events,
     text,
+    realPath: resolved.real,
   };
 }
 
-function analyzeSessionEvents(events, window) {
+function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
   let model = null;
   let effort = null;
   const responses = new Map();
@@ -414,17 +544,49 @@ function analyzeSessionEvents(events, window) {
   const compactedAt = [];
   let secondaryTotal = null;
   let lastThread = null;
+  let preWindowThread = emptyCounters();
+  let sawPreWindowUsage = false;
   let primaryComplete = true;
   const notes = [];
+  let sessionMetaId = null;
+  let attributionUnknown = false;
 
   for (const event of events) {
-    if (event.timestamp.ms < window.start.ms || event.timestamp.ms > window.end.ms) {
+    const inWindow = event.timestamp.ms >= window.start.ms && event.timestamp.ms <= window.end.ms;
+
+    if (event.type === 'session_meta') {
+      const payload = assertPlain(event.payload, `event:${event.lineNumber}.payload`);
+      const metaId = ownString(payload, 'id', `event:${event.lineNumber}.payload`);
+      if (sessionMetaId != null && sessionMetaId !== metaId) {
+        fail('identity_mismatch', `session ${sessionId} has conflicting session_meta ids.`);
+      }
+      sessionMetaId = metaId;
+      if (Object.hasOwn(payload, 'thread_id') && payload.thread_id != null) {
+        const threadId = ownString(payload, 'thread_id', `event:${event.lineNumber}.payload`);
+        if (threadId !== metaId && threadId !== sessionId) {
+          fail(
+            'identity_mismatch',
+            `session ${sessionId} session_meta thread_id conflicts with manifest binding.`,
+          );
+        }
+      }
       continue;
     }
+
     if (event.type === 'turn_context') {
       const payload = assertPlain(event.payload, `event:${event.lineNumber}.payload`);
       if (Object.hasOwn(payload, 'model')) {
-        model = ownString(payload, 'model', `event:${event.lineNumber}.payload`);
+        const nextModel = ownString(payload, 'model', `event:${event.lineNumber}.payload`);
+        if (model != null && model !== nextModel) {
+          fail('identity_mismatch', `session ${sessionId} observes conflicting models.`);
+        }
+        model = nextModel;
+        if (expectedHostModel != null && model !== expectedHostModel) {
+          fail(
+            'identity_mismatch',
+            `session ${sessionId} model ${model} conflicts with host_model ${expectedHostModel}.`,
+          );
+        }
       }
       if (Object.hasOwn(payload, 'effort')) {
         const value = payload.effort;
@@ -435,8 +597,17 @@ function analyzeSessionEvents(events, window) {
       }
       continue;
     }
+
     if (event.type === 'token_usage_record') {
       const record = collectResponseRecord(event.payload, `event:${event.lineNumber}.payload`);
+      if (!inWindow) {
+        if (event.timestamp.ms < window.start.ms) {
+          preWindowThread = cloneCounters(record.thread_token_usage);
+          sawPreWindowUsage = true;
+          lastThread = record.thread_token_usage;
+        }
+        continue;
+      }
       const previous = responses.get(record.response_id);
       if (previous) {
         if (!countersEqual(previous.usage, record.usage)
@@ -459,12 +630,14 @@ function analyzeSessionEvents(events, window) {
       lastThread = record.thread_token_usage;
       continue;
     }
+
     if (event.type === 'compacted') {
-      // Compaction outputs already appear inside token_usage_record rows.
-      compactedAt.push(event.timestamp.ms);
+      if (inWindow) compactedAt.push(event.timestamp.ms);
       continue;
     }
+
     if (event.type === 'event_msg') {
+      if (!inWindow) continue;
       const payload = assertPlain(event.payload, `event:${event.lineNumber}.payload`);
       const innerType = ownString(payload, 'type', `event:${event.lineNumber}.payload`);
       if (innerType === 'item_completed') {
@@ -490,108 +663,169 @@ function analyzeSessionEvents(events, window) {
     }
   }
 
+  if (sessionMetaId == null) {
+    attributionUnknown = true;
+    notes.push('missing_session_meta');
+  } else if (sessionMetaId !== sessionId) {
+    fail(
+      'identity_mismatch',
+      `session ${sessionId} session_meta id ${sessionMetaId} conflicts with manifest id.`,
+    );
+  }
+
   const summed = emptyCounters();
   for (const record of responses.values()) addCounters(summed, record.usage);
 
-  if (responses.size === 0) {
+  if (responses.size === 0 && !sawPreWindowUsage) {
     primaryComplete = false;
     notes.push('missing_primary_token_usage_records');
-  } else if (lastThread && !countersEqual(summed, lastThread)) {
-    primaryComplete = false;
-    notes.push('response_sum_thread_mismatch');
+  } else if (lastThread) {
+    const expected = addCounters(cloneCounters(preWindowThread), summed);
+    if (!countersEqual(expected, lastThread)) {
+      primaryComplete = false;
+      notes.push('response_sum_thread_mismatch');
+    }
   }
 
-  if (secondaryTotal && lastThread && !countersEqual(secondaryTotal, lastThread)) {
-    // Secondary cumulative totals may omit compaction; keep primary authoritative.
-    notes.push('secondary_token_count_diverges');
+  if (secondaryTotal && lastThread) {
+    const expectedSecondary = addCounters(cloneCounters(preWindowThread), summed);
+    if (!countersEqual(secondaryTotal, expectedSecondary) && !countersEqual(secondaryTotal, lastThread)) {
+      // Secondary cumulative totals may omit compaction; keep primary authoritative.
+      notes.push('secondary_token_count_diverges');
+    }
   }
+
+  if (attributionUnknown) primaryComplete = false;
 
   return {
     model,
     effort,
     responses,
     childLinks,
+    compactedAt,
     compactedCount: compactedAt.length,
     summed,
     lastThread,
+    preWindowThread: sawPreWindowUsage ? preWindowThread : emptyCounters(),
     secondaryTotal,
     primaryComplete,
     notes,
+    sessionMetaId,
+    attributionUnknown,
   };
 }
 
-function resolveLinkedChildren(seedIds, sessionsById, analyzedById) {
+function resolveLinkedChildren(seedIds, sessionsById, analyzedById, loadedById) {
   const seen = new Set();
+  const visiting = new Set();
   const queue = [...seedIds];
   const ordered = [];
+
   while (queue.length > 0) {
     const id = queue.shift();
     if (seen.has(id)) continue;
+    if (visiting.has(id)) {
+      fail('identity_mismatch', `linked session graph contains a cycle at ${id}.`);
+    }
+    visiting.add(id);
     seen.add(id);
     ordered.push(id);
     const analysis = analyzedById.get(id);
-    if (!analysis) continue;
-    for (const link of analysis.childLinks) {
-      for (const session of sessionsById.values()) {
-        if (session.id === link.agent_thread_id
-          || session.path === link.agent_path
-          || session.path.endsWith(`/${link.agent_path}`)
-          || path.basename(session.path) === path.basename(link.agent_path)) {
-          if (!seen.has(session.id)) queue.push(session.id);
+    if (analysis) {
+      for (const link of analysis.childLinks) {
+        const matched = sessionsById.get(link.agent_thread_id);
+        if (!matched) {
+          fail(
+            'identity_mismatch',
+            `unlisted nested child ${link.agent_thread_id} linked from ${id}.`,
+          );
         }
+        if (matched.path !== link.agent_path) {
+          fail(
+            'identity_mismatch',
+            `nested child ${link.agent_thread_id} path conflicts with allowlisted path.`,
+          );
+        }
+        if (matched.parent_id !== id) {
+          fail(
+            'identity_mismatch',
+            `nested child ${link.agent_thread_id} parent graph conflicts with link from ${id}.`,
+          );
+        }
+        const loaded = loadedById.get(matched.id);
+        if (!loaded || loaded.status !== 'present') {
+          fail(
+            'identity_mismatch',
+            `missing nested child session file for ${matched.id}.`,
+          );
+        }
+        if (!seen.has(matched.id)) queue.push(matched.id);
       }
     }
     for (const session of sessionsById.values()) {
       if (session.parent_id === id && !seen.has(session.id)) queue.push(session.id);
     }
+    visiting.delete(id);
   }
   return ordered;
 }
 
 function assignResponsesToPhases(phases, analyzedById) {
   const byPhase = new Map();
+  const compactionByPhase = new Map();
   const unassigned = [];
-  for (const phase of phases) byPhase.set(phase.attempt_id, []);
-
   for (const phase of phases) {
-    const analysis = analyzedById.get(phase.session_id);
-    if (!analysis) continue;
-    for (const record of analysis.responses.values()) {
-      if (record.timestamp.ms < phase.start.ms || record.timestamp.ms > phase.end.ms) continue;
-      byPhase.get(phase.attempt_id).push(record);
-    }
+    byPhase.set(phase.attempt_id, []);
+    compactionByPhase.set(phase.attempt_id, 0);
   }
 
-  const claimed = new Set();
-  for (const records of byPhase.values()) {
-    for (const record of records) claimed.add(record.response_id);
-  }
+  const phasesBySession = new Map();
   for (const phase of phases) {
-    const analysis = analyzedById.get(phase.session_id);
-    if (!analysis) continue;
+    const list = phasesBySession.get(phase.session_id) ?? [];
+    list.push(phase);
+    phasesBySession.set(phase.session_id, list);
+  }
+
+  for (const [sessionId, analysis] of analyzedById.entries()) {
+    const sessionPhases = phasesBySession.get(sessionId) ?? [];
     for (const record of analysis.responses.values()) {
-      if (claimed.has(record.response_id)) continue;
-      if (record.timestamp.ms < phase.start.ms || record.timestamp.ms > phase.end.ms) {
-        // outside this phase; may belong to another phase on same session
+      const owning = sessionPhases.filter((phase) => (
+        phaseOwnsTimestamp(phase, record.timestamp.ms, sessionPhases)
+      ));
+      if (owning.length === 0) {
+        unassigned.push({
+          session_id: sessionId,
+          response_id: record.response_id,
+          key: responseKey(sessionId, record.response_id),
+        });
         continue;
+      }
+      if (owning.length > 1) {
+        fail(
+          'identity_mismatch',
+          `response ${record.response_id} in session ${sessionId} maps to multiple phases.`,
+        );
+      }
+      byPhase.get(owning[0].attempt_id).push(record);
+    }
+
+    const claimedCompaction = new Set();
+    for (const stamp of analysis.compactedAt ?? []) {
+      const owning = sessionPhases.filter((phase) => phaseOwnsTimestamp(phase, stamp, sessionPhases));
+      if (owning.length === 1 && !claimedCompaction.has(stamp)) {
+        compactionByPhase.set(
+          owning[0].attempt_id,
+          (compactionByPhase.get(owning[0].attempt_id) ?? 0) + 1,
+        );
+        claimedCompaction.add(stamp);
       }
     }
   }
-  for (const [sessionId, analysis] of analyzedById.entries()) {
-    for (const record of analysis.responses.values()) {
-      if (claimed.has(record.response_id)) continue;
-      const owning = phases.filter((phase) => (
-        phase.session_id === sessionId
-        && record.timestamp.ms >= phase.start.ms
-        && record.timestamp.ms <= phase.end.ms
-      ));
-      if (owning.length === 0) unassigned.push({ session_id: sessionId, response_id: record.response_id });
-    }
-  }
-  return { byPhase, unassigned };
+
+  return { byPhase, compactionByPhase, unassigned };
 }
 
-function buildAttemptUsage(phase, records, sessionAnalysis, options) {
+function buildAttemptUsage(phase, records, compactionEvents, sessionAnalysis, options) {
   const inconclusive = options.inconclusive;
   const sums = emptyCounters();
   const models = new Map();
@@ -630,15 +864,66 @@ function buildAttemptUsage(phase, records, sessionAnalysis, options) {
     breakdown: {
       input_tokens: measured ? sums.input_tokens : null,
       cached_input_tokens: measured ? sums.cached_input_tokens : null,
+      cache_write_input_tokens: measured ? sums.cache_write_input_tokens : null,
       output_tokens: measured ? sums.output_tokens : null,
       reasoning_output_tokens: measured ? sums.reasoning_output_tokens : null,
-      compaction_events: sessionAnalysis?.compactedCount ?? null,
+      compaction_events: measured ? compactionEvents : null,
       by_model: [...models.entries()].map(([model, counters]) => ({
         model,
         ...counters,
       })),
     },
   };
+}
+
+function emitTrial(parsedTrial) {
+  const emittedTrial = {
+    schema: parsedTrial.schema,
+    trial_id: parsedTrial.trial_id,
+    case_id: parsedTrial.case_id,
+    arm: parsedTrial.arm,
+    base_sha: parsedTrial.base_sha,
+    input_digest: parsedTrial.input_digest,
+    coengineer_source: {
+      kind: parsedTrial.coengineer_source.kind,
+      value: parsedTrial.coengineer_source.value,
+    },
+    host_model: parsedTrial.host_model,
+    host_settings: parsedTrial.host_settings,
+    provider_configuration: parsedTrial.provider_configuration,
+    wall_elapsed_ms: {
+      value: parsedTrial.wall_elapsed_ms.value,
+      source: parsedTrial.wall_elapsed_ms.source,
+      trust: parsedTrial.wall_elapsed_ms.trust,
+    },
+    attempts: parsedTrial.attempts.map((attempt) => {
+      const row = {
+        attempt_id: attempt.attempt_id,
+        kind: attempt.kind,
+        outcome: attempt.outcome,
+        sequence: attempt.sequence,
+        usage: Object.fromEntries(
+          Object.entries(attempt.usage).map(([key, metric]) => [key, {
+            value: metric.value,
+            source: metric.source,
+            trust: metric.trust,
+          }]),
+        ),
+      };
+      if (attempt.provider != null) {
+        row.provider = attempt.provider;
+        row.model = attempt.model;
+      }
+      return row;
+    }),
+  };
+  if (parsedTrial.accepted !== null) {
+    emittedTrial.accepted = parsedTrial.accepted;
+  }
+  if (parsedTrial.native_parent_excludes_helpers) {
+    emittedTrial.native_parent_excludes_helpers = true;
+  }
+  return emittedTrial;
 }
 
 export async function collectTrialUsage(manifestInput, options = {}) {
@@ -657,12 +942,18 @@ export async function collectTrialUsage(manifestInput, options = {}) {
   };
   let incomplete = false;
 
+  if (!manifest.trial.acceptanceKnown) {
+    incomplete = true;
+    evidence.notes.push('acceptance_unknown');
+  }
+
   for (const session of manifest.sessions) {
-    const absolute = path.resolve(sessionsRoot, session.path);
-    if (!absolute.startsWith(sessionsRoot + path.sep) && absolute !== sessionsRoot) {
-      fail('invalid_format', `session ${session.id} resolves outside sessions root.`);
-    }
-    const loaded = await readAllowlistedSession(absolute, session.path, `session:${session.id}`);
+    const resolved = await resolvePathInsideRoot(
+      sessionsRoot,
+      session.path,
+      `session:${session.id}`,
+    );
+    const loaded = await readAllowlistedSession(resolved, session.path, `session:${session.id}`);
     loadedById.set(session.id, loaded);
     if (loaded.status === 'absent') {
       incomplete = true;
@@ -672,19 +963,28 @@ export async function collectTrialUsage(manifestInput, options = {}) {
         effort: null,
         responses: new Map(),
         childLinks: [],
+        compactedAt: [],
         compactedCount: 0,
         summed: emptyCounters(),
         lastThread: null,
+        preWindowThread: emptyCounters(),
         secondaryTotal: null,
         primaryComplete: false,
         notes: ['absent_session'],
         bytes: null,
         digest: null,
+        sessionMetaId: null,
+        attributionUnknown: true,
       });
       continue;
     }
     evidence.session_digests[session.id] = loaded.digest;
-    const analysis = analyzeSessionEvents(loaded.events, manifest.window);
+    const analysis = analyzeSessionEvents(
+      loaded.events,
+      manifest.window,
+      session.id,
+      manifest.trial.host_model,
+    );
     analysis.bytes = loaded.bytes;
     analysis.digest = loaded.digest;
     analyzedById.set(session.id, analysis);
@@ -695,27 +995,18 @@ export async function collectTrialUsage(manifestInput, options = {}) {
       evidence.notes.push(...analysis.notes.map((note) => `${session.id}:${note}`));
     }
     for (const link of analysis.childLinks) {
+      const matched = sessionsById.get(link.agent_thread_id);
       evidence.link_digests.push(sha256Hex([
         'child-link',
         session.id,
         link.agent_thread_id,
-        path.basename(link.agent_path),
+        matched ? matched.path : link.agent_thread_id,
       ]));
-      const matched = [...sessionsById.values()].some((candidate) => (
-        candidate.id === link.agent_thread_id
-        || candidate.path === link.agent_path
-        || path.basename(candidate.path) === path.basename(link.agent_path)
-      ));
-      if (!matched) {
-        // Linked helper observed but not allowlisted: do not scan; mark incomplete.
-        incomplete = true;
-        evidence.notes.push(`unallowlisted_child_link:${session.id}`);
-      }
     }
   }
 
   const parentIds = manifest.sessions.filter((session) => session.role === 'parent').map((s) => s.id);
-  const walkOrder = resolveLinkedChildren(parentIds, sessionsById, analyzedById);
+  const walkOrder = resolveLinkedChildren(parentIds, sessionsById, analyzedById, loadedById);
   for (const session of manifest.sessions) {
     if (!walkOrder.includes(session.id) && session.role === 'native_helper') {
       // Explicitly allowlisted helpers are still included even without a live link event.
@@ -731,19 +1022,28 @@ export async function collectTrialUsage(manifestInput, options = {}) {
 
   const hasHelpers = manifest.phases.some((phase) => phase.kind === 'native_helper');
   const hasParent = manifest.phases.some((phase) => phase.kind !== 'native_helper');
-  if (hasHelpers && hasParent) {
-    // Parent rows must exclude separately reported helper usage.
-  }
 
   const attempts = [];
   const breakdownAttempts = [];
   for (const phase of manifest.phases) {
     const records = assignment.byPhase.get(phase.attempt_id) ?? [];
     const analysis = analyzedById.get(phase.session_id);
+    if (phase.model != null && analysis?.model != null && phase.model !== analysis.model) {
+      fail(
+        'identity_mismatch',
+        `phase ${phase.attempt_id} model conflicts with observed session model.`,
+      );
+    }
     const phaseIncomplete = incomplete
       || analysis?.primaryComplete !== true
       || (phase.kind === 'native_helper' && loadedById.get(phase.session_id)?.status === 'absent');
-    const built = buildAttemptUsage(phase, records, analysis, { inconclusive: phaseIncomplete });
+    const built = buildAttemptUsage(
+      phase,
+      records,
+      assignment.compactionByPhase.get(phase.attempt_id) ?? 0,
+      analysis,
+      { inconclusive: phaseIncomplete },
+    );
     const attempt = {
       attempt_id: phase.attempt_id,
       kind: phase.kind,
@@ -775,77 +1075,44 @@ export async function collectTrialUsage(manifestInput, options = {}) {
     host_model: manifest.trial.host_model,
     host_settings: manifest.trial.host_settings,
     provider_configuration: manifest.trial.provider_configuration,
-    accepted: manifest.trial.accepted,
     wall_elapsed_ms: hostMetric(wall),
     attempts,
   };
+  if (manifest.trial.acceptanceKnown) {
+    trial.accepted = manifest.trial.accepted;
+  }
   if (hasHelpers && hasParent) {
     trial.native_parent_excludes_helpers = true;
   }
 
   const parsedTrial = parseTrial(trial);
-  // Re-emit the analyzer-accepted trial shape without internal-only fields.
-  const emittedTrial = {
-    schema: parsedTrial.schema,
-    trial_id: parsedTrial.trial_id,
-    case_id: parsedTrial.case_id,
-    arm: parsedTrial.arm,
-    base_sha: parsedTrial.base_sha,
-    input_digest: parsedTrial.input_digest,
-    coengineer_source: {
-      kind: parsedTrial.coengineer_source.kind,
-      value: parsedTrial.coengineer_source.value,
-    },
-    host_model: parsedTrial.host_model,
-    host_settings: parsedTrial.host_settings,
-    provider_configuration: parsedTrial.provider_configuration,
-    accepted: parsedTrial.accepted,
-    wall_elapsed_ms: {
-      value: parsedTrial.wall_elapsed_ms.value,
-      source: parsedTrial.wall_elapsed_ms.source,
-      trust: parsedTrial.wall_elapsed_ms.trust,
-    },
-    attempts: parsedTrial.attempts.map((attempt) => {
-      const row = {
-        attempt_id: attempt.attempt_id,
-        kind: attempt.kind,
-        outcome: attempt.outcome,
-        sequence: attempt.sequence,
-        usage: Object.fromEntries(
-          Object.entries(attempt.usage).map(([key, metric]) => [key, {
-            value: metric.value,
-            source: metric.source,
-            trust: metric.trust,
-          }]),
-        ),
-      };
-      if (attempt.provider != null) {
-        row.provider = attempt.provider;
-        row.model = attempt.model;
-      }
-      return row;
-    }),
-  };
-  if (parsedTrial.native_parent_excludes_helpers) {
-    emittedTrial.native_parent_excludes_helpers = true;
-  }
+  const emittedTrial = emitTrial(parsedTrial);
 
   const totals = {
     input_tokens: null,
     cached_input_tokens: null,
+    cache_write_input_tokens: null,
     output_tokens: null,
     reasoning_output_tokens: null,
     compaction_events: 0,
   };
   if (!incomplete) {
     for (const key of [
-      'input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens',
+      'input_tokens',
+      'cached_input_tokens',
+      'cache_write_input_tokens',
+      'output_tokens',
+      'reasoning_output_tokens',
     ]) {
       totals[key] = 0;
     }
     for (const row of breakdownAttempts) {
       for (const key of [
-        'input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens',
+        'input_tokens',
+        'cached_input_tokens',
+        'cache_write_input_tokens',
+        'output_tokens',
+        'reasoning_output_tokens',
       ]) {
         if (row[key] == null) totals[key] = null;
         else if (totals[key] != null) totals[key] += row[key];
@@ -865,8 +1132,11 @@ export async function collectTrialUsage(manifestInput, options = {}) {
       totals,
       accounting: {
         response_id_deduped: true,
+        response_identity: 'session_and_response',
+        phase_endpoints: 'start_inclusive_end_exclusive_unless_terminal',
         compaction_counted_once: true,
         reasoning_included_in_output: true,
+        cache_counters_separate: true,
         secondary_token_count: 'non_authoritative',
         native_parent_excludes_helpers: Boolean(emittedTrial.native_parent_excludes_helpers),
         walked_sessions: walkOrder,
@@ -921,6 +1191,38 @@ here. Unknown is never coerced to zero.
 `);
 }
 
+async function assertWriteTargetSafe(outPath, manifestPath, sessionsRoot, manifest) {
+  let outReal;
+  try {
+    outReal = await realpath(outPath);
+  } catch {
+    try {
+      outReal = await realpath(path.dirname(outPath));
+      outReal = path.join(outReal, path.basename(outPath));
+    } catch {
+      outReal = path.resolve(outPath);
+    }
+  }
+  let manifestReal;
+  try {
+    manifestReal = await realpath(manifestPath);
+  } catch {
+    manifestReal = path.resolve(manifestPath);
+  }
+  if (outReal === manifestReal) {
+    fail('invalid_format', '--write must not overwrite the manifest.');
+  }
+  for (const session of manifest.sessions) {
+    const resolved = await resolvePathInsideRoot(sessionsRoot, session.path, `session:${session.id}`);
+    if (resolved.real && resolved.real === outReal) {
+      fail('invalid_format', '--write must not overwrite an input session file.');
+    }
+    if (path.resolve(sessionsRoot, session.path) === path.resolve(outPath)) {
+      fail('invalid_format', '--write must not overwrite an input session file.');
+    }
+  }
+}
+
 export async function main(argv = process.argv.slice(2), io = {
   stdout: process.stdout,
   stderr: process.stderr,
@@ -950,12 +1252,13 @@ export async function main(argv = process.argv.slice(2), io = {
   const payload = `${JSON.stringify(report, null, 2)}\n`;
   if (flags['--write']) {
     const outPath = path.resolve(io.cwd ?? process.cwd(), flags['--write']);
+    await assertWriteTargetSafe(outPath, manifestPath, sessionsRoot, parseManifest(manifest));
     await writeFile(outPath, payload, 'utf8');
     io.stdout.write(`wrote ${path.basename(outPath)} status=${report.status}\n`);
   } else {
     io.stdout.write(payload);
   }
-  return report.status === 'complete' ? 0 : 0;
+  return report.status === 'complete' ? 0 : 1;
 }
 
 const isMain = process.argv[1]

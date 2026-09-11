@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -16,26 +16,33 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CASES_DIR = path.join(ROOT, 'benchmarks/cases');
 
-function usage(input, cached, output, reasoning, total = input + output) {
+function usage(input, cached, output, reasoning, total = input + output, extras = {}) {
   return {
     input_tokens: input,
     cached_input_tokens: cached,
     output_tokens: output,
     reasoning_output_tokens: reasoning,
     total_tokens: total,
+    ...extras,
   };
 }
 
 function threadAfter(...records) {
-  const sum = usage(0, 0, 0, 0, 0);
+  const sum = usage(0, 0, 0, 0, 0, { cache_write_input_tokens: 0 });
   for (const record of records) {
-    for (const key of Object.keys(sum)) sum[key] += record[key];
+    for (const key of Object.keys(sum)) {
+      if (Object.hasOwn(record, key)) sum[key] += record[key];
+    }
   }
   return sum;
 }
 
 function line(timestamp, type, payload) {
   return `${JSON.stringify({ timestamp, type, payload })}\n`;
+}
+
+function sessionMeta(id, timestamp = '2026-09-11T09:59:00.000Z') {
+  return line(timestamp, 'session_meta', { id, thread_id: id });
 }
 
 async function writeSession(root, relative, text) {
@@ -106,6 +113,7 @@ test('happy path imports parent+helper usage and passes analyzer parseTrial', as
     const parentU2 = usage(50, 10, 20, 5);
     const helperU1 = usage(25, 5, 12, 3);
     await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
       line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default', effort: 'default' }),
       line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
         response_id: 'resp-parent-1',
@@ -140,6 +148,7 @@ test('happy path imports parent+helper usage and passes analyzer parseTrial', as
       }),
     ].join(''));
     await writeSession(root, 'sessions/helper.jsonl', [
+      sessionMeta('helper-session'),
       line('2026-09-11T10:01:05.000Z', 'turn_context', { model: 'codex-default', effort: 'low' }),
       line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
         response_id: 'resp-helper-1',
@@ -180,6 +189,7 @@ test('conflicting response_id duplicates fail closed', async () => {
     const first = usage(10, 0, 4, 1);
     const second = usage(11, 0, 4, 1);
     await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
       line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
         response_id: 'dup',
         usage: first,
@@ -192,6 +202,7 @@ test('conflicting response_id duplicates fail closed', async () => {
       }),
     ].join(''));
     await writeSession(root, 'sessions/helper.jsonl', [
+      sessionMeta('helper-session'),
       line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
         response_id: 'helper',
         usage: usage(1, 0, 1, 0),
@@ -214,6 +225,8 @@ test('absent helper session is inconclusive and never reports zero usage', async
   try {
     const parentU1 = usage(40, 0, 8, 2);
     await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
       line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
         response_id: 'resp-parent-1',
         usage: parentU1,
@@ -229,15 +242,11 @@ test('absent helper session is inconclusive and never reports zero usage', async
         },
       }),
     ].join(''));
-    // helper.jsonl intentionally absent
-    const report = await collectTrialUsage(baseManifest(caseRecord), { sessionsRoot: root });
-    assert.equal(report.status, 'inconclusive');
-    assert.equal(report.evidence.incomplete_primary_evidence, true);
-    assert.equal(report.trial.attempts[0].usage.native_input_tokens.value, null);
-    assert.equal(report.trial.attempts[0].usage.native_input_tokens.source, 'unknown');
-    assert.notEqual(report.trial.attempts[0].usage.native_input_tokens.value, 0);
-    assert.equal(report.trial.attempts[1].usage.native_input_tokens.value, null);
-    parseTrial(report.trial);
+    // helper.jsonl intentionally absent — linked nested child is rejected.
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -291,6 +300,8 @@ test('privacy fields and mismatched attribution fail closed', async () => {
   try {
     const u = usage(5, 0, 2, 1);
     await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
       line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
         response_id: 'r1',
         usage: u,
@@ -360,6 +371,8 @@ test('CLI writes only with --write and keeps sessions read-only', async () => {
   try {
     const u = usage(9, 1, 3, 1);
     const sessionRel = await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
       line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
         response_id: 'r1',
         usage: u,
@@ -405,6 +418,8 @@ test('failed and correction attempts preserve outcomes and correction_rounds', a
     const failUsage = usage(22, 0, 8, 2);
     const fixUsage = usage(18, 0, 7, 1);
     await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
       line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
         response_id: 'fail-1',
         usage: failUsage,
@@ -462,4 +477,483 @@ test('failed and correction attempts preserve outcomes and correction_rounds', a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('optional cache_write_input_tokens is accepted and kept separate from reasoning', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(12, 4, 6, 2, 18, { cache_write_input_tokens: 3 });
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'cache-1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [{
+        attempt_id: 'only',
+        kind: 'initial',
+        outcome: 'accepted',
+        start: '2026-09-11T10:00:00.000Z',
+        end: '2026-09-11T10:01:00.000Z',
+        session_id: 'parent-session',
+      }],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.breakdown.totals.cache_write_input_tokens, 3);
+    assert.equal(report.breakdown.totals.reasoning_output_tokens, 2);
+    assert.equal(report.breakdown.totals.output_tokens, 6);
+    assert.equal(report.breakdown.accounting.cache_counters_separate, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('adjacent phase endpoints assign each response once', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u1 = usage(0, 0, 1, 0, 1);
+    const u2 = usage(0, 0, 1, 0, 1);
+    const u3 = usage(0, 0, 1, 0, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:00.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:01.000Z', 'token_usage_record', {
+        response_id: 't1',
+        usage: u1,
+        thread_token_usage: threadAfter(u1),
+      }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 't10',
+        usage: u2,
+        thread_token_usage: threadAfter(u1, u2),
+      }),
+      line('2026-09-11T10:00:20.000Z', 'token_usage_record', {
+        response_id: 't20',
+        usage: u3,
+        thread_token_usage: threadAfter(u1, u2, u3),
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      window: {
+        start: '2026-09-11T10:00:00.000Z',
+        end: '2026-09-11T10:00:20.000Z',
+      },
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [
+        {
+          attempt_id: 'phase-a',
+          kind: 'initial',
+          outcome: 'completed_unaccepted',
+          sequence: 1,
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:00:10.000Z',
+          session_id: 'parent-session',
+        },
+        {
+          attempt_id: 'phase-b',
+          kind: 'correction',
+          outcome: 'accepted',
+          sequence: 2,
+          start: '2026-09-11T10:00:10.000Z',
+          end: '2026-09-11T10:00:20.000Z',
+          session_id: 'parent-session',
+        },
+      ],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 1);
+    assert.equal(report.trial.attempts[1].usage.native_output_tokens.value, 2);
+    assert.equal(report.breakdown.totals.output_tokens, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('pre-window counters reconcile window deltas without false mismatch', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const pre = usage(0, 0, 1, 0, 1);
+    const mid = usage(0, 0, 1, 0, 1);
+    const late = usage(0, 0, 1, 0, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session', '2026-09-11T09:59:00.000Z'),
+      line('2026-09-11T09:59:30.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T09:59:50.000Z', 'token_usage_record', {
+        response_id: 'pre',
+        usage: pre,
+        thread_token_usage: threadAfter(pre),
+      }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'mid',
+        usage: mid,
+        thread_token_usage: threadAfter(pre, mid),
+      }),
+      line('2026-09-11T10:00:20.000Z', 'token_usage_record', {
+        response_id: 'late',
+        usage: late,
+        thread_token_usage: threadAfter(pre, mid, late),
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      window: {
+        start: '2026-09-11T10:00:10.000Z',
+        end: '2026-09-11T10:00:20.000Z',
+      },
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [{
+        attempt_id: 'windowed',
+        kind: 'initial',
+        outcome: 'accepted',
+        start: '2026-09-11T10:00:10.000Z',
+        end: '2026-09-11T10:00:20.000Z',
+        session_id: 'parent-session',
+      }],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 2);
+    assert.equal(report.breakdown.totals.output_tokens, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('session_meta conflicts reject and missing meta is inconclusive', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(4, 0, 2, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('other-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+        phases: [{
+          attempt_id: 'only',
+          kind: 'initial',
+          outcome: 'accepted',
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:01:00.000Z',
+          session_id: 'parent-session',
+        }],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+
+    await writeSession(root, 'sessions/parent.jsonl', [
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [{
+        attempt_id: 'only',
+        kind: 'initial',
+        outcome: 'accepted',
+        start: '2026-09-11T10:00:00.000Z',
+        end: '2026-09-11T10:01:00.000Z',
+        session_id: 'parent-session',
+      }],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'inconclusive');
+    assert.match(report.evidence.notes.join(','), /missing_session_meta/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('basename child-link fallback is rejected; exact ids required', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU1 = usage(10, 0, 4, 1);
+    const helperU1 = usage(5, 0, 2, 0);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'p1',
+        usage: parentU1,
+        thread_token_usage: parentU1,
+      }),
+      line('2026-09-11T10:00:20.000Z', 'event_msg', {
+        type: 'item_completed',
+        item: {
+          type: 'SubAgentActivity',
+          kind: 'started',
+          agent_thread_id: 'not-allowlisted',
+          agent_path: 'helper.jsonl',
+        },
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/helper.jsonl', [
+      sessionMeta('helper-session'),
+      line('2026-09-11T10:01:05.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'h1',
+        usage: helperU1,
+        thread_token_usage: helperU1,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('same response_id in different sessions stays independently assigned', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(8, 0, 3, 1);
+    const helperU = usage(5, 0, 2, 0);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'shared-id',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+      line('2026-09-11T10:00:20.000Z', 'event_msg', {
+        type: 'item_completed',
+        item: {
+          type: 'SubAgentActivity',
+          kind: 'started',
+          agent_thread_id: 'helper-session',
+          agent_path: 'sessions/helper.jsonl',
+        },
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/helper.jsonl', [
+      sessionMeta('helper-session'),
+      line('2026-09-11T10:01:05.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'shared-id',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_input_tokens.value, 8);
+    assert.equal(report.trial.attempts[1].usage.native_input_tokens.value, 5);
+    assert.equal(report.breakdown.accounting.response_identity, 'session_and_response');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('missing acceptance omits accepted and marks inconclusive', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(6, 0, 2, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    const trial = {
+      trial_id: 'host-accept-unknown',
+      case_id: caseRecord.id,
+      arm: 'native-codex',
+      base_sha: caseRecord.base_sha,
+      input_digest: caseRecord.input_digest,
+      coengineer_source: { kind: 'native', value: 'native-codex' },
+      host_model: 'codex-default',
+      host_settings: { reasoning: 'default', sandbox: 'workspace-write' },
+      provider_configuration: { implement: 'native' },
+    };
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      trial,
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [{
+        attempt_id: 'only',
+        kind: 'initial',
+        outcome: 'accepted',
+        start: '2026-09-11T10:00:00.000Z',
+        end: '2026-09-11T10:01:00.000Z',
+        session_id: 'parent-session',
+      }],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'inconclusive');
+    assert.equal(Object.hasOwn(report.trial, 'accepted'), false);
+    parseTrial(report.trial);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI returns nonzero for inconclusive and refuses overwrite of inputs', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(6, 0, 2, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    const trial = {
+      trial_id: 'host-cli-inc',
+      case_id: caseRecord.id,
+      arm: 'native-codex',
+      base_sha: caseRecord.base_sha,
+      input_digest: caseRecord.input_digest,
+      coengineer_source: { kind: 'native', value: 'native-codex' },
+      host_model: 'codex-default',
+      host_settings: { reasoning: 'default', sandbox: 'workspace-write' },
+      provider_configuration: { implement: 'native' },
+      accepted: true,
+    };
+    const manifest = baseManifest(caseRecord, {
+      trial,
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [{
+        attempt_id: 'only',
+        kind: 'initial',
+        outcome: 'accepted',
+        start: '2026-09-11T10:00:00.000Z',
+        end: '2026-09-11T10:01:00.000Z',
+        session_id: 'parent-session',
+      }],
+    });
+    const manifestPath = path.join(root, 'manifest.json');
+    await writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
+    const code = await main(
+      ['--manifest', manifestPath, '--sessions-root', root],
+      { stdout: { write() {} }, stderr: { write() {} }, cwd: root },
+    );
+    assert.equal(code, 1);
+
+    await assert.rejects(
+      () => main(
+        ['--manifest', manifestPath, '--sessions-root', root, '--write', manifestPath],
+        { stdout: { write() {} }, stderr: { write() {} }, cwd: root },
+      ),
+      { code: 'invalid_format' },
+    );
+    await assert.rejects(
+      () => main(
+        [
+          '--manifest',
+          manifestPath,
+          '--sessions-root',
+          root,
+          '--write',
+          path.join(root, 'sessions/parent.jsonl'),
+        ],
+        { stdout: { write() {} }, stderr: { write() {} }, cwd: root },
+      ),
+      { code: 'invalid_format' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('symlink escape outside sessions root is rejected', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'ce-host-outside-'));
+  try {
+    const u = usage(3, 0, 1, 0);
+    await writeFile(path.join(outside, 'secret.jsonl'), [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    await mkdir(path.join(root, 'sessions'), { recursive: true });
+    await symlink(path.join(outside, 'secret.jsonl'), path.join(root, 'sessions/parent.jsonl'));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+        phases: [{
+          attempt_id: 'only',
+          kind: 'initial',
+          outcome: 'accepted',
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:01:00.000Z',
+          session_id: 'parent-session',
+        }],
+      }), { sessionsRoot: root }),
+      { code: 'invalid_format' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('bounded host_settings reject freeform path secrets', () => {
+  const caseRecord = {
+    id: 'single-file-bugfix',
+    base_sha: 'df49c63059159a79646258358850bef0590ca583',
+    input_digest: '54bd89a12cdbb1a66e662467f71d96bfc5e596bafced30f6a0c715c68a71d368',
+  };
+  assert.throws(() => parseManifest(baseManifest(caseRecord, {
+    trial: {
+      trial_id: 'bad-settings',
+      case_id: caseRecord.id,
+      arm: 'native-codex',
+      base_sha: caseRecord.base_sha,
+      input_digest: caseRecord.input_digest,
+      coengineer_source: { kind: 'native', value: 'native-codex' },
+      host_model: 'codex-default',
+      host_settings: { reasoning: 'default', sandbox: 'workspace-write', cwd: '/secret/path' },
+      provider_configuration: { implement: 'native' },
+      accepted: true,
+    },
+    sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+    phases: [{
+      attempt_id: 'only',
+      kind: 'initial',
+      outcome: 'accepted',
+      start: '2026-09-11T10:00:00.000Z',
+      end: '2026-09-11T10:01:00.000Z',
+      session_id: 'parent-session',
+    }],
+  })), { code: 'unknown_key' });
 });
