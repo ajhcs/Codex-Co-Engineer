@@ -335,6 +335,9 @@ function assertAcyclicParentGraph(sessions, sessionById, pathLabel) {
 
 function extractParentThreadId(payload, pathLabel) {
   if (!Object.hasOwn(payload, 'source') || payload.source == null) return null;
+  // Normal parent CLI sessions emit source as a string (e.g. "cli"); that is not
+  // a parent link and must not be treated as a subagent object.
+  if (typeof payload.source === 'string') return null;
   const source = assertPlain(payload.source, `${pathLabel}.source`);
   if (!Object.hasOwn(source, 'subagent') || source.subagent == null) return null;
   const subagent = assertPlain(source.subagent, `${pathLabel}.source.subagent`);
@@ -379,6 +382,8 @@ function readSessionMetaBinding(events, sessionId) {
 }
 
 function collectProvenAncestorSessionIds(session, sessionsById, bindingsById) {
+  // Parent/cycle/allowlist conflicts are validated in the binding prepass.
+  // Walk only proven linkages already stored on bindingsById.
   const ancestors = new Set();
   let current = session;
   const seen = new Set();
@@ -389,12 +394,6 @@ function collectProvenAncestorSessionIds(session, sessionsById, bindingsById) {
     seen.add(current.id);
     const binding = bindingsById.get(current.id);
     if (binding == null || binding.parentThreadId == null) break;
-    if (binding.parentThreadId !== current.parent_id) {
-      fail(
-        'identity_mismatch',
-        `session ${current.id} session_meta parent_thread_id conflicts with manifest parent_id.`,
-      );
-    }
     if (!sessionsById.has(current.parent_id)) {
       fail(
         'identity_mismatch',
@@ -743,8 +742,9 @@ async function readAllowlistedSession(resolved, relativePath, pathLabel) {
 function analyzeSessionEvents(events, window, sessionId, options = {}) {
   const expectedHostModel = options.expectedModel ?? null;
   const expectedHostSettings = options.expectedSettings ?? null;
-  const expectedParentId = options.expectedParentId ?? null;
   const allowedSharedSessionIds = options.allowedSharedSessionIds ?? new Set();
+  // Identity/parent binding is validated once in the prepass; reuse it here.
+  const sessionMetaId = options.sessionMetaId ?? null;
   let model = null;
   let effort = undefined;
   let sawCollabEffort = false;
@@ -758,51 +758,12 @@ function analyzeSessionEvents(events, window, sessionId, options = {}) {
   let sawPreWindowUsage = false;
   let primaryComplete = true;
   const notes = [];
-  let sessionMetaId = null;
-  let parentThreadId = null;
   let attributionUnknown = false;
 
   for (const event of events) {
     const inWindow = event.timestamp.ms >= window.start.ms && event.timestamp.ms <= window.end.ms;
 
     if (event.type === 'session_meta') {
-      const payload = assertPlain(event.payload, `event:${event.lineNumber}.payload`);
-      const metaId = ownString(payload, 'id', `event:${event.lineNumber}.payload`);
-      if (sessionMetaId != null && sessionMetaId !== metaId) {
-        fail('identity_mismatch', `session ${sessionId} has conflicting session_meta ids.`);
-      }
-      sessionMetaId = metaId;
-      if (Object.hasOwn(payload, 'thread_id') && payload.thread_id != null) {
-        const threadId = ownString(payload, 'thread_id', `event:${event.lineNumber}.payload`);
-        if (threadId !== metaId && threadId !== sessionId) {
-          fail(
-            'identity_mismatch',
-            `session ${sessionId} session_meta thread_id conflicts with manifest binding.`,
-          );
-        }
-      }
-      const nextParent = extractParentThreadId(payload, `event:${event.lineNumber}.payload`);
-      if (nextParent != null) {
-        if (parentThreadId != null && parentThreadId !== nextParent) {
-          fail(
-            'identity_mismatch',
-            `session ${sessionId} has conflicting session_meta parent_thread_id values.`,
-          );
-        }
-        parentThreadId = nextParent;
-        if (expectedParentId == null) {
-          fail(
-            'identity_mismatch',
-            `session ${sessionId} session_meta parent_thread_id is not allowed for parent role.`,
-          );
-        }
-        if (parentThreadId !== expectedParentId) {
-          fail(
-            'identity_mismatch',
-            `session ${sessionId} session_meta parent_thread_id conflicts with manifest parent_id.`,
-          );
-        }
-      }
       continue;
     }
 
@@ -1020,8 +981,6 @@ function analyzeSessionEvents(events, window, sessionId, options = {}) {
     secondaryTotal,
     primaryComplete,
     notes,
-    sessionMetaId,
-    parentThreadId,
     attributionUnknown,
   };
 }
@@ -1290,8 +1249,6 @@ export async function collectTrialUsage(manifestInput, options = {}) {
         notes: ['absent_session'],
         bytes: null,
         digest: null,
-        sessionMetaId: null,
-        parentThreadId: null,
         attributionUnknown: true,
       });
       continue;
@@ -1324,6 +1281,7 @@ export async function collectTrialUsage(manifestInput, options = {}) {
     const expectedSettings = session.role === 'parent'
       ? manifest.trial.host_settings
       : null;
+    const binding = bindingsById.get(session.id);
     const allowedSharedSessionIds = collectProvenAncestorSessionIds(
       session,
       sessionsById,
@@ -1336,7 +1294,7 @@ export async function collectTrialUsage(manifestInput, options = {}) {
       {
         expectedModel,
         expectedSettings,
-        expectedParentId: session.parent_id,
+        sessionMetaId: binding?.sessionMetaId ?? null,
         allowedSharedSessionIds,
       },
     );

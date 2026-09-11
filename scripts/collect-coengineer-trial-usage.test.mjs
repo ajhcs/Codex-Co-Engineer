@@ -1334,6 +1334,81 @@ test('helper token_usage may share proven root session_id with exact child threa
   }
 });
 
+test('normal CLI parent source string allows proven shared-session helper', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(9, 0, 4, 1);
+    const helperU = usage(6, 0, 3, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('example-parent', '2026-09-11T09:59:00.000Z', { source: 'cli' }),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default', effort: 'default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'resp-parent-1',
+        thread_id: 'example-parent',
+        session_id: 'example-parent',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+      line('2026-09-11T10:00:20.000Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        agent_thread_id: 'example-child',
+        agent_path: '/root/helper',
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/helper.jsonl', [
+      helperSessionMeta('example-child', 'example-parent'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default', effort: 'default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-helper-1',
+        thread_id: 'example-child',
+        session_id: 'example-parent',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      sessions: [
+        { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+        {
+          id: 'example-child',
+          role: 'native_helper',
+          path: 'sessions/helper.jsonl',
+          parent_id: 'example-parent',
+          agent_path: '/root/helper',
+        },
+      ],
+      phases: [
+        {
+          attempt_id: 'native-initial',
+          kind: 'initial',
+          outcome: 'completed_unaccepted',
+          sequence: 1,
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:02:00.000Z',
+          session_id: 'example-parent',
+        },
+        {
+          attempt_id: 'native-helper',
+          kind: 'native_helper',
+          outcome: 'accepted',
+          sequence: 2,
+          start: '2026-09-11T10:01:00.000Z',
+          end: '2026-09-11T10:01:30.000Z',
+          session_id: 'example-child',
+        },
+      ],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 4);
+    assert.equal(report.trial.attempts[1].usage.native_output_tokens.value, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('nested helper may share original root session_id across proven ancestry', async () => {
   const cases = await loadCases(CASES_DIR);
   const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
