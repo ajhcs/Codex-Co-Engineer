@@ -122,16 +122,17 @@ test('retains the persistent ACP client before turn result settles', async () =>
       timeoutMs: 3_000,
     });
     const result = await turn.result;
-    assert.equal(result.status, 'completed');
-    agentPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
-    descendantPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-descendant.pid'), 'utf8'));
-    // Demonstrates the close race gap: if result settles before retain, the
-    // pending map is empty and runtime.close becomes a no-op kill path.
+    // Same synchronous continuation as turn.result: any await here lets
+    // finalize populate pendingPersistentClients and hides the ordering gap.
+    // Capture PIDs with readFileSync first so finally can reap on assert failure.
+    agentPid = Number(readFileSync(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
+    descendantPid = Number(readFileSync(path.join(value.cwd, '.acpx-fake-descendant.pid'), 'utf8'));
     assert.equal(
       manager.pendingPersistentClients.has(value.handle.acpxRecordId),
       true,
       'persistent client must be retained before turn.result resolves',
     );
+    assert.equal(result.status, 'completed');
     assert.ok(processAlive(agentPid), 'fixture agent should still be running after retain');
     assert.ok(processAlive(descendantPid), 'fixture descendant should still be running after retain');
     await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
