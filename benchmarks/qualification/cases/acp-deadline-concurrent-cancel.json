@@ -1,0 +1,66 @@
+{
+  "schema": "codex-co-engineer.benchmark-case.v1",
+  "id": "acp-deadline-concurrent-cancel",
+  "title": "Honor deadline extensions and isolate concurrent ACP cancellation",
+  "summary": "In-flight turns must follow the current recorded deadline, and overlapping sessions must not steal cancellation or promote timeout partials into completed end_turn.",
+  "input_digest": "b5ece29ed5b4f8ccbca074aa98ac6f688bcd5c7d5c36a8dc19f2c09c0e3e62e1",
+  "comparable": {
+    "host_model": "codex-default",
+    "host_settings": {
+      "reasoning": "default",
+      "sandbox": "workspace-write"
+    },
+    "provider_configuration": {
+      "implement": "cursor-local",
+      "review": "grok"
+    }
+  },
+  "inputs": {
+    "files": {
+      "TASK.md": "# ACP deadline extension and concurrent cancellation\n\nThis frozen case reproduces two public 3.4.2 defects later corrected in the\n3.4.3 candidate: an in-flight ACP turn kept a fixed inner timeout that could\noutlive a recorded deadline extension and then settle as a completed\n`end_turn`, and overlapping turns shared cancellation so one session could\nsteal or drop another session's abort.\n\nRepair `turn-runner.mjs` so the frozen checks in `turn-runner.test.mjs` pass.\nDo not edit the test file, this prompt, or the recorded identity. Do not copy\nlater corrected sources into the workspace.\n\nRequired behavior:\n\n- `extendDeadline` must refuse an empty reason, refuse a silent roll after the\n  recorded deadline has already passed, and require the next deadline to be\n  strictly later than the recorded one.\n- An in-flight `runPromptTurn` is governed by the task's current deadline. An\n  audited extension must re-arm that bound. Hitting the original inner timeout\n  after a valid extension is not a successful completed turn.\n- Timeout or interrupt after partial output remains timeout/cancelled. Partial\n  text must not be promoted into `{ stopReason: 'end_turn' }`.\n- Concurrent turns keep independent cancellation. Aborting turn A must not\n  cancel turn B, and finishing A must not drop B's abort context.\n- A pre-aborted signal fails as cancelled. A prompt that settles later must\n  still be observed so it cannot become an unhandled rejection.\n\nAcceptance is the frozen command `node --test turn-runner.test.mjs`.\n",
+      "turn-runner.mjs": "// Known-bad isolated reproduction of dede188029aff117c60e9a8c4299cc0ab0838be9\n// ACP turn behavior: a fixed inner timer can outlive an audited deadline\n// extension and settle as completed end_turn, and overlapping turns share one\n// module-global cancellation slot.\n\nconst DURATION_MARGIN = 1.2;\n\nfunction fail(code, message) {\n  throw Object.assign(new Error(message), { code });\n}\n\nexport function createClock(startMs = 0) {\n  let now = startMs;\n  let nextId = 1;\n  const timers = new Map();\n  return {\n    now() {\n      return now;\n    },\n    setTimeout(fn, delayMs) {\n      const id = nextId;\n      nextId += 1;\n      timers.set(id, { fn, at: now + delayMs });\n      return id;\n    },\n    clearTimeout(id) {\n      timers.delete(id);\n    },\n    advance(ms) {\n      const target = now + ms;\n      while (timers.size > 0) {\n        let chosenId = null;\n        let chosen = null;\n        for (const [id, timer] of timers) {\n          if (timer.at > target) continue;\n          if (\n            chosen == null\n            || timer.at < chosen.at\n            || (timer.at === chosen.at && id < chosenId)\n          ) {\n            chosenId = id;\n            chosen = timer;\n          }\n        }\n        if (chosen == null) break;\n        now = chosen.at;\n        timers.delete(chosenId);\n        chosen.fn();\n      }\n      now = target;\n    },\n  };\n}\n\nfunction delay(clock, ms) {\n  return new Promise((resolve) => {\n    clock.setTimeout(resolve, ms);\n  });\n}\n\nexport function createTask({ expectedDurationMs, now }) {\n  if (!Number.isInteger(expectedDurationMs) || expectedDurationMs < 1) {\n    fail('invalid_expected_duration_ms', 'expectedDurationMs must be a positive integer.');\n  }\n  const timeoutMs = Math.ceil(expectedDurationMs * DURATION_MARGIN);\n  return {\n    expectedDurationMs,\n    timeoutMs,\n    deadlineAt: now + timeoutMs,\n    deadlineSource: 'margin',\n    deadlineExtensions: [],\n  };\n}\n\nexport function extendDeadline(task, { expectedDurationMs, reason, now }) {\n  if (!task || typeof task !== 'object') fail('invalid_task_record', 'Task record is invalid.');\n  if (typeof reason !== 'string' || reason.trim().length === 0) {\n    fail('invalid_extend_reason', 'extend_reason must be non-empty text describing why the deadline is changing.');\n  }\n  if (now >= task.deadlineAt) {\n    fail('deadline_expired', 'The recorded deadline has already passed; a silent roll-forward is not allowed.');\n  }\n  if (!Number.isInteger(expectedDurationMs) || expectedDurationMs < 1) {\n    fail('invalid_expected_duration_ms', 'expectedDurationMs must be a positive integer.');\n  }\n  const timeoutMs = Math.ceil(expectedDurationMs * DURATION_MARGIN);\n  const deadlineAt = now + timeoutMs;\n  if (deadlineAt <= task.deadlineAt) {\n    fail('deadline_not_extended', 'The new deadline must be strictly later than the recorded deadline.');\n  }\n  const previous = task.deadlineAt;\n  task.expectedDurationMs = expectedDurationMs;\n  task.timeoutMs = timeoutMs;\n  task.deadlineAt = deadlineAt;\n  task.deadlineSource = 'extended';\n  task.deadlineExtensions = [\n    ...task.deadlineExtensions,\n    {\n      at: now,\n      reason: reason.trim(),\n      previousDeadlineAt: previous,\n      deadlineAt,\n      timeoutMs,\n    },\n  ];\n  return task;\n}\n\nlet activeTurn = null;\n\nexport async function runPromptTurn({ task, signal, prompt, clock }) {\n  const innerTimeoutMs = task.timeoutMs;\n  let partial = '';\n  const emit = (text) => {\n    partial += String(text);\n  };\n\n  activeTurn = { task, cancelled: false };\n  const onAbort = () => {\n    if (activeTurn) activeTurn.cancelled = true;\n  };\n  if (signal?.aborted) onAbort();\n  else signal?.addEventListener('abort', onAbort, { once: true });\n\n  const promptPromise = Promise.resolve().then(() => prompt({ emit, signal }));\n\n  try {\n    const result = await Promise.race([\n      promptPromise,\n      delay(clock, innerTimeoutMs).then(() => {\n        const error = new Error('timeout');\n        error.code = 'timeout';\n        throw error;\n      }),\n    ]);\n    if (activeTurn?.cancelled) {\n      return { stopReason: 'cancelled', source: 'signal', text: partial };\n    }\n    return {\n      stopReason: 'end_turn',\n      source: 'rpc',\n      text: result == null ? partial : String(result),\n    };\n  } catch (error) {\n    if (error && error.code === 'timeout') {\n      return { stopReason: 'end_turn', source: 'session', text: partial };\n    }\n    if (activeTurn?.cancelled || signal?.aborted) {\n      return { stopReason: 'cancelled', source: 'signal', text: partial };\n    }\n    throw error;\n  } finally {\n    activeTurn = null;\n  }\n}\n",
+      "turn-runner.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\n\nimport {\n  createClock,\n  createTask,\n  extendDeadline,\n  runPromptTurn,\n} from './turn-runner.mjs';\n\nfunction hang() {\n  return new Promise(() => {});\n}\n\ntest('deadline extension is audited and refuses a silent roll after expiry', () => {\n  const task = createTask({ expectedDurationMs: 1000, now: 0 });\n  assert.equal(task.timeoutMs, 1200);\n  assert.equal(task.deadlineAt, 1200);\n\n  const extended = extendDeadline(task, {\n    expectedDurationMs: 3000,\n    reason: 'provider still making progress on tests',\n    now: 200,\n  });\n  assert.equal(extended.deadlineSource, 'extended');\n  assert.equal(extended.timeoutMs, 3600);\n  assert.equal(extended.deadlineAt, 3800);\n  assert.equal(extended.deadlineExtensions.length, 1);\n  assert.equal(extended.deadlineExtensions[0].previousDeadlineAt, 1200);\n\n  assert.throws(\n    () => extendDeadline(task, { expectedDurationMs: 5000, reason: 'too late', now: 3800 }),\n    (error) => error.code === 'deadline_expired',\n  );\n  assert.throws(\n    () => extendDeadline(task, { expectedDurationMs: 5000, now: 300 }),\n    (error) => error.code === 'invalid_extend_reason',\n  );\n  assert.throws(\n    () => extendDeadline(task, {\n      expectedDurationMs: 1000,\n      reason: 'would shrink the recorded deadline',\n      now: 300,\n    }),\n    (error) => error.code === 'deadline_not_extended',\n  );\n});\n\ntest('an in-flight turn is governed by the extended deadline, not the original inner timer', async () => {\n  const clock = createClock(0);\n  const task = createTask({ expectedDurationMs: 1000, now: 0 });\n  const turn = runPromptTurn({\n    task,\n    clock,\n    prompt: async ({ emit }) => {\n      emit('partial-progress');\n      await hang();\n    },\n  });\n  let settled = null;\n  turn.then((value) => {\n    settled = value;\n  }, (error) => {\n    settled = { error };\n  });\n\n  extendDeadline(task, {\n    expectedDurationMs: 3000,\n    reason: 'tests still running',\n    now: 200,\n  });\n  clock.advance(1200);\n  await Promise.resolve();\n  assert.equal(settled, null);\n\n  clock.advance(2600);\n  const result = await turn;\n  assert.notEqual(result.stopReason, 'end_turn');\n  assert.equal(['timeout', 'cancelled'].includes(result.stopReason), true);\n  assert.equal(result.text.includes('partial-progress'), true);\n});\n\ntest('timeout after partial output is not promoted to a completed end_turn', async () => {\n  const clock = createClock(0);\n  const task = createTask({ expectedDurationMs: 100, now: 0 });\n  const turn = runPromptTurn({\n    task,\n    clock,\n    prompt: async ({ emit }) => {\n      emit('chunk-one');\n      await hang();\n    },\n  });\n  clock.advance(120);\n  const result = await turn;\n  assert.notEqual(result.stopReason, 'end_turn');\n  assert.equal(['timeout', 'cancelled'].includes(result.stopReason), true);\n  assert.equal(result.source === 'session', false);\n  assert.equal(result.text, 'chunk-one');\n});\n\ntest('concurrent turns keep independent cancellation', async () => {\n  const clock = createClock(0);\n  const taskA = createTask({ expectedDurationMs: 5000, now: 0 });\n  const taskB = createTask({ expectedDurationMs: 5000, now: 0 });\n  const abortA = new AbortController();\n  const abortB = new AbortController();\n\n  const turnA = runPromptTurn({\n    task: taskA,\n    clock,\n    signal: abortA.signal,\n    prompt: () => hang(),\n  });\n  const turnB = runPromptTurn({\n    task: taskB,\n    clock,\n    signal: abortB.signal,\n    prompt: () => hang(),\n  });\n\n  let aSettled = null;\n  let bSettled = null;\n  turnA.then((value) => {\n    aSettled = value;\n  });\n  turnB.then((value) => {\n    bSettled = value;\n  });\n  abortA.abort();\n  await Promise.resolve();\n  if (aSettled == null) clock.advance(7000);\n  const resultA = await turnA;\n  await Promise.resolve();\n  assert.equal(resultA.stopReason, 'cancelled');\n  assert.equal(bSettled, null);\n\n  abortB.abort();\n  if (bSettled == null) clock.advance(1);\n  const resultB = await turnB;\n  assert.equal(resultB.stopReason, 'cancelled');\n});\n\ntest('a pre-aborted signal cancels and late prompt settlement is observed', async () => {\n  const clock = createClock(0);\n  const task = createTask({ expectedDurationMs: 1000, now: 0 });\n  const abort = new AbortController();\n  abort.abort();\n  let settledLate = false;\n  const prompt = () => new Promise((resolve) => {\n    queueMicrotask(() => {\n      settledLate = true;\n      resolve('late-text');\n    });\n  });\n  const result = await runPromptTurn({\n    task,\n    clock,\n    signal: abort.signal,\n    prompt,\n  });\n  assert.equal(result.stopReason, 'cancelled');\n  await Promise.resolve();\n  await Promise.resolve();\n  assert.equal(settledLate, true);\n});\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "unit",
+        "command": [
+          "node",
+          "--test",
+          "turn-runner.test.mjs"
+        ],
+        "expect_exit": 0
+      }
+    ],
+    "required_files": [
+      "TASK.md",
+      "turn-runner.mjs",
+      "turn-runner.test.mjs"
+    ],
+    "forbidden_paths": [
+      "turn-runner.test.mjs",
+      "TASK.md"
+    ]
+  },
+  "qualification": {
+    "retrospective": true,
+    "status": "unrun",
+    "source_sha": "dede188029aff117c60e9a8c4299cc0ab0838be9",
+    "candidate_sha": "c50550e0a12e6ce8f7564d0e384f52c205640ce5",
+    "source_kind": "git_commit",
+    "implement_provider": "cursor-local",
+    "review_provider": "grok",
+    "allowlist": [
+      "plugins/codex-co-engineer/mcp/v3/acp-worker.mjs",
+      "plugins/codex-co-engineer/assets/acpx-runtime.mjs",
+      "plugins/codex-co-engineer/mcp/v3/deadline.mjs"
+    ],
+    "host_and_astra": "record_at_execution",
+    "invented_backend_ids": false,
+    "input_digest": "b5ece29ed5b4f8ccbca074aa98ac6f688bcd5c7d5c36a8dc19f2c09c0e3e62e1",
+    "base_sha": "6f56fa2c26a913959cebb37269a905393302fd94"
+  },
+  "base_sha": "6f56fa2c26a913959cebb37269a905393302fd94"
+}
