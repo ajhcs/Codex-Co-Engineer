@@ -37,9 +37,11 @@ Four **required** approaches: `native-codex`, `published-3.4.2`,
 `candidate-3.4.3`, and `direct-delegation`. Direct delegation is not optional
 for this qualification. Three distinct cases × two repetitions = 24 trials,
 exactly six per arm. Seeded ordering uses seed `43` with Fisher-Yates over
-case/rep groups so the first four scheduled rows are one matched task/rep
-across all four arms. Trial identities are frozen hyphen-only ids (arm tokens
-`published-3-4-2` and `candidate-3-4-3`); they must parse with the existing
+case/rep groups, then Fisher-Yates of approach positions within each matched
+group, so the first four scheduled rows are one matched task/rep across all
+four arms and arm order varies across groups. Trial identities are frozen
+hyphen-only ids (arm tokens `published-3-4-2` and `candidate-3-4-3`); they
+must parse with the existing
 comparator `trial_id` pattern. The entire-trial recorded deadline is one hour,
 with at most three corrections.
 

@@ -49,7 +49,7 @@
   "planned_identities": 24,
   "ordering": {
     "seed": 43,
-    "algorithm": "mulberry32-fisher-yates-grouped-by-case-rep",
+    "algorithm": "mulberry32-fisher-yates-grouped-by-case-rep-then-approach-positions",
     "first_matched_group": "same-case-and-rep-all-four-arms"
   },
   "deadline": {

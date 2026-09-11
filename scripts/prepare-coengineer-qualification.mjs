@@ -385,8 +385,7 @@ export function mulberry32(seed) {
   };
 }
 
-export function seededShuffle(items, seed) {
-  const rng = mulberry32(seed);
+function fisherYates(items, rng) {
   const arr = items.slice();
   for (let i = arr.length - 1; i > 0; i -= 1) {
     const j = Math.floor(rng() * (i + 1));
@@ -395,6 +394,10 @@ export function seededShuffle(items, seed) {
     arr[j] = swap;
   }
   return arr;
+}
+
+export function seededShuffle(items, seed) {
+  return fisherYates(items, mulberry32(seed));
 }
 
 export function qualificationTrialId(caseId, arm, rep) {
@@ -431,7 +434,10 @@ export function generateSchedule(seed = ORDERING_SEED) {
       canonical.push(...group);
     }
   }
-  const ordered = seededShuffle(groups, seed).flat();
+  const rng = mulberry32(seed);
+  const ordered = fisherYates(groups, rng)
+    .map((group) => fisherYates(group, rng))
+    .flat();
   const armCounts = Object.fromEntries(QUALIFICATION_ARMS.map((arm) => [
     arm,
     canonical.filter((row) => row.arm === arm).length,
@@ -449,7 +455,7 @@ export function generateSchedule(seed = ORDERING_SEED) {
   }
   return {
     seed,
-    algorithm: 'mulberry32-fisher-yates-grouped-by-case-rep',
+    algorithm: 'mulberry32-fisher-yates-grouped-by-case-rep-then-approach-positions',
     trial_count: canonical.length,
     canonical,
     ordered,
@@ -1328,6 +1334,7 @@ function reconcileHostUsageAttempt(row, trialAttempt) {
   const uniqueModels = seenModels.size === row.by_model.length;
   if (uniqueModels) {
     for (const key of HOST_USAGE_COUNTERS) {
+      if (row[key] == null) continue;
       const summed = sumModelCounter(row.by_model, key);
       if (row[key] !== summed) reasons.push(`by_model_sum:${row.attempt_id}:${key}`);
     }
