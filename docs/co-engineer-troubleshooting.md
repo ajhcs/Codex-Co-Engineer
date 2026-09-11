@@ -51,6 +51,15 @@ codex plugin marketplace add LOCAL_ROOT
 codex plugin add codex-co-engineer@codex-co-engineer
 ```
 
+When older open projects still use the public marketplace identity
+`codex-co-engineer`, create that local marketplace wrapper outside the tracked
+candidate with the unchanged plugin name and exact tested plugin bytes.
+Remove/re-add alone is not sufficient because opening an older project can
+replace the same-name cache again. Verify project-scoped `plugin/list`
+inventory and persistence after a connection restart. A separate clean Codex
+environment remains valid for clean onboarding. Keep the shipped
+`.agents/plugins/marketplace.json` unchanged.
+
 Treat client-to-host resync as suspected until versions or file hashes confirm
 it. Do not add an auto-repair cron, replace the cache with a symlink, or disable
 unrelated configuration to mask the problem.

@@ -41,6 +41,12 @@ release and host acceptance gates still apply.
 - Point public Grok install docs at the official Grok Build overview and
   document `grok login` / `grok login --device-auth` subscription login for
   first-outcome work (no API key).
+- Restore the distinct local marketplace-wrapper path for older open projects
+  that share the public marketplace identity, keep the shipped marketplace
+  manifest stable, and require `plugin/list` persistence checks after restart.
+- Align the 3.4.3 evaluation gate so Astra own-output is measured versus
+  published 3.4.2 (helpers do not satisfy) and paid work does not dispatch
+  beyond the $25 cap.
 - Make supported deadline extensions govern the active ACP turn and preserve
   timeout/cancellation truth after partial provider output.
 - Preserve empty capability restrictions and complete Unicode review feedback;

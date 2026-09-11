@@ -72,10 +72,16 @@ shipped marketplace to solve a local install collision, invent unsupported
 install flags, or silently modify tracked manifests during installation.
 
 Prefer a clean Codex installation for candidate qualification and onboarding.
-When an existing installation already uses that marketplace identity, finish or
-cancel active runs, then remove and re-add through the supported plugin CLI, or
-keep the candidate in a separate clean Codex environment. Preserve any dirty
-source checkout instead of changing its version label or replacing its files.
+A separate clean Codex environment remains valid for clean onboarding.
+
+When older open projects still use that public marketplace identity, create a
+distinct local marketplace wrapper outside the tracked candidate. Keep the
+plugin name and the exact tested plugin bytes unchanged; only the local wrapper
+marketplace identity differs. Finish or cancel active runs first. Remove/re-add
+alone is not sufficient: opening an older project with the same
+marketplace/plugin identity can replace the shared cache again. Preserve any
+dirty source checkout instead of changing its version label or replacing its
+files.
 
 Codex can refresh installed local plugins when listing project marketplaces.
 A project source with the same marketplace/plugin identity can replace the
@@ -88,7 +94,8 @@ its complete file inventory must match the qualified source, and stale
 installations must remain uninstalled. Repeat the inventory check after the host
 connection restarts, then run native provider acceptance. CLI marketplace
 listing alone and a successful check immediately after copying files do not prove
-persistence.
+persistence. Historical release notes alone do not preserve the current host
+gate.
 
 ## Native run acceptance
 
@@ -142,8 +149,8 @@ comparison under these rules. Missing evidence is inconclusive, not a pass.
 Do not claim human-validation of agent onboarding.
 
 1. **Budget.** Cap TOTAL API/Cloud spend at **$25** with an enforceable cap or a
-   bounded maximum cost checked before dispatch. Refuse unpaid expansion once
-   the cap is reached.
+   bounded maximum cost checked before dispatch. Do not dispatch paid work beyond
+   the cap.
 2. **Design.** Four approaches — native Codex, published 3.4.2, candidate
    3.4.3, and direct delegation — times **three** representative retrospective
    tasks times **two** repetitions = **24** trials. Use the seed43 case set and
@@ -155,7 +162,8 @@ Do not claim human-validation of agent onboarding.
    - Candidate: **6/6** accepted.
    - Median task-level native output per accepted result: **≤ 50%** of native
      and **≤ 75%** of published 3.4.2.
-   - Astra's own output decreases relative to the native baseline.
+   - Astra's own output decreases relative to published 3.4.2; native helpers
+     do not satisfy this threshold.
    - Median wall clock: **≤ 2×** native.
    - Native overhead versus direct: **≤ 1.25×**.
 5. **Onboarding.** Collect clean-environment agent onboarding evidence for the

@@ -68,11 +68,15 @@ npm --prefix plugins/codex-co-engineer run setup:check
 ### Install the 3.4.3 candidate from public PR43
 
 The public candidate keeps the stable marketplace identity
-`codex-co-engineer`. Prefer a clean Codex installation. If Co-Engineer is
-already installed, finish or cancel active runs, then follow the supported
-remove/re-add workflow, or keep the candidate in a separate clean Codex
-environment. Do not rename the shipped marketplace manifest to work around a
-local collision.
+`codex-co-engineer` in the shipped marketplace manifest. Prefer a clean Codex
+installation. A separate clean Codex environment remains valid for clean
+onboarding. If older open projects still use that public marketplace identity,
+finish or cancel active runs, then create a distinct local marketplace wrapper
+outside the tracked candidate with the unchanged plugin name and exact tested
+plugin bytes. Remove/re-add alone is not sufficient because opening an older
+project can replace the same-name cache again. Do not rename the shipped
+marketplace manifest to work around a local collision. Historical notes alone
+do not preserve the current host gate.
 
 ```bash
 git clone https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-pr43
@@ -140,8 +144,9 @@ codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-**3.4.3 candidate (stable marketplace `codex-co-engineer`; prefer a clean Codex
-environment or finish/cancel then remove/re-add):**
+**3.4.3 candidate** (stable shipped marketplace `codex-co-engineer`; prefer a
+clean Codex environment, or a distinct local marketplace wrapper outside the
+tracked candidate when older open projects share that identity):
 
 ```bash
 git fetch origin pull/43/head:pr-43
@@ -232,9 +237,14 @@ codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 ```
 
-Prefer a clean Codex installation for the candidate. If you already have
-Co-Engineer installed, finish or cancel active runs, then remove/re-add through
-the supported plugin CLI, or keep the candidate in a separate clean environment.
+Prefer a clean Codex installation for the candidate. A separate clean
+environment remains valid for clean onboarding. If older open projects still
+use the public marketplace identity, finish or cancel active runs, then create a
+distinct local marketplace wrapper outside the tracked candidate with the
+unchanged plugin name and exact tested plugin bytes. Remove/re-add alone is not
+sufficient because opening an older project can replace the same-name cache
+again. Historical notes alone do not preserve the current host gate.
+
 **A managed worktree appeared without a receipt.**
 Do not guess or delete it. Inspect `git worktree list` and
 `worktree-bootstrap lock inspect`, then clean only an exact identified
