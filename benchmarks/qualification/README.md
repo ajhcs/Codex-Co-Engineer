@@ -10,9 +10,10 @@ The existing offline comparator and the four fixtures under
 Qualification cases use a separate schema because historical source
 materialization exceeds the small-fixture file and path limits.
 
-Candidate SHA/tree, Astra model, host settings, and provider/model routes are
-**not** tracked here. Bind them in an external execution manifest before
-collection. `codex-default` is not comparable truth.
+Candidate commit SHA and tree SHA, the Astra host model `gpt-6-astra`, host
+settings, and exact per-case `{provider, model}` routes are **not** tracked
+here. Bind them in an external execution manifest before collection.
+`codex-default` is not comparable truth. Do not omit `candidate.tree`.
 
 ## Cases
 
@@ -34,26 +35,40 @@ solutions. Acceptance checks the semantic defects, not exact prose.
 
 Four **required** approaches: `native-codex`, `published-3.4.2`,
 `candidate-3.4.3`, and `direct-delegation`. Direct delegation is not optional
-for this qualification. Three cases × two repetitions = 24 trials. Seeded
-ordering uses seed `43`. The entire-trial deadline is one hour, with at most
-three corrections.
+for this qualification. Three distinct cases × two repetitions = 24 trials,
+exactly six per arm. Seeded ordering uses seed `43` with Fisher-Yates over
+case/rep groups so the first four scheduled rows are one matched task/rep
+across all four arms. Trial identities are frozen hyphen-only ids (arm tokens
+`published-3-4-2` and `candidate-3-4-3`); they must parse with the existing
+comparator `trial_id` pattern. The entire-trial recorded deadline is one hour,
+with at most three corrections.
 
-Record the actual candidate SHA/tree, published SHA, Astra model, host
-settings, and exact provider/model routes in the external execution manifest
-before collection. Native has no external jobs but uses the same planned host
-config. Never invent backend IDs.
+Record the actual candidate commit SHA and tree SHA, published 3.4.2 SHA,
+Astra host `openai` / `gpt-6-astra`, host settings, frozen input/check
+digests, and exact per-case `{provider, model}` routes in the external
+execution manifest before collection. Native has no external jobs but uses
+the same planned host config. Never invent backend IDs. Do not use one global
+implement/review route: Cursor implements ACP and Grok implements the other
+two cases.
 
 Offline freeze thresholds (see `protocol.json`):
 
 - candidate 6/6 accepted
 - three task-level median native-output-per-accepted ratios: ≤ 50% of native
   and ≤ 75% of published 3.4.2 (median of the three tasks, not a pooled ratio)
-- Astra own output decreases versus published 3.4.2 using model breakdown
-- median turnaround ≤ 2× native
-- native overhead ≤ 1.25× direct
+- Astra own output decreases versus published 3.4.2 by counting `gpt-6-astra`
+  native output once from bound `host-usage-report.v1` `by_model` rows; helpers
+  are excluded unless the helper itself observed Astra. Do not invent provider
+  tokens to populate Astra. Incomplete primary coverage, including
+  `report.status=inconclusive`, stays inconclusive while measured numbers remain
+- median turnaround ≤ 2× native, using the median of per-trial candidate/native
+  wall ratios paired by case and repetition — not the ratio of summed wall
+  durations
+- native overhead ≤ 1.25× direct, using the median of three task ratios of
+  candidate native-output-per-accepted / direct native-output-per-accepted
 - failed attempts, corrections, and helpers remain in the numerator
-- missing primary evidence, missing acceptance, accounting gaps, and identity
-  mismatches are inconclusive
+- missing primary evidence, missing acceptance, accounting gaps, missing
+  usage reports, and identity mismatches are inconclusive
 - $25 paid ceiling
 
 ## Prepare a worker case

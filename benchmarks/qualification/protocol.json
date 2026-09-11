@@ -49,7 +49,8 @@
   "planned_identities": 24,
   "ordering": {
     "seed": 43,
-    "algorithm": "mulberry32-fisher-yates"
+    "algorithm": "mulberry32-fisher-yates-grouped-by-case-rep",
+    "first_matched_group": "same-case-and-rep-all-four-arms"
   },
   "deadline": {
     "entire_trial_ms": 3600000,
@@ -73,7 +74,10 @@
     "missing_primary_evidence": "inconclusive",
     "paid_ceiling_usd": 25,
     "max_corrections": 3,
-    "entire_trial_deadline_ms": 3600000
+    "entire_trial_deadline_ms": 3600000,
+    "turnaround_reduction": "median of per-trial candidate/native wall ratios paired by case_id and rep; not the ratio of summed wall durations",
+    "native_overhead_reduction": "median of 3 task ratios of candidate native_output_per_accepted / direct native_output_per_accepted",
+    "astra_own_output_reduction": "count gpt-6-astra native output once from host-usage-report.v1 by_model; helpers excluded unless observed as Astra"
   },
   "accounting": {
     "failed_attempts_in_numerator": true,
@@ -81,7 +85,11 @@
     "reuse_offline_comparator_parsing": true,
     "task_median_not_pooled": true,
     "helpers_in_total_not_astra_unless_astra": true,
-    "all_four_approaches_required": true
+    "all_four_approaches_required": true,
+    "routes_bound_per_case": true,
+    "turnaround_reduction": "median of per-trial candidate/native wall ratios paired by case_id and rep; not the ratio of summed wall durations",
+    "native_overhead_reduction": "median of 3 task ratios of candidate native_output_per_accepted / direct native_output_per_accepted",
+    "astra_own_output_reduction": "count gpt-6-astra native output once from host-usage-report.v1 by_model; helpers excluded unless observed as Astra"
   },
   "safeguards": {
     "public_mcp_tools": [

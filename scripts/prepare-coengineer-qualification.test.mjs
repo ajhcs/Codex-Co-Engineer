@@ -10,16 +10,21 @@ import {
   parseTrial,
 } from './compare-coengineer-runs.mjs';
 import {
+  ASTRA_MODEL,
+  ASTRA_PROVIDER,
   CASE_IDS,
   DEADLINE_SOURCE_SHA,
   FIVE_TOOLS,
+  HOST_USAGE_REPORT_SCHEMA_ID,
   ORDERING_SEED,
+  OVERHEAD_REDUCTION,
   PAID_CEILING_USD,
   PLACEHOLDER_HOST_MODEL,
   PUBLISHED_342_SHA,
   QUALIFICATION_ARMS,
   QUALIFICATION_CASE_SCHEMA_ID,
   RESULT_SOURCE_SHA,
+  TURNAROUND_REDUCTION,
   checkKnownBad,
   evaluateQualificationCohort,
   extractSource,
@@ -29,6 +34,7 @@ import {
   materializeQualificationCase,
   packCase,
   parseExecutionManifest,
+  parseHostUsageReport,
   parseQualificationTrial,
   protocolRecord,
   scanOverlayLeakage,
@@ -42,8 +48,8 @@ const QUAL_PROTOCOL = path.join(ROOT, 'benchmarks/qualification/protocol.json');
 const QUAL_MANIFEST = path.join(ROOT, 'benchmarks/qualification/operator-manifest.json');
 const CANDIDATE_FIXTURE_SHA = 'c0ffeeabc0ffeeabc0ffeeabc0ffeeabc0ffeeab';
 const PUBLISHED_FIXTURE_TREE = 'd0ffeeabc0ffeeabc0ffeeabc0ffeeabc0ffeeab';
-const ASTRA_MODEL = 'grok-4-1-fast-recorded';
-const HOST_MODEL = 'gpt-5.3-codex-recorded';
+const HOST_MODEL = ASTRA_MODEL;
+const QUAL_FIXTURES = path.join(ROOT, 'benchmarks/qualification/fixtures');
 
 function io() {
   const stdout = [];
@@ -68,6 +74,23 @@ function metric(value, source = 'host_measured') {
   };
 }
 
+function caseRoutes() {
+  return {
+    'acp-deadline-concurrent-cancel': {
+      implement: { provider: 'cursor-local', model: 'composer-1' },
+      review: { provider: 'grok', model: 'grok-4' },
+    },
+    'run-result-outcome-acceptance': {
+      implement: { provider: 'grok', model: 'grok-4' },
+      review: { provider: 'cursor-local', model: 'composer-1' },
+    },
+    'comparison-failed-helper-cumulative': {
+      implement: { provider: 'grok', model: 'grok-4' },
+      review: { provider: 'cursor-local', model: 'composer-1' },
+    },
+  };
+}
+
 function recordedManifest(cases) {
   return {
     schema: 'codex-co-engineer.qualification-execution-manifest.v1',
@@ -79,12 +102,8 @@ function recordedManifest(cases) {
       host_model: HOST_MODEL,
       host_settings: settings(),
     },
-    astra: { provider: 'grok', model: ASTRA_MODEL },
-    provider_configuration: {
-      implement: 'grok',
-      review: 'cursor-local',
-      astra_model: ASTRA_MODEL,
-    },
+    astra: { provider: ASTRA_PROVIDER, model: ASTRA_MODEL },
+    provider_configuration: caseRoutes(),
     approaches: {
       'native-codex': { external_jobs: false },
       'published-3.4.2': { external_jobs: true },
@@ -96,25 +115,21 @@ function recordedManifest(cases) {
   };
 }
 
-function attemptId(label) {
-  return label.replaceAll('.', '-');
-}
-
 function makeTrial(plan, caseRecord, manifest, {
   accepted = true,
   nativeOutput = 40,
   wall = 1000,
   failedThenCorrect = false,
   helper = false,
-  astraOutput = null,
   hostModel = manifest.host.host_model,
   inputDigest = caseRecord.input_digest,
   source = null,
+  providerConfiguration = null,
 } = {}) {
   const attempts = [];
   if (failedThenCorrect) {
     attempts.push({
-      attempt_id: attemptId('initial'),
+      attempt_id: 'initial',
       kind: 'initial',
       outcome: 'failed',
       usage: {
@@ -123,7 +138,7 @@ function makeTrial(plan, caseRecord, manifest, {
       },
     });
     attempts.push({
-      attempt_id: attemptId('correction'),
+      attempt_id: 'correction',
       kind: 'correction',
       outcome: accepted ? 'accepted' : 'failed',
       usage: {
@@ -133,7 +148,7 @@ function makeTrial(plan, caseRecord, manifest, {
     });
   } else {
     attempts.push({
-      attempt_id: attemptId('initial'),
+      attempt_id: 'initial',
       kind: 'initial',
       outcome: accepted ? 'accepted' : 'failed',
       usage: {
@@ -144,7 +159,7 @@ function makeTrial(plan, caseRecord, manifest, {
   }
   if (helper) {
     attempts.push({
-      attempt_id: attemptId('helper'),
+      attempt_id: 'helper',
       kind: 'native_helper',
       outcome: 'accepted',
       usage: {
@@ -154,19 +169,15 @@ function makeTrial(plan, caseRecord, manifest, {
       },
     });
   }
-  if (astraOutput != null) {
-    const target = attempts.find((attempt) => attempt.kind !== 'native_helper') ?? attempts[0];
-    target.provider = manifest.astra.provider;
-    target.model = manifest.astra.model;
-    target.usage.provider_input_tokens = metric(4, 'provider_report');
-    target.usage.provider_output_tokens = metric(astraOutput, 'provider_report');
-  }
   const armSource = source ?? (plan.arm === 'native-codex'
     ? { kind: 'native', value: 'native-codex' }
     : {
       kind: 'git_commit',
       value: plan.arm === 'published-3.4.2' ? manifest.published_3_4_2.sha : manifest.candidate.sha,
     });
+  const route = providerConfiguration ?? (plan.arm === 'native-codex'
+    ? { implement: 'native' }
+    : manifest.provider_configuration[plan.case_id]);
   return {
     schema: 'codex-co-engineer.benchmark-trial.v1',
     trial_id: plan.trial_id,
@@ -177,14 +188,119 @@ function makeTrial(plan, caseRecord, manifest, {
     coengineer_source: armSource,
     host_model: hostModel,
     host_settings: manifest.host.host_settings,
-    provider_configuration: plan.arm === 'native-codex'
-      ? { implement: 'native' }
-      : manifest.provider_configuration,
+    provider_configuration: route,
     accepted,
     wall_elapsed_ms: metric(wall),
     attempts,
     ...(helper ? { native_parent_excludes_helpers: true } : {}),
   };
+}
+
+function makeUsageReport(trial, {
+  status = 'complete',
+  astraOutput = 0,
+  helperModel = 'helper-model-x',
+} = {}) {
+  const primaryAttemptId = (trial.attempts.find((attempt) => attempt.kind !== 'native_helper') ?? trial.attempts[0]).attempt_id;
+  const attempts = trial.attempts.map((attempt) => {
+    const nativeOut = attempt.usage.native_output_tokens?.value ?? 0;
+    const isHelper = attempt.kind === 'native_helper';
+    const byModel = [];
+    if (isHelper) {
+      byModel.push({
+        model: helperModel,
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: nativeOut,
+        reasoning_output_tokens: 0,
+        total_tokens: nativeOut,
+      });
+    } else if (astraOutput != null && attempt.attempt_id === primaryAttemptId) {
+      byModel.push({
+        model: ASTRA_MODEL,
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: astraOutput,
+        reasoning_output_tokens: 0,
+        total_tokens: astraOutput,
+      });
+    }
+    return {
+      attempt_id: attempt.attempt_id,
+      session_id: isHelper ? 'helper-session' : 'parent-session',
+      output_tokens: nativeOut,
+      by_model: byModel,
+    };
+  });
+  const astraTotal = attempts.reduce((sum, row) => (
+    sum + row.by_model.filter((entry) => entry.model === ASTRA_MODEL)
+      .reduce((inner, entry) => inner + (entry.output_tokens ?? 0), 0)
+  ), 0);
+  return {
+    schema: HOST_USAGE_REPORT_SCHEMA_ID,
+    status,
+    trial: structuredClone(trial),
+    breakdown: {
+      attempts,
+      totals: {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: attempts.reduce((sum, row) => sum + (row.output_tokens ?? 0), 0),
+        reasoning_output_tokens: 0,
+        compaction_events: 0,
+        astra_output_tokens: astraTotal,
+      },
+      accounting: {
+        response_id_deduped: true,
+        response_identity: 'session_and_response',
+        native_parent_excludes_helpers: trial.native_parent_excludes_helpers === true,
+        acceptance_unknown: !Object.hasOwn(trial, 'accepted'),
+        measurement_incomplete: status !== 'complete',
+      },
+    },
+    evidence: {
+      digests: {
+        manifest: 'ab'.repeat(32),
+        sessions: {},
+        links: [],
+        trial: 'cd'.repeat(32),
+      },
+      notes: status === 'inconclusive' ? ['absent_session:helper-session'] : [],
+      incomplete_primary_evidence: status !== 'complete',
+    },
+  };
+}
+
+function defaultAstraOutput(arm) {
+  if (arm === 'published-3.4.2') return 50;
+  if (arm === 'native-codex') return 10;
+  return 20;
+}
+
+function cohortReports(trials, customize = {}) {
+  return trials.map((trial) => {
+    const key = `${trial.case_id}:${trial.arm}:r${trial.trial_id.slice(-1)}`;
+    const override = customize[key] ?? customize[trial.trial_id] ?? customize[trial.arm] ?? {};
+    return makeUsageReport(trial, {
+      astraOutput: defaultAstraOutput(trial.arm),
+      ...override,
+    });
+  });
+}
+
+function evaluateCohort(packed, manifest, trials, extra = {}) {
+  const { reportCustomize, usageReports, ...rest } = extra;
+  return evaluateQualificationCohort({
+    protocol: protocolRecord(),
+    cases: packed.raw,
+    trials,
+    executionManifest: manifest,
+    usageReports: usageReports ?? cohortReports(trials, reportCustomize),
+    ...rest,
+  });
 }
 
 function cohortTrials(cases, manifest, customize = {}) {
@@ -197,7 +313,6 @@ function cohortTrials(cases, manifest, customize = {}) {
       accepted: true,
       nativeOutput: plan.arm === 'native-codex' ? 100 : plan.arm === 'published-3.4.2' ? 80 : 40,
       wall: plan.arm === 'candidate-3.4.3' ? 1500 : plan.arm === 'native-codex' ? 1000 : 900,
-      astraOutput: plan.arm === 'published-3.4.2' ? 50 : (plan.arm === 'native-codex' ? null : 20),
       failedThenCorrect: plan.arm === 'candidate-3.4.3' && plan.rep === 1,
       helper: plan.arm === 'native-codex' && plan.rep === 1,
     };
@@ -381,6 +496,14 @@ test('seed 43 schedule has 24 unrun required-arm trials and live jobs are refuse
   assert.equal(schedule.ordered.every((row) => row.status === 'unrun'), true);
   assert.equal(schedule.ordered.every((row) => row.retrospective === true), true);
   assert.equal(new Set(schedule.ordered.map((row) => row.trial_id)).size, 24);
+  assert.equal(schedule.ordered.every((row) => row.trial_id.includes('.') === false), true);
+  assert.equal(new Set(schedule.canonical.map((row) => row.case_id)).size, 3);
+  for (const arm of QUALIFICATION_ARMS) {
+    assert.equal(schedule.canonical.filter((row) => row.arm === arm).length, 6);
+  }
+  const firstFour = schedule.ordered.slice(0, 4);
+  assert.equal(new Set(firstFour.map((row) => `${row.case_id}:${row.rep}`)).size, 1);
+  assert.deepEqual([...new Set(firstFour.map((row) => row.arm))].sort(), [...QUALIFICATION_ARMS].sort());
   assert.deepEqual([...new Set(schedule.canonical.map((row) => row.arm))].sort(), [...QUALIFICATION_ARMS].sort());
   const reshuffled = generateSchedule(ORDERING_SEED);
   assert.deepEqual(reshuffled.ordered, schedule.ordered);
@@ -430,10 +553,11 @@ test('packCase keeps qualification identity without fictional hashes or future S
   assert.notEqual(packed.base_sha, packed.source_sha);
   assert.equal(Object.hasOwn(packed, 'candidate_sha'), false);
   assert.equal(packed.schema, QUALIFICATION_CASE_SCHEMA_ID);
-  const dotted = generateSchedule().canonical.find((row) => row.arm === 'candidate-3.4.3');
-  const parsedTrial = parseQualificationTrial({
+  const planned = generateSchedule().canonical.find((row) => row.arm === 'candidate-3.4.3');
+  assert.equal(planned.trial_id.includes('.'), false);
+  const trialBody = {
     schema: 'codex-co-engineer.benchmark-trial.v1',
-    trial_id: dotted.trial_id,
+    trial_id: planned.trial_id,
     case_id: packed.id,
     arm: 'candidate-3.4.3',
     base_sha: packed.base_sha,
@@ -441,7 +565,7 @@ test('packCase keeps qualification identity without fictional hashes or future S
     coengineer_source: { kind: 'git_commit', value: CANDIDATE_FIXTURE_SHA },
     host_model: HOST_MODEL,
     host_settings: settings(),
-    provider_configuration: { implement: 'grok', review: 'cursor-local' },
+    provider_configuration: caseRoutes()[packed.id],
     accepted: true,
     wall_elapsed_ms: metric(1000),
     attempts: [{
@@ -450,27 +574,13 @@ test('packCase keeps qualification identity without fictional hashes or future S
       outcome: 'accepted',
       usage: { native_output_tokens: metric(10) },
     }],
-  });
-  assert.equal(parsedTrial.trial_id, dotted.trial_id);
+  };
+  const parsedTrial = parseQualificationTrial(trialBody);
+  assert.equal(parsedTrial.trial_id, planned.trial_id);
+  assert.equal(parseTrial(trialBody).trial_id, planned.trial_id);
   assert.throws(() => parseTrial({
-    schema: 'codex-co-engineer.benchmark-trial.v1',
-    trial_id: dotted.trial_id,
-    case_id: packed.id,
-    arm: 'candidate-3.4.3',
-    base_sha: packed.base_sha,
-    input_digest: packed.input_digest,
-    coengineer_source: { kind: 'git_commit', value: CANDIDATE_FIXTURE_SHA },
-    host_model: HOST_MODEL,
-    host_settings: settings(),
-    provider_configuration: { implement: 'grok', review: 'cursor-local' },
-    accepted: true,
-    wall_elapsed_ms: metric(1000),
-    attempts: [{
-      attempt_id: 'initial',
-      kind: 'initial',
-      outcome: 'accepted',
-      usage: { native_output_tokens: metric(10) },
-    }],
+    ...trialBody,
+    trial_id: `${packed.id}-candidate-3.4.3-r1`,
   }), { code: 'invalid_format' });
 });
 
@@ -493,7 +603,7 @@ test('tracked protocol requires all four arms and leaves candidate identity exte
     candidate: { sha: CANDIDATE_FIXTURE_SHA },
     published_3_4_2: { sha: PUBLISHED_342_SHA },
     host: { host_model: PLACEHOLDER_HOST_MODEL, host_settings: settings() },
-    astra: { model: ASTRA_MODEL },
+    astra: { provider: ASTRA_PROVIDER, model: ASTRA_MODEL },
     provider_configuration: { implement: 'grok' },
     approaches: {
       'native-codex': { external_jobs: false },
@@ -502,18 +612,23 @@ test('tracked protocol requires all four arms and leaves candidate identity exte
       'direct-delegation': { external_jobs: true },
     },
   }), { code: 'identity_mismatch' });
+  const cases = await loadQualificationCases();
+  const recorded = recordedManifest(cases.raw);
+  delete recorded.candidate.tree;
+  assert.throws(() => parseExecutionManifest(recorded), { code: 'missing_key' });
+  recorded.candidate.tree = PUBLISHED_FIXTURE_TREE;
+  recorded.provider_configuration = {
+    implement: { provider: 'grok', model: 'grok-4' },
+    review: { provider: 'cursor-local', model: 'composer-1' },
+  };
+  assert.throws(() => parseExecutionManifest(recorded), { code: 'identity_mismatch' });
 });
 
 test('evaluator accepts 6/6 with task-level medians, Astra decrease, failures, corrections, and helpers', async () => {
   const packed = await loadQualificationCases();
   const manifest = recordedManifest(packed.raw);
   const trials = cohortTrials(packed.raw, manifest);
-  const comparison = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials,
-    executionManifest: manifest,
-  });
+  const comparison = evaluateCohort(packed, manifest, trials);
   assert.equal(comparison.decision, 'pass');
   assert.equal(comparison.candidate_accepted, '6/6');
   assert.equal(comparison.compared_identities, 24);
@@ -522,6 +637,8 @@ test('evaluator accepts 6/6 with task-level medians, Astra decrease, failures, c
   assert.equal(comparison.metrics.astra_own_native_output.decreased, true);
   assert.ok(comparison.metrics.median_turnaround_vs_native <= 2);
   assert.ok(comparison.metrics.native_overhead_vs_direct <= 1.25);
+  assert.equal(comparison.metrics.median_turnaround_reduction, TURNAROUND_REDUCTION);
+  assert.equal(comparison.metrics.native_overhead_reduction, OVERHEAD_REDUCTION);
   const candidateArm = comparison.cases[0].arms['candidate-3.4.3'];
   assert.ok(candidateArm.failed_attempt_count >= 1);
   assert.ok(candidateArm.correction_count >= 1);
@@ -549,15 +666,9 @@ test('evaluator uses task-level median rather than a pooled ratio', async () => 
       nativeOutput: byCase[trial.case_id].nativeOutput,
       wall: 1500,
       failedThenCorrect: false,
-      astraOutput: 20,
     });
   });
-  const comparison = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials,
-    executionManifest: manifest,
-  });
+  const comparison = evaluateCohort(packed, manifest, trials);
   assert.equal(comparison.decision, 'fail');
   assert.equal(comparison.reasons.includes('task_median_vs_native_exceeds_0.5'), true);
   assert.ok(comparison.metrics.task_median_native_output_per_accepted_vs_native > 0.5);
@@ -570,58 +681,42 @@ test('missing arms, missing acceptance, missing primary, and mismatched identiti
 
   const omittedDirect = cohortTrials(packed.raw, manifest)
     .filter((trial) => trial.arm !== 'direct-delegation');
-  const missingArm = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials: omittedDirect,
-    executionManifest: manifest,
-  });
+  const missingArm = evaluateCohort(packed, manifest, omittedDirect);
   assert.equal(missingArm.decision, 'inconclusive');
   assert.equal(missingArm.reasons.some((reason) => reason.startsWith('omitted:')), true);
 
   const missingAcceptanceTrials = cohortTrials(packed.raw, manifest);
   delete missingAcceptanceTrials[0].accepted;
-  const missingAcceptance = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials: missingAcceptanceTrials,
-    executionManifest: manifest,
-  });
+  const missingAcceptance = evaluateCohort(packed, manifest, missingAcceptanceTrials);
   assert.equal(missingAcceptance.decision, 'inconclusive');
   assert.equal(missingAcceptance.reasons.some((reason) => reason.startsWith('missing_acceptance:')), true);
 
   const missingPrimaryTrials = cohortTrials(packed.raw, manifest);
   missingPrimaryTrials[0].wall_elapsed_ms = { value: null, source: 'unknown', trust: 'unknown' };
-  const missingPrimary = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials: missingPrimaryTrials,
-    executionManifest: manifest,
-  });
+  const missingPrimary = evaluateCohort(packed, manifest, missingPrimaryTrials);
   assert.equal(missingPrimary.decision, 'inconclusive');
   assert.equal(missingPrimary.reasons.some((reason) => reason.startsWith('missing_primary:')), true);
 
   const mismatchedTrials = cohortTrials(packed.raw, manifest);
   mismatchedTrials[0].host_model = 'other-host-model';
-  const mismatched = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials: mismatchedTrials,
-    executionManifest: manifest,
-  });
+  const mismatched = evaluateCohort(packed, manifest, mismatchedTrials);
   assert.equal(mismatched.decision, 'inconclusive');
   assert.equal(mismatched.reasons.some((reason) => reason.includes('host_model_mismatch')), true);
 
   const digestMismatchTrials = cohortTrials(packed.raw, manifest);
   digestMismatchTrials[1].input_digest = 'ab'.repeat(32);
-  const digestMismatch = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials: digestMismatchTrials,
-    executionManifest: manifest,
-  });
+  const digestMismatch = evaluateCohort(packed, manifest, digestMismatchTrials);
   assert.equal(digestMismatch.decision, 'inconclusive');
   assert.equal(digestMismatch.reasons.some((reason) => reason.includes('input_digest_mismatch')), true);
+
+  const wrongRouteTrials = cohortTrials(packed.raw, manifest);
+  const acpTrial = wrongRouteTrials.find((trial) => (
+    trial.case_id === 'acp-deadline-concurrent-cancel' && trial.arm === 'candidate-3.4.3'
+  ));
+  acpTrial.provider_configuration = caseRoutes()['run-result-outcome-acceptance'];
+  const wrongRoute = evaluateCohort(packed, manifest, wrongRouteTrials);
+  assert.equal(wrongRoute.decision, 'inconclusive');
+  assert.equal(wrongRoute.reasons.some((reason) => reason.includes('provider_configuration_mismatch')), true);
 });
 
 test('candidate not 6/6 accepted fails when identities are otherwise comparable', async () => {
@@ -636,18 +731,12 @@ test('candidate not 6/6 accepted fails when identities are otherwise comparable'
         accepted: false,
         nativeOutput: 40,
         wall: 1500,
-        astraOutput: 20,
         failedThenCorrect: false,
       });
     }
     return trial;
   });
-  const comparison = evaluateQualificationCohort({
-    protocol: protocolRecord(),
-    cases: packed.raw,
-    trials,
-    executionManifest: manifest,
-  });
+  const comparison = evaluateCohort(packed, manifest, trials);
   assert.equal(comparison.decision, 'fail');
   assert.equal(comparison.reasons.includes('candidate_not_6_of_6_accepted'), true);
   assert.equal(comparison.candidate_accepted, '5/6');
@@ -669,4 +758,110 @@ test('unrecorded execution manifest is inconclusive and does not invent identiti
   });
   assert.equal(comparison.decision, 'inconclusive');
   assert.deepEqual(comparison.reasons, ['execution_manifest_unrecorded']);
+});
+
+test('overhead uses candidate/direct native output, not wall time', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const trials = cohortTrials(packed.raw, manifest, {
+    'native-codex': { nativeOutput: 1000, wall: 1000 },
+    'published-3.4.2': { nativeOutput: 800, wall: 1000 },
+    'candidate-3.4.3': { nativeOutput: 400, wall: 1000, failedThenCorrect: false },
+    'direct-delegation': { nativeOutput: 100, wall: 1000 },
+  });
+  const comparison = evaluateCohort(packed, manifest, trials);
+  assert.equal(comparison.metrics.native_overhead_vs_direct, 4);
+  assert.equal(comparison.decision, 'fail');
+  assert.equal(comparison.reasons.includes('native_overhead_exceeds_1.25x_direct'), true);
+  assert.equal(comparison.metrics.median_turnaround_vs_native, 1);
+});
+
+test('turnaround is the median of per-trial wall ratios, not the ratio of summed walls', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const schedule = generateSchedule();
+  const caseById = new Map(packed.raw.map((entry) => [entry.id, entry]));
+  const trials = schedule.canonical.map((plan) => {
+    const walls = {
+      'native-codex': plan.rep === 1 ? 1000 : 4000,
+      'candidate-3.4.3': plan.rep === 1 ? 4000 : 1000,
+      'published-3.4.2': 900,
+      'direct-delegation': 900,
+    };
+    return makeTrial(plan, caseById.get(plan.case_id), manifest, {
+      accepted: true,
+      nativeOutput: plan.arm === 'native-codex' ? 100 : 40,
+      wall: walls[plan.arm],
+      failedThenCorrect: false,
+      helper: false,
+    });
+  });
+  const comparison = evaluateCohort(packed, manifest, trials);
+  assert.equal(comparison.metrics.median_turnaround_vs_native, 2.125);
+  assert.equal(comparison.decision, 'fail');
+  assert.equal(comparison.reasons.includes('median_turnaround_exceeds_2x_native'), true);
+  const summedRatio = (4000 + 1000) / (1000 + 4000);
+  assert.equal(summedRatio, 1);
+  assert.ok(comparison.metrics.median_turnaround_vs_native > summedRatio);
+});
+
+test('missing helper usage report stays inconclusive and keeps measured numbers', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const trials = cohortTrials(packed.raw, manifest);
+  const reports = cohortReports(trials);
+  const helperTrial = trials.find((trial) => trial.attempts.some((attempt) => attempt.kind === 'native_helper'));
+  const report = reports.find((entry) => entry.trial.trial_id === helperTrial.trial_id);
+  report.status = 'inconclusive';
+  report.evidence.incomplete_primary_evidence = true;
+  report.evidence.notes = ['absent_session:helper-session'];
+  const comparison = evaluateCohort(packed, manifest, trials, { usageReports: reports });
+  assert.equal(comparison.decision, 'inconclusive');
+  assert.equal(comparison.reasons.some((reason) => reason.startsWith('usage_report_inconclusive:')), true);
+  assert.notEqual(comparison.decision, 'pass');
+  assert.ok(comparison.metrics.astra_own_native_output.candidate > 0);
+  assert.ok(comparison.metrics.task_median_native_output_per_accepted_vs_native != null);
+  const nativeUsage = comparison.cases
+    .find((row) => row.case_id === helperTrial.case_id)
+    .arms['native-codex']
+    .usage.native_output_tokens.value;
+  assert.ok(nativeUsage > 0);
+});
+
+test('importer host-usage-report fixture interoperates with parseTrial and the evaluator', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const fixture = JSON.parse(await readFile(path.join(QUAL_FIXTURES, 'host-usage-report-astra.json'), 'utf8'));
+  const parsedReport = parseHostUsageReport(fixture);
+  assert.equal(parsedReport.status, 'complete');
+  assert.equal(parsedReport.breakdown.attempts[0].by_model[0].model, ASTRA_MODEL);
+  const parsedTrial = parseTrial(fixture.trial);
+  assert.equal(parsedTrial.attempts[0].provider, null);
+  assert.equal(parsedTrial.attempts[0].model, null);
+  assert.equal(parsedTrial.attempts[0].usage.provider_output_tokens.value, null);
+  assert.equal(parsedTrial.attempts[0].usage.native_output_tokens.value, fixture.trial.attempts[0].usage.native_output_tokens.value);
+
+  const trials = cohortTrials(packed.raw, manifest);
+  const target = trials.find((trial) => trial.trial_id === fixture.trial.trial_id);
+  assert.equal(target != null, true);
+  const reports = cohortReports(trials);
+  const index = reports.findIndex((entry) => entry.trial.trial_id === fixture.trial.trial_id);
+  reports[index] = fixture;
+  Object.assign(target, fixture.trial);
+  const comparison = evaluateCohort(packed, manifest, trials, { usageReports: reports });
+  assert.equal(comparison.decision, 'pass');
+  const arm = comparison.cases.find((row) => row.case_id === fixture.trial.case_id).arms[fixture.trial.arm];
+  assert.equal(arm.astra_own_native_output.value, 60);
+  assert.equal(arm.astra_own_native_output.includes_helpers, false);
+});
+
+test('deadline over one hour fails when identities are otherwise comparable', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const trials = cohortTrials(packed.raw, manifest, {
+    'candidate-3.4.3': { wall: 3_600_001, failedThenCorrect: false },
+  });
+  const comparison = evaluateCohort(packed, manifest, trials);
+  assert.equal(comparison.decision, 'fail');
+  assert.equal(comparison.reasons.some((reason) => reason.startsWith('deadline_exceeded:')), true);
 });

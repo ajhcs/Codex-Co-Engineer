@@ -603,7 +603,7 @@ function usagePerAccepted(metric, context) {
   };
 }
 
-function aggregateTrials(trials) {
+export function aggregateTrials(trials) {
   const attemptRows = [];
   let acceptedCount = 0;
   let acceptedKnown = 0;

@@ -23,11 +23,10 @@ import { promisify } from 'node:util';
 import { canonicalJsonStringify } from '../plugins/codex-co-engineer/mcp/v3/identity.mjs';
 import { PUBLIC_MCP_TOOLS } from '../plugins/codex-co-engineer/mcp/v3/response.mjs';
 import {
-  BYTE_METRICS,
   CASE_GIT_IDENTITY,
   COENGINEER_ARMS,
   GIT_EXECUTABLE,
-  METRIC_KEYS,
+  aggregateTrials,
   loadCases,
   parseTrial,
 } from './compare-coengineer-runs.mjs';
@@ -55,6 +54,18 @@ export const QUALIFICATION_ARMS = Object.freeze([
   'direct-delegation',
 ]);
 export const PLACEHOLDER_HOST_MODEL = 'codex-default';
+export const ASTRA_PROVIDER = 'openai';
+export const ASTRA_MODEL = 'gpt-6-astra';
+export const HOST_USAGE_REPORT_SCHEMA_ID = 'codex-co-engineer.host-usage-report.v1';
+export const ARM_TRIAL_TOKENS = Object.freeze({
+  'native-codex': 'native-codex',
+  'published-3.4.2': 'published-3-4-2',
+  'candidate-3.4.3': 'candidate-3-4-3',
+  'direct-delegation': 'direct-delegation',
+});
+export const TURNAROUND_REDUCTION = 'median of per-trial candidate/native wall ratios paired by case_id and rep; not the ratio of summed wall durations';
+export const OVERHEAD_REDUCTION = 'median of 3 task ratios of candidate native_output_per_accepted / direct native_output_per_accepted';
+export const ASTRA_REDUCTION = 'count gpt-6-astra native output once from host-usage-report.v1 by_model; helpers excluded unless observed as Astra';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const QUAL_ROOT = path.join(ROOT, 'benchmarks/qualification');
@@ -71,7 +82,9 @@ const NODE_TEST_TIMEOUT_MS = 90_000;
 const MAX_QUAL_FILES = 80;
 const MAX_QUAL_FILE_BYTES = 1024 * 1024;
 const MAX_PATH_SEGMENTS = 8;
-const QUAL_TRIAL_ID = /^[a-z][a-z0-9.-]{1,80}$/u;
+const QUAL_TRIAL_ID = /^[a-z][a-z0-9-]{1,63}$/u;
+const PROVIDER_ID = /^[a-z][a-z0-9-]{0,63}$/u;
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$/u;
 const BOOLEAN_FLAGS = Object.freeze([
   '--help', '--live', '--validate', '--pack', '--schedule', '--check-known-bad',
   '--extract-source', '--evaluate-cohort',
@@ -93,16 +106,6 @@ function isPlainObject(value) {
 
 function sha256Bytes(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
-}
-
-function metricUnit(key) {
-  if (BYTE_METRICS.includes(key)) return 'bytes';
-  if (key === 'elapsed_ms' || key === 'wall_elapsed_ms' || key === 'attempt_elapsed_ms') {
-    return 'milliseconds';
-  }
-  if (key === 'provider_cost_millicents') return 'millicents';
-  if (key.endsWith('_tokens')) return 'tokens';
-  return 'count';
 }
 
 export const CASE_DEFS = Object.freeze([
@@ -351,31 +354,62 @@ export function seededShuffle(items, seed) {
   return arr;
 }
 
+export function qualificationTrialId(caseId, arm, rep) {
+  const token = ARM_TRIAL_TOKENS[arm];
+  if (token == null) fail('invalid_format', `Unknown qualification arm ${arm}.`);
+  const trialId = `${caseId}-${token}-r${rep}`;
+  if (!QUAL_TRIAL_ID.test(trialId)) {
+    fail('invalid_format', `Qualification trial id ${trialId} is not hyphen-only.`);
+  }
+  return trialId;
+}
+
+function plannedTrial(id, arm, rep) {
+  const def = caseDef(id);
+  return {
+    trial_id: qualificationTrialId(id, arm, rep),
+    case_id: id,
+    arm,
+    rep,
+    implement: arm === 'native-codex' ? 'native' : def.implement,
+    review: arm === 'native-codex' ? null : def.review,
+    status: 'unrun',
+    retrospective: true,
+  };
+}
+
 export function generateSchedule(seed = ORDERING_SEED) {
   const canonical = [];
+  const groups = [];
   for (const id of CASE_IDS) {
-    for (const arm of QUALIFICATION_ARMS) {
-      for (let rep = 1; rep <= REPETITIONS; rep += 1) {
-        const def = caseDef(id);
-        canonical.push({
-          trial_id: `${id}-${arm}-r${rep}`,
-          case_id: id,
-          arm,
-          rep,
-          implement: arm === 'native-codex' ? 'native' : def.implement,
-          review: arm === 'native-codex' ? null : def.review,
-          status: 'unrun',
-          retrospective: true,
-        });
-      }
+    for (let rep = 1; rep <= REPETITIONS; rep += 1) {
+      const group = QUALIFICATION_ARMS.map((arm) => plannedTrial(id, arm, rep));
+      groups.push(group);
+      canonical.push(...group);
     }
+  }
+  const ordered = seededShuffle(groups, seed).flat();
+  const armCounts = Object.fromEntries(QUALIFICATION_ARMS.map((arm) => [
+    arm,
+    canonical.filter((row) => row.arm === arm).length,
+  ]));
+  if (canonical.length !== 24 || new Set(canonical.map((row) => row.trial_id)).size !== 24) {
+    fail('identity_mismatch', 'Planned identities must be exactly 24 unique hyphen-only trial ids.');
+  }
+  if (Object.values(armCounts).some((count) => count !== 6) || new Set(canonical.map((row) => row.case_id)).size !== 3) {
+    fail('identity_mismatch', 'Schedule must cover 3 distinct cases and exactly 6 trials per arm.');
+  }
+  const firstGroup = ordered.slice(0, 4);
+  if (new Set(firstGroup.map((row) => `${row.case_id}:${row.rep}`)).size !== 1
+    || new Set(firstGroup.map((row) => row.arm)).size !== 4) {
+    fail('identity_mismatch', 'Seeded ordering must start with one matched group of 4 same task/rep arms.');
   }
   return {
     seed,
-    algorithm: 'mulberry32-fisher-yates',
+    algorithm: 'mulberry32-fisher-yates-grouped-by-case-rep',
     trial_count: canonical.length,
     canonical,
-    ordered: seededShuffle(canonical, seed),
+    ordered,
   };
 }
 
@@ -706,10 +740,9 @@ export function parseQualificationTrial(value, pathLabel = 'trial') {
   if (!isPlainObject(value)) fail('invalid_type', `${pathLabel} must be a JSON object.`);
   const trialId = value.trial_id;
   if (typeof trialId !== 'string' || !QUAL_TRIAL_ID.test(trialId)) {
-    fail('invalid_format', `${pathLabel}.trial_id is not a qualification trial identity.`);
+    fail('invalid_format', `${pathLabel}.trial_id is not a hyphen-only qualification trial identity.`);
   }
-  const parsed = parseTrial({ ...value, trial_id: trialId.replaceAll('.', '-') }, pathLabel);
-  return { ...parsed, trial_id: trialId };
+  return parseTrial(value, pathLabel);
 }
 
 export async function assertFreshIdentity(record) {
@@ -896,6 +929,9 @@ export function freezeThresholds() {
     paid_ceiling_usd: PAID_CEILING_USD,
     max_corrections: MAX_CORRECTIONS,
     entire_trial_deadline_ms: TRIAL_DEADLINE_MS,
+    turnaround_reduction: TURNAROUND_REDUCTION,
+    native_overhead_reduction: OVERHEAD_REDUCTION,
+    astra_own_output_reduction: ASTRA_REDUCTION,
   };
 }
 
@@ -925,7 +961,11 @@ export function protocolRecord() {
     repetitions: REPETITIONS,
     trial_count: schedule.trial_count,
     planned_identities: 24,
-    ordering: { seed: ORDERING_SEED, algorithm: schedule.algorithm },
+    ordering: {
+      seed: ORDERING_SEED,
+      algorithm: schedule.algorithm,
+      first_matched_group: 'same-case-and-rep-all-four-arms',
+    },
     deadline: {
       entire_trial_ms: TRIAL_DEADLINE_MS,
       max_corrections: MAX_CORRECTIONS,
@@ -945,6 +985,10 @@ export function protocolRecord() {
       task_median_not_pooled: true,
       helpers_in_total_not_astra_unless_astra: true,
       all_four_approaches_required: true,
+      routes_bound_per_case: true,
+      turnaround_reduction: TURNAROUND_REDUCTION,
+      native_overhead_reduction: OVERHEAD_REDUCTION,
+      astra_own_output_reduction: ASTRA_REDUCTION,
     },
     safeguards: {
       public_mcp_tools: [...FIVE_TOOLS],
@@ -964,11 +1008,10 @@ export function operatorManifest() {
     status: 'unrun',
     title: 'Operator schedule for 3.4.3 retrospective qualification',
     note: 'All 24 trials are unrun retrospective cases. Do not treat this manifest as measured evidence. Candidate and published SHAs are bound in the external execution manifest, not here.',
-    assignments: {
-      'acp-deadline-concurrent-cancel': { implement: 'cursor-local', review: 'grok' },
-      'run-result-outcome-acceptance': { implement: 'grok', review: 'cursor-local' },
-      'comparison-failed-helper-cumulative': { implement: 'grok', review: 'cursor-local' },
-    },
+    assignments: Object.fromEntries(CASE_DEFS.map((def) => [def.id, {
+      implement: { provider: def.implement },
+      review: { provider: def.review },
+    }])),
     paid_ceiling_usd: PAID_CEILING_USD,
     live_jobs: 'not_implemented',
     ordering: {
@@ -986,7 +1029,7 @@ export function precollectionManifestTemplate() {
     schema: QUALIFICATION_EXECUTION_SCHEMA_ID,
     version: 1,
     status: 'unrecorded',
-    note: 'Record actual host_model, effective settings, and exact provider/model routes before collection. Native has no external jobs but uses the same planned host config. Never invent backend IDs. Bind immutable candidate SHA/tree, published SHA, and frozen input/check digests here so later results cannot change tracked files.',
+    note: 'Record actual Astra host model gpt-6-astra, effective settings, and exact per-case {provider,model} routes before collection. Native has no external jobs but uses the same planned host config. Never invent backend IDs. Bind immutable candidate commit SHA and tree SHA, published 3.4.2 SHA, and frozen input/check digests here so later results cannot change tracked files. Do not omit candidate.tree.',
     candidate: null,
     published_3_4_2: null,
     host: null,
@@ -1021,6 +1064,64 @@ function ownSha(value, pathLabel) {
   return value;
 }
 
+function ownDigest(value, pathLabel) {
+  if (typeof value !== 'string' || !SHA256.test(value)) {
+    fail('invalid_format', `${pathLabel} must be a 64-character SHA-256 digest.`);
+  }
+  return value;
+}
+
+function parseProviderModel(value, pathLabel, expectedProvider = null) {
+  if (!isPlainObject(value)) {
+    fail('invalid_type', `${pathLabel} must be a {provider, model} object.`);
+  }
+  const extra = Object.keys(value).filter((key) => key !== 'provider' && key !== 'model');
+  if (extra.length > 0) fail('unknown_key', `${pathLabel}.${extra[0]}`);
+  const provider = value.provider;
+  const model = value.model;
+  if (typeof provider !== 'string' || !PROVIDER_ID.test(provider)) {
+    fail('invalid_format', `${pathLabel}.provider`);
+  }
+  if (typeof model !== 'string' || !MODEL_ID.test(model)) {
+    fail('invalid_format', `${pathLabel}.model`);
+  }
+  if (expectedProvider != null && provider !== expectedProvider) {
+    fail('identity_mismatch', `${pathLabel}.provider must be ${expectedProvider}.`);
+  }
+  return { provider, model };
+}
+
+function parseCaseRoutes(value, pathLabel) {
+  if (!isPlainObject(value)) fail('invalid_type', `${pathLabel} must be a JSON object.`);
+  const expectedIds = [...CASE_IDS].sort().join(',');
+  if (Object.keys(value).sort().join(',') !== expectedIds) {
+    fail('identity_mismatch', `${pathLabel} must bind exact routes for all three cases.`);
+  }
+  const routes = {};
+  for (const def of CASE_DEFS) {
+    const row = value[def.id];
+    if (!isPlainObject(row)) fail('missing_key', `${pathLabel}.${def.id}`);
+    routes[def.id] = {
+      implement: parseProviderModel(row.implement, `${pathLabel}.${def.id}.implement`, def.implement),
+      review: parseProviderModel(row.review, `${pathLabel}.${def.id}.review`, def.review),
+    };
+  }
+  return routes;
+}
+
+function parseBoundDigests(value, pathLabel) {
+  if (!isPlainObject(value)) fail('missing_key', pathLabel);
+  const expectedIds = [...CASE_IDS].sort().join(',');
+  if (Object.keys(value).sort().join(',') !== expectedIds) {
+    fail('identity_mismatch', `${pathLabel} must record every frozen case digest.`);
+  }
+  const out = {};
+  for (const id of CASE_IDS) {
+    out[id] = ownDigest(value[id], `${pathLabel}.${id}`);
+  }
+  return out;
+}
+
 export function parseExecutionManifest(value, pathLabel = 'execution_manifest') {
   if (!isPlainObject(value)) fail('invalid_type', `${pathLabel} must be a JSON object.`);
   if (value.schema !== QUALIFICATION_EXECUTION_SCHEMA_ID) fail('invalid_format', `${pathLabel}.schema`);
@@ -1038,7 +1139,6 @@ export function parseExecutionManifest(value, pathLabel = 'execution_manifest') 
   if (!isPlainObject(value.published_3_4_2)) fail('missing_key', `${pathLabel}.published_3_4_2`);
   if (!isPlainObject(value.host)) fail('missing_key', `${pathLabel}.host`);
   if (!isPlainObject(value.astra)) fail('missing_key', `${pathLabel}.astra`);
-  if (!isPlainObject(value.provider_configuration)) fail('missing_key', `${pathLabel}.provider_configuration`);
   if (!isPlainObject(value.approaches)) fail('missing_key', `${pathLabel}.approaches`);
   const hostModel = value.host.host_model;
   if (typeof hostModel !== 'string' || hostModel.length === 0) {
@@ -1047,16 +1147,30 @@ export function parseExecutionManifest(value, pathLabel = 'execution_manifest') 
   if (hostModel === PLACEHOLDER_HOST_MODEL) {
     fail('identity_mismatch', 'codex-default placeholders are not comparable truth.');
   }
+  if (hostModel !== ASTRA_MODEL) {
+    fail('identity_mismatch', `Recorded host_model must be the Astra host ${ASTRA_MODEL}.`);
+  }
   if (!isPlainObject(value.host.host_settings)) fail('missing_key', `${pathLabel}.host.host_settings`);
-  const astraModel = value.astra.model;
-  if (typeof astraModel !== 'string' || astraModel.length === 0) {
-    fail('missing_key', `${pathLabel}.astra.model`);
+  const astra = parseProviderModel(value.astra, `${pathLabel}.astra`, ASTRA_PROVIDER);
+  if (astra.model !== ASTRA_MODEL || astra.model !== hostModel) {
+    fail('identity_mismatch', `Astra model must be ${ASTRA_MODEL} and match host.host_model.`);
   }
   const candidateSha = ownSha(value.candidate.sha, `${pathLabel}.candidate.sha`);
+  if (!Object.hasOwn(value.candidate, 'tree') || value.candidate.tree == null) {
+    fail('missing_key', `${pathLabel}.candidate.tree`);
+  }
+  const candidateTree = ownSha(value.candidate.tree, `${pathLabel}.candidate.tree`);
   const publishedSha = ownSha(value.published_3_4_2.sha, `${pathLabel}.published_3_4_2.sha`);
+  if (publishedSha !== PUBLISHED_342_SHA) {
+    fail('identity_mismatch', 'published_3_4_2.sha must be the frozen 3.4.2 baseline.');
+  }
   if (candidateSha === publishedSha) {
     fail('identity_mismatch', 'Candidate SHA cannot equal published SHA.');
   }
+  const providerConfiguration = parseCaseRoutes(
+    value.provider_configuration,
+    `${pathLabel}.provider_configuration`,
+  );
   const approaches = {};
   for (const arm of QUALIFICATION_ARMS) {
     const row = value.approaches[arm];
@@ -1083,10 +1197,6 @@ export function parseExecutionManifest(value, pathLabel = 'execution_manifest') 
           fail('identity_mismatch', `${arm} coengineer_source conflicts with bound SHA.`);
         }
       }
-      if (row.provider_configuration != null
-        && settingsDigest(row.provider_configuration) !== settingsDigest(value.provider_configuration)) {
-        fail('identity_mismatch', `${arm} provider_configuration conflicts with the planned config.`);
-      }
       approaches[arm] = {
         external_jobs: true,
         coengineer_source: { kind: 'git_commit', value: sourceValue },
@@ -1100,22 +1210,19 @@ export function parseExecutionManifest(value, pathLabel = 'execution_manifest') 
     status: 'recorded',
     recorded: true,
     candidate_sha: candidateSha,
-    candidate_tree: value.candidate.tree ?? null,
+    candidate_tree: candidateTree,
     published_sha: publishedSha,
     host_model: hostModel,
     host_settings: value.host.host_settings,
-    astra: {
-      provider: typeof value.astra.provider === 'string' ? value.astra.provider : null,
-      model: astraModel,
-    },
-    provider_configuration: value.provider_configuration,
+    astra,
+    provider_configuration: providerConfiguration,
     approaches,
-    input_digests: isPlainObject(value.input_digests) ? value.input_digests : {},
-    check_digests: isPlainObject(value.check_digests) ? value.check_digests : {},
+    input_digests: parseBoundDigests(value.input_digests, `${pathLabel}.input_digests`),
+    check_digests: parseBoundDigests(value.check_digests, `${pathLabel}.check_digests`),
   };
 }
 
-function emptyMetric(key) {
+function emptyAstraMetric(astra = null) {
   return {
     value: null,
     source: 'unknown',
@@ -1123,173 +1230,189 @@ function emptyMetric(key) {
     reported_sum: null,
     reported_count: 0,
     unknown_count: 0,
-    unit: metricUnit(key),
+    unit: 'tokens',
+    model: astra?.model ?? null,
+    provider: astra?.provider ?? null,
+    includes_helpers: false,
+    coverage_complete: false,
+    reason: 'missing_usage_report',
   };
 }
 
-function rollupMetric(rows, key) {
-  const result = emptyMetric(key);
-  let source = null;
-  let trust = null;
-  for (const row of rows) {
-    if (row.source === 'unknown' || row.value === null) {
-      result.unknown_count += 1;
+export function parseHostUsageReport(value, pathLabel = 'usage_report') {
+  if (!isPlainObject(value)) fail('invalid_type', `${pathLabel} must be a JSON object.`);
+  if (value.schema !== HOST_USAGE_REPORT_SCHEMA_ID) fail('invalid_format', `${pathLabel}.schema`);
+  const status = value.status;
+  if (status !== 'complete' && status !== 'inconclusive') {
+    fail('invalid_format', `${pathLabel}.status`);
+  }
+  const trial = parseQualificationTrial(value.trial, `${pathLabel}.trial`);
+  const breakdown = value.breakdown;
+  if (!isPlainObject(breakdown) || !Array.isArray(breakdown.attempts)) {
+    fail('invalid_format', `${pathLabel}.breakdown.attempts`);
+  }
+  const attempts = breakdown.attempts.map((entry, index) => {
+    if (!isPlainObject(entry)) fail('invalid_type', `${pathLabel}.breakdown.attempts[${index}]`);
+    const attemptId = entry.attempt_id;
+    if (typeof attemptId !== 'string' || !QUAL_TRIAL_ID.test(attemptId)) {
+      fail('invalid_format', `${pathLabel}.breakdown.attempts[${index}].attempt_id`);
+    }
+    const byModel = Array.isArray(entry.by_model) ? entry.by_model : [];
+    return {
+      attempt_id: attemptId,
+      session_id: typeof entry.session_id === 'string' ? entry.session_id : null,
+      output_tokens: Number.isSafeInteger(entry.output_tokens) ? entry.output_tokens : null,
+      by_model: byModel.map((row, rowIndex) => {
+        if (!isPlainObject(row)) fail('invalid_type', `${pathLabel}.breakdown.attempts[${index}].by_model[${rowIndex}]`);
+        const model = row.model;
+        if (typeof model !== 'string' || model.length === 0) {
+          fail('invalid_format', `${pathLabel}.breakdown.attempts[${index}].by_model[${rowIndex}].model`);
+        }
+        const output = row.output_tokens;
+        if (output != null && (!Number.isSafeInteger(output) || output < 0)) {
+          fail('out_of_range', `${pathLabel}.breakdown.attempts[${index}].by_model[${rowIndex}].output_tokens`);
+        }
+        return { model, output_tokens: output ?? null };
+      }),
+    };
+  });
+  const evidence = isPlainObject(value.evidence) ? value.evidence : {};
+  const incompletePrimary = evidence.incomplete_primary_evidence === true || status !== 'complete';
+  return {
+    schema: HOST_USAGE_REPORT_SCHEMA_ID,
+    status,
+    trial,
+    breakdown: {
+      attempts,
+      totals: isPlainObject(breakdown.totals) ? breakdown.totals : {},
+      accounting: isPlainObject(breakdown.accounting) ? breakdown.accounting : {},
+    },
+    evidence: {
+      notes: Array.isArray(evidence.notes) ? evidence.notes : [],
+      incomplete_primary_evidence: incompletePrimary,
+    },
+    measured_numbers_retained: true,
+  };
+}
+
+function reportMatchesTrial(report, trial) {
+  const bound = report.trial;
+  if (bound.trial_id !== trial.trial_id) return 'trial_id';
+  if (bound.case_id !== trial.case_id) return 'case_id';
+  if (bound.arm !== trial.arm) return 'arm';
+  if (bound.base_sha !== trial.base_sha) return 'base_sha';
+  if (bound.input_digest !== trial.input_digest) return 'input_digest';
+  if (bound.host_model !== trial.host_model) return 'host_model';
+  if (settingsDigest(bound.host_settings) !== settingsDigest(trial.host_settings)) return 'host_settings';
+  if (settingsDigest(bound.provider_configuration) !== settingsDigest(trial.provider_configuration)) {
+    return 'provider_configuration';
+  }
+  if (bound.coengineer_source.kind !== trial.coengineer_source.kind
+    || bound.coengineer_source.value !== trial.coengineer_source.value) {
+    return 'coengineer_source';
+  }
+  if (bound.accepted !== trial.accepted) return 'accepted';
+  if (bound.wall_elapsed_ms.value !== trial.wall_elapsed_ms.value) return 'wall_elapsed_ms';
+  if (bound.attempts.length !== trial.attempts.length) return 'attempts';
+  for (let index = 0; index < bound.attempts.length; index += 1) {
+    const left = bound.attempts[index];
+    const right = trial.attempts[index];
+    if (left.attempt_id !== right.attempt_id || left.kind !== right.kind || left.outcome !== right.outcome) {
+      return 'attempt_identity';
+    }
+    if (left.usage.native_output_tokens.value !== right.usage.native_output_tokens.value) {
+      return 'native_output_tokens';
+    }
+  }
+  return null;
+}
+
+function astraOutputFromReport(report, astra, trial) {
+  if (astra == null || typeof astra.model !== 'string') return { value: null, includesHelpers: false, observed: false };
+  const byAttemptId = new Map(trial.attempts.map((attempt) => [attempt.attempt_id, attempt]));
+  let sum = 0;
+  let observed = false;
+  let includesHelpers = false;
+  const countedAttempts = new Set();
+  for (const row of report.breakdown.attempts) {
+    if (countedAttempts.has(row.attempt_id)) continue;
+    countedAttempts.add(row.attempt_id);
+    const matching = row.by_model.filter((entry) => entry.model === astra.model);
+    if (matching.length === 0) continue;
+    let attemptSum = 0;
+    for (const entry of matching) {
+      if (entry.output_tokens == null) return { value: null, includesHelpers, observed: false };
+      attemptSum += entry.output_tokens;
+    }
+    sum += attemptSum;
+    observed = true;
+    const attempt = byAttemptId.get(row.attempt_id);
+    if (attempt?.kind === 'native_helper') includesHelpers = true;
+  }
+  return { value: observed ? sum : null, includesHelpers, observed };
+}
+
+function accountAstraOwnNativeOutput(trials, astra, reportsByTrialId) {
+  const result = emptyAstraMetric(astra);
+  if (astra == null || trials.length === 0) return result;
+  let sum = 0;
+  let known = 0;
+  let unknown = 0;
+  let includesHelpers = false;
+  let coverageComplete = true;
+  for (const trial of trials) {
+    const report = reportsByTrialId.get(trial.trial_id);
+    if (report == null) {
+      unknown += 1;
+      coverageComplete = false;
       continue;
     }
-    if (source === null) {
-      source = row.source;
-      trust = row.trust;
-    } else if (source !== row.source || trust !== row.trust) {
-      result.unknown_count += 1;
+    if (report.status !== 'complete' || report.evidence.incomplete_primary_evidence === true) {
+      coverageComplete = false;
+    }
+    const observed = astraOutputFromReport(report, astra, trial);
+    if (!observed.observed || observed.value == null) {
+      unknown += 1;
       continue;
     }
-    result.reported_count += 1;
-    result.reported_sum = result.reported_sum == null ? row.value : result.reported_sum + row.value;
+    sum += observed.value;
+    known += 1;
+    if (observed.includesHelpers) includesHelpers = true;
   }
-  if (result.unknown_count === 0 && result.reported_count > 0) {
-    result.value = result.reported_sum;
-    result.source = source;
-    result.trust = trust;
+  result.reported_sum = known > 0 ? sum : null;
+  result.reported_count = known;
+  result.unknown_count = unknown;
+  result.includes_helpers = includesHelpers;
+  result.coverage_complete = coverageComplete && unknown === 0 && known === trials.length;
+  if (known > 0) {
+    result.value = sum;
+    result.source = 'host_measured';
+    result.trust = 'host_authoritative';
   }
+  if (!coverageComplete || unknown > 0) result.reason = 'incomplete_primary_coverage';
+  else result.reason = 'observed_native_model';
   return result;
 }
 
-function usagePerAccepted(metric, context) {
-  const coverage = {
-    accepted_known: context.acceptedKnown,
-    accepted_count: context.acceptedCount,
-    trial_count: context.trialCount,
-    metric_reported: metric.reported_count,
-    metric_unknown: metric.unknown_count,
-  };
-  if (context.acceptanceComplete !== true) {
-    return {
-      value: null,
-      source: 'unknown',
-      trust: 'unknown',
-      reason: 'incomplete_acceptance_coverage',
-      numerator: metric.value,
-      known_accepted_count: context.acceptedCount,
-      coverage,
-      unit: metric.unit,
-    };
-  }
-  if (context.acceptedCount === 0) {
-    return {
-      value: null,
-      source: 'unknown',
-      trust: 'unknown',
-      reason: 'zero_accepted_not_zero_cost',
-      numerator: metric.value,
-      known_accepted_count: 0,
-      coverage,
-      unit: metric.unit,
-    };
-  }
-  if (metric.value === null || metric.source === 'unknown') {
-    return {
-      value: null,
-      source: 'unknown',
-      trust: 'unknown',
-      reason: 'unknown_metric',
-      numerator: metric.value,
-      known_accepted_count: context.acceptedCount,
-      coverage,
-      unit: metric.unit,
-    };
-  }
-  return {
-    value: metric.value / context.acceptedCount,
-    source: metric.source,
-    trust: metric.trust,
-    reason: 'includes_failed_attempts_and_corrections',
-    numerator: metric.value,
-    known_accepted_count: context.acceptedCount,
-    coverage,
-    unit: metric.unit,
-  };
-}
-
-function isAstraAttempt(attempt, astra) {
-  if (astra == null || typeof astra.model !== 'string' || astra.model.length === 0) return false;
-  if (attempt.model !== astra.model) return false;
-  if (astra.provider && attempt.provider != null && attempt.provider !== astra.provider) return false;
-  return true;
-}
-
-export function accountArm(trials, astra = null) {
-  const attemptRows = [];
-  let acceptedCount = 0;
-  let acceptedKnown = 0;
-  let failedAttempts = 0;
-  let corrections = 0;
-  let nativeHelpers = 0;
+export function accountArm(trials, astra = null, reportsByTrialId = new Map()) {
+  const aggregated = aggregateTrials(trials);
   let missingPrimary = 0;
   for (const trial of trials) {
-    if (trial.accepted === true) acceptedCount += 1;
-    if (trial.accepted === true || trial.accepted === false) acceptedKnown += 1;
-    else missingPrimary += 1;
-    for (const attempt of trial.attempts) {
-      attemptRows.push(attempt);
-      if (attempt.outcome === 'failed') failedAttempts += 1;
-      if (attempt.kind === 'correction') corrections += 1;
-      if (attempt.kind === 'native_helper') nativeHelpers += 1;
-    }
+    if (trial.accepted !== true && trial.accepted !== false) missingPrimary += 1;
   }
-  const acceptanceComplete = trials.length > 0 && acceptedKnown === trials.length;
-  const perAcceptedContext = {
-    acceptedCount,
-    acceptedKnown,
-    trialCount: trials.length,
-    acceptanceComplete,
-  };
-  const metrics = {};
-  const perAccepted = {};
-  for (const key of METRIC_KEYS) {
-    const rolled = rollupMetric(attemptRows.map((attempt) => attempt.usage[key]), key);
-    if (key === 'elapsed_ms') rolled.role = 'attempt_duration_sum';
-    metrics[key] = rolled;
-    perAccepted[key] = usagePerAccepted(rolled, perAcceptedContext);
-  }
-  const wall = rollupMetric(trials.map((trial) => trial.wall_elapsed_ms), 'wall_elapsed_ms');
-  wall.role = 'trial_wall_elapsed';
-  metrics.wall_elapsed_ms = wall;
-  perAccepted.wall_elapsed_ms = usagePerAccepted(wall, perAcceptedContext);
-  let astraOwn = emptyMetric('provider_output_tokens');
-  if (astra != null) {
-    const astraAttempts = attemptRows.filter((attempt) => isAstraAttempt(attempt, astra));
-    const useProvider = astraAttempts.some((attempt) => (
-      attempt.usage.provider_output_tokens.value != null
-      && attempt.usage.provider_output_tokens.source !== 'unknown'
-    ));
-    const key = useProvider ? 'provider_output_tokens' : 'native_output_tokens';
-    astraOwn = rollupMetric(astraAttempts.map((attempt) => attempt.usage[key]), key);
-    astraOwn.model = astra.model;
-    astraOwn.provider = astra.provider ?? null;
-    astraOwn.includes_helpers = astraAttempts.some((attempt) => attempt.kind === 'native_helper');
-  }
-  const acceptanceRate = acceptanceComplete
-    ? { value: acceptedCount / trials.length, coverage: 1 }
-    : { value: null, coverage: trials.length === 0 ? 0 : acceptedKnown / trials.length, reason: 'missing_acceptance' };
   return {
-    trial_count: trials.length,
-    accepted_count: acceptedCount,
-    accepted_known_count: acceptedKnown,
-    failed_attempt_count: failedAttempts,
-    correction_count: corrections,
-    native_helper_count: nativeHelpers,
+    ...aggregated,
     missing_primary_count: missingPrimary,
-    acceptance_rate: acceptanceRate,
-    usage: metrics,
-    usage_per_accepted_result: perAccepted,
-    astra_own_native_output: astraOwn,
+    astra_own_native_output: accountAstraOwnNativeOutput(trials, astra, reportsByTrialId),
   };
 }
 
-function medianOfThree(values) {
-  if (values.some((value) => value == null || Number.isNaN(value))) return null;
+function median(values) {
+  if (values.length === 0 || values.some((value) => value == null || Number.isNaN(value))) return null;
   const sorted = [...values].sort((left, right) => left - right);
-  return sorted[1];
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function ratio(numerator, denominator) {
@@ -1311,11 +1434,38 @@ function comparableMismatch(trial, caseRecord, manifest, arm) {
     return 'source_mismatch';
   }
   if (COENGINEER_ARMS.includes(arm)) {
-    if (settingsDigest(trial.provider_configuration) !== settingsDigest(manifest.provider_configuration)) {
+    const expectedRoute = manifest.provider_configuration[caseRecord.id];
+    if (expectedRoute == null) return 'provider_configuration_mismatch';
+    if (settingsDigest(trial.provider_configuration) !== settingsDigest(expectedRoute)) {
       return 'provider_configuration_mismatch';
     }
   }
   return null;
+}
+
+function indexUsageReports(usageReports, parsedTrials, mark) {
+  const reportsByTrialId = new Map();
+  if (usageReports == null) return reportsByTrialId;
+  if (!Array.isArray(usageReports)) fail('invalid_type', 'usage_reports must be an array.');
+  const trialById = new Map(parsedTrials.map((trial) => [trial.trial_id, trial]));
+  for (let index = 0; index < usageReports.length; index += 1) {
+    const report = parseHostUsageReport(usageReports[index], `usage_reports[${index}]`);
+    if (reportsByTrialId.has(report.trial.trial_id)) {
+      fail('duplicate_id', `duplicate usage report for ${report.trial.trial_id}`);
+    }
+    const trial = trialById.get(report.trial.trial_id);
+    if (trial == null) {
+      mark('inconclusive', `usage_report_unknown_trial:${report.trial.trial_id}`);
+      reportsByTrialId.set(report.trial.trial_id, report);
+      continue;
+    }
+    const mismatch = reportMatchesTrial(report, trial);
+    if (mismatch) {
+      mark('inconclusive', `usage_report_mismatch:${report.trial.trial_id}:${mismatch}`);
+    }
+    reportsByTrialId.set(report.trial.trial_id, report);
+  }
+  return reportsByTrialId;
 }
 
 export function evaluateQualificationCohort({
@@ -1323,6 +1473,7 @@ export function evaluateQualificationCohort({
   cases,
   trials,
   executionManifest,
+  usageReports = null,
 }) {
   const parsedProtocol = protocol ?? protocolRecord();
   if (!Array.isArray(parsedProtocol.approaches)
@@ -1369,8 +1520,9 @@ export function evaluateQualificationCohort({
   const parsedTrials = trials.map((entry, index) => parseQualificationTrial(entry, `trials[${index}]`));
   const byId = new Map(parsedTrials.map((trial) => [trial.trial_id, trial]));
   if (byId.size !== parsedTrials.length) fail('duplicate_id', 'duplicate trial_id');
+  const reportsByTrialId = indexUsageReports(usageReports, parsedTrials, mark);
 
-  const caseById = new Map(parsedCases.map((entry) => [entry.id, entry]));
+  const matchedByKey = new Map();
   const taskRows = [];
   let comparedIdentities = 0;
   let omitted = 0;
@@ -1410,14 +1562,26 @@ export function evaluateQualificationCohort({
         if (trialCorrections > MAX_CORRECTIONS) {
           mark('fail', `too_many_corrections:${plan.trial_id}`);
         }
+        if (trial.wall_elapsed_ms?.value != null && trial.wall_elapsed_ms.value > TRIAL_DEADLINE_MS) {
+          mark('fail', `deadline_exceeded:${plan.trial_id}`);
+        }
+        const report = reportsByTrialId.get(plan.trial_id);
+        if (report == null) {
+          missingEvidence += 1;
+          mark('inconclusive', `missing_usage_report:${plan.trial_id}`);
+        } else if (report.status !== 'complete' || report.evidence.incomplete_primary_evidence === true) {
+          missingEvidence += 1;
+          mark('inconclusive', `usage_report_inconclusive:${plan.trial_id}`);
+        }
         matched.push(trial);
+        matchedByKey.set(`${plan.case_id}:${plan.arm}:${plan.rep}`, trial);
         comparedIdentities += 1;
       }
       arms[arm] = {
         arm,
         status: matched.length === planned.length && unmatched.length === 0 ? 'compared' : (planned.length === unmatched.length && matched.length === 0 ? 'omitted' : 'partial'),
         unmatched,
-        ...accountArm(matched, manifest.astra),
+        ...accountArm(matched, manifest.astra, reportsByTrialId),
       };
     }
     taskRows.push({
@@ -1434,8 +1598,8 @@ export function evaluateQualificationCohort({
 
   const taskNativeRatios = [];
   const taskPublishedRatios = [];
-  const taskTurnaroundRatios = [];
   const taskOverheadRatios = [];
+  const trialTurnaroundRatios = [];
   let pooledCandidateNumerator = 0;
   let pooledCandidateAccepted = 0;
   let pooledNativeNumerator = 0;
@@ -1445,43 +1609,57 @@ export function evaluateQualificationCohort({
     const candidate = row.arms['candidate-3.4.3'].usage_per_accepted_result.native_output_tokens;
     const native = row.arms['native-codex'].usage_per_accepted_result.native_output_tokens;
     const published = row.arms['published-3.4.2'].usage_per_accepted_result.native_output_tokens;
+    const direct = row.arms['direct-delegation'].usage_per_accepted_result.native_output_tokens;
     taskNativeRatios.push(ratio(candidate.value, native.value));
     taskPublishedRatios.push(ratio(candidate.value, published.value));
+    taskOverheadRatios.push(ratio(candidate.value, direct.value));
     if (candidate.numerator != null && native.numerator != null) {
       pooledCandidateNumerator += candidate.numerator;
       pooledCandidateAccepted += candidate.known_accepted_count;
       pooledNativeNumerator += native.numerator;
       pooledNativeAccepted += native.known_accepted_count;
     }
-    const candidateWall = row.arms['candidate-3.4.3'].usage.wall_elapsed_ms.value;
-    const nativeWall = row.arms['native-codex'].usage.wall_elapsed_ms.value;
-    const directWall = row.arms['direct-delegation'].usage.wall_elapsed_ms.value;
-    taskTurnaroundRatios.push(ratio(candidateWall, nativeWall));
-    taskOverheadRatios.push(ratio(nativeWall, directWall));
+    for (let rep = 1; rep <= REPETITIONS; rep += 1) {
+      const candidateTrial = matchedByKey.get(`${row.case_id}:candidate-3.4.3:${rep}`);
+      const nativeTrial = matchedByKey.get(`${row.case_id}:native-codex:${rep}`);
+      const candidateWall = candidateTrial?.wall_elapsed_ms?.value ?? null;
+      const nativeWall = nativeTrial?.wall_elapsed_ms?.value ?? null;
+      trialTurnaroundRatios.push(ratio(candidateWall, nativeWall));
+    }
   }
 
-  const taskMedianVsNative = medianOfThree(taskNativeRatios);
-  const taskMedianVsPublished = medianOfThree(taskPublishedRatios);
+  const taskMedianVsNative = median(taskNativeRatios);
+  const taskMedianVsPublished = median(taskPublishedRatios);
   const pooledVsNative = ratio(
     pooledCandidateAccepted === 0 ? null : pooledCandidateNumerator / pooledCandidateAccepted,
     pooledNativeAccepted === 0 ? null : pooledNativeNumerator / pooledNativeAccepted,
   );
-  const medianTurnaround = medianOfThree(taskTurnaroundRatios);
-  const nativeOverhead = medianOfThree(taskOverheadRatios);
+  const medianTurnaround = median(trialTurnaroundRatios);
+  const nativeOverhead = median(taskOverheadRatios);
 
   let astraCandidate = 0;
   let astraPublished = 0;
-  let astraKnown = true;
+  let astraMeasured = false;
+  let astraCoverageComplete = true;
   for (const row of taskRows) {
     const cand = row.arms['candidate-3.4.3'].astra_own_native_output;
     const pub = row.arms['published-3.4.2'].astra_own_native_output;
-    if (cand.value == null || pub.value == null) astraKnown = false;
-    else {
+    if (cand.coverage_complete !== true || pub.coverage_complete !== true) astraCoverageComplete = false;
+    if (cand.value != null) {
       astraCandidate += cand.value;
-      astraPublished += pub.value;
+      astraMeasured = true;
     }
+    if (pub.value != null) {
+      astraPublished += pub.value;
+      astraMeasured = true;
+    }
+    if (cand.value == null || pub.value == null) astraCoverageComplete = false;
   }
 
+  for (const arm of QUALIFICATION_ARMS) {
+    const count = taskRows.reduce((sum, row) => sum + row.arms[arm].trial_count, 0);
+    if (count !== 6) mark('inconclusive', `arm_count_not_6:${arm}`);
+  }
   if (candidateTrials !== 6 || candidateKnown !== 6) {
     mark('inconclusive', 'candidate_acceptance_coverage_incomplete');
   } else if (candidateAccepted !== 6) {
@@ -1491,7 +1669,7 @@ export function evaluateQualificationCohort({
   else if (taskMedianVsNative > 0.5) mark('fail', 'task_median_vs_native_exceeds_0.5');
   if (taskMedianVsPublished == null) mark('inconclusive', 'task_median_vs_published_unknown');
   else if (taskMedianVsPublished > 0.75) mark('fail', 'task_median_vs_published_exceeds_0.75');
-  if (!astraKnown) mark('inconclusive', 'astra_own_output_unknown');
+  if (!astraCoverageComplete) mark('inconclusive', 'astra_own_output_unknown');
   else if (!(astraCandidate < astraPublished)) mark('fail', 'astra_own_output_did_not_decrease');
   if (medianTurnaround == null) mark('inconclusive', 'median_turnaround_unknown');
   else if (medianTurnaround > 2) mark('fail', 'median_turnaround_exceeds_2x_native');
@@ -1518,12 +1696,16 @@ export function evaluateQualificationCohort({
       task_median_native_output_per_accepted_vs_published: taskMedianVsPublished,
       pooled_native_output_per_accepted_vs_native: pooledVsNative,
       astra_own_native_output: {
-        candidate: astraKnown ? astraCandidate : null,
-        published: astraKnown ? astraPublished : null,
-        decreased: astraKnown ? astraCandidate < astraPublished : null,
+        candidate: astraMeasured ? astraCandidate : null,
+        published: astraMeasured ? astraPublished : null,
+        decreased: astraCoverageComplete ? astraCandidate < astraPublished : null,
+        coverage_complete: astraCoverageComplete,
       },
       median_turnaround_vs_native: medianTurnaround,
+      median_turnaround_reduction: TURNAROUND_REDUCTION,
       native_overhead_vs_direct: nativeOverhead,
+      native_overhead_reduction: OVERHEAD_REDUCTION,
+      astra_own_output_reduction: ASTRA_REDUCTION,
     },
     cases: taskRows,
   };
@@ -1690,12 +1872,14 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     const packed = await loadQualificationCases();
     const trialsJson = JSON.parse(await readFile(path.resolve(flags['--trials']), 'utf8'));
     const trials = Array.isArray(trialsJson) ? trialsJson : trialsJson.trials;
+    const usageReports = Array.isArray(trialsJson) ? null : (trialsJson.usage_reports ?? null);
     const executionManifest = JSON.parse(await readFile(path.resolve(flags['--execution-manifest']), 'utf8'));
     const comparison = evaluateQualificationCohort({
       protocol: protocolRecord(),
       cases: packed.raw,
       trials,
       executionManifest,
+      usageReports,
     });
     io.stdout.write(`${JSON.stringify(comparison, null, 2)}\n`);
     if (comparison.decision === 'pass') return 0;

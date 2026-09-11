@@ -1,0 +1,157 @@
+{
+  "schema": "codex-co-engineer.host-usage-report.v1",
+  "status": "complete",
+  "trial": {
+    "schema": "codex-co-engineer.benchmark-trial.v1",
+    "trial_id": "acp-deadline-concurrent-cancel-candidate-3-4-3-r2",
+    "case_id": "acp-deadline-concurrent-cancel",
+    "arm": "candidate-3.4.3",
+    "base_sha": "7c8374f6eacf39e683c17f3e80c48c96459c3982",
+    "input_digest": "85e28b36a39db8b6d10a3095e6f81e7b89a0ce1fd3af80056376006cdaffd258",
+    "coengineer_source": {
+      "kind": "git_commit",
+      "value": "c0ffeeabc0ffeeabc0ffeeabc0ffeeabc0ffeeab"
+    },
+    "host_model": "gpt-6-astra",
+    "host_settings": {
+      "reasoning": "high",
+      "sandbox": "workspace-write"
+    },
+    "provider_configuration": {
+      "implement": {
+        "provider": "cursor-local",
+        "model": "composer-1"
+      },
+      "review": {
+        "provider": "grok",
+        "model": "grok-4"
+      }
+    },
+    "wall_elapsed_ms": {
+      "value": 1500,
+      "source": "host_measured",
+      "trust": "host_authoritative"
+    },
+    "attempts": [
+      {
+        "attempt_id": "initial",
+        "kind": "initial",
+        "outcome": "accepted",
+        "sequence": 1,
+        "usage": {
+          "native_input_tokens": {
+            "value": 80,
+            "source": "host_measured",
+            "trust": "host_authoritative"
+          },
+          "native_output_tokens": {
+            "value": 40,
+            "source": "host_measured",
+            "trust": "host_authoritative"
+          },
+          "native_helper_calls": {
+            "value": 0,
+            "source": "host_measured",
+            "trust": "host_authoritative"
+          },
+          "correction_rounds": {
+            "value": 0,
+            "source": "host_measured",
+            "trust": "host_authoritative"
+          },
+          "elapsed_ms": {
+            "value": 11000,
+            "source": "host_measured",
+            "trust": "host_authoritative"
+          },
+          "provider_input_tokens": {
+            "value": null,
+            "source": "unknown",
+            "trust": "unknown"
+          },
+          "provider_output_tokens": {
+            "value": null,
+            "source": "unknown",
+            "trust": "unknown"
+          },
+          "provider_cost_millicents": {
+            "value": null,
+            "source": "unknown",
+            "trust": "unknown"
+          },
+          "model_facing_bytes": {
+            "value": null,
+            "source": "unknown",
+            "trust": "unknown"
+          },
+          "evidence_bytes": {
+            "value": null,
+            "source": "unknown",
+            "trust": "unknown"
+          }
+        }
+      }
+    ],
+    "accepted": true
+  },
+  "breakdown": {
+    "attempts": [
+      {
+        "attempt_id": "initial",
+        "session_id": "parent-session",
+        "input_tokens": 80,
+        "cached_input_tokens": 10,
+        "cache_write_input_tokens": 2,
+        "output_tokens": 40,
+        "reasoning_output_tokens": 12,
+        "compaction_events": 0,
+        "by_model": [
+          {
+            "model": "gpt-6-astra",
+            "input_tokens": 80,
+            "cached_input_tokens": 10,
+            "output_tokens": 40,
+            "reasoning_output_tokens": 12,
+            "total_tokens": 120,
+            "cache_write_input_tokens": 2
+          }
+        ]
+      }
+    ],
+    "totals": {
+      "input_tokens": 80,
+      "cached_input_tokens": 10,
+      "cache_write_input_tokens": 2,
+      "output_tokens": 40,
+      "reasoning_output_tokens": 12,
+      "compaction_events": 0
+    },
+    "accounting": {
+      "response_id_deduped": true,
+      "response_identity": "session_and_response",
+      "phase_endpoints": "start_inclusive_end_exclusive_unless_terminal",
+      "compaction_counted_once": true,
+      "reasoning_included_in_output": true,
+      "cache_counters_separate": true,
+      "secondary_token_count": "non_authoritative",
+      "native_parent_excludes_helpers": false,
+      "walked_sessions": [
+        "parent-session"
+      ],
+      "acceptance_unknown": false,
+      "measurement_incomplete": false
+    }
+  },
+  "evidence": {
+    "digests": {
+      "manifest": "6ffdbbe7bf1d733899bac37b9ca70deadfbaec06d962d6ecba7db5f5c3c7d37a",
+      "sessions": {
+        "parent-session": "2140108ad836dc5fdaf5ab6ec66b1b36a4f0d43d76984ac003bc9305450a98ca"
+      },
+      "links": [],
+      "trial": "6ab853e71e04d97466826bd9a95d6b8aba51688d8003978949cadba056feadec"
+    },
+    "notes": [],
+    "incomplete_primary_evidence": false
+  }
+}
