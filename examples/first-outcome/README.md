@@ -31,8 +31,9 @@ failures:
 - typecheck
 ```
 
-Empty input prints zero counts and an empty `failures:` list. Invalid JSON,
-missing names, or unknown statuses exit non-zero with an error on stderr.
+An empty JSON array (`[]`) prints zero counts and an empty `failures:` list.
+Empty stdin is invalid JSON and exits non-zero. Other invalid JSON, missing
+names, or unknown statuses also exit non-zero with an error on stderr.
 
 ## Compatibility before providers
 

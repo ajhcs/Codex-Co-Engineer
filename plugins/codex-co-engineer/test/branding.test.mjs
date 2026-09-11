@@ -14,7 +14,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
   );
 
   assert.equal(manifest.name, 'codex-co-engineer');
-  assert.equal(manifest.version, '3.4.2');
+  assert.equal(manifest.version, '3.4.3');
   assert.equal(manifest.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(manifest.interface.developerName, 'Codex-Co-Engineer');
   assert.equal(
@@ -71,7 +71,7 @@ test('plugin presents the Co-Engineer brand with usable icon assets', async () =
 
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.name, 'codex-co-engineer');
-  assert.equal(packageJson.version, '3.4.2');
+  assert.equal(packageJson.version, '3.4.3');
 
   const skill = await readFile(
     path.join(ROOT, 'skills', 'control-codex-co-engineer-agents', 'SKILL.md'),
@@ -168,13 +168,18 @@ test('visitor README leads with the product shot and copy/paste install', async 
     assert.equal(readme.includes(stale), false, stale);
   }
 
+  // Public install stays on the published 3.4.2 tag; the unreleased 3.4.3
+  // candidate is distinguished separately (PR43 path) and must not require a
+  // nonexistent v3.4.3 install tag.
   assert.match(readme, /git clone --branch v3\.4\.2 --single-branch https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
+  assert.doesNotMatch(readme, /git clone --branch v3\.4\.3/u);
+  assert.doesNotMatch(readme, /git fetch origin tag v3\.4\.3/u);
+  assert.match(readme, /3\.4\.3\s+\(candidate\)|In development for 3\.4\.3|unreleased\s+3\.4\.3\s+candidate/iu);
+  assert.match(readme, /PR43|pull\/43/u);
   assert.match(readme, /codex plugin marketplace add "\$PWD"/u);
   assert.match(readme, /codex plugin add codex-co-engineer@codex-co-engineer/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup:check/u);
-
-
 
   assert.match(readme, /docs\/releases\/v3\.4\.2\.md/u);
   assert.match(readme, /historical\s+3\.3\.0\s+notes/u);
@@ -264,7 +269,7 @@ test('every repository-relative README link resolves from its README location', 
   }
 });
 
-test('repository marketplace catalogs Codex-Co-Engineer 3.4.2', async () => {
+test('repository marketplace catalogs Codex-Co-Engineer 3.4.3', async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
@@ -272,7 +277,7 @@ test('repository marketplace catalogs Codex-Co-Engineer 3.4.2', async () => {
   assert.equal(marketplace.interface.displayName, 'Codex-Co-Engineer');
   assert.equal(marketplace.plugins.length, 1);
   assert.equal(marketplace.plugins[0].name, 'codex-co-engineer');
-  assert.equal(marketplace.plugins[0].version, '3.4.2');
+  assert.equal(marketplace.plugins[0].version, '3.4.3');
   assert.equal(marketplace.plugins[0].source.path, './plugins/codex-co-engineer');
   assert.equal(
     marketplace.interface.shortDescription,
