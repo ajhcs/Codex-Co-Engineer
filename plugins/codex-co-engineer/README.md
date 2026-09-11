@@ -19,8 +19,8 @@ is a complete workflow. The stable plugin and MCP identifier is `codex-co-engine
 ## Complete engineering assignments
 
 The revision operation and result reporting below are part of the 3.4.3
-candidate; install commands select `v3.4.3`. Verification remains open and no
-savings claim is made here.
+candidate; use the PR43 candidate install path below while the public tag is
+absent. Verification remains open and no savings claim is made here.
 
 Grok and Cursor can own preparation, implementation, meaningful checks, and
 requested corrections. Tell Codex your provider preferences once in the task;
@@ -35,7 +35,9 @@ readiness does not establish a subscription balance.
 See the [result guide](docs/run-results.md) and the public repository’s
 [contribution guide](https://github.com/ajhcs/Codex-Co-Engineer/blob/main/CONTRIBUTING.md),
 [support routes](https://github.com/ajhcs/Codex-Co-Engineer/blob/main/SUPPORT.md),
-and [first-outcome example](https://github.com/ajhcs/Codex-Co-Engineer/tree/main/examples/first-outcome).
+and the candidate
+[first-outcome example](https://github.com/ajhcs/Codex-Co-Engineer/tree/codex/coengineer-autonomous-ownership-20260910/examples/first-outcome)
+(PR43 tree only; absent from current `main` and published `v3.4.2`).
 
 ## Install and authentication
 
@@ -48,22 +50,47 @@ and [first-outcome example](https://github.com/ajhcs/Codex-Co-Engineer/tree/main
 
 The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
 
-### Install from a release clone
+### Install published 3.4.2 (stable)
+
+While the public `v3.4.3` tag is absent, install the **stable** published release.
+This path does not include the 3.4.3 candidate onboarding example or ownership
+package.
 
 ```bash
-git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
-cd Codex-Co-Engineer
+git clone --branch v3.4.2 --single-branch \
+  https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
+cd Codex-Co-Engineer-3.4.2
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Until the public `v3.4.3` tag exists, clone the exact qualified candidate commit
-or release branch instead of the tag. Historical `v3.4.2` install examples remain
-in the [3.4.2 release notes](docs/releases/v3.4.2.md).
+### Install the 3.4.3 candidate from public PR43
 
-Keep the clone as the registered marketplace source. Setup installs pinned ACPX
+Use a separate clone and marketplace identity `codex-co-engineer-343-candidate`
+so it does not collide with stable 3.4.2.
+
+```bash
+git clone https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-pr43
+cd Codex-Co-Engineer-pr43
+git fetch origin pull/43/head:pr-43
+git switch --detach pr-43
+git rev-parse HEAD
+git remote get-url origin
+git status --short
+npm --prefix plugins/codex-co-engineer run setup
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+npm --prefix plugins/codex-co-engineer run setup:check
+```
+
+Equivalent branch: `codex/coengineer-autonomous-ownership-20260910`. Parent tip
+`c50550e0a12e6ce8f7564d0e384f52c205640ce5` is historical development evidence
+from PR43; an external execution manifest binds the final integrated candidate
+SHA after integration.
+
+Keep each clone as its registered marketplace source. Setup installs pinned ACPX
 0.13.0, Cursor SDK 1.0.28, and the DSH 0.1.0-rc.7 composition globally. Use a
 user-writable npm global prefix on your `PATH`; a Node version manager is one
 way to provide it. Setup creates key-free DSH profiles and owner-only session
@@ -89,28 +116,43 @@ never include credentials in prompts or tool arguments. See
 
 ### Verify and start
 
-Start a new Codex session and ask: **Show Co-Engineer status.** Then name a
+Start a new Codex session. For a first route, use **one** provider—Grok is the
+default walkthrough—and ask: **Show Co-Engineer status.** Then name that
 provider and describe its first assignment. Setup checks dependencies and DSH
 profiles; the live `status` tool checks provider readiness and the MCP process's
 local Linux boundary. Setup does not install or authenticate Grok or Cursor.
 
 ### Upgrade
 
-Finish or cancel active runs, then update your clean registered source clone:
+Finish or cancel active runs, then update the matching clean registered clone.
+
+**Published 3.4.2 (stable `codex-co-engineer`):**
 
 ```bash
-git fetch origin tag v3.4.3
-git switch --detach v3.4.3
+git fetch origin tag v3.4.2
+git switch --detach v3.4.2
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin remove codex-co-engineer@codex-co-engineer
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
+**3.4.3 candidate (`codex-co-engineer-343-candidate`):**
+
+```bash
+git fetch origin pull/43/head:pr-43
+git switch --detach pr-43
+git rev-parse HEAD
+npm --prefix plugins/codex-co-engineer run setup
+codex plugin remove codex-co-engineer@codex-co-engineer-343-candidate
+codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+npm --prefix plugins/codex-co-engineer run setup:check
+```
+
 Restart the Codex session. Use the identity from `codex plugin list` if your
 marketplace name differs. Preserve dirty source clones and existing task state.
 Direct Meta Muse profiles need the [OpenRouter migration](docs/releases/v3.4.2.md#upgrading).
-Historical 3.4.2 upgrade commands remain in those notes.
+Historical 3.4.2 upgrade detail remains in those notes.
 
 ## Execution and safety model
 
@@ -177,12 +219,19 @@ are visible to that process.
 **Where should I run setup?**
 From this package directory (`plugins/codex-co-engineer` in a clone), or
 with `npm --prefix plugins/codex-co-engineer run setup` from the
-repository root. The copy/paste plugin registration from the repository root
+repository root. Stable published 3.4.2 registration from the repository root
 is:
 
 ```bash
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
+```
+
+The 3.4.3 candidate marketplace identity is `codex-co-engineer-343-candidate`:
+
+```bash
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
 ```
 
 **A managed worktree appeared without a receipt.**

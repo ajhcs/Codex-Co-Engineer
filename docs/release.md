@@ -68,9 +68,12 @@ After the provider-free gate passes:
 
 Use a distinct local marketplace name for an unpublished release candidate when
 an open project still contains an older plugin under the public marketplace name.
-Keep the plugin name and tested plugin bytes unchanged. Remove the conflicting
-installed identity through the supported plugin CLI; preserve any dirty source
-checkout instead of changing its version label or replacing its files.
+Keep the plugin name and tested plugin bytes unchanged. This candidate catalogs
+marketplace identity `codex-co-engineer-343-candidate` in
+`.agents/plugins/marketplace.json` so it does not collide with published
+3.4.2's `codex-co-engineer`. Remove a conflicting installed identity through the
+supported plugin CLI; preserve any dirty source checkout instead of changing its
+version label or replacing its files.
 
 Codex can refresh installed local plugins when listing project marketplaces.
 A project source with the same marketplace/plugin identity can replace the
@@ -112,8 +115,7 @@ The lifecycle ownership decision is
 Keep every existing requirement above. The new result and comparison fixtures
 are provider-free; they do not establish paid evaluation results or replace
 live acceptance. The local gate and CI both run the comparison fixture suite
-and the provider-free trial-usage and qualification unit stages when those
-scripts are present.
+and the provider-free trial-usage and qualification unit stages.
 
 For ownership changes, retain evidence of a completed producer, independent
 review, specific feedback, a corrected candidate, and Codex's acceptance.
@@ -159,9 +161,11 @@ Do not claim human-validation of agent onboarding.
 
 Follow the [benchmark protocol](../benchmarks/) for materialization and
 analysis. Link [PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) for
-the exact candidate and for actual measurements when retained. Synthetic
-fixtures and this checklist do not establish savings. Missing usage stays
-unknown in the [result report](run-results.md).
+the candidate path and for actual measurements when retained. Parent tip
+`c50550e` is historical development evidence; an external execution manifest
+binds the final integrated candidate SHA after integration. Synthetic fixtures
+and this checklist do not establish savings. Missing usage stays unknown in the
+[result report](run-results.md).
 
 ## Handoff and cleanup
 

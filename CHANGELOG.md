@@ -4,10 +4,12 @@
 
 ## [3.4.3] - UNRELEASED
 
-Candidate pending verification. Exact source identity: public
-[PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) (`c50550e`). No
-released or savings claim; link that PR for actual measurements when collected.
-Existing release and host acceptance gates still apply.
+Candidate pending verification. Public
+[PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) parent tip `c50550e`
+is historical development evidence from that PR; an external execution manifest
+binds the final integrated candidate SHA after integration. No released or
+savings claim; link that PR for actual measurements when collected. Existing
+release and host acceptance gates still apply.
 
 ### Added
 

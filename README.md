@@ -58,34 +58,65 @@ Install the CLI and account access for **only the providers you plan to use**.
 The provider table below separates these requirements. Co-Engineer does not
 install or sign you into Grok or Cursor.
 
-### 2. Install the release
+### 2. Install published 3.4.2 (stable)
 
-Run these commands from the directory where you keep your projects:
+The public `v3.4.3` tag is not published yet. Use this **stable** path for the
+released plugin. It does **not** include the 3.4.3 candidate onboarding example
+or ownership/revision package.
 
 ```bash
-git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
-cd Codex-Co-Engineer
+git clone --branch v3.4.2 --single-branch \
+  https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
+cd Codex-Co-Engineer-3.4.2
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Until the public `v3.4.3` tag exists, clone the exact qualified candidate commit
-or release branch instead of the tag. Historical installs may still use
-`v3.4.2` from the [3.4.2 notes](docs/releases/v3.4.2.md).
+Keep this clone as the registered **stable** marketplace source
+(`codex-co-engineer`). Full compatibility notes remain in the
+[3.4.2 release notes](docs/releases/v3.4.2.md).
 
-Keep this clone: it is the registered local marketplace source. Setup installs
-pinned ACPX, Cursor SDK, and DSH dependencies globally and creates key-free DSH
-configuration. It preserves existing compatible configuration and reports
-incompatible profiles instead of overwriting them. Use a user-writable npm global
-prefix on your `PATH`; a Node version manager is one way to provide it.
+### 3. Install the 3.4.3 candidate from public PR43
 
-`setup:check` checks Node/Python prerequisites, installed dependencies, and DSH configuration. Provider login
-and the running MCP process's Linux boundary are checked separately by `status`.
-The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
+Use a **separate** clone and the distinct development marketplace identity
+`codex-co-engineer-343-candidate` so it does not collide with published 3.4.2.
+This tree carries the candidate package (including `examples/first-outcome`);
+current `main` and published `v3.4.2` do not.
 
-### 3. Connect your chosen provider
+```bash
+git clone https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-pr43
+cd Codex-Co-Engineer-pr43
+git fetch origin pull/43/head:pr-43
+git switch --detach pr-43
+# Capture git identity for qualification evidence (do not invent a SHA):
+git rev-parse HEAD
+git remote get-url origin
+git status --short
+npm --prefix plugins/codex-co-engineer run setup
+codex plugin marketplace add "$PWD"
+codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+npm --prefix plugins/codex-co-engineer run setup:check
+```
+
+Equivalent branch checkout: `codex/coengineer-autonomous-ownership-20260910`.
+Parent tip `c50550e0a12e6ce8f7564d0e384f52c205640ce5` is **historical development
+evidence** from public PR43 qualification; an external execution manifest binds
+the final integrated candidate SHA after integration. Do not treat a local HEAD
+written into docs as that final SHA.
+
+Setup installs pinned ACPX, Cursor SDK, and DSH dependencies globally and creates
+key-free DSH configuration. It preserves existing compatible configuration and
+reports incompatible profiles instead of overwriting them. Use a user-writable
+npm global prefix on your `PATH`; a Node version manager is one way to provide it.
+
+`setup:check` checks Node/Python prerequisites, installed dependencies, and DSH
+configuration. Provider login and the running MCP process's Linux boundary are
+checked separately by `status`. The worktree tool is bundled; no separate
+`worktree-bootstrap` installation is needed.
+
+### 4. Connect your chosen provider
 
 | Provider | One-time authentication | Runs where? |
 | --- | --- | --- |
@@ -98,9 +129,9 @@ Muse defaults to **Muse Spark 1.3 Contributor, XHigh, through OpenRouter**.
 Provider credentials stay in normal login state, environment variables, or
 owner-only key files. Never paste them into task prompts or MCP arguments.
 
-### 4. Start a new Codex session
+### 5. Start a new Codex session
 
-Ask:
+For a first route, use **one** provider. Grok is the default walkthrough:
 
 > Show Co-Engineer status, then use Grok Co-Engineer to review the latest change.
 
@@ -121,8 +152,10 @@ new decision. [Inspect or revoke remembered access](plugins/codex-co-engineer/RE
 ## Your first delegation
 
 Start with [one provider and a small useful outcome](docs/co-engineer-quickstart.md).
-The [copyable example](examples/first-outcome/) includes a fixed local acceptance
-check, so you can see what the agent changed and verify it yourself.
+On the **3.4.3 candidate / PR43** tree, the [copyable example](examples/first-outcome/)
+includes a fixed local acceptance check. That example is **not** on current `main`
+or published `v3.4.2`; use the candidate install above (or the
+[PR43 first-outcome path](https://github.com/ajhcs/Codex-Co-Engineer/tree/codex/coengineer-autonomous-ownership-20260910/examples/first-outcome)).
 
 > Use Grok Co-Engineer to review the authentication changes. Report actionable findings.
 
@@ -228,26 +261,38 @@ does not change your Codex model, reasoning effort, or experimental settings.
 
 ## Upgrade to 3.4.3
 
-Finish or cancel active runs first. In a **clean existing source clone**:
+Finish or cancel active runs first. Prefer a **clean** clone; preserve dirty
+development checkouts.
+
+**Refresh published 3.4.2 (stable marketplace `codex-co-engineer`):**
 
 ```bash
-git fetch origin tag v3.4.3
-git switch --detach v3.4.3
+git fetch origin tag v3.4.2
+git switch --detach v3.4.2
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin remove codex-co-engineer@codex-co-engineer
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Start a new Codex session, then check Co-Engineer status. Keep your local changes
-if the source clone is dirty; use a separate clean release clone instead of
-resetting it. If your marketplace uses a different name, use the installed
-identity shown by `codex plugin list`.
+**Refresh the 3.4.3 candidate** (distinct marketplace
+`codex-co-engineer-343-candidate`; do not replace the stable identity):
 
-Existing task receipts and provider accounts are retained. Users with a direct
-Meta Muse profile must migrate to OpenRouter; see the
-[upgrade notes](docs/releases/v3.4.3.md#upgrading). Historical upgrade steps for
-published 3.4.2 remain in the [3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
+```bash
+git fetch origin pull/43/head:pr-43
+git switch --detach pr-43
+git rev-parse HEAD
+npm --prefix plugins/codex-co-engineer run setup
+codex plugin remove codex-co-engineer@codex-co-engineer-343-candidate
+codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+npm --prefix plugins/codex-co-engineer run setup:check
+```
+
+Start a new Codex session, then check Co-Engineer status. Use the identity from
+`codex plugin list` if it differs. Existing task receipts and provider accounts
+are retained. Users with a direct Meta Muse profile must migrate to OpenRouter;
+see the [upgrade notes](docs/releases/v3.4.3.md#upgrading) and historical
+[3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
 
 ## Troubleshooting
 
