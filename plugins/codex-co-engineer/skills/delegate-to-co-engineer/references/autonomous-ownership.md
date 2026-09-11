@@ -41,9 +41,14 @@ supported revision operation and its returned identity/action rather than
 reconstructing a launch from memory. A terminal revision is new scoped work,
 not a replay or an answer to an old attention question. It preserves provider,
 model, ownership, repository authorization, and immutable previous evidence.
-The correction chain permits three rounds and one admitted child per producer.
-Follow the returned child; an exhausted or failed loop needs an explicit decision
-about a new bounded assignment. Do not branch the original producer repeatedly.
+The child is a fresh correction workspace already at the reviewed commit.
+Implementation and commits stay in that assigned working directory. Original
+run, assignment, and repository paths are lineage and reference, not
+navigation. Inspect pwd and Git identity and report a mismatch instead of
+seeking the producer worktree. The correction chain permits three rounds and
+one admitted child per producer. Follow the returned child; an exhausted or
+failed loop needs an explicit decision about a new bounded assignment. Do not
+branch the original producer repeatedly.
 Read `result_evidence` for the outcome and use diagnostics only when the detailed
 usage or unresolved evidence affects the decision. Its usage covers this run,
 so include earlier attempts and native helpers when comparing the whole outcome.

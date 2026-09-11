@@ -75,6 +75,11 @@ test('valid clean revision preserves authority and derives a fresh identity', ()
   assert.match(derived.run_request.assignments[0].prompt, /unit-tests/u);
   assert.match(derived.run_request.assignments[0].prompt, /Reviewed HEAD: /u);
   assert.match(derived.run_request.assignments[0].prompt, /fresh owned revision/u);
+  assert.match(derived.run_request.assignments[0].prompt, /fresh correction workspace already at the reviewed commit/u);
+  assert.match(derived.run_request.assignments[0].prompt, /current assigned working directory/u);
+  assert.match(derived.run_request.assignments[0].prompt, /lineage and reference, not navigation/u);
+  assert.match(derived.run_request.assignments[0].prompt, /Inspect pwd and Git identity and report a mismatch instead of seeking the producer worktree/u);
+  assert.doesNotMatch(derived.run_request.assignments[0].prompt, /in place/u);
   assert.equal(derived.producer_run_id, 'vale-hardening');
   assert.equal(derived.correction.lineage, 'owned_revision');
   assert.equal(derived.correction.reviewed_head, HEAD);

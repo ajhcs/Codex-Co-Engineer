@@ -733,7 +733,7 @@ export function parseChildEnvelopeV1(envelopeText) {
   });
 }
 
-const CORRECTION_PROMPT_PREFIX = 'Correct the existing assignment in place. Preserve the provider, model, write scope, access, and capabilities. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
+const CORRECTION_PROMPT_PREFIX = 'This is a fresh correction workspace already at the reviewed commit. Implementation and all commits must occur in the current assigned working directory. Original run, assignment, and repository paths are lineage and reference, not navigation. Inspect pwd and Git identity and report a mismatch instead of seeking the producer worktree. Preserve the provider, model, write scope, access, and capabilities. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
 
 function correctionScopeSection(writeScope, access) {
   const readOnly = access === 'read_only' || access === 'read';
