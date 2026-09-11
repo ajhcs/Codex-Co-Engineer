@@ -600,6 +600,31 @@ AcpRuntimeManager.prototype.runRuntimeTurnTask = function coEngineerRunRuntimeTu
   });
 };
 
+/*
+ * finalizeRuntimeTurnRecord samples refreshClosedState, then awaits
+ * sessionStore.save before retainPersistentClientAfterTurn. close() can finish
+ * in that gap: it persists closed=true on a freshly loaded record, but
+ * finalization still holds a stale not-closed decision, overwrites the stored
+ * snapshot, and retains the live client. Refuse retain after close intent
+ * (closingActiveRecords / closed) and re-persist the closed snapshot after
+ * that save.
+ */
+const coEngineerOriginalRetainPersistentClientAfterTurn = AcpRuntimeManager.prototype.retainPersistentClientAfterTurn;
+AcpRuntimeManager.prototype.retainPersistentClientAfterTurn = async function coEngineerRetainPersistentClientAfterTurn(input) {
+  if (input.record.closed || this.closingActiveRecords.has(input.record.acpxRecordId)) return false;
+  return coEngineerOriginalRetainPersistentClientAfterTurn.call(this, input);
+};
+
+const coEngineerOriginalFinalizeRuntimeTurnRecord = AcpRuntimeManager.prototype.finalizeRuntimeTurnRecord;
+AcpRuntimeManager.prototype.finalizeRuntimeTurnRecord = async function coEngineerFinalizeRuntimeTurnRecord(turn) {
+  const retained = await coEngineerOriginalFinalizeRuntimeTurnRecord.call(this, turn);
+  const closed = await this.refreshClosedState(turn.record);
+  if (!closed) return retained;
+  if (retained) await this.closePendingPersistentClient(turn.record.acpxRecordId);
+  await this.options.sessionStore.save(turn.record).catch(() => {});
+  return false;
+};
+
 async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } = {}) {
   const hasTimeout = timeoutMs != null && timeoutMs > 0;
   const hasSignal = signal != null;
