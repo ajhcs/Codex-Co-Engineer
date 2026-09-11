@@ -60,13 +60,12 @@ install or sign you into Grok or Cursor.
 
 ### 2. Install published 3.4.2 (stable)
 
-The public `v3.4.3` tag is not published yet. Use this **stable** path for the
-released plugin. It does **not** include the 3.4.3 candidate onboarding example
-or ownership/revision package.
+The public `v3.4.3` tag is absent. Use this **stable** path for the released
+plugin. It does **not** include the 3.4.3 candidate onboarding example or
+ownership/revision package.
 
 ```bash
-git clone --branch v3.4.2 --single-branch \
-  https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
+git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
 cd Codex-Co-Engineer-3.4.2
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
@@ -80,8 +79,14 @@ Keep this clone as the registered **stable** marketplace source
 
 ### 3. Install the 3.4.3 candidate from public PR43
 
-Use a **separate** clone and the distinct development marketplace identity
-`codex-co-engineer-343-candidate` so it does not collide with published 3.4.2.
+The public candidate keeps the **stable** marketplace identity
+`codex-co-engineer`. Prefer a **clean Codex installation** (no existing
+Co-Engineer marketplace/plugin) so registration does not collide with published
+3.4.2. If you already have Co-Engineer installed, finish or cancel active runs,
+then use the supported remove/re-add marketplace workflow below, or keep this
+candidate in a separate clean Codex environment. Do not rename the shipped
+marketplace manifest or invent install flags to work around a local collision.
+
 This tree carries the candidate package (including `examples/first-outcome`);
 current `main` and published `v3.4.2` do not.
 
@@ -96,7 +101,7 @@ git remote get-url origin
 git status --short
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
-codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
@@ -259,10 +264,12 @@ The [model-role guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/
 separates practical suggestions from official model documentation. Co-Engineer
 does not change your Codex model, reasoning effort, or experimental settings.
 
-## Upgrade to 3.4.3
+## Upgrade to 3.4.2
 
 Finish or cancel active runs first. Prefer a **clean** clone; preserve dirty
-development checkouts.
+development checkouts. While the public `v3.4.3` tag is absent, published 3.4.2
+remains the stable install; the 3.4.3 candidate uses the same marketplace
+identity from PR43.
 
 **Refresh published 3.4.2 (stable marketplace `codex-co-engineer`):**
 
@@ -275,16 +282,16 @@ codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-**Refresh the 3.4.3 candidate** (distinct marketplace
-`codex-co-engineer-343-candidate`; do not replace the stable identity):
+**Refresh the 3.4.3 candidate** (same stable marketplace `codex-co-engineer`;
+prefer a clean Codex environment, or finish/cancel runs then remove/re-add):
 
 ```bash
 git fetch origin pull/43/head:pr-43
 git switch --detach pr-43
 git rev-parse HEAD
 npm --prefix plugins/codex-co-engineer run setup
-codex plugin remove codex-co-engineer@codex-co-engineer-343-candidate
-codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+codex plugin remove codex-co-engineer@codex-co-engineer
+codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
@@ -302,7 +309,7 @@ see the [upgrade notes](docs/releases/v3.4.3.md#upgrading) and historical
 | Local provider is unavailable | Ask for Co-Engineer status; inspect `local_boundary` and the named missing dependency |
 | Setup reports an incompatible Muse profile | Follow the OpenRouter migration in the release notes; keep a backup of your configuration |
 | Repeated repository-sharing prompts | Choose remembered access; confirm the provider and repository origin have not changed |
-| Installed files disappear or an old version returns | Check for another local marketplace using the same identity; use a distinct marketplace name for development candidates |
+| Installed files disappear or an old version returns | Check for another local marketplace using the same identity; finish/cancel runs, then remove/re-add from one clean source, or use a separate clean Codex environment for the candidate |
 | Cursor Cloud cannot see a commit | Push the exact SHA and make the branch visible through an open PR or the default branch |
 | No extra panel appears | Continue in the conversation; the CLI workflow is complete without an optional host UI |
 

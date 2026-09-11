@@ -66,14 +66,16 @@ After the provider-free gate passes:
 
 ## Local release installation identity
 
-Use a distinct local marketplace name for an unpublished release candidate when
-an open project still contains an older plugin under the public marketplace name.
-Keep the plugin name and tested plugin bytes unchanged. This candidate catalogs
-marketplace identity `codex-co-engineer-343-candidate` in
-`.agents/plugins/marketplace.json` so it does not collide with published
-3.4.2's `codex-co-engineer`. Remove a conflicting installed identity through the
-supported plugin CLI; preserve any dirty source checkout instead of changing its
-version label or replacing its files.
+The public release candidate keeps the stable marketplace identity
+`codex-co-engineer` in `.agents/plugins/marketplace.json`. Do not rename the
+shipped marketplace to solve a local install collision, invent unsupported
+install flags, or silently modify tracked manifests during installation.
+
+Prefer a clean Codex installation for candidate qualification and onboarding.
+When an existing installation already uses that marketplace identity, finish or
+cancel active runs, then remove and re-add through the supported plugin CLI, or
+keep the candidate in a separate clean Codex environment. Preserve any dirty
+source checkout instead of changing its version label or replacing its files.
 
 Codex can refresh installed local plugins when listing project marketplaces.
 A project source with the same marketplace/plugin identity can replace the
@@ -82,10 +84,11 @@ An existing MCP process then retains paths into the removed version.
 
 After installation, verify the actual project-scoped `plugin/list` operation for
 open development checkouts: the candidate must remain installed and enabled,
-its complete file inventory must match the qualified source, and old identities
-must remain uninstalled. Repeat the inventory check after the host connection
-restarts, then run native provider acceptance. CLI marketplace listing alone
-and a successful check immediately after copying files do not prove persistence.
+its complete file inventory must match the qualified source, and stale
+installations must remain uninstalled. Repeat the inventory check after the host
+connection restarts, then run native provider acceptance. CLI marketplace
+listing alone and a successful check immediately after copying files do not prove
+persistence.
 
 ## Native run acceptance
 

@@ -57,8 +57,7 @@ This path does not include the 3.4.3 candidate onboarding example or ownership
 package.
 
 ```bash
-git clone --branch v3.4.2 --single-branch \
-  https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
+git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
 cd Codex-Co-Engineer-3.4.2
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
@@ -68,8 +67,12 @@ npm --prefix plugins/codex-co-engineer run setup:check
 
 ### Install the 3.4.3 candidate from public PR43
 
-Use a separate clone and marketplace identity `codex-co-engineer-343-candidate`
-so it does not collide with stable 3.4.2.
+The public candidate keeps the stable marketplace identity
+`codex-co-engineer`. Prefer a clean Codex installation. If Co-Engineer is
+already installed, finish or cancel active runs, then follow the supported
+remove/re-add workflow, or keep the candidate in a separate clean Codex
+environment. Do not rename the shipped marketplace manifest to work around a
+local collision.
 
 ```bash
 git clone https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-pr43
@@ -81,7 +84,7 @@ git remote get-url origin
 git status --short
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
-codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
@@ -137,15 +140,16 @@ codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-**3.4.3 candidate (`codex-co-engineer-343-candidate`):**
+**3.4.3 candidate (stable marketplace `codex-co-engineer`; prefer a clean Codex
+environment or finish/cancel then remove/re-add):**
 
 ```bash
 git fetch origin pull/43/head:pr-43
 git switch --detach pr-43
 git rev-parse HEAD
 npm --prefix plugins/codex-co-engineer run setup
-codex plugin remove codex-co-engineer@codex-co-engineer-343-candidate
-codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
+codex plugin remove codex-co-engineer@codex-co-engineer
+codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
@@ -219,21 +223,18 @@ are visible to that process.
 **Where should I run setup?**
 From this package directory (`plugins/codex-co-engineer` in a clone), or
 with `npm --prefix plugins/codex-co-engineer run setup` from the
-repository root. Stable published 3.4.2 registration from the repository root
-is:
+repository root. Registration from the repository root uses the stable
+marketplace identity `codex-co-engineer` for both published 3.4.2 and the
+3.4.3 candidate:
 
 ```bash
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 ```
 
-The 3.4.3 candidate marketplace identity is `codex-co-engineer-343-candidate`:
-
-```bash
-codex plugin marketplace add "$PWD"
-codex plugin add codex-co-engineer@codex-co-engineer-343-candidate
-```
-
+Prefer a clean Codex installation for the candidate. If you already have
+Co-Engineer installed, finish or cancel active runs, then remove/re-add through
+the supported plugin CLI, or keep the candidate in a separate clean environment.
 **A managed worktree appeared without a receipt.**
 Do not guess or delete it. Inspect `git worktree list` and
 `worktree-bootstrap lock inspect`, then clean only an exact identified
