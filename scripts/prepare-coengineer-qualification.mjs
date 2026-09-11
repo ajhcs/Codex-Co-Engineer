@@ -57,6 +57,15 @@ export const PLACEHOLDER_HOST_MODEL = 'codex-default';
 export const ASTRA_PROVIDER = 'openai';
 export const ASTRA_MODEL = 'gpt-6-astra';
 export const HOST_USAGE_REPORT_SCHEMA_ID = 'codex-co-engineer.host-usage-report.v1';
+export const EVIDENCE_DIGEST_DOMAIN = 'codex-co-engineer.host-usage-evidence.v1';
+const HOST_USAGE_COUNTERS = Object.freeze([
+  'input_tokens',
+  'cached_input_tokens',
+  'cache_write_input_tokens',
+  'output_tokens',
+  'reasoning_output_tokens',
+]);
+const HOST_MODEL_COUNTERS = Object.freeze([...HOST_USAGE_COUNTERS, 'total_tokens']);
 export const ARM_TRIAL_TOKENS = Object.freeze({
   'native-codex': 'native-codex',
   'published-3.4.2': 'published-3-4-2',
@@ -106,6 +115,40 @@ function isPlainObject(value) {
 
 function sha256Bytes(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+export function hostUsageEvidenceDigest(parts) {
+  const hash = createHash('sha256');
+  hash.update(EVIDENCE_DIGEST_DOMAIN);
+  hash.update('\0');
+  for (const part of parts) {
+    const buffer = Buffer.isBuffer(part) ? part : Buffer.from(String(part), 'utf8');
+    hash.update(Buffer.from([0]));
+    hash.update(buffer);
+  }
+  return hash.digest('hex');
+}
+
+export function hostUsageTrialDigest(trial) {
+  return hostUsageEvidenceDigest(['trial', JSON.stringify(trial)]);
+}
+
+function parseOptionalCounter(value, pathLabel) {
+  if (value == null) return null;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    fail('out_of_range', `${pathLabel} must be a non-negative safe integer.`);
+  }
+  return value;
+}
+
+function sumModelCounter(rows, key) {
+  if (rows.length === 0) return 0;
+  let sum = 0;
+  for (const row of rows) {
+    if (row[key] == null) return null;
+    sum += row[key];
+  }
+  return sum;
 }
 
 export const CASE_DEFS = Object.freeze([
@@ -1239,6 +1282,111 @@ function emptyAstraMetric(astra = null) {
   };
 }
 
+function parseHostUsageModelRow(row, pathLabel) {
+  if (!isPlainObject(row)) fail('invalid_type', pathLabel);
+  const model = row.model;
+  if (typeof model !== 'string' || model.length === 0) {
+    fail('invalid_format', `${pathLabel}.model`);
+  }
+  const parsed = { model };
+  for (const key of HOST_MODEL_COUNTERS) {
+    parsed[key] = parseOptionalCounter(row[key], `${pathLabel}.${key}`);
+  }
+  return parsed;
+}
+
+function parseHostUsageAttemptRow(entry, pathLabel) {
+  if (!isPlainObject(entry)) fail('invalid_type', pathLabel);
+  const attemptId = entry.attempt_id;
+  if (typeof attemptId !== 'string' || !QUAL_TRIAL_ID.test(attemptId)) {
+    fail('invalid_format', `${pathLabel}.attempt_id`);
+  }
+  const byModelInput = Array.isArray(entry.by_model) ? entry.by_model : [];
+  const parsed = {
+    attempt_id: attemptId,
+    session_id: typeof entry.session_id === 'string' ? entry.session_id : null,
+    compaction_events: parseOptionalCounter(entry.compaction_events, `${pathLabel}.compaction_events`),
+    by_model: byModelInput.map((row, rowIndex) => (
+      parseHostUsageModelRow(row, `${pathLabel}.by_model[${rowIndex}]`)
+    )),
+  };
+  for (const key of HOST_USAGE_COUNTERS) {
+    parsed[key] = parseOptionalCounter(entry[key], `${pathLabel}.${key}`);
+  }
+  return parsed;
+}
+
+function reconcileHostUsageAttempt(row, trialAttempt) {
+  const reasons = [];
+  const seenModels = new Set();
+  for (const entry of row.by_model) {
+    if (seenModels.has(entry.model)) {
+      reasons.push(`duplicate_model:${row.attempt_id}:${entry.model}`);
+    }
+    seenModels.add(entry.model);
+  }
+  const uniqueModels = seenModels.size === row.by_model.length;
+  if (uniqueModels) {
+    for (const key of HOST_USAGE_COUNTERS) {
+      const summed = sumModelCounter(row.by_model, key);
+      if (row[key] !== summed) reasons.push(`by_model_sum:${row.attempt_id}:${key}`);
+    }
+  }
+  if (trialAttempt != null) {
+    if (row.input_tokens !== trialAttempt.usage.native_input_tokens.value) {
+      reasons.push(`native_usage:${row.attempt_id}:native_input_tokens`);
+    }
+    if (row.output_tokens !== trialAttempt.usage.native_output_tokens.value) {
+      reasons.push(`native_usage:${row.attempt_id}:native_output_tokens`);
+    }
+  }
+  return reasons;
+}
+
+function reconcileHostUsageReport(report, claimedTrialDigest, computedTrialDigest) {
+  const reasons = [];
+  if (claimedTrialDigest == null || claimedTrialDigest !== computedTrialDigest) {
+    reasons.push('trial_digest');
+  }
+  const trialAttempts = new Map(report.trial.attempts.map((attempt) => [attempt.attempt_id, attempt]));
+  const seenAttemptIds = new Set();
+  const totals = report.breakdown.totals;
+  const summedTotals = Object.fromEntries(HOST_USAGE_COUNTERS.map((key) => [key, 0]));
+  let compactionSum = 0;
+  let totalsMeasurable = true;
+  for (const row of report.breakdown.attempts) {
+    if (seenAttemptIds.has(row.attempt_id)) reasons.push(`duplicate_attempt_id:${row.attempt_id}`);
+    seenAttemptIds.add(row.attempt_id);
+    const trialAttempt = trialAttempts.get(row.attempt_id);
+    if (trialAttempt == null) reasons.push(`extra_attempt:${row.attempt_id}`);
+    reasons.push(...reconcileHostUsageAttempt(row, trialAttempt));
+    for (const key of HOST_USAGE_COUNTERS) {
+      if (row[key] == null || summedTotals[key] == null) {
+        summedTotals[key] = null;
+        totalsMeasurable = false;
+      } else {
+        summedTotals[key] += row[key];
+      }
+    }
+    if (row.compaction_events == null) compactionSum = null;
+    else if (compactionSum != null) compactionSum += row.compaction_events;
+  }
+  for (const attempt of report.trial.attempts) {
+    if (!seenAttemptIds.has(attempt.attempt_id)) reasons.push(`missing_attempt:${attempt.attempt_id}`);
+  }
+  const totalsPresent = HOST_USAGE_COUNTERS.some((key) => totals[key] != null)
+    || totals.compaction_events != null;
+  if (totalsPresent && totalsMeasurable) {
+    for (const key of HOST_USAGE_COUNTERS) {
+      if (totals[key] !== summedTotals[key]) reasons.push(`totals:${key}`);
+    }
+    if (totals.compaction_events != null && totals.compaction_events !== compactionSum) {
+      reasons.push('totals:compaction_events');
+    }
+  }
+  return [...new Set(reasons)];
+}
+
 export function parseHostUsageReport(value, pathLabel = 'usage_report') {
   if (!isPlainObject(value)) fail('invalid_type', `${pathLabel} must be a JSON object.`);
   if (value.schema !== HOST_USAGE_REPORT_SCHEMA_ID) fail('invalid_format', `${pathLabel}.schema`);
@@ -1246,39 +1394,22 @@ export function parseHostUsageReport(value, pathLabel = 'usage_report') {
   if (status !== 'complete' && status !== 'inconclusive') {
     fail('invalid_format', `${pathLabel}.status`);
   }
+  const computedTrialDigest = isPlainObject(value.trial) ? hostUsageTrialDigest(value.trial) : null;
   const trial = parseQualificationTrial(value.trial, `${pathLabel}.trial`);
   const breakdown = value.breakdown;
   if (!isPlainObject(breakdown) || !Array.isArray(breakdown.attempts)) {
     fail('invalid_format', `${pathLabel}.breakdown.attempts`);
   }
-  const attempts = breakdown.attempts.map((entry, index) => {
-    if (!isPlainObject(entry)) fail('invalid_type', `${pathLabel}.breakdown.attempts[${index}]`);
-    const attemptId = entry.attempt_id;
-    if (typeof attemptId !== 'string' || !QUAL_TRIAL_ID.test(attemptId)) {
-      fail('invalid_format', `${pathLabel}.breakdown.attempts[${index}].attempt_id`);
-    }
-    const byModel = Array.isArray(entry.by_model) ? entry.by_model : [];
-    return {
-      attempt_id: attemptId,
-      session_id: typeof entry.session_id === 'string' ? entry.session_id : null,
-      output_tokens: Number.isSafeInteger(entry.output_tokens) ? entry.output_tokens : null,
-      by_model: byModel.map((row, rowIndex) => {
-        if (!isPlainObject(row)) fail('invalid_type', `${pathLabel}.breakdown.attempts[${index}].by_model[${rowIndex}]`);
-        const model = row.model;
-        if (typeof model !== 'string' || model.length === 0) {
-          fail('invalid_format', `${pathLabel}.breakdown.attempts[${index}].by_model[${rowIndex}].model`);
-        }
-        const output = row.output_tokens;
-        if (output != null && (!Number.isSafeInteger(output) || output < 0)) {
-          fail('out_of_range', `${pathLabel}.breakdown.attempts[${index}].by_model[${rowIndex}].output_tokens`);
-        }
-        return { model, output_tokens: output ?? null };
-      }),
-    };
-  });
+  const attempts = breakdown.attempts.map((entry, index) => (
+    parseHostUsageAttemptRow(entry, `${pathLabel}.breakdown.attempts[${index}]`)
+  ));
   const evidence = isPlainObject(value.evidence) ? value.evidence : {};
+  const digests = isPlainObject(evidence.digests) ? evidence.digests : {};
+  const claimedTrialDigest = typeof digests.trial === 'string' && SHA256.test(digests.trial)
+    ? digests.trial
+    : null;
   const incompletePrimary = evidence.incomplete_primary_evidence === true || status !== 'complete';
-  return {
+  const parsed = {
     schema: HOST_USAGE_REPORT_SCHEMA_ID,
     status,
     trial,
@@ -1288,68 +1419,116 @@ export function parseHostUsageReport(value, pathLabel = 'usage_report') {
       accounting: isPlainObject(breakdown.accounting) ? breakdown.accounting : {},
     },
     evidence: {
+      digests: {
+        manifest: typeof digests.manifest === 'string' ? digests.manifest : null,
+        sessions: isPlainObject(digests.sessions) ? digests.sessions : {},
+        links: Array.isArray(digests.links) ? digests.links : [],
+        trial: claimedTrialDigest,
+      },
       notes: Array.isArray(evidence.notes) ? evidence.notes : [],
       incomplete_primary_evidence: incompletePrimary,
+      trial_digest_verified: claimedTrialDigest != null && claimedTrialDigest === computedTrialDigest,
     },
     measured_numbers_retained: true,
+    bound_mismatch: null,
   };
+  parsed.integrity = {
+    reasons: reconcileHostUsageReport(parsed, claimedTrialDigest, computedTrialDigest),
+  };
+  parsed.integrity.ok = parsed.integrity.reasons.length === 0;
+  return parsed;
 }
 
 function reportMatchesTrial(report, trial) {
-  const bound = report.trial;
-  if (bound.trial_id !== trial.trial_id) return 'trial_id';
-  if (bound.case_id !== trial.case_id) return 'case_id';
-  if (bound.arm !== trial.arm) return 'arm';
-  if (bound.base_sha !== trial.base_sha) return 'base_sha';
-  if (bound.input_digest !== trial.input_digest) return 'input_digest';
-  if (bound.host_model !== trial.host_model) return 'host_model';
-  if (settingsDigest(bound.host_settings) !== settingsDigest(trial.host_settings)) return 'host_settings';
-  if (settingsDigest(bound.provider_configuration) !== settingsDigest(trial.provider_configuration)) {
-    return 'provider_configuration';
-  }
-  if (bound.coengineer_source.kind !== trial.coengineer_source.kind
-    || bound.coengineer_source.value !== trial.coengineer_source.value) {
-    return 'coengineer_source';
-  }
-  if (bound.accepted !== trial.accepted) return 'accepted';
-  if (bound.wall_elapsed_ms.value !== trial.wall_elapsed_ms.value) return 'wall_elapsed_ms';
-  if (bound.attempts.length !== trial.attempts.length) return 'attempts';
-  for (let index = 0; index < bound.attempts.length; index += 1) {
-    const left = bound.attempts[index];
-    const right = trial.attempts[index];
-    if (left.attempt_id !== right.attempt_id || left.kind !== right.kind || left.outcome !== right.outcome) {
-      return 'attempt_identity';
-    }
-    if (left.usage.native_output_tokens.value !== right.usage.native_output_tokens.value) {
-      return 'native_output_tokens';
-    }
+  if (canonicalJsonStringify(report.trial) !== canonicalJsonStringify(trial)) {
+    return 'canonical_trial';
   }
   return null;
 }
 
 function astraOutputFromReport(report, astra, trial) {
-  if (astra == null || typeof astra.model !== 'string') return { value: null, includesHelpers: false, observed: false };
-  const byAttemptId = new Map(trial.attempts.map((attempt) => [attempt.attempt_id, attempt]));
+  const empty = {
+    value: null,
+    includesHelpers: false,
+    observed: false,
+    coverageComplete: false,
+    untrusted: true,
+  };
+  if (astra == null || typeof astra.model !== 'string') return empty;
+  if (report.bound_mismatch) return empty;
+  const duplicateAttempts = report.integrity.reasons.some((reason) => reason.startsWith('duplicate_attempt_id:'));
+  const duplicateModels = report.integrity.reasons.some((reason) => reason.startsWith('duplicate_model:'));
+  if (duplicateAttempts || duplicateModels) return empty;
+
+  const byAttemptId = new Map();
+  for (const row of report.breakdown.attempts) {
+    if (byAttemptId.has(row.attempt_id)) return empty;
+    byAttemptId.set(row.attempt_id, row);
+  }
+
   let sum = 0;
   let observed = false;
   let includesHelpers = false;
-  const countedAttempts = new Set();
-  for (const row of report.breakdown.attempts) {
-    if (countedAttempts.has(row.attempt_id)) continue;
-    countedAttempts.add(row.attempt_id);
+  let coverageComplete = report.integrity.ok && report.status === 'complete'
+    && report.evidence.incomplete_primary_evidence !== true;
+  let untrusted = false;
+
+  for (const attempt of trial.attempts) {
+    const row = byAttemptId.get(attempt.attempt_id);
+    if (row == null) {
+      coverageComplete = false;
+      continue;
+    }
+    const rowReasons = report.integrity.reasons.filter((reason) => reason.includes(`:${attempt.attempt_id}:`)
+      || reason === `extra_attempt:${attempt.attempt_id}`
+      || reason === `duplicate_attempt_id:${attempt.attempt_id}`
+      || reason === `missing_attempt:${attempt.attempt_id}`);
+    const rowUntrusted = rowReasons.some((reason) => (
+      reason.startsWith('by_model_sum:')
+      || reason.startsWith('native_usage:')
+      || reason.startsWith('duplicate_model:')
+      || reason.startsWith('duplicate_attempt_id:')
+    ));
+    if (rowUntrusted) {
+      untrusted = true;
+      coverageComplete = false;
+      continue;
+    }
     const matching = row.by_model.filter((entry) => entry.model === astra.model);
     if (matching.length === 0) continue;
     let attemptSum = 0;
+    let missing = false;
     for (const entry of matching) {
-      if (entry.output_tokens == null) return { value: null, includesHelpers, observed: false };
+      if (entry.output_tokens == null) {
+        missing = true;
+        break;
+      }
       attemptSum += entry.output_tokens;
+    }
+    if (missing) {
+      coverageComplete = false;
+      continue;
     }
     sum += attemptSum;
     observed = true;
-    const attempt = byAttemptId.get(row.attempt_id);
-    if (attempt?.kind === 'native_helper') includesHelpers = true;
+    if (attempt.kind === 'native_helper') includesHelpers = true;
   }
-  return { value: observed ? sum : null, includesHelpers, observed };
+  for (const attemptId of byAttemptId.keys()) {
+    if (!trial.attempts.some((attempt) => attempt.attempt_id === attemptId)) {
+      coverageComplete = false;
+      untrusted = true;
+    }
+  }
+  if (untrusted && !observed) {
+    return { value: null, includesHelpers, observed: false, coverageComplete: false, untrusted: true };
+  }
+  return {
+    value: observed ? sum : null,
+    includesHelpers,
+    observed,
+    coverageComplete: coverageComplete && !untrusted && observed,
+    untrusted,
+  };
 }
 
 function accountAstraOwnNativeOutput(trials, astra, reportsByTrialId) {
@@ -1367,10 +1546,19 @@ function accountAstraOwnNativeOutput(trials, astra, reportsByTrialId) {
       coverageComplete = false;
       continue;
     }
-    if (report.status !== 'complete' || report.evidence.incomplete_primary_evidence === true) {
+    if (report.status !== 'complete'
+      || report.evidence.incomplete_primary_evidence === true
+      || report.integrity.ok !== true
+      || report.bound_mismatch) {
       coverageComplete = false;
     }
     const observed = astraOutputFromReport(report, astra, trial);
+    if (observed.untrusted && !observed.observed) {
+      unknown += 1;
+      coverageComplete = false;
+      continue;
+    }
+    if (!observed.coverageComplete) coverageComplete = false;
     if (!observed.observed || observed.value == null) {
       unknown += 1;
       continue;
@@ -1387,10 +1575,13 @@ function accountAstraOwnNativeOutput(trials, astra, reportsByTrialId) {
   if (known > 0) {
     result.value = sum;
     result.source = 'host_measured';
-    result.trust = 'host_authoritative';
+    result.trust = result.coverage_complete ? 'host_authoritative' : 'unknown';
   }
-  if (!coverageComplete || unknown > 0) result.reason = 'incomplete_primary_coverage';
-  else result.reason = 'observed_native_model';
+  if (!coverageComplete || unknown > 0 || !result.coverage_complete) {
+    result.reason = 'incomplete_primary_coverage';
+  } else {
+    result.reason = 'observed_native_model';
+  }
   return result;
 }
 
@@ -1460,8 +1651,15 @@ function indexUsageReports(usageReports, parsedTrials, mark) {
       continue;
     }
     const mismatch = reportMatchesTrial(report, trial);
+    report.bound_mismatch = mismatch;
     if (mismatch) {
       mark('inconclusive', `usage_report_mismatch:${report.trial.trial_id}:${mismatch}`);
+    }
+    if (report.integrity.ok !== true) {
+      mark(
+        'inconclusive',
+        `usage_report_inconsistent:${report.trial.trial_id}:${report.integrity.reasons[0]}`,
+      );
     }
     reportsByTrialId.set(report.trial.trial_id, report);
   }

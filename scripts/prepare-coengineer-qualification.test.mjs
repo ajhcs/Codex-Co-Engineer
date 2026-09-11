@@ -14,6 +14,7 @@ import {
   ASTRA_PROVIDER,
   CASE_IDS,
   DEADLINE_SOURCE_SHA,
+  EVIDENCE_DIGEST_DOMAIN,
   FIVE_TOOLS,
   HOST_USAGE_REPORT_SCHEMA_ID,
   ORDERING_SEED,
@@ -29,6 +30,7 @@ import {
   evaluateQualificationCohort,
   extractSource,
   generateSchedule,
+  hostUsageTrialDigest,
   loadQualificationCases,
   main,
   materializeQualificationCase,
@@ -132,8 +134,12 @@ function makeTrial(plan, caseRecord, manifest, {
       attempt_id: 'initial',
       kind: 'initial',
       outcome: 'failed',
+      sequence: 1,
       usage: {
+        native_input_tokens: metric(0),
         native_output_tokens: metric(10),
+        native_helper_calls: metric(0),
+        correction_rounds: metric(0),
         elapsed_ms: metric(400),
       },
     });
@@ -141,8 +147,12 @@ function makeTrial(plan, caseRecord, manifest, {
       attempt_id: 'correction',
       kind: 'correction',
       outcome: accepted ? 'accepted' : 'failed',
+      sequence: 2,
       usage: {
+        native_input_tokens: metric(0),
         native_output_tokens: metric(Math.max(0, nativeOutput - 10)),
+        native_helper_calls: metric(0),
+        correction_rounds: metric(1),
         elapsed_ms: metric(800),
       },
     });
@@ -151,8 +161,12 @@ function makeTrial(plan, caseRecord, manifest, {
       attempt_id: 'initial',
       kind: 'initial',
       outcome: accepted ? 'accepted' : 'failed',
+      sequence: 1,
       usage: {
+        native_input_tokens: metric(0),
         native_output_tokens: metric(helper ? Math.max(0, nativeOutput - 8) : nativeOutput),
+        native_helper_calls: metric(0),
+        correction_rounds: metric(0),
         elapsed_ms: metric(1000),
       },
     });
@@ -162,9 +176,12 @@ function makeTrial(plan, caseRecord, manifest, {
       attempt_id: 'helper',
       kind: 'native_helper',
       outcome: 'accepted',
+      sequence: attempts.length + 1,
       usage: {
+        native_input_tokens: metric(0),
         native_helper_calls: metric(1),
         native_output_tokens: metric(8),
+        correction_rounds: metric(0),
         elapsed_ms: metric(200),
       },
     });
@@ -196,67 +213,74 @@ function makeTrial(plan, caseRecord, manifest, {
   };
 }
 
+function modelRow(model, inputTokens, outputTokens) {
+  return {
+    model,
+    input_tokens: inputTokens,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: outputTokens,
+    reasoning_output_tokens: 0,
+    total_tokens: inputTokens + outputTokens,
+  };
+}
+
 function makeUsageReport(trial, {
   status = 'complete',
-  astraOutput = 0,
+  astraOutput = null,
   helperModel = 'helper-model-x',
 } = {}) {
-  const primaryAttemptId = (trial.attempts.find((attempt) => attempt.kind !== 'native_helper') ?? trial.attempts[0]).attempt_id;
   const attempts = trial.attempts.map((attempt) => {
     const nativeOut = attempt.usage.native_output_tokens?.value ?? 0;
+    const nativeIn = attempt.usage.native_input_tokens?.value ?? 0;
     const isHelper = attempt.kind === 'native_helper';
     const byModel = [];
     if (isHelper) {
-      byModel.push({
-        model: helperModel,
-        input_tokens: 0,
-        cached_input_tokens: 0,
-        cache_write_input_tokens: 0,
-        output_tokens: nativeOut,
-        reasoning_output_tokens: 0,
-        total_tokens: nativeOut,
-      });
-    } else if (astraOutput != null && attempt.attempt_id === primaryAttemptId) {
-      byModel.push({
-        model: ASTRA_MODEL,
-        input_tokens: 0,
-        cached_input_tokens: 0,
-        cache_write_input_tokens: 0,
-        output_tokens: astraOutput,
-        reasoning_output_tokens: 0,
-        total_tokens: astraOutput,
-      });
+      byModel.push(modelRow(helperModel, nativeIn, nativeOut));
+    } else {
+      const astraOut = astraOutput == null ? nativeOut : Math.min(astraOutput, nativeOut);
+      byModel.push(modelRow(ASTRA_MODEL, nativeIn, astraOut));
+      if (astraOut !== nativeOut) {
+        byModel.push(modelRow(helperModel, 0, nativeOut - astraOut));
+      }
     }
     return {
       attempt_id: attempt.attempt_id,
       session_id: isHelper ? 'helper-session' : 'parent-session',
+      input_tokens: nativeIn,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
       output_tokens: nativeOut,
+      reasoning_output_tokens: 0,
+      compaction_events: 0,
       by_model: byModel,
     };
   });
-  const astraTotal = attempts.reduce((sum, row) => (
-    sum + row.by_model.filter((entry) => entry.model === ASTRA_MODEL)
-      .reduce((inner, entry) => inner + (entry.output_tokens ?? 0), 0)
-  ), 0);
+  const clonedTrial = structuredClone(trial);
   return {
     schema: HOST_USAGE_REPORT_SCHEMA_ID,
     status,
-    trial: structuredClone(trial),
+    trial: clonedTrial,
     breakdown: {
       attempts,
       totals: {
-        input_tokens: 0,
+        input_tokens: attempts.reduce((sum, row) => sum + (row.input_tokens ?? 0), 0),
         cached_input_tokens: 0,
         cache_write_input_tokens: 0,
         output_tokens: attempts.reduce((sum, row) => sum + (row.output_tokens ?? 0), 0),
         reasoning_output_tokens: 0,
         compaction_events: 0,
-        astra_output_tokens: astraTotal,
       },
       accounting: {
         response_id_deduped: true,
         response_identity: 'session_and_response',
+        phase_endpoints: 'start_inclusive_end_exclusive_unless_terminal',
+        compaction_counted_once: true,
+        reasoning_included_in_output: true,
+        cache_counters_separate: true,
+        secondary_token_count: 'non_authoritative',
         native_parent_excludes_helpers: trial.native_parent_excludes_helpers === true,
+        walked_sessions: [...new Set(attempts.map((row) => row.session_id))],
         acceptance_unknown: !Object.hasOwn(trial, 'accepted'),
         measurement_incomplete: status !== 'complete',
       },
@@ -264,9 +288,9 @@ function makeUsageReport(trial, {
     evidence: {
       digests: {
         manifest: 'ab'.repeat(32),
-        sessions: {},
+        sessions: Object.fromEntries(attempts.map((row) => [row.session_id, '11'.repeat(32)])),
         links: [],
-        trial: 'cd'.repeat(32),
+        trial: hostUsageTrialDigest(clonedTrial),
       },
       notes: status === 'inconclusive' ? ['absent_session:helper-session'] : [],
       incomplete_primary_evidence: status !== 'complete',
@@ -274,20 +298,11 @@ function makeUsageReport(trial, {
   };
 }
 
-function defaultAstraOutput(arm) {
-  if (arm === 'published-3.4.2') return 50;
-  if (arm === 'native-codex') return 10;
-  return 20;
-}
-
 function cohortReports(trials, customize = {}) {
   return trials.map((trial) => {
     const key = `${trial.case_id}:${trial.arm}:r${trial.trial_id.slice(-1)}`;
     const override = customize[key] ?? customize[trial.trial_id] ?? customize[trial.arm] ?? {};
-    return makeUsageReport(trial, {
-      astraOutput: defaultAstraOutput(trial.arm),
-      ...override,
-    });
+    return makeUsageReport(trial, override);
   });
 }
 
@@ -832,14 +847,23 @@ test('importer host-usage-report fixture interoperates with parseTrial and the e
   const packed = await loadQualificationCases();
   const manifest = recordedManifest(packed.raw);
   const fixture = JSON.parse(await readFile(path.join(QUAL_FIXTURES, 'host-usage-report-astra.json'), 'utf8'));
+  assert.equal(EVIDENCE_DIGEST_DOMAIN, 'codex-co-engineer.host-usage-evidence.v1');
+  assert.equal(fixture.evidence.digests.trial, hostUsageTrialDigest(fixture.trial));
   const parsedReport = parseHostUsageReport(fixture);
   assert.equal(parsedReport.status, 'complete');
+  assert.equal(parsedReport.integrity.ok, true);
+  assert.equal(parsedReport.evidence.trial_digest_verified, true);
+  assert.equal(parsedReport.evidence.digests.trial, fixture.evidence.digests.trial);
   assert.equal(parsedReport.breakdown.attempts[0].by_model[0].model, ASTRA_MODEL);
+  assert.equal(parsedReport.breakdown.attempts[0].by_model[0].input_tokens, 80);
+  assert.equal(parsedReport.breakdown.attempts[0].output_tokens, 40);
   const parsedTrial = parseTrial(fixture.trial);
   assert.equal(parsedTrial.attempts[0].provider, null);
   assert.equal(parsedTrial.attempts[0].model, null);
   assert.equal(parsedTrial.attempts[0].usage.provider_output_tokens.value, null);
+  assert.equal(parsedTrial.attempts[0].usage.native_input_tokens.value, 80);
   assert.equal(parsedTrial.attempts[0].usage.native_output_tokens.value, fixture.trial.attempts[0].usage.native_output_tokens.value);
+  assert.equal(parsedTrial.attempts[0].sequence, 1);
 
   const trials = cohortTrials(packed.raw, manifest);
   const target = trials.find((trial) => trial.trial_id === fixture.trial.trial_id);
@@ -851,8 +875,85 @@ test('importer host-usage-report fixture interoperates with parseTrial and the e
   const comparison = evaluateCohort(packed, manifest, trials, { usageReports: reports });
   assert.equal(comparison.decision, 'pass');
   const arm = comparison.cases.find((row) => row.case_id === fixture.trial.case_id).arms[fixture.trial.arm];
-  assert.equal(arm.astra_own_native_output.value, 60);
+  assert.equal(arm.astra_own_native_output.value, 80);
   assert.equal(arm.astra_own_native_output.includes_helpers, false);
+  assert.equal(arm.astra_own_native_output.coverage_complete, true);
+});
+
+test('corrupted by_model, mutated trial input, and missing helper rows are inconclusive', async () => {
+  const packed = await loadQualificationCases();
+  const manifest = recordedManifest(packed.raw);
+  const trials = cohortTrials(packed.raw, manifest);
+
+  const clean = evaluateCohort(packed, manifest, trials);
+  assert.equal(clean.decision, 'pass');
+  assert.equal(clean.metrics.astra_own_native_output.coverage_complete, true);
+  const cleanAstra = clean.metrics.astra_own_native_output.candidate;
+
+  const candidateReport = cohortReports(trials).find((entry) => entry.trial.arm === 'candidate-3.4.3');
+  const candidateId = candidateReport.trial.trial_id;
+  const candidateAstra = candidateReport.breakdown.attempts
+    .flatMap((row) => row.by_model)
+    .filter((entry) => entry.model === ASTRA_MODEL)
+    .reduce((sum, entry) => sum + (entry.output_tokens ?? 0), 0);
+
+  const mutatedInputReports = cohortReports(trials);
+  const mutatedInput = mutatedInputReports.find((entry) => entry.trial.trial_id === candidateId);
+  mutatedInput.trial.attempts[0].usage.native_input_tokens.value += 1;
+  const mutatedInputResult = evaluateCohort(packed, manifest, trials, { usageReports: mutatedInputReports });
+  assert.equal(mutatedInputResult.decision, 'inconclusive');
+  assert.equal(
+    mutatedInputResult.reasons.some((reason) => reason === `usage_report_mismatch:${candidateId}:canonical_trial`),
+    true,
+  );
+  assert.equal(mutatedInputResult.metrics.astra_own_native_output.coverage_complete, false);
+  assert.notEqual(mutatedInputResult.decision, 'pass');
+
+  const modelReports = cohortReports(trials);
+  const modelReport = modelReports.find((entry) => entry.trial.trial_id === candidateId);
+  const astraRow = modelReport.breakdown.attempts[0].by_model.find((entry) => entry.model === ASTRA_MODEL);
+  const originalAstra = astraRow.output_tokens;
+  astraRow.output_tokens = 1;
+  const modelResult = evaluateCohort(packed, manifest, trials, { usageReports: modelReports });
+  assert.equal(modelResult.decision, 'inconclusive');
+  assert.equal(
+    modelResult.reasons.some((reason) => reason.startsWith(`usage_report_inconsistent:${candidateId}:`)),
+    true,
+  );
+  assert.equal(modelResult.metrics.astra_own_native_output.coverage_complete, false);
+  assert.notEqual(modelResult.metrics.astra_own_native_output.candidate, cleanAstra - originalAstra + 1);
+  assert.notEqual(modelResult.metrics.astra_own_native_output.candidate, cleanAstra - candidateAstra + 1);
+  assert.notEqual(modelResult.decision, 'pass');
+
+  const helperTrials = cohortTrials(packed.raw, manifest);
+  const helperIndex = helperTrials.findIndex((trial) => trial.arm === 'candidate-3.4.3');
+  const helperCase = packed.raw.find((entry) => entry.id === helperTrials[helperIndex].case_id);
+  helperTrials[helperIndex] = makeTrial(helperTrials[helperIndex], helperCase, manifest, {
+    accepted: true,
+    nativeOutput: 40,
+    wall: 1500,
+    failedThenCorrect: false,
+    helper: true,
+  });
+  const helperReports = cohortReports(helperTrials);
+  const helperId = helperTrials[helperIndex].trial_id;
+  const helperReport = helperReports.find((entry) => entry.trial.trial_id === helperId);
+  helperReport.breakdown.attempts.pop();
+  const helperResult = evaluateCohort(packed, manifest, helperTrials, { usageReports: helperReports });
+  assert.equal(helperResult.decision, 'inconclusive');
+  assert.equal(
+    helperResult.reasons.some((reason) => reason === `usage_report_inconsistent:${helperId}:missing_attempt:helper`),
+    true,
+  );
+  const helperArm = helperResult.cases
+    .find((row) => row.case_id === helperTrials[helperIndex].case_id)
+    .arms['candidate-3.4.3']
+    .astra_own_native_output;
+  assert.equal(helperResult.metrics.astra_own_native_output.coverage_complete, false);
+  assert.equal(helperArm.coverage_complete, false);
+  assert.ok(helperArm.value > 0);
+  assert.ok(helperResult.metrics.astra_own_native_output.candidate > 0);
+  assert.notEqual(helperResult.decision, 'pass');
 });
 
 test('deadline over one hour fails when identities are otherwise comparable', async () => {
