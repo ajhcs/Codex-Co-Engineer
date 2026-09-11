@@ -125,7 +125,8 @@ The lifecycle ownership decision is
 Keep every existing requirement above. The new result and comparison fixtures
 are provider-free; they do not establish paid evaluation results or replace
 live acceptance. The local gate and CI both run the comparison fixture suite
-and the provider-free trial-usage and qualification unit stages.
+and the provider-free trial-usage and qualification unit stages. Historical
+qualification fixtures require full Git history so CI can read pinned commits.
 
 For ownership changes, retain evidence of a completed producer, independent
 review, specific feedback, a corrected candidate, and Codex's acceptance.
