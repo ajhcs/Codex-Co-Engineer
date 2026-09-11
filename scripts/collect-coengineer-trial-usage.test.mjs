@@ -126,7 +126,7 @@ test('happy path imports parent+helper usage and passes analyzer parseTrial', as
           type: 'SubAgentActivity',
           kind: 'started',
           agent_thread_id: 'helper-session',
-          agent_path: 'sessions/helper.jsonl',
+          agent_path: '/root/helper',
         },
       }),
       line('2026-09-11T10:01:40.000Z', 'token_usage_record', {
@@ -238,7 +238,7 @@ test('absent helper session is inconclusive and never reports zero usage', async
           type: 'SubAgentActivity',
           kind: 'started',
           agent_thread_id: 'helper-session',
-          agent_path: 'sessions/helper.jsonl',
+          agent_path: '/root/helper',
         },
       }),
     ].join(''));
@@ -705,7 +705,7 @@ test('basename child-link fallback is rejected; exact ids required', async () =>
           type: 'SubAgentActivity',
           kind: 'started',
           agent_thread_id: 'not-allowlisted',
-          agent_path: 'helper.jsonl',
+          agent_path: '/root/helper',
         },
       }),
     ].join(''));
@@ -718,10 +718,11 @@ test('basename child-link fallback is rejected; exact ids required', async () =>
         thread_token_usage: helperU1,
       }),
     ].join(''));
-    await assert.rejects(
-      () => collectTrialUsage(baseManifest(caseRecord), { sessionsRoot: root }),
-      { code: 'identity_mismatch' },
-    );
+    const report = await collectTrialUsage(baseManifest(caseRecord), { sessionsRoot: root });
+    assert.equal(report.status, 'inconclusive');
+    assert.match(report.evidence.notes.join(','), /unlisted_nested_child/);
+    // Basename/session-path fallback is not used; measured parent+helper totals remain.
+    assert.equal(report.breakdown.totals.output_tokens, 6);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -748,7 +749,7 @@ test('same response_id in different sessions stays independently assigned', asyn
           type: 'SubAgentActivity',
           kind: 'started',
           agent_thread_id: 'helper-session',
-          agent_path: 'sessions/helper.jsonl',
+          agent_path: '/root/helper',
         },
       }),
     ].join(''));
@@ -811,6 +812,10 @@ test('missing acceptance omits accepted and marks inconclusive', async () => {
     }), { sessionsRoot: root });
     assert.equal(report.status, 'inconclusive');
     assert.equal(Object.hasOwn(report.trial, 'accepted'), false);
+    assert.equal(report.breakdown.totals.output_tokens, 2);
+    assert.equal(report.trial.attempts[0].usage.native_input_tokens.value, 6);
+    assert.equal(report.breakdown.accounting.acceptance_unknown, true);
+    assert.equal(report.breakdown.accounting.measurement_incomplete, false);
     parseTrial(report.trial);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -944,6 +949,292 @@ test('bounded host_settings reject freeform path secrets', () => {
       host_model: 'codex-default',
       host_settings: { reasoning: 'default', sandbox: 'workspace-write', cwd: '/secret/path' },
       provider_configuration: { implement: 'native' },
+      accepted: true,
+    },
+    sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+    phases: [{
+      attempt_id: 'only',
+      kind: 'initial',
+      outcome: 'accepted',
+      start: '2026-09-11T10:00:00.000Z',
+      end: '2026-09-11T10:01:00.000Z',
+      session_id: 'parent-session',
+    }],
+  })), { code: 'unknown_key' });
+});
+
+test('current CLI shape counts gpt-6-astra output with collaboration_mode settings', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(20, 4, 9, 3, 29, { cache_write_input_tokens: 2 });
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', {
+        model: 'gpt-6-astra',
+        sandbox_policy: { type: 'read-only' },
+        collaboration_mode: {
+          mode: 'default',
+          settings: {
+            model: 'gpt-6-astra',
+            reasoning_effort: null,
+          },
+        },
+      }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'resp-cli-1',
+        thread_id: 'parent-session',
+        session_id: 'parent-session',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      trial: {
+        trial_id: 'host-cli-shape',
+        case_id: caseRecord.id,
+        arm: 'native-codex',
+        base_sha: caseRecord.base_sha,
+        input_digest: caseRecord.input_digest,
+        coengineer_source: { kind: 'native', value: 'native-codex' },
+        host_model: 'gpt-6-astra',
+        host_settings: { reasoning: 'default', sandbox: 'read-only' },
+        provider_configuration: {
+          implement: { provider: 'cursor-local', model: 'composer-1' },
+          review: null,
+        },
+        accepted: true,
+      },
+      sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+      phases: [{
+        attempt_id: 'only',
+        kind: 'initial',
+        outcome: 'accepted',
+        start: '2026-09-11T10:00:00.000Z',
+        end: '2026-09-11T10:01:00.000Z',
+        session_id: 'parent-session',
+      }],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 9);
+    assert.equal(report.breakdown.totals.output_tokens, 9);
+    assert.equal(report.breakdown.totals.cache_write_input_tokens, 2);
+    assert.equal(report.breakdown.attempts[0].by_model[0].model, 'gpt-6-astra');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('mixed-model nested helper via sub_agent_activity keeps distinct attribution', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(10, 0, 4, 1);
+    const helperU = usage(7, 0, 5, 2);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', {
+        model: 'gpt-6-astra',
+        sandbox_policy: { type: 'read-only' },
+        collaboration_mode: {
+          mode: 'default',
+          settings: { model: 'gpt-6-astra', reasoning_effort: null },
+        },
+      }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'p1',
+        thread_id: 'parent-session',
+        session_id: 'parent-session',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+      line('2026-09-11T10:00:20.000Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        agent_thread_id: 'helper-session',
+        agent_path: '/root/helper',
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/helper.jsonl', [
+      sessionMeta('helper-session'),
+      line('2026-09-11T10:01:05.000Z', 'turn_context', {
+        model: 'helper-model-x',
+        sandbox_policy: { type: 'workspace-write' },
+        collaboration_mode: {
+          mode: 'default',
+          settings: { model: 'helper-model-x', reasoning_effort: 'low' },
+        },
+      }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'h1',
+        thread_id: 'helper-session',
+        session_id: 'helper-session',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      trial: {
+        trial_id: 'host-mixed-model',
+        case_id: caseRecord.id,
+        arm: 'native-codex',
+        base_sha: caseRecord.base_sha,
+        input_digest: caseRecord.input_digest,
+        coengineer_source: { kind: 'native', value: 'native-codex' },
+        host_model: 'gpt-6-astra',
+        host_settings: { reasoning: 'default', sandbox: 'read-only' },
+        provider_configuration: { implement: 'native' },
+        accepted: true,
+      },
+      sessions: [
+        { id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' },
+        {
+          id: 'helper-session',
+          role: 'native_helper',
+          path: 'sessions/helper.jsonl',
+          parent_id: 'parent-session',
+          agent_path: '/root/helper',
+          expected_model: 'helper-model-x',
+        },
+      ],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 4);
+    assert.equal(report.trial.attempts[1].usage.native_output_tokens.value, 5);
+    assert.equal(report.breakdown.attempts[0].by_model[0].model, 'gpt-6-astra');
+    assert.equal(report.breakdown.attempts[1].by_model[0].model, 'helper-model-x');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('token_usage_record cross-session thread_id is rejected', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(4, 0, 2, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        thread_id: 'other-session',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+        phases: [{
+          attempt_id: 'only',
+          kind: 'initial',
+          outcome: 'accepted',
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:01:00.000Z',
+          session_id: 'parent-session',
+        }],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('host_settings conflict with observed sandbox_policy rejects', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const u = usage(4, 0, 2, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('parent-session'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', {
+        model: 'codex-default',
+        sandbox_policy: { type: 'danger-full-access' },
+        collaboration_mode: {
+          mode: 'default',
+          settings: { model: 'codex-default', reasoning_effort: 'default' },
+        },
+      }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'r1',
+        usage: u,
+        thread_token_usage: u,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+        phases: [{
+          attempt_id: 'only',
+          kind: 'initial',
+          outcome: 'accepted',
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:01:00.000Z',
+          session_id: 'parent-session',
+        }],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('provider_configuration binds structured provider+model without path leaks', () => {
+  const caseRecord = {
+    id: 'single-file-bugfix',
+    base_sha: 'df49c63059159a79646258358850bef0590ca583',
+    input_digest: '54bd89a12cdbb1a66e662467f71d96bfc5e596bafced30f6a0c715c68a71d368',
+  };
+  const parsed = parseManifest(baseManifest(caseRecord, {
+    trial: {
+      trial_id: 'host-provider-bind',
+      case_id: caseRecord.id,
+      arm: 'candidate-3.4.3',
+      base_sha: caseRecord.base_sha,
+      input_digest: caseRecord.input_digest,
+      coengineer_source: { kind: 'synthetic_label', value: 'fixture:candidate-3.4.3' },
+      host_model: 'codex-default',
+      host_settings: { reasoning: 'default', sandbox: 'workspace-write' },
+      provider_configuration: {
+        implement: { provider: 'cursor-local', model: 'composer-1' },
+        review: { provider: 'grok', model: 'grok-4' },
+      },
+      accepted: true,
+    },
+    sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],
+    phases: [{
+      attempt_id: 'only',
+      kind: 'initial',
+      outcome: 'accepted',
+      start: '2026-09-11T10:00:00.000Z',
+      end: '2026-09-11T10:01:00.000Z',
+      session_id: 'parent-session',
+    }],
+  }));
+  assert.deepEqual(parsed.trial.provider_configuration.implement, {
+    provider: 'cursor-local',
+    model: 'composer-1',
+  });
+  assert.throws(() => parseManifest(baseManifest(caseRecord, {
+    trial: {
+      trial_id: 'bad-provider',
+      case_id: caseRecord.id,
+      arm: 'candidate-3.4.3',
+      base_sha: caseRecord.base_sha,
+      input_digest: caseRecord.input_digest,
+      coengineer_source: { kind: 'synthetic_label', value: 'fixture:candidate-3.4.3' },
+      host_model: 'codex-default',
+      host_settings: { reasoning: 'default', sandbox: 'workspace-write' },
+      provider_configuration: {
+        implement: { provider: 'cursor-local', api_key: 'secret' },
+      },
       accepted: true,
     },
     sessions: [{ id: 'parent-session', role: 'parent', path: 'sessions/parent.jsonl' }],

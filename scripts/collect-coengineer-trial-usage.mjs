@@ -46,6 +46,8 @@ const USAGE_COUNTERS = Object.freeze([...REQUIRED_COUNTERS, ...OPTIONAL_COUNTERS
 
 const HOST_SETTINGS_KEYS = Object.freeze(['reasoning', 'sandbox']);
 const PROVIDER_CONFIGURATION_KEYS = Object.freeze(['implement', 'review']);
+const PROVIDER_ROLE_KEYS = Object.freeze(['provider', 'model']);
+const AGENT_NAME_PATTERN = /^[a-z0-9_]+$/u;
 
 // Forbid content-bearing keys in shareable aggregates. Configuration labels
 // such as host_settings.reasoning (effort enum) are allowed.
@@ -215,6 +217,80 @@ function assertBoundedShareableObject(value, pathLabel, allowedKeys) {
   return record;
 }
 
+function assertProviderConfiguration(value, pathLabel) {
+  const record = assertPlain(value, pathLabel);
+  for (const key of Object.keys(record)) {
+    if (!PROVIDER_CONFIGURATION_KEYS.includes(key)) fail('unknown_key', `${pathLabel}.${key}`);
+    const child = record[key];
+    if (child === null) continue;
+    if (typeof child === 'string') {
+      if (!SETTINGS_TOKEN.test(child) || child.includes('/') || child.includes('\\')) {
+        fail('privacy_leak', `${pathLabel}.${key} must be a bounded shareable token.`);
+      }
+      continue;
+    }
+    if (isPlainObject(child)) {
+      assertBoundedShareableObject(child, `${pathLabel}.${key}`, PROVIDER_ROLE_KEYS);
+      continue;
+    }
+    fail(
+      'invalid_type',
+      `${pathLabel}.${key} must be a bounded token or {provider,model} object.`,
+    );
+  }
+  return record;
+}
+
+function assertAgentPath(value, pathLabel) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 240) {
+    fail('invalid_format', `${pathLabel} is not a canonical agent path.`);
+  }
+  if (value === '/morpheus') return value;
+  if (!value.startsWith('/root') || value.endsWith('/')) {
+    fail('invalid_format', `${pathLabel} must be /root[/name...] or /morpheus.`);
+  }
+  const segments = value.slice(1).split('/');
+  if (segments[0] !== 'root') {
+    fail('invalid_format', `${pathLabel} must start with /root.`);
+  }
+  for (let index = 1; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment === 'root' || !AGENT_NAME_PATTERN.test(segment)) {
+      fail('invalid_format', `${pathLabel} has an invalid agent path segment.`);
+    }
+  }
+  return value;
+}
+
+function normalizeEffort(value) {
+  if (value === null || value === 'default') return 'default';
+  return value;
+}
+
+function extractStartedChildLink(payload, pathLabel) {
+  const record = assertPlain(payload, pathLabel);
+  const innerType = ownString(record, 'type', pathLabel);
+  let agentThreadId = null;
+  let agentPath = null;
+  if (innerType === 'sub_agent_activity') {
+    if (ownString(record, 'kind', pathLabel) !== 'started') return null;
+    agentThreadId = ownString(record, 'agent_thread_id', pathLabel);
+    agentPath = assertAgentPath(ownString(record, 'agent_path', pathLabel), `${pathLabel}.agent_path`);
+  } else if (innerType === 'item_completed') {
+    const item = assertPlain(record.item, `${pathLabel}.item`);
+    if (item.type !== 'SubAgentActivity') return null;
+    if (ownString(item, 'kind', `${pathLabel}.item`) !== 'started') return null;
+    agentThreadId = ownString(item, 'agent_thread_id', `${pathLabel}.item`);
+    agentPath = assertAgentPath(
+      ownString(item, 'agent_path', `${pathLabel}.item`),
+      `${pathLabel}.item.agent_path`,
+    );
+  } else {
+    return null;
+  }
+  return { agent_thread_id: agentThreadId, agent_path: agentPath };
+}
+
 function assertNoPrivacyLeak(value, pathLabel = 'report') {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertNoPrivacyLeak(entry, `${pathLabel}[${index}]`));
@@ -301,7 +377,24 @@ export function parseManifest(value, pathLabel = 'manifest') {
     if (role === 'parent' && parentId != null) {
       fail('invalid_format', `${pathLabel}.sessions[${index}] parent cannot declare parent_id.`);
     }
-    const record = { id, role, path: relativePath, parent_id: parentId };
+    const record = { id, role, path: relativePath, parent_id: parentId, agent_path: null, expected_model: null };
+    if (Object.hasOwn(entry, 'agent_path') && entry.agent_path != null) {
+      record.agent_path = assertAgentPath(
+        ownString(entry, 'agent_path', `${pathLabel}.sessions[${index}]`),
+        `${pathLabel}.sessions[${index}].agent_path`,
+      );
+    }
+    if (Object.hasOwn(entry, 'expected_model') && entry.expected_model != null) {
+      record.expected_model = ownString(
+        entry,
+        'expected_model',
+        `${pathLabel}.sessions[${index}]`,
+        SETTINGS_TOKEN,
+      );
+    }
+    if (role === 'parent' && record.expected_model != null) {
+      fail('invalid_format', `${pathLabel}.sessions[${index}] parent uses trial.host_model.`);
+    }
     sessions.push(record);
     sessionById.set(id, record);
   }
@@ -410,10 +503,9 @@ export function parseManifest(value, pathLabel = 'manifest') {
         `${pathLabel}.trial.host_settings`,
         HOST_SETTINGS_KEYS,
       ),
-      provider_configuration: assertBoundedShareableObject(
+      provider_configuration: assertProviderConfiguration(
         trial.provider_configuration,
         `${pathLabel}.trial.provider_configuration`,
-        PROVIDER_CONFIGURATION_KEYS,
       ),
       accepted,
       acceptanceKnown,
@@ -443,7 +535,21 @@ function collectResponseRecord(payload, pathLabel) {
   const responseId = ownString(record, 'response_id', pathLabel);
   const usage = parseCounters(record.usage, `${pathLabel}.usage`);
   const thread = parseCounters(record.thread_token_usage, `${pathLabel}.thread_token_usage`);
-  return { response_id: responseId, usage, thread_token_usage: thread };
+  let threadId = null;
+  let sessionIdField = null;
+  if (Object.hasOwn(record, 'thread_id') && record.thread_id != null) {
+    threadId = ownString(record, 'thread_id', pathLabel);
+  }
+  if (Object.hasOwn(record, 'session_id') && record.session_id != null) {
+    sessionIdField = ownString(record, 'session_id', pathLabel);
+  }
+  return {
+    response_id: responseId,
+    usage,
+    thread_token_usage: thread,
+    thread_id: threadId,
+    session_id: sessionIdField,
+  };
 }
 
 function responseKey(sessionId, responseId) {
@@ -536,9 +642,13 @@ async function readAllowlistedSession(resolved, relativePath, pathLabel) {
   };
 }
 
-function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
+function analyzeSessionEvents(events, window, sessionId, options = {}) {
+  const expectedHostModel = options.expectedModel ?? null;
+  const expectedHostSettings = options.expectedSettings ?? null;
   let model = null;
-  let effort = null;
+  let effort = undefined;
+  let sawCollabEffort = false;
+  let sandbox = null;
   const responses = new Map();
   const childLinks = [];
   const compactedAt = [];
@@ -575,31 +685,90 @@ function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
 
     if (event.type === 'turn_context') {
       const payload = assertPlain(event.payload, `event:${event.lineNumber}.payload`);
+      const pathLabel = `event:${event.lineNumber}.payload`;
       if (Object.hasOwn(payload, 'model')) {
-        const nextModel = ownString(payload, 'model', `event:${event.lineNumber}.payload`);
+        const nextModel = ownString(payload, 'model', pathLabel);
         if (model != null && model !== nextModel) {
           fail('identity_mismatch', `session ${sessionId} observes conflicting models.`);
         }
         model = nextModel;
-        if (expectedHostModel != null && model !== expectedHostModel) {
-          fail(
-            'identity_mismatch',
-            `session ${sessionId} model ${model} conflicts with host_model ${expectedHostModel}.`,
-          );
+      }
+      if (Object.hasOwn(payload, 'sandbox_policy') && payload.sandbox_policy != null) {
+        const policy = assertPlain(payload.sandbox_policy, `${pathLabel}.sandbox_policy`);
+        const nextSandbox = ownString(policy, 'type', `${pathLabel}.sandbox_policy`);
+        if (sandbox != null && sandbox !== nextSandbox) {
+          fail('identity_mismatch', `session ${sessionId} observes conflicting sandbox_policy.`);
+        }
+        sandbox = nextSandbox;
+      }
+      let eventCollabEffort = false;
+      if (Object.hasOwn(payload, 'collaboration_mode') && payload.collaboration_mode != null) {
+        const collab = assertPlain(payload.collaboration_mode, `${pathLabel}.collaboration_mode`);
+        if (Object.hasOwn(collab, 'settings') && collab.settings != null) {
+          const settings = assertPlain(collab.settings, `${pathLabel}.collaboration_mode.settings`);
+          if (Object.hasOwn(settings, 'model') && settings.model != null) {
+            const collabModel = ownString(settings, 'model', `${pathLabel}.collaboration_mode.settings`);
+            if (model != null && model !== collabModel) {
+              fail(
+                'identity_mismatch',
+                `session ${sessionId} collaboration_mode model conflicts with turn_context model.`,
+              );
+            }
+            model = collabModel;
+          }
+          if (Object.hasOwn(settings, 'reasoning_effort')) {
+            const value = settings.reasoning_effort;
+            if (typeof value !== 'string' && typeof value !== 'number' && value !== null) {
+              fail('invalid_type', `${pathLabel}.collaboration_mode.settings.reasoning_effort`);
+            }
+            if (effort !== undefined && normalizeEffort(effort) !== normalizeEffort(value)) {
+              fail('identity_mismatch', `session ${sessionId} observes conflicting reasoning effort.`);
+            }
+            effort = value;
+            sawCollabEffort = true;
+            eventCollabEffort = true;
+          }
         }
       }
-      if (Object.hasOwn(payload, 'effort')) {
+      // Legacy top-level effort: only when collaboration_mode did not emit reasoning_effort.
+      if (!eventCollabEffort && Object.hasOwn(payload, 'effort')) {
         const value = payload.effort;
         if (typeof value !== 'string' && typeof value !== 'number' && value !== null) {
-          fail('invalid_type', `event:${event.lineNumber}.payload.effort`);
+          fail('invalid_type', `${pathLabel}.effort`);
+        }
+        if (sawCollabEffort && normalizeEffort(effort) !== normalizeEffort(value)) {
+          fail('identity_mismatch', `session ${sessionId} legacy effort conflicts with collaboration_mode.`);
+        }
+        if (effort !== undefined && normalizeEffort(effort) !== normalizeEffort(value)) {
+          fail('identity_mismatch', `session ${sessionId} observes conflicting reasoning effort.`);
         }
         effort = value;
+      }
+      if (expectedHostModel != null && model != null && model !== expectedHostModel) {
+        fail(
+          'identity_mismatch',
+          `session ${sessionId} model ${model} conflicts with expected model ${expectedHostModel}.`,
+        );
       }
       continue;
     }
 
     if (event.type === 'token_usage_record') {
       const record = collectResponseRecord(event.payload, `event:${event.lineNumber}.payload`);
+      const boundIds = new Set([sessionId]);
+      if (sessionMetaId != null) boundIds.add(sessionMetaId);
+      if (record.thread_id != null && !boundIds.has(record.thread_id)) {
+        fail(
+          'identity_mismatch',
+          `session ${sessionId} token_usage_record.thread_id conflicts with session binding.`,
+        );
+      }
+      if (record.session_id != null && !boundIds.has(record.session_id)) {
+        fail(
+          'identity_mismatch',
+          `session ${sessionId} token_usage_record.session_id conflicts with session binding.`,
+        );
+      }
       if (!inWindow) {
         if (event.timestamp.ms < window.start.ms) {
           preWindowThread = cloneCounters(record.thread_token_usage);
@@ -623,7 +792,8 @@ function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
           ...record,
           timestamp: event.timestamp,
           model,
-          effort,
+          effort: effort === undefined ? null : effort,
+          sandbox,
           duplicate_count: 1,
         });
       }
@@ -637,20 +807,18 @@ function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
     }
 
     if (event.type === 'event_msg') {
-      if (!inWindow) continue;
       const payload = assertPlain(event.payload, `event:${event.lineNumber}.payload`);
-      const innerType = ownString(payload, 'type', `event:${event.lineNumber}.payload`);
-      if (innerType === 'item_completed') {
-        const item = assertPlain(payload.item, `event:${event.lineNumber}.payload.item`);
-        if (item.type === 'SubAgentActivity' && item.kind === 'started') {
-          childLinks.push({
-            agent_thread_id: ownString(item, 'agent_thread_id', `event:${event.lineNumber}.payload.item`),
-            agent_path: ownString(item, 'agent_path', `event:${event.lineNumber}.payload.item`),
-            timestamp: event.timestamp,
-          });
-        }
+      const started = extractStartedChildLink(payload, `event:${event.lineNumber}.payload`);
+      if (started) {
+        // Parent graph links are collected outside the usage window too.
+        childLinks.push({
+          ...started,
+          timestamp: event.timestamp,
+        });
         continue;
       }
+      if (!inWindow) continue;
+      const innerType = ownString(payload, 'type', `event:${event.lineNumber}.payload`);
       if (innerType === 'token_count') {
         const info = payload.info == null ? null : assertPlain(payload.info, `event:${event.lineNumber}.payload.info`);
         if (info && Object.hasOwn(info, 'total_token_usage')) {
@@ -673,6 +841,32 @@ function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
     );
   }
 
+  if (expectedHostModel != null && model != null && model !== expectedHostModel) {
+    fail(
+      'identity_mismatch',
+      `session ${sessionId} model ${model} conflicts with expected model ${expectedHostModel}.`,
+    );
+  }
+
+  if (expectedHostSettings != null) {
+    if (effort !== undefined) {
+      const expectedEffort = expectedHostSettings.reasoning;
+      if (normalizeEffort(effort) !== normalizeEffort(expectedEffort)) {
+        fail(
+          'identity_mismatch',
+          `session ${sessionId} reasoning effort conflicts with host_settings.reasoning.`,
+        );
+      }
+    }
+    if (sandbox != null && expectedHostSettings.sandbox != null
+      && sandbox !== expectedHostSettings.sandbox) {
+      fail(
+        'identity_mismatch',
+        `session ${sessionId} sandbox_policy conflicts with host_settings.sandbox.`,
+      );
+    }
+  }
+
   const summed = emptyCounters();
   for (const record of responses.values()) addCounters(summed, record.usage);
 
@@ -687,6 +881,11 @@ function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
     }
   }
 
+  if (responses.size > 0 && model == null) {
+    primaryComplete = false;
+    notes.push('missing_observed_model');
+  }
+
   if (secondaryTotal && lastThread) {
     const expectedSecondary = addCounters(cloneCounters(preWindowThread), summed);
     if (!countersEqual(secondaryTotal, expectedSecondary) && !countersEqual(secondaryTotal, lastThread)) {
@@ -699,7 +898,8 @@ function analyzeSessionEvents(events, window, sessionId, expectedHostModel) {
 
   return {
     model,
-    effort,
+    effort: effort === undefined ? null : effort,
+    sandbox,
     responses,
     childLinks,
     compactedAt,
@@ -720,6 +920,7 @@ function resolveLinkedChildren(seedIds, sessionsById, analyzedById, loadedById) 
   const visiting = new Set();
   const queue = [...seedIds];
   const ordered = [];
+  const unlisted = [];
 
   while (queue.length > 0) {
     const id = queue.shift();
@@ -735,15 +936,15 @@ function resolveLinkedChildren(seedIds, sessionsById, analyzedById, loadedById) 
       for (const link of analysis.childLinks) {
         const matched = sessionsById.get(link.agent_thread_id);
         if (!matched) {
-          fail(
-            'identity_mismatch',
-            `unlisted nested child ${link.agent_thread_id} linked from ${id}.`,
-          );
+          // Unlisted started children are not basename-resolved; coverage stays inconclusive.
+          unlisted.push({ parent_id: id, agent_thread_id: link.agent_thread_id });
+          continue;
         }
-        if (matched.path !== link.agent_path) {
+        // agent_path is canonical agent identity (/root/helper), not a session file path.
+        if (matched.agent_path != null && matched.agent_path !== link.agent_path) {
           fail(
             'identity_mismatch',
-            `nested child ${link.agent_thread_id} path conflicts with allowlisted path.`,
+            `nested child ${link.agent_thread_id} agent_path conflicts with allowlisted identity.`,
           );
         }
         if (matched.parent_id !== id) {
@@ -767,7 +968,7 @@ function resolveLinkedChildren(seedIds, sessionsById, analyzedById, loadedById) 
     }
     visiting.delete(id);
   }
-  return ordered;
+  return { ordered, unlisted };
 }
 
 function assignResponsesToPhases(phases, analyzedById) {
@@ -940,10 +1141,11 @@ export async function collectTrialUsage(manifestInput, options = {}) {
     link_digests: [],
     notes: [],
   };
-  let incomplete = false;
-
-  if (!manifest.trial.acceptanceKnown) {
-    incomplete = true;
+  let measurementIncomplete = false;
+  let coverageIncomplete = false;
+  const acceptanceUnknown = !manifest.trial.acceptanceKnown;
+  if (acceptanceUnknown) {
+    coverageIncomplete = true;
     evidence.notes.push('acceptance_unknown');
   }
 
@@ -956,11 +1158,13 @@ export async function collectTrialUsage(manifestInput, options = {}) {
     const loaded = await readAllowlistedSession(resolved, session.path, `session:${session.id}`);
     loadedById.set(session.id, loaded);
     if (loaded.status === 'absent') {
-      incomplete = true;
+      measurementIncomplete = true;
+      coverageIncomplete = true;
       evidence.notes.push(`absent_session:${session.id}`);
       analyzedById.set(session.id, {
         model: null,
         effort: null,
+        sandbox: null,
         responses: new Map(),
         childLinks: [],
         compactedAt: [],
@@ -979,34 +1183,47 @@ export async function collectTrialUsage(manifestInput, options = {}) {
       continue;
     }
     evidence.session_digests[session.id] = loaded.digest;
+    const expectedModel = session.role === 'parent'
+      ? manifest.trial.host_model
+      : session.expected_model;
+    const expectedSettings = session.role === 'parent'
+      ? manifest.trial.host_settings
+      : null;
     const analysis = analyzeSessionEvents(
       loaded.events,
       manifest.window,
       session.id,
-      manifest.trial.host_model,
+      { expectedModel, expectedSettings },
     );
     analysis.bytes = loaded.bytes;
     analysis.digest = loaded.digest;
     analyzedById.set(session.id, analysis);
     if (!analysis.primaryComplete) {
-      incomplete = true;
+      measurementIncomplete = true;
+      coverageIncomplete = true;
       evidence.notes.push(...analysis.notes.map((note) => `${session.id}:${note}`));
     } else if (analysis.notes.length > 0) {
       evidence.notes.push(...analysis.notes.map((note) => `${session.id}:${note}`));
     }
     for (const link of analysis.childLinks) {
-      const matched = sessionsById.get(link.agent_thread_id);
       evidence.link_digests.push(sha256Hex([
         'child-link',
         session.id,
         link.agent_thread_id,
-        matched ? matched.path : link.agent_thread_id,
+        link.agent_path,
       ]));
     }
   }
 
   const parentIds = manifest.sessions.filter((session) => session.role === 'parent').map((s) => s.id);
-  const walkOrder = resolveLinkedChildren(parentIds, sessionsById, analyzedById, loadedById);
+  const walk = resolveLinkedChildren(parentIds, sessionsById, analyzedById, loadedById);
+  const walkOrder = walk.ordered;
+  if (walk.unlisted.length > 0) {
+    coverageIncomplete = true;
+    for (const entry of walk.unlisted) {
+      evidence.notes.push(`unlisted_nested_child:${entry.parent_id}->${entry.agent_thread_id}`);
+    }
+  }
   for (const session of manifest.sessions) {
     if (!walkOrder.includes(session.id) && session.role === 'native_helper') {
       // Explicitly allowlisted helpers are still included even without a live link event.
@@ -1016,7 +1233,8 @@ export async function collectTrialUsage(manifestInput, options = {}) {
 
   const assignment = assignResponsesToPhases(manifest.phases, analyzedById);
   if (assignment.unassigned.length > 0) {
-    incomplete = true;
+    measurementIncomplete = true;
+    coverageIncomplete = true;
     evidence.notes.push(`unassigned_responses:${assignment.unassigned.length}`);
   }
 
@@ -1034,7 +1252,7 @@ export async function collectTrialUsage(manifestInput, options = {}) {
         `phase ${phase.attempt_id} model conflicts with observed session model.`,
       );
     }
-    const phaseIncomplete = incomplete
+    const phaseIncomplete = measurementIncomplete
       || analysis?.primaryComplete !== true
       || (phase.kind === 'native_helper' && loadedById.get(phase.session_id)?.status === 'absent');
     const built = buildAttemptUsage(
@@ -1096,7 +1314,9 @@ export async function collectTrialUsage(manifestInput, options = {}) {
     reasoning_output_tokens: null,
     compaction_events: 0,
   };
-  if (!incomplete) {
+  // Unknown acceptance / unlisted-child coverage keeps the report inconclusive but
+  // retains fully measured usage/by_model/cache/compaction totals.
+  if (!measurementIncomplete) {
     for (const key of [
       'input_tokens',
       'cached_input_tokens',
@@ -1125,7 +1345,7 @@ export async function collectTrialUsage(manifestInput, options = {}) {
 
   const report = {
     schema: REPORT_SCHEMA_ID,
-    status: incomplete ? 'inconclusive' : 'complete',
+    status: coverageIncomplete ? 'inconclusive' : 'complete',
     trial: emittedTrial,
     breakdown: {
       attempts: breakdownAttempts,
@@ -1140,6 +1360,8 @@ export async function collectTrialUsage(manifestInput, options = {}) {
         secondary_token_count: 'non_authoritative',
         native_parent_excludes_helpers: Boolean(emittedTrial.native_parent_excludes_helpers),
         walked_sessions: walkOrder,
+        acceptance_unknown: acceptanceUnknown,
+        measurement_incomplete: measurementIncomplete,
       },
     },
     evidence: {
@@ -1150,7 +1372,7 @@ export async function collectTrialUsage(manifestInput, options = {}) {
         trial: sha256Hex(['trial', JSON.stringify(emittedTrial)]),
       },
       notes: evidence.notes,
-      incomplete_primary_evidence: incomplete,
+      incomplete_primary_evidence: coverageIncomplete,
     },
   };
 
