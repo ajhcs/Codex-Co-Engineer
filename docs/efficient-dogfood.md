@@ -1,6 +1,15 @@
 # Efficient Codex-Co-Engineer dogfood workflow
 
-This workflow for Codex-Co-Engineer 3.2.0 minimizes coordination calls and
+For current semantic runs, read
+`skills/delegate-to-co-engineer/references/autonomous-ownership.md` and
+`skills/delegate-to-co-engineer/references/launch.md` inside the installed plugin
+(`plugins/codex-co-engineer/` in a source clone), plus the [run API](run-tool-api.md). Delegate preparation, implementation, tests and
+corrections together, retain provider preferences, and use compact candidate
+evidence at the review boundary. Measure parent plus native-child usage per
+accepted result; moving work from Astra to a native helper does not measure
+external-capacity utilization. Missing provider usage stays unknown.
+
+The compatible 3.2.0 workflow below minimizes coordination calls and
 repeated receipt content without weakening Codex's review and merge
 authority. The core pattern is:
 

@@ -1,0 +1,27 @@
+{
+  "schema": "codex-co-engineer.qualification-execution-manifest.v1",
+  "version": 1,
+  "status": "unrecorded",
+  "note": "Record actual Astra host model gpt-6-astra, effective settings, and exact per-case {provider,model} routes before collection. Native has no external jobs but uses the same planned host config. Never invent backend IDs. Bind immutable candidate commit SHA and tree SHA, published 3.4.2 SHA, and frozen input/check digests here so later results cannot change tracked files. Do not omit candidate.tree.",
+  "candidate": null,
+  "published_3_4_2": null,
+  "host": null,
+  "astra": null,
+  "provider_configuration": null,
+  "approaches": {
+    "native-codex": {
+      "external_jobs": false
+    },
+    "published-3.4.2": {
+      "external_jobs": true
+    },
+    "candidate-3.4.3": {
+      "external_jobs": true
+    },
+    "direct-delegation": {
+      "external_jobs": true
+    }
+  },
+  "input_digests": {},
+  "check_digests": {}
+}

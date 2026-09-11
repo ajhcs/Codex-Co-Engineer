@@ -31,6 +31,27 @@ timeout_seconds = 300
 quiet_seconds = 30
 
 [[stages]]
+name = "comparison-fixtures"
+kind = "unit_tests"
+command = ["node", "--no-warnings", "--test", "scripts/compare-coengineer-runs.test.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 30
+
+[[stages]]
+name = "trial-usage-unit"
+kind = "unit_tests"
+command = ["node", "--no-warnings", "--test", "scripts/collect-coengineer-trial-usage.test.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 30
+
+[[stages]]
+name = "qualification-prep-unit"
+kind = "unit_tests"
+command = ["node", "--no-warnings", "--test", "scripts/prepare-coengineer-qualification.test.mjs"]
+failure_class = "product_test_failed"
+timeout_seconds = 30
+
+[[stages]]
 name = "cursor-compatibility-unit"
 kind = "unit_tests"
 command = ["npm", "--prefix", "plugins/cursor-cloud-control", "test"]

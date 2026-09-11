@@ -1,0 +1,73 @@
+{
+  "schema": "codex-co-engineer.benchmark-protocol.v1",
+  "version": 1,
+  "title": "Codex-Co-Engineer 3.4.3 comparison protocol",
+  "arms": {
+    "required": ["native-codex", "published-3.4.2", "candidate-3.4.3"],
+    "optional": ["direct-delegation"]
+  },
+  "comparable": {
+    "all_arms": ["case_id", "input_digest", "base_sha", "host_model", "host_settings"],
+    "coengineer_arms": ["provider_configuration", "coengineer_source"]
+  },
+  "host": {
+    "model": "codex-default",
+    "settings": { "reasoning": "default", "sandbox": "workspace-write" }
+  },
+  "attempt_kinds": ["initial", "correction", "native_helper"],
+  "metrics": [
+    { "key": "native_input_tokens", "unit": "tokens", "label": "native input tokens" },
+    { "key": "native_output_tokens", "unit": "tokens", "label": "native output tokens" },
+    { "key": "native_helper_calls", "unit": "count", "label": "native helper calls" },
+    { "key": "correction_rounds", "unit": "count", "label": "correction rounds" },
+    { "key": "elapsed_ms", "unit": "milliseconds", "label": "sum of attempt durations, not wall clock" },
+    { "key": "wall_elapsed_ms", "unit": "milliseconds", "label": "trial wall elapsed" },
+    { "key": "provider_input_tokens", "unit": "tokens", "label": "provider-reported input tokens" },
+    { "key": "provider_output_tokens", "unit": "tokens", "label": "provider-reported output tokens" },
+    { "key": "provider_cost_millicents", "unit": "millicents", "label": "provider-reported cost" },
+    { "key": "model_facing_bytes", "unit": "bytes", "label": "host-measured model-facing bytes" },
+    { "key": "evidence_bytes", "unit": "bytes", "label": "retrievable evidence bytes" }
+  ],
+  "materialize": {
+    "author_name": "Co-Engineer Benchmark",
+    "author_email": "benchmark@invalid",
+    "date": "2026-01-01T00:00:00+0000",
+    "empty_destination_only": true,
+    "safe_relative_paths": true
+  },
+  "rules": {
+    "include_every_attempt": true,
+    "include_corrections": true,
+    "include_native_helpers": true,
+    "avoid_double_count_cumulative": true,
+    "terminal_snapshot_continuity": true,
+    "native_parent_excludes_separately_recorded_helpers": true,
+    "wall_elapsed_is_not_attempt_sum": true,
+    "failed_attempts_in_usage_per_accepted": true,
+    "acceptance_rate_with_coverage": true,
+    "usage_per_accepted_requires_complete_acceptance": true,
+    "zero_accepted_is_not_zero_cost": true,
+    "unknown_is_not_zero": true,
+    "never_invent_measured_results": true,
+    "synthetic_fixtures_are_unverified": true,
+    "do_not_claim_independent_verification": true,
+    "label_unrun_and_unmatched": true,
+    "bind_case_input_digest": true,
+    "bind_coengineer_source_identity": true,
+    "reject_duplicate_case_ids": true,
+    "reject_mixed_candidate_identity": true,
+    "preserve_provider_model_groups": true,
+    "mixed_providers_are_non_comparable": true,
+    "source_trust_pairs_enforced": true,
+    "frozen_acceptance_checks": true,
+    "paid_repeated_trials_opt_in": true,
+    "live_jobs_not_implemented": true,
+    "no_proportional_subscription_claims": true
+  },
+  "sources": {
+    "host_measured": "host_authoritative",
+    "provider_report": "provider_untrusted",
+    "evidence_bytes": "host_authoritative",
+    "unknown": "unknown"
+  }
+}

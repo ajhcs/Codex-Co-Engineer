@@ -16,6 +16,8 @@ jobs:
       NPM_CONFIG_CACHE: /tmp/codex-acpx-release-npm-cache
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -24,6 +26,9 @@ jobs:
       - run: umask 077 && node scripts/validate-release.mjs
       - run: umask 077 && npm --prefix tools/acpx-vendor ci --ignore-scripts --no-audit --no-fund
       - run: umask 077 && npm --prefix plugins/codex-co-engineer test
+      - run: umask 077 && node --no-warnings --test scripts/compare-coengineer-runs.test.mjs
+      - run: umask 077 && node --no-warnings --test scripts/collect-coengineer-trial-usage.test.mjs
+      - run: umask 077 && node --no-warnings --test scripts/prepare-coengineer-qualification.test.mjs
       - run: umask 077 && npm --prefix plugins/cursor-cloud-control test
       - run: umask 077 && npm --prefix tools/acpx-vendor run test:publish-provenance
       - run: umask 077 && node scripts/inspector-preflight.mjs

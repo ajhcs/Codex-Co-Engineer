@@ -10,7 +10,8 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, rename, lstat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
-import { assertRunId } from './run-manifest.mjs';
+import { assertRunId, isAssignmentId } from './run-manifest.mjs';
+import { compactOwnedCorrectionFollowV1 } from './owned-delegation.mjs';
 import { assertDirectJsonClosure } from './selection-json.mjs';
 
 export const RUN_ADMISSION_STORE_SCHEMA = 'codex-co-engineer.run-admission-store.v1';
@@ -223,9 +224,81 @@ export function createRunAdmissionStore(root) {
     }
   }
 
+  // Exclusive durable reservation before child admission. A second MCP process
+  // may inspect the same child, but cannot dispatch a competing correction.
+  // A crash before child persistence leaves a pending reservation: do not
+  // automatically reclaim it or assume the provider did no work.
+  async function reserveRevision(producerRunId, assignmentId, followInput) {
+    safeRunId(producerRunId);
+    if (!isAssignmentId(assignmentId)) storeError('run_store_identity_invalid', 'Invalid correction assignment.');
+    const follow = compactOwnedCorrectionFollowV1(followInput);
+    const target = path.join(directory, `${producerRunId}.${assignmentId}.revision.json`);
+    const schema = 'codex-co-engineer.owned-revision-reservation.v1';
+    const reservationId = randomUUID();
+    await initialize();
+    const rootHandle = await openRoot(directory);
+    let handle;
+    try {
+      try {
+        handle = await open(target, WRITE_FLAGS, 0o600);
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        const existing = await open(target, READ_FLAGS);
+        try {
+          const metadata = await existing.stat();
+          assertPrivateFile(metadata);
+          if (metadata.size > 2048) storeError('run_store_record_too_large', 'Correction reservation exceeds its bound.');
+          let record;
+          try { record = JSON.parse(await existing.readFile('utf8')); } catch {
+            storeError('revision_admission_pending', 'Correction reservation is pending; inspect before retrying.');
+          }
+          if (record?.schema !== schema || record.producer_run_id !== producerRunId
+            || record.assignment_id !== assignmentId || typeof record.reservation_id !== 'string') {
+            storeError('run_store_identity_mismatch', 'Correction reservation identity differs.');
+          }
+          return { reserved: false, follow: compactOwnedCorrectionFollowV1(record.follow) };
+        } finally {
+          await existing.close();
+        }
+      }
+      const text = JSON.stringify({ schema, producer_run_id: producerRunId,
+        assignment_id: assignmentId, reservation_id: reservationId, follow });
+      await handle.chmod(0o600);
+      await handle.writeFile(text, 'utf8');
+      await handle.sync();
+      const written = await handle.stat();
+      assertPrivateFile(written);
+      await rootHandle.handle.sync();
+      return {
+        reserved: true,
+        follow,
+        // Only the winning caller can release its own pre-admission failure.
+        // An admitted child, including failed work, permanently consumes it.
+        release: async () => {
+          const existing = await open(target, READ_FLAGS);
+          try {
+            const metadata = await existing.stat();
+            assertPrivateFile(metadata);
+            if (metadata.ino !== written.ino || metadata.dev !== written.dev) {
+              storeError('run_store_record_changed', 'Correction reservation changed.');
+            }
+            const record = JSON.parse(await existing.readFile('utf8'));
+            if (record.reservation_id !== reservationId) storeError('run_store_record_changed', 'Correction reservation changed.');
+            await unlink(target);
+          } finally {
+            await existing.close();
+          }
+        },
+      };
+    } finally {
+      await handle?.close().catch(() => {});
+      await rootHandle.handle.close().catch(() => {});
+    }
+  }
+
   async function has(runId) {
     return (await load(runId)) !== null;
   }
 
-  return Object.freeze({ directory, load, save, has });
+  return Object.freeze({ directory, load, save, has, reserveRevision });
 }

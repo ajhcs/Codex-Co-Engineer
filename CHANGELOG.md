@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+## [3.4.3] - 2026-09-11
+
+Published at the maintainer's direction with partial qualification. Independent
+code review, real owned corrections, Astra acceptance, the automated release
+gate, and GitHub CI passed. Measured benefit, clean-agent onboarding, refreshed
+native-host acceptance, and Desktop wait/recovery evidence remain incomplete.
+No savings claim is made. See [PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43)
+and the [release notes](docs/releases/v3.4.3.md) for retained failures and limits;
+existing qualification requirements remain unchanged.
+
+### Added
+
+- Explicit provider preferences and bounded candidate revisions through the
+  existing Co-Engineer tool surface, preserving external ownership and prior
+  evidence instead of rebuilding correction assignments in the lead agent.
+
+- Ordinary run results and on-demand usage evidence through the existing ledger
+  and decision-card helpers; unknown usage stays unknown and completion never
+  implies Codex acceptance.
+- A one-provider first-outcome example, issue forms, PR template, support links,
+  contributor tasks, roadmap, and a documented real development correction loop.
+- Reproducible frozen comparison cases and an offline analyzer covering native
+  helpers, corrections, failed attempts, exact source identities, and missing
+  acceptance coverage. Synthetic fixtures do not establish savings.
+- OpenAI showcase preparation with the current local-MCP submission limitation.
+
+### Changed
+
+- Delegate complete engineering assignments, checks and corrections to external
+  owners; return compact evidence for Astra and other autonomous lead agents.
+  Preserve final review, host model defaults, and repository authorization.
+
+- Cap owned correction chains at three rounds, reserve one admitted child per
+  producer across server processes, and retain lineage through restart.
+
+### Fixed
+
+- Settle ACP results after persistent-client finalization so immediate runtime
+  close can clean up agents and descendants; retain a deterministic ordering
+  regression and the independently reviewed correction history.
+
+- Point public Grok install docs at the official Grok Build overview and
+  document `grok login` / `grok login --device-auth` subscription login for
+  first-outcome work (no API key).
+- Restore the distinct local marketplace-wrapper path for older open projects
+  that share the public marketplace identity, keep the shipped marketplace
+  manifest stable, and require `plugin/list` persistence checks after restart.
+- Align the 3.4.3 evaluation gate so Astra own-output is measured versus
+  published 3.4.2 (helpers do not satisfy) and paid work does not dispatch
+  beyond the $25 cap.
+- Make supported deadline extensions govern the active ACP turn and preserve
+  timeout/cancellation truth after partial provider output.
+- Preserve empty capability restrictions and complete Unicode review feedback;
+  reject unproven producers and competing feedback instead of silently dropping it.
+- Direct terminal uncertainty to inspection and keep active work on bounded waits.
+
 ## [3.4.2] - 2026-09-08
 
 ### Fixed

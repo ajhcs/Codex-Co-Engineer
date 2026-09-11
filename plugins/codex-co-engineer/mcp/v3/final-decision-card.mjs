@@ -248,6 +248,58 @@ export const SUMMARY_KEYS = capturedFreeze([
   'blocker_count', 'branch', 'ci', 'head', 'pr', 'push', 'ready_for_sol_merge',
   'text', 'tree', 'worktree',
 ]);
+export const LOCAL_OUTCOME_SCHEMA_ID = 'codex-co-engineer.local-outcome.v1';
+export const LOCAL_OUTCOME_RESULT_SCHEMA_ID = 'codex-co-engineer.local-outcome-result.v1';
+export const LOCAL_OUTCOME_VERSION = 1;
+export const PUBLIC_LABEL_REVIEW_NEEDED = 'Review needed';
+export const PUBLIC_LABEL_UNRESOLVED = 'Unresolved';
+export const PUBLIC_LABEL_FAILED = 'Failed';
+export const PUBLIC_LABEL_IN_PROGRESS = 'In progress';
+export const PUBLIC_LABEL_ACCEPTED = 'Accepted';
+export const LOCAL_PUBLIC_LABELS = capturedFreeze([
+  PUBLIC_LABEL_REVIEW_NEEDED, PUBLIC_LABEL_UNRESOLVED, PUBLIC_LABEL_FAILED,
+  PUBLIC_LABEL_IN_PROGRESS, PUBLIC_LABEL_ACCEPTED,
+]);
+export const ASSIGNMENT_OUTCOMES = capturedFreeze([
+  'cancelled', 'completed', 'failed', 'uncertain', 'unfinal',
+]);
+export const NEXT_DECISIONS = capturedFreeze([
+  'inspect_unresolved', 'none', 'resolve_failures', 'review_candidate', 'wait_for_completion',
+]);
+export const LOCAL_CHECK_STATUSES = capturedFreeze([
+  'failed', 'missing', 'passed', 'provider_pass', 'unknown',
+]);
+export const LOCAL_OUTCOME_INPUT_KEYS = capturedFreeze([
+  'artifacts', 'assignments', 'candidate', 'checks', 'codex_acceptance', 'identity',
+  'schema', 'version',
+]);
+export const LOCAL_OUTCOME_REQUIRED_KEYS = capturedFreeze([
+  'assignments', 'candidate', 'identity', 'schema', 'version',
+]);
+export const LOCAL_CANDIDATE_KEYS = capturedFreeze(['branch', 'composed', 'head', 'tree']);
+export const LOCAL_ASSIGNMENT_KEYS = capturedFreeze([
+  'assignment_id', 'head', 'outcome', 'provider', 'required', 'role',
+]);
+export const LOCAL_ASSIGNMENT_REQUIRED_KEYS = capturedFreeze([
+  'assignment_id', 'outcome', 'provider', 'required', 'role',
+]);
+export const LOCAL_CHECK_KEYS = capturedFreeze(['id', 'present', 'status']);
+export const LOCAL_ACCEPTANCE_KEYS = capturedFreeze([
+  'accepted', 'authority', 'head', 'run_id', 'tree',
+]);
+export const LOCAL_ACCEPTANCE_REQUIRED_KEYS = capturedFreeze(['accepted', 'authority']);
+export const LOCAL_OUTCOME_RESULT_KEYS = capturedFreeze([
+  'artifacts', 'assignment_result', 'assignments', 'candidate', 'checks',
+  'codex_accepted', 'label', 'next_decision', 'review_needed', 'schema',
+  'summary', 'truncation', 'unresolved', 'version',
+]);
+export const LOCAL_SUMMARY_KEYS = capturedFreeze([
+  'assignment_result', 'codex_accepted', 'head', 'next_decision', 'review_needed',
+  'text', 'tree', 'unresolved',
+]);
+export const CODEX_ACCEPTANCE_AUTHORITY = 'codex';
+export const MAX_LOCAL_CHECKS = 8;
+export const MAX_CHECK_ID_BYTES = 64;
 
 export const FINAL_DECISION_CARD_ERROR_CODES = capturedFreeze([
   'accessor_property_denied', 'aliased_reference_denied', 'bounds_exceeded',
@@ -949,8 +1001,15 @@ export function describeFinalDecisionCardV1() {
     version: FINAL_DECISION_CARD_VERSION,
     result_schema: FINAL_DECISION_CARD_RESULT_SCHEMA_ID,
     rule: 'typed_facts_only_never_provider_prose',
-    api: capturedFreeze(['describeFinalDecisionCardV1', 'projectFinalDecisionCardV1']),
+    api: capturedFreeze([
+      'describeFinalDecisionCardV1',
+      'projectFinalDecisionCardV1',
+      'projectLocalOutcomeCardV1',
+    ]),
     public_labels: PUBLIC_LABELS,
+    local_outcome_schema: LOCAL_OUTCOME_SCHEMA_ID,
+    local_outcome_result_schema: LOCAL_OUTCOME_RESULT_SCHEMA_ID,
+    local_public_labels: LOCAL_PUBLIC_LABELS,
     blocker_codes: BLOCKER_CODES,
     checks: CARD_CHECKS,
     error_codes: FINAL_DECISION_CARD_ERROR_CODES,
@@ -1050,5 +1109,294 @@ export function projectFinalDecisionCardV1(input) {
   return freezeData(card);
 }
 
+function optionalSha40(object, key, pathLabel) {
+  const value = ownDataValue(object, key, pathLabel);
+  if (value === null) return null;
+  if (typeof value !== 'string') deny('invalid_type', pathLabel);
+  if (!isSha40(value)) deny('invalid_format', pathLabel);
+  return value;
+}
+
+function optionalBranch(object, key, pathLabel) {
+  const value = ownDataValue(object, key, pathLabel);
+  if (value === null) return null;
+  return ownBranch(object, key, pathLabel);
+}
+
+function parseLocalCandidate(input, pathLabel) {
+  const object = assertClosedObject(input, LOCAL_CANDIDATE_KEYS, pathLabel);
+  requireKeys(object, LOCAL_CANDIDATE_KEYS, pathLabel);
+  return freezeRecord(LOCAL_CANDIDATE_KEYS, {
+    branch: optionalBranch(object, 'branch', `${pathLabel}.branch`),
+    head: optionalSha40(object, 'head', `${pathLabel}.head`),
+    tree: optionalSha40(object, 'tree', `${pathLabel}.tree`),
+    composed: ownBoolean(object, 'composed', `${pathLabel}.composed`),
+  });
+}
+
+function parseLocalAssignment(input, pathLabel) {
+  const object = assertClosedObject(input, LOCAL_ASSIGNMENT_KEYS, pathLabel);
+  requireKeys(object, LOCAL_ASSIGNMENT_REQUIRED_KEYS, pathLabel);
+  const assignmentId = ownString(object, 'assignment_id', `${pathLabel}.assignment_id`);
+  if (!isAssignmentId(assignmentId)) deny('invalid_format', `${pathLabel}.assignment_id`);
+  const provider = ownString(object, 'provider', `${pathLabel}.provider`);
+  if (!isKnownProvider(provider)) deny('invalid_format', `${pathLabel}.provider`);
+  const role = ownString(object, 'role', `${pathLabel}.role`);
+  if (!isKnownRole(role)) deny('invalid_format', `${pathLabel}.role`);
+  const head = hasOwn(object, 'head')
+    ? optionalSha40(object, 'head', `${pathLabel}.head`)
+    : null;
+  return freezeRecord(LOCAL_ASSIGNMENT_KEYS, {
+    assignment_id: assignmentId,
+    provider,
+    role,
+    required: ownBoolean(object, 'required', `${pathLabel}.required`),
+    outcome: ownEnum(object, 'outcome', ASSIGNMENT_OUTCOMES, `${pathLabel}.outcome`),
+    head,
+  });
+}
+
+function parseLocalAssignments(input, pathLabel) {
+  try { assertNotProxy(input, pathLabel); } catch (error) { remapClosure(error, pathLabel); }
+  try { assertDenseJsonArray(input, pathLabel); } catch (error) { remapClosure(error, pathLabel); }
+  if (input.length < MIN_ASSIGNMENTS || input.length > MAX_ASSIGNMENTS) {
+    deny('bounds_exceeded', pathLabel);
+  }
+  const assignments = [];
+  const seen = new SET_CTOR();
+  for (let i = 0; i < input.length; i += 1) {
+    const assignment = parseLocalAssignment(input[i], `${pathLabel}[${i}]`);
+    if (seen.has(assignment.assignment_id)) deny('invalid_format', `${pathLabel}[${i}].assignment_id`);
+    seen.add(assignment.assignment_id);
+    assignments.push(assignment);
+  }
+  assignments.sort((left, right) => {
+    if (left.assignment_id === right.assignment_id) return 0;
+    return left.assignment_id < right.assignment_id ? -1 : 1;
+  });
+  return freezeList(assignments);
+}
+
+function parseLocalCheck(input, pathLabel) {
+  const object = assertClosedObject(input, LOCAL_CHECK_KEYS, pathLabel);
+  requireKeys(object, LOCAL_CHECK_KEYS, pathLabel);
+  return freezeRecord(LOCAL_CHECK_KEYS, {
+    id: ownString(object, 'id', `${pathLabel}.id`, MAX_CHECK_ID_BYTES),
+    present: ownBoolean(object, 'present', `${pathLabel}.present`),
+    status: ownEnum(object, 'status', LOCAL_CHECK_STATUSES, `${pathLabel}.status`),
+  });
+}
+
+function parseLocalChecks(input, pathLabel) {
+  if (input === undefined) return freezeList([]);
+  try { assertNotProxy(input, pathLabel); } catch (error) { remapClosure(error, pathLabel); }
+  try { assertDenseJsonArray(input, pathLabel); } catch (error) { remapClosure(error, pathLabel); }
+  if (input.length > MAX_LOCAL_CHECKS) deny('bounds_exceeded', pathLabel);
+  const checks = [];
+  const seen = new SET_CTOR();
+  for (let i = 0; i < input.length; i += 1) {
+    const check = parseLocalCheck(input[i], `${pathLabel}[${i}]`);
+    if (seen.has(check.id)) deny('invalid_format', `${pathLabel}[${i}].id`);
+    seen.add(check.id);
+    checks.push(check);
+  }
+  return freezeList(checks);
+}
+
+function parseCodexAcceptance(input, pathLabel) {
+  if (input === undefined) {
+    return freezeRecord(LOCAL_ACCEPTANCE_KEYS, {
+      accepted: false, authority: null, run_id: null, head: null, tree: null,
+    });
+  }
+  const object = assertClosedObject(input, LOCAL_ACCEPTANCE_KEYS, pathLabel);
+  requireKeys(object, LOCAL_ACCEPTANCE_REQUIRED_KEYS, pathLabel);
+  const accepted = ownBoolean(object, 'accepted', `${pathLabel}.accepted`);
+  const authority = ownDataValue(object, 'authority', `${pathLabel}.authority`);
+  if (authority !== null && typeof authority !== 'string') deny('invalid_type', `${pathLabel}.authority`);
+  if (authority !== null && authority !== CODEX_ACCEPTANCE_AUTHORITY) {
+    deny('invalid_format', `${pathLabel}.authority`);
+  }
+  const runId = hasOwn(object, 'run_id')
+    ? ownDataValue(object, 'run_id', `${pathLabel}.run_id`)
+    : null;
+  if (runId !== null && typeof runId !== 'string') deny('invalid_type', `${pathLabel}.run_id`);
+  if (typeof runId === 'string') bindRunId(runId, `${pathLabel}.run_id`);
+  const head = hasOwn(object, 'head')
+    ? optionalSha40(object, 'head', `${pathLabel}.head`)
+    : null;
+  const tree = hasOwn(object, 'tree')
+    ? optionalSha40(object, 'tree', `${pathLabel}.tree`)
+    : null;
+  return freezeRecord(LOCAL_ACCEPTANCE_KEYS, {
+    accepted: accepted === true,
+    authority: authority === CODEX_ACCEPTANCE_AUTHORITY ? CODEX_ACCEPTANCE_AUTHORITY : null,
+    run_id: typeof runId === 'string' ? runId : null,
+    head,
+    tree,
+  });
+}
+
+function hasKnownFailedCheck(checks) {
+  for (let i = 0; i < checks.length; i += 1) {
+    if (checks[i].status === 'failed') return true;
+  }
+  return false;
+}
+
+function honorCodexAcceptance(acceptance, identity, candidate, assignmentResult, checks) {
+  if (acceptance.accepted !== true) return false;
+  if (acceptance.authority !== CODEX_ACCEPTANCE_AUTHORITY) return false;
+  if (assignmentResult !== 'completed') return false;
+  if (acceptance.run_id == null || acceptance.head == null) return false;
+  if (acceptance.run_id !== identity.run_id) return false;
+  if (candidate.head == null || acceptance.head !== candidate.head) return false;
+  if (acceptance.tree != null && acceptance.tree !== candidate.tree) return false;
+  if (hasKnownFailedCheck(checks)) return false;
+  return true;
+}
+
+export function rollupAssignmentResult(assignments, runOutcome) {
+  let hasActive = false;
+  let hasFailed = false;
+  let hasCancelled = false;
+  let hasUncertain = false;
+  let completedRequired = 0;
+  let requiredCount = 0;
+  for (let i = 0; i < assignments.length; i += 1) {
+    const assignment = assignments[i];
+    if (assignment.required === true) requiredCount += 1;
+    if (assignment.outcome === 'unfinal') hasActive = true;
+    else if (assignment.outcome === 'failed') hasFailed = true;
+    else if (assignment.outcome === 'cancelled') hasCancelled = true;
+    else if (assignment.outcome === 'uncertain') hasUncertain = true;
+    else if (assignment.outcome === 'completed' && assignment.required === true) {
+      completedRequired += 1;
+    }
+  }
+  if (runOutcome === 'failed' || hasFailed) return 'failed';
+  if (runOutcome === 'cancelled' || hasCancelled) return 'cancelled';
+  if (hasActive || runOutcome === 'unfinal') return 'unfinal';
+  if (runOutcome === 'uncertain' || hasUncertain) return 'uncertain';
+  if ((runOutcome == null || runOutcome === 'completed')
+    && requiredCount > 0 && completedRequired === requiredCount) {
+    return 'completed';
+  }
+  return 'uncertain';
+}
+
+function deriveNextDecision(result, reviewNeeded, unresolved) {
+  if (result === 'unfinal') return 'wait_for_completion';
+  if (result === 'failed' || result === 'cancelled') return 'resolve_failures';
+  if (result === 'uncertain' || unresolved === true) return 'inspect_unresolved';
+  if (reviewNeeded === true) return 'review_candidate';
+  return 'none';
+}
+
+function localLabel(result, reviewNeeded, unresolved, accepted) {
+  if (accepted === true && result === 'completed') return PUBLIC_LABEL_ACCEPTED;
+  if (result === 'failed' || result === 'cancelled') return PUBLIC_LABEL_FAILED;
+  if (result === 'unfinal') return PUBLIC_LABEL_IN_PROGRESS;
+  if (unresolved === true || result === 'uncertain') return PUBLIC_LABEL_UNRESOLVED;
+  if (reviewNeeded === true) return PUBLIC_LABEL_REVIEW_NEEDED;
+  return PUBLIC_LABEL_REVIEW_NEEDED;
+}
+
+function localSummaryText(result, accepted, reviewNeeded, unresolved) {
+  if (accepted === true && result === 'completed') {
+    return 'Codex accepted this completed candidate.';
+  }
+  if (result === 'failed') return 'The run failed; resolve the failures.';
+  if (result === 'cancelled') return 'The run was cancelled; resolve the failures.';
+  if (result === 'unfinal') return 'Work is still in progress; wait for completion.';
+  if (result === 'uncertain' || unresolved === true) {
+    return 'The outcome is unresolved; inspect before deciding.';
+  }
+  if (reviewNeeded === true) return 'Completed work needs review; it is not Codex-accepted.';
+  return 'Completed work is not Codex-accepted.';
+}
+
+function projectLocalSummary(candidate, result, accepted, reviewNeeded, unresolved, nextDecision) {
+  const text = clipSummaryText(localSummaryText(result, accepted, reviewNeeded, unresolved));
+  return freezeRecord(LOCAL_SUMMARY_KEYS, {
+    assignment_result: result,
+    codex_accepted: accepted,
+    review_needed: reviewNeeded,
+    unresolved,
+    next_decision: nextDecision,
+    head: candidate.head,
+    tree: candidate.tree,
+    text,
+  });
+}
+
+export function projectLocalOutcomeCardV1(input) {
+  if (IS_PROXY(input)) deny('proxy_denied', 'request');
+  const object = assertClosedObject(input, LOCAL_OUTCOME_INPUT_KEYS, 'request');
+  requireKeys(object, LOCAL_OUTCOME_REQUIRED_KEYS, 'request');
+  const schema = ownString(object, 'schema', 'request.schema', MAX_CARD_STRING_BYTES);
+  if (schema !== LOCAL_OUTCOME_SCHEMA_ID) deny('invalid_format', 'request.schema');
+  const version = ownDataValue(object, 'version', 'request.version');
+  if (version !== LOCAL_OUTCOME_VERSION) deny('invalid_format', 'request.version');
+  const identity = parseIdentity(ownDataValue(object, 'identity', 'identity'), 'identity');
+  const candidate = parseLocalCandidate(ownDataValue(object, 'candidate', 'candidate'), 'candidate');
+  const assignments = parseLocalAssignments(
+    ownDataValue(object, 'assignments', 'assignments'),
+    'assignments',
+  );
+  const assignmentIds = new SET_CTOR();
+  for (let i = 0; i < assignments.length; i += 1) assignmentIds.add(assignments[i].assignment_id);
+  const checks = parseLocalChecks(
+    optionalOwn(object, 'checks', 'checks', (src, key, label) => ownDataValue(src, key, label)),
+    'checks',
+  );
+  const artifacts = parseArtifacts(
+    optionalOwn(object, 'artifacts', 'artifacts', (src, key, label) => ownDataValue(src, key, label)),
+    identity,
+    assignmentIds,
+    'artifacts',
+  );
+  const acceptance = parseCodexAcceptance(
+    optionalOwn(object, 'codex_acceptance', 'codex_acceptance', (src, key, label) => ownDataValue(src, key, label)),
+    'codex_acceptance',
+  );
+  const assignmentResult = rollupAssignmentResult(assignments);
+  const unresolved = assignmentResult === 'uncertain' || assignmentResult === 'unfinal';
+  const codexAccepted = honorCodexAcceptance(
+    acceptance, identity, candidate, assignmentResult, checks,
+  );
+  const reviewNeeded = codexAccepted !== true && assignmentResult === 'completed';
+  const nextDecision = deriveNextDecision(assignmentResult, reviewNeeded, unresolved);
+  const truncation = freezeRecord(TRUNCATION_KEYS, {
+    truncated: artifacts.truncated,
+    fields: freezeList(artifacts.truncated ? ['artifacts'] : []),
+    original_count: artifacts.original_count,
+    retained: artifacts.artifacts.length,
+    omitted: artifacts.omitted,
+    reason: artifacts.truncated ? ARTIFACT_TRUNCATION_REASON : null,
+  });
+  const card = freezeRecord(LOCAL_OUTCOME_RESULT_KEYS, {
+    schema: LOCAL_OUTCOME_RESULT_SCHEMA_ID,
+    version: LOCAL_OUTCOME_VERSION,
+    label: localLabel(assignmentResult, reviewNeeded, unresolved, codexAccepted),
+    assignment_result: assignmentResult,
+    codex_accepted: codexAccepted,
+    review_needed: reviewNeeded,
+    unresolved,
+    next_decision: nextDecision,
+    candidate,
+    assignments,
+    checks,
+    artifacts: artifacts.artifacts,
+    summary: projectLocalSummary(
+      candidate, assignmentResult, codexAccepted, reviewNeeded, unresolved, nextDecision,
+    ),
+    truncation,
+  });
+  return freezeData(card);
+}
+
 capturedFreeze(projectFinalDecisionCardV1);
 capturedFreeze(describeFinalDecisionCardV1);
+capturedFreeze(projectLocalOutcomeCardV1);
+capturedFreeze(rollupAssignmentResult);

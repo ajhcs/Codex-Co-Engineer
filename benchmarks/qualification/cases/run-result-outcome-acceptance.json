@@ -1,0 +1,131 @@
+{
+  "schema": "codex-co-engineer.qualification-case.v1",
+  "id": "run-result-outcome-acceptance",
+  "title": "Keep run-result outcomes distinct from Codex acceptance",
+  "summary": "Completed provider work is not Codex acceptance. Failed, uncertain, and unfinal stay distinct, verify completion is not a passed check, and missing usage stays unknown.",
+  "input_digest": "b1e7571a963603bc610e41b20bb1683d273181643852c58b71a2a8c32f820cfa",
+  "check_digest": "530956f00bc8e05f8037b4e85f6c3f43a95a11da8a59ca35181a64c6d36df96c",
+  "source_sha": "3131f9ac7f6807eccb2ab68f027f1d98d3db3661",
+  "retrospective": true,
+  "status": "unrun",
+  "implement": "grok",
+  "review": "cursor-local",
+  "allowlist": [
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-path.mjs",
+      "git_sha256": "ce9170fdbdfa84e526c01fa12e74c54da77b0b998359bbd45f6d614e4142c1b6",
+      "bytes": 14445
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/artifact-ref.mjs",
+      "git_sha256": "94fcbb60974729a5c9c959b8236e1fbf2a9ff89957080769664b5181100a89b9",
+      "bytes": 16931
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/assignment-manifest.mjs",
+      "git_sha256": "b8b90746b059cea51933757b82334db64054fc5525f3d03692f23dc39d52470b",
+      "bytes": 14355
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/capability-bridge.mjs",
+      "git_sha256": "555c7ce7f94a611240cd9ba9d1a59fa9e999071f3c2e6e6fbb984575b1f76f9a",
+      "bytes": 15421
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/contract.mjs",
+      "git_sha256": "7ec33962e8ed30fbaf628a128ca56bcc907f9d032f909950d394a99cd086970a",
+      "bytes": 4187
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/final-decision-card.mjs",
+      "git_sha256": "794b756d289c4a7ff315a1168a72835ce033589b079bc4dba96f1589eb3d3e99",
+      "bytes": 54510
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/grammar.mjs",
+      "git_sha256": "8b80015d521b7a39e8a1df41d489eb791d3ce6d2f8b05eea3e9c699a5b81da66",
+      "bytes": 5842
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/identity.mjs",
+      "git_sha256": "80382e0d552f0979859f1bb919b4ceae481743c49213e199e1891b7baab7ede5",
+      "bytes": 26760
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/prompt-compiler.mjs",
+      "git_sha256": "82b33f2d086e002999a386ef659fc182d2ec22c578578f03b888f294dd18537d",
+      "bytes": 38404
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/protected-identity.mjs",
+      "git_sha256": "114d9bd6fe03b6a07e515980b4edc1569e03decb72e747e096efec56479fad40",
+      "bytes": 28974
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/protected-telemetry.mjs",
+      "git_sha256": "cd778870f25278753c1f22059ac9f4ff80afde38484411bb7ed6ebdac266f837",
+      "bytes": 29889
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/repo-path-matcher.mjs",
+      "git_sha256": "25ffd90555229733e90ede629ec2cf4aad728ee3377e1402eb5f7488f6e87df9",
+      "bytes": 31089
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-manifest.mjs",
+      "git_sha256": "2ed6861654ab629cf5c1756cc3747feba45c047063fee4088973248bd55b4b44",
+      "bytes": 46207
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-policy.mjs",
+      "git_sha256": "aeed773fbff6b96ffdbf08555001a644aadf846155366325944360a9a6702948",
+      "bytes": 6727
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-result-evidence.mjs",
+      "git_sha256": "f86043263a851c5047fc487df19146da18e6869569a486174e8823672474b5e2",
+      "bytes": 16343
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/selection-json.mjs",
+      "git_sha256": "5baca38e0d5c85bf4081d6bf73179459b6770ce4f9a40118df23a28bceae23b5",
+      "bytes": 10148
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/usage-ledger.mjs",
+      "git_sha256": "1e06b0e6c2903e69d5e16ecd8631880e7b6a845d01aacb0deff648b0413e4892",
+      "bytes": 57024
+    }
+  ],
+  "overlay": {
+    "files": {
+      "TASK.md": "# Run-result outcome and acceptance\n\nThis retrospective task uses a bounded pre-fix snapshot of public repository\nsource. Repair the historical modules at their original paths so the frozen\nchecks in `checks/run-result-outcome.test.mjs` pass.\n\nDo not edit the check file, this prompt, or recorded identity. Do not copy\nlater corrected sources, Git history, or other trial outputs into the\nworkspace.\n\nRequired behavior:\n\n- A completed provider job is not Codex acceptance. `codex_accepted` is true\n  only when the assignment result is completed and a Codex acceptance record is\n  bound to this run id and the exact candidate head.\n- Failed, uncertain, and unfinal remain distinct. A failed run stays failed\n  even when a lane completed and produced a head. Uncertain proof\n  (`lifecycle_pending`, unknown dispatch confidence, dirty handoff) is not\n  completed. A still-running lane keeps the result unfinal.\n- Completed verify work is not a passed check. Checks stay empty unless an\n  explicit check record is supplied.\n- Independent lane heads are not one composed candidate. Report a candidate\n  head only for a single lane or an explicit composed=true override.\n- Missing metrics stay unknown. Do not emit numeric zero for absent usage.\n- Shareable text must not leak owner-only prompts, worktree paths, or internal\n  tokens such as `not_accepted`.\n- Stale or unbound Codex acceptance cannot label the result Accepted. A bound\n  acceptance still cannot accept a failed assignment result.\n\nAcceptance is the frozen command\n`node --test checks/run-result-outcome.test.mjs`.\n",
+      "checks/run-result-outcome.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\n\nimport { ARTIFACT_REF_SCHEMA_ID } from '../plugins/codex-co-engineer/mcp/v3/artifact-ref.mjs';\nimport {\n  RUN_ADMISSION_RECEIPT_SCHEMA_ID,\n  RUN_RESULT_EVIDENCE_SCHEMA_ID,\n  detailRunResultEvidenceV1,\n  projectRunResultEvidenceV1,\n  summarizeRunResultEvidenceV1,\n} from '../plugins/codex-co-engineer/mcp/v3/run-result-evidence.mjs';\n\nconst RUN_ID = 'run-result-01';\nconst BASE_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';\nconst HEAD_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';\nconst OTHER_HEAD = 'cccccccccccccccccccccccccccccccccccccccc';\nconst HOSTILE_PATH = '/tmp/secret-repo-do-not-leak';\nconst HOSTILE_PROMPT = 'owner-only prompt with secret token';\n\nfunction artifactRef() {\n  return {\n    schema: ARTIFACT_REF_SCHEMA_ID,\n    run_id: RUN_ID,\n    assignment_id: 'lane-writer',\n    artifact_kind: 'git_diff',\n    artifact_class: 'sanitized',\n    relative_path: `runs/${RUN_ID}/lane-writer/diff-1.patch`,\n    byte_length: 128,\n    sha256: 'ab'.repeat(32),\n    media_type: 'text/plain',\n    content_encoding: 'identity',\n  };\n}\n\nfunction writerLane(overrides = {}) {\n  return {\n    assignment_id: 'lane-writer',\n    provider: 'grok',\n    role: 'implement',\n    required: true,\n    phase: 'completed',\n    status: 'completed',\n    prompt_dispatched: true,\n    dispatch_confidence: 'authoritative',\n    task_final: true,\n    clean: true,\n    head: HEAD_SHA,\n    result: HOSTILE_PROMPT,\n    handoff: {\n      worktree: HOSTILE_PATH,\n      current_head: HEAD_SHA,\n      branch: 'ce/lane-writer',\n    },\n    artifact_refs: [artifactRef()],\n    ...overrides,\n  };\n}\n\nfunction receipt(overrides = {}) {\n  const result = {\n    schema: RUN_ADMISSION_RECEIPT_SCHEMA_ID,\n    version: 1,\n    run_id: RUN_ID,\n    phase: 'completed',\n    status: 'completed',\n    base_sha: BASE_SHA,\n    git: { base_sha: BASE_SHA, digest: 'sha256:not-copied' },\n    objective: HOSTILE_PROMPT,\n    complete_candidate_blocked: false,\n    lanes: [writerLane()],\n    ...overrides,\n  };\n  return {\n    ...result,\n    lanes: result.lanes.map((lane) => ({\n      prompt_dispatched: true,\n      dispatch_confidence: 'authoritative',\n      task_final: true,\n      clean: true,\n      ...lane,\n    })),\n  };\n}\n\ntest('completed admission work is not Codex acceptance', () => {\n  const summary = summarizeRunResultEvidenceV1(receipt());\n  assert.equal(summary.schema, RUN_RESULT_EVIDENCE_SCHEMA_ID);\n  assert.equal(summary.assignment_result, 'completed');\n  assert.equal(summary.codex_accepted, false);\n  assert.equal(summary.review_needed, true);\n  assert.equal(summary.next_decision, 'review_candidate');\n  assert.equal(summary.candidate.head, HEAD_SHA);\n  assert.match(summary.text, /needs review/iu);\n  assert.equal(summary.text.includes('not_accepted'), false);\n});\n\ntest('failed, uncertain, and unfinal states stay distinct', () => {\n  const failed = summarizeRunResultEvidenceV1(receipt({\n    phase: 'failed',\n    status: 'failed',\n    lanes: [writerLane({\n      phase: 'failed_pre_prompt',\n      status: 'failed_pre_prompt',\n      head: null,\n    })],\n  }));\n  assert.equal(failed.assignment_result, 'failed');\n  assert.equal(failed.next_decision, 'resolve_failures');\n  assert.equal(failed.codex_accepted, false);\n\n  const uncertain = summarizeRunResultEvidenceV1(receipt({\n    phase: 'needs_attention',\n    status: 'needs_attention',\n    lanes: [writerLane({\n      phase: 'needs_attention',\n      status: 'needs_attention',\n      dispatch_confidence: 'uncertain',\n    })],\n  }));\n  assert.equal(uncertain.assignment_result, 'uncertain');\n  assert.equal(uncertain.unresolved, true);\n  assert.equal(uncertain.next_decision, 'inspect_unresolved');\n\n  const unfinal = summarizeRunResultEvidenceV1(receipt({\n    phase: 'running',\n    status: 'running',\n    lanes: [writerLane({\n      phase: 'running',\n      status: 'running',\n    })],\n  }));\n  assert.equal(unfinal.assignment_result, 'unfinal');\n  assert.equal(unfinal.next_decision, 'wait_for_completion');\n});\n\ntest('mismatched run and lane states stay coherent', () => {\n  const failedWithOutput = summarizeRunResultEvidenceV1(receipt({\n    phase: 'failed',\n    status: 'failed',\n    lanes: [writerLane()],\n  }));\n  assert.equal(failedWithOutput.assignment_result, 'failed');\n  assert.equal(failedWithOutput.label, 'Failed');\n  assert.equal(failedWithOutput.next_decision, 'resolve_failures');\n  assert.equal(failedWithOutput.review_needed, false);\n\n  const pending = summarizeRunResultEvidenceV1(receipt({\n    phase: 'lifecycle_pending',\n    status: 'lifecycle_pending',\n    lanes: [writerLane({ task_final: false })],\n  }));\n  assert.equal(pending.assignment_result, 'uncertain');\n  assert.equal(pending.next_decision, 'inspect_unresolved');\n\n  const unknownProof = summarizeRunResultEvidenceV1(receipt({\n    lanes: [writerLane({ dispatch_confidence: 'unknown' })],\n  }));\n  assert.equal(unknownProof.assignment_result, 'uncertain');\n\n  const dirty = summarizeRunResultEvidenceV1(receipt({\n    lanes: [writerLane({ clean: false })],\n  }));\n  assert.equal(dirty.assignment_result, 'uncertain');\n\n  const stillRunning = summarizeRunResultEvidenceV1(receipt({\n    phase: 'running',\n    status: 'running',\n    lanes: [\n      writerLane(),\n      {\n        assignment_id: 'lane-reviewer',\n        provider: 'cursor-local',\n        role: 'review',\n        required: false,\n        phase: 'running',\n        status: 'running',\n      },\n    ],\n  }));\n  assert.equal(stillRunning.assignment_result, 'unfinal');\n  assert.match(stillRunning.text, /in progress/iu);\n});\n\ntest('completed verify work is not treated as a passed check', () => {\n  const detailed = detailRunResultEvidenceV1(receipt({\n    lanes: [{\n      assignment_id: 'lane-verify',\n      provider: 'grok',\n      role: 'verify',\n      required: true,\n      phase: 'completed',\n      status: 'completed',\n      prompt_dispatched: true,\n      dispatch_confidence: 'authoritative',\n      task_final: true,\n      clean: true,\n      head: HEAD_SHA,\n    }],\n  }));\n  assert.equal(detailed.assignment_result, 'completed');\n  assert.equal(detailed.assignments[0].role, 'verify');\n  assert.equal(detailed.assignments[0].outcome, 'completed');\n  assert.equal(detailed.checks.length, 0);\n  assert.equal(detailed.codex_accepted, false);\n  assert.equal(detailed.review_needed, true);\n});\n\ntest('candidate heads stay unambiguous and composition must be explicit', () => {\n  const mixed = summarizeRunResultEvidenceV1(receipt({\n    lanes: [\n      writerLane(),\n      {\n        assignment_id: 'lane-docs',\n        provider: 'cursor-local',\n        role: 'implement',\n        required: true,\n        phase: 'completed',\n        status: 'completed',\n        prompt_dispatched: true,\n        dispatch_confidence: 'authoritative',\n        task_final: true,\n        clean: true,\n        head: OTHER_HEAD,\n      },\n    ],\n  }));\n  assert.equal(mixed.candidate.head, null);\n  assert.equal(mixed.candidate.composed, false);\n\n  const composed = projectRunResultEvidenceV1({\n    receipt: receipt({\n      lanes: [\n        writerLane(),\n        {\n          assignment_id: 'lane-docs',\n          provider: 'cursor-local',\n          role: 'implement',\n          required: true,\n          phase: 'completed',\n          status: 'completed',\n          prompt_dispatched: true,\n          dispatch_confidence: 'authoritative',\n          task_final: true,\n          clean: true,\n          head: OTHER_HEAD,\n        },\n      ],\n    }),\n    candidate: {\n      head: HEAD_SHA,\n      composed: true,\n    },\n  });\n  assert.equal(composed.candidate.head, HEAD_SHA);\n  assert.equal(composed.candidate.composed, true);\n});\n\ntest('missing metrics stay unknown and shareable text omits owner-only data', () => {\n  const missing = summarizeRunResultEvidenceV1(receipt());\n  assert.equal(missing.usage.present, false);\n  assert.equal(JSON.stringify(missing.usage).includes('\"value\":0'), false);\n  assert.equal(missing.text.includes(HOSTILE_PATH), false);\n  assert.equal(missing.text.includes(HOSTILE_PROMPT), false);\n  assert.equal(missing.text.includes('/tmp/'), false);\n  assert.equal(missing.text.includes('not_accepted'), false);\n});\n\ntest('unbound or stale Codex acceptance cannot label Accepted', () => {\n  const flagOnly = projectRunResultEvidenceV1({\n    receipt: receipt(),\n    codex_acceptance: { accepted: true, authority: 'codex' },\n  });\n  assert.equal(flagOnly.codex_accepted, false);\n  assert.equal(flagOnly.label, 'Review needed');\n\n  const stale = projectRunResultEvidenceV1({\n    receipt: receipt(),\n    codex_acceptance: {\n      accepted: true,\n      authority: 'codex',\n      run_id: RUN_ID,\n      head: OTHER_HEAD,\n    },\n  });\n  assert.equal(stale.codex_accepted, false);\n\n  const bound = projectRunResultEvidenceV1({\n    receipt: receipt(),\n    codex_acceptance: {\n      accepted: true,\n      authority: 'codex',\n      run_id: RUN_ID,\n      head: HEAD_SHA,\n    },\n  });\n  assert.equal(bound.codex_accepted, true);\n  assert.equal(bound.label, 'Accepted');\n\n  const failed = projectRunResultEvidenceV1({\n    receipt: receipt({\n      phase: 'failed',\n      status: 'failed',\n      lanes: [writerLane({ phase: 'failed', status: 'failed' })],\n    }),\n    codex_acceptance: {\n      accepted: true,\n      authority: 'codex',\n      run_id: RUN_ID,\n      head: HEAD_SHA,\n    },\n  });\n  assert.equal(failed.codex_accepted, false);\n  assert.equal(failed.label, 'Failed');\n});\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "unit",
+        "command": [
+          "node",
+          "--test",
+          "checks/run-result-outcome.test.mjs"
+        ],
+        "expect_exit": 0
+      }
+    ],
+    "required_files": [
+      "TASK.md",
+      "checks/run-result-outcome.test.mjs",
+      "plugins/codex-co-engineer/mcp/v3/run-result-evidence.mjs",
+      "plugins/codex-co-engineer/mcp/v3/final-decision-card.mjs",
+      "plugins/codex-co-engineer/mcp/v3/usage-ledger.mjs"
+    ],
+    "forbidden_paths": [
+      "TASK.md",
+      "checks/run-result-outcome.test.mjs"
+    ]
+  },
+  "base_sha": "5884323286145e6f71a64fb92d723431633b6fa6"
+}

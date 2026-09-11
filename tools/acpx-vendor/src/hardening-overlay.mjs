@@ -467,3 +467,133 @@ AcpClient.prototype.killAgentIfRunning = async function coEngineerKillAgentIfRun
   }
   return coEngineerWaitForAgentTree(child, waitMs);
 };
+
+/*
+ * Turn deadlines must stay extensible. Upstream runPromptTurn races the prompt
+ * against a fixed withTimeout; when that timer fires after any agent reply it
+ * fabricates {stopReason:'end_turn',source:'session'}, which the manager
+ * records as a completed turn. Co-Engineer therefore:
+ *   1. races the prompt against the turn AbortSignal (worker-owned deadline)
+ *   2. never promotes TimeoutError / interrupt into a synthetic end_turn
+ * Session startup and bounded cleanup keep using their own withTimeout paths.
+ *
+ * The turn signal is propagated with AsyncLocalStorage so overlapping turns
+ * (and managers) cannot overwrite each other's AbortSignal across awaits.
+ * A module-global would race: turn B could steal turn A's signal, or A's
+ * finally could restore a stale value while B is still awaiting.
+ */
+const { AsyncLocalStorage: CoEngineerAsyncLocalStorage } = process.getBuiltinModule('node:async_hooks');
+const coEngineerTurnSignalStore = new CoEngineerAsyncLocalStorage();
+
+/*
+ * Upstream settles turn.result before finalizeRuntimeTurn retains (or closes)
+ * the persistent client. Callers that await result then close() race an empty
+ * pendingPersistentClients map, so close returns without terminating the ACP
+ * agent or its detached descendants. Defer settlement until after the upstream
+ * turn task — including finalize — completes so retention precedes result.
+ */
+const coEngineerOriginalRunRuntimeTurnTask = AcpRuntimeManager.prototype.runRuntimeTurnTask;
+AcpRuntimeManager.prototype.runRuntimeTurnTask = function coEngineerRunRuntimeTurnTask(task) {
+  const originalSettleResult = task.settleResult;
+  let deferredSettlement;
+  task.settleResult = (next) => {
+    if (deferredSettlement === undefined) deferredSettlement = next;
+  };
+  return coEngineerTurnSignalStore.run(task?.input?.signal ?? null, async () => {
+    try {
+      await coEngineerOriginalRunRuntimeTurnTask.call(this, task);
+    } finally {
+      if (deferredSettlement !== undefined) originalSettleResult(deferredSettlement);
+    }
+  });
+};
+
+/*
+ * finalizeRuntimeTurnRecord samples refreshClosedState, then awaits
+ * sessionStore.save before retainPersistentClientAfterTurn. close() can finish
+ * in that gap: it persists closed=true on a freshly loaded record, but
+ * finalization still holds a stale not-closed decision, overwrites the stored
+ * snapshot, and retains the live client. Refuse retain after close intent
+ * (closingActiveRecords / closed) and re-persist the closed snapshot after
+ * that save.
+ */
+const coEngineerOriginalRetainPersistentClientAfterTurn = AcpRuntimeManager.prototype.retainPersistentClientAfterTurn;
+AcpRuntimeManager.prototype.retainPersistentClientAfterTurn = async function coEngineerRetainPersistentClientAfterTurn(input) {
+  if (input.record.closed || this.closingActiveRecords.has(input.record.acpxRecordId)) return false;
+  return coEngineerOriginalRetainPersistentClientAfterTurn.call(this, input);
+};
+
+const coEngineerOriginalFinalizeRuntimeTurnRecord = AcpRuntimeManager.prototype.finalizeRuntimeTurnRecord;
+AcpRuntimeManager.prototype.finalizeRuntimeTurnRecord = async function coEngineerFinalizeRuntimeTurnRecord(turn) {
+  const retained = await coEngineerOriginalFinalizeRuntimeTurnRecord.call(this, turn);
+  const closed = await this.refreshClosedState(turn.record);
+  if (!closed) return retained;
+  if (retained) await this.closePendingPersistentClient(turn.record.acpxRecordId);
+  await this.options.sessionStore.save(turn.record).catch(() => {});
+  return false;
+};
+
+async function coEngineerAwaitPromptWithDeadline(promise, { timeoutMs, signal } = {}) {
+  const hasTimeout = timeoutMs != null && timeoutMs > 0;
+  const hasSignal = signal != null;
+  if (!hasTimeout && !hasSignal) return await promise;
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    let abortTimer;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (abortTimer) clearTimeout(abortTimer);
+      if (hasSignal) signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => {
+      // Let session/cancel settle cooperatively before forcing a turn failure.
+      // Hostile agents that ignore cancel still fail after this short grace.
+      abortTimer = setTimeout(() => finish(reject, new InterruptedError()), 200);
+    };
+    // Observe the prompt before any early abort path so a pre-aborted signal
+    // or hostile late settlement cannot become an unhandled rejection.
+    promise.then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+    if (signal?.aborted) {
+      finish(reject, new InterruptedError());
+      return;
+    }
+    if (hasSignal) signal.addEventListener('abort', onAbort, { once: true });
+    if (hasTimeout) {
+      timer = setTimeout(() => finish(reject, new TimeoutError(timeoutMs)), timeoutMs);
+    }
+  });
+}
+
+runPromptTurn = async function coEngineerRunPromptTurn(params) {
+  const promptPromise = params.client.prompt(params.sessionId, params.prompt);
+  try {
+    await params.onPromptStarted?.();
+    const response = await coEngineerAwaitPromptWithDeadline(promptPromise, {
+      timeoutMs: params.timeoutMs,
+      signal: params.signal ?? coEngineerTurnSignalStore.getStore(),
+    });
+    await params.client.waitForSessionUpdatesIdle?.({
+      idleMs: SESSION_REPLY_IDLE_MS,
+      timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
+    }).catch(() => {});
+    recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
+    return { stopReason: response.stopReason, source: 'rpc' };
+  } catch (error) {
+    // Absorb late prompt settlement after interrupt/timeout; never replay.
+    void promptPromise.then(() => {}, () => {});
+    if (error instanceof InterruptedError) {
+      return { stopReason: 'cancelled', source: 'signal' };
+    }
+    throw error;
+  }
+};

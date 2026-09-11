@@ -1,6 +1,9 @@
-# Run tool API (3.4.1)
+# Run tool API
 
-3.4.1 keeps the five-tool MCP catalog. Submit, status, wait, attention,
+The 3.4.3 additions are role preferences, candidate revisions, and
+compact result/usage evidence. Published 3.4.2 does not expose those additions.
+
+Co-Engineer keeps the five-tool MCP catalog. Submit, status, wait, attention,
 reply, cancel, and cleanup are parameters and modes on `status`, `delegate`,
 `task`, `tasks`, and `cancel`. The preferred bounded-run ingress is the small
 server-compiled `run_request`; the 3.4.0 full `run` envelope remains accepted
@@ -34,11 +37,48 @@ structured/wait/diagnostic/reply/cancel behavior and response shapes.
 | wait | `task` or `tasks` | `run_id` plus `wait_until: "decision_or_attention"` |
 | attention | `task` | `run_id` plus `attention` |
 | reply | `task` | `run_id` plus `run_reply` |
+| revision | `task` | `run_id` plus `revision` |
 | cancel | `cancel` | `run_id` plus optional `assignment_ids` |
 | cleanup | `cancel` | `run_id` plus `cleanup: true` |
 
 `wait_until` remains `progress` and `terminal` for 3.2.1. The additive
 run mode is `decision_or_attention`. Routine progress never wakes.
+
+`task.revision` derives a new bounded correction from a completed, clean,
+exactly identified producer assignment. It preserves provider, model, write
+scope, access, capabilities, and the original assignment constraints for a
+fresh worker, plus correction feedback and the reviewed HEAD. If the combined
+prompt cannot fit the existing 16,384-byte bound, `bounded_context_overflow`
+rejects it before dispatch; constraints are never silently clipped. Public
+admission receipts and the compact coordination packet return the producer
+request identity (`request_idempotency_key`) and unambiguous per-assignment
+HEAD/status. Completed candidates next-action to `review`; `revision` is an
+available capability for a proven clean completed writer. The coordinator
+decides whether findings warrant using it; provider prose does not make that decision. Completed-but-dirty,
+uncertain, or cleanup-incomplete evidence stays unresolved. Active,
+uncertain, dirty, stale, missing, remote, or unfinal producers fail closed
+and are never replayed. Duplicate calls with the same identity, including
+concurrent duplicates, dispatch once. Compact packets include retrievable
+artifact refs when those artifacts exist; identity hashes are not presented
+as retrievable artifacts.
+
+The correction chain has a fixed limit of three admitted rounds and one
+distinct child per producer. The child retains original and immediate producer
+identity, `round`, and `limit`. Repeated identical requests follow that child;
+different feedback is rejected with `revision_child_exists` and the child id,
+explicitly stating that the new feedback was not applied. An admitted
+failure does not replenish a consumed round. `revision_budget_exhausted` requires
+a deliberate new bounded assignment and never dispatches it automatically.
+The production store reserves that child exclusively across MCP processes.
+If a crash leaves a reservation without a child receipt, the operation returns
+`revision_admission_pending`. Inspect the retained state; no automatic replay or
+budget replenishment follows. A deliberate new bounded assignment is a separate
+decision and is not a recovery claim that earlier work never ran.
+
+Normal run replies also contain `result_evidence`; `view: "diagnostics"` requests
+its detailed outcome and usage view. It uses the existing ledger and local
+decision card. Completion is not Codex acceptance; unknown usage stays unknown.
+See [run results](run-results.md) for measurement scope and limits.
 
 Mixing a run body with 3.2.1 `task_id` / `workspace_mode` / `create_pr` /
 `reply` fields fails closed.
@@ -70,6 +110,36 @@ Assignment `access` is optional: `implement` derives `writer`, while `review`
 and `verify` derive `read_only`. An explicit value must agree with the role.
 Omitting access and supplying its equivalent explicit value produce the same
 normalized request. Multiple writer lanes need explicit disjoint write scopes.
+
+Optional `preferences` reuse provider ownership by role so eligible
+assignments may omit `provider` / `model`. Exact assignment selections win,
+including when they override an unknown role preference. Unknown or
+unavailable preferred providers are reported only when an assignment would
+use them; unused unknown role preferences do not block dispatch. Used
+unknown preferences return a pre-admission result with no persisted run and
+`next_action=resubmit` instead of a fake identity that asks for `reply`.
+Omitted preferences keep the explicit provider path unchanged.
+
+```json
+{
+  "run_request": {
+    "run_id": "vale-hardening",
+    "repo": "/absolute/repository/path",
+    "objective": "Implement and review the hardening plan.",
+    "preferences": {
+      "implement": { "provider": "grok" },
+      "review": { "provider": "cursor-local" }
+    },
+    "assignments": [
+      {
+        "assignment_id": "social-implementation",
+        "role": "implement",
+        "prompt": "Implement the social ingestion slice."
+      }
+    ]
+  }
+}
+```
 
 The server observes the clean exact Git identity, resolves the provider model,
 and derives the request idempotency key, manifest/prompt-envelope/lane

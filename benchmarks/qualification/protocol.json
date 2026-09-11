@@ -1,0 +1,107 @@
+{
+  "schema": "codex-co-engineer.qualification-protocol.v1",
+  "version": 1,
+  "title": "Codex-Co-Engineer 3.4.3 retrospective qualification protocol",
+  "status": "unrun",
+  "arms": {
+    "required": [
+      "native-codex",
+      "published-3.4.2",
+      "candidate-3.4.3",
+      "direct-delegation"
+    ],
+    "optional": []
+  },
+  "approaches": [
+    "native-codex",
+    "published-3.4.2",
+    "candidate-3.4.3",
+    "direct-delegation"
+  ],
+  "cases": [
+    {
+      "id": "acp-deadline-concurrent-cancel",
+      "status": "unrun",
+      "retrospective": true,
+      "source_sha": "dede188029aff117c60e9a8c4299cc0ab0838be9",
+      "implement": "cursor-local",
+      "review": "grok"
+    },
+    {
+      "id": "run-result-outcome-acceptance",
+      "status": "unrun",
+      "retrospective": true,
+      "source_sha": "3131f9ac7f6807eccb2ab68f027f1d98d3db3661",
+      "implement": "grok",
+      "review": "cursor-local"
+    },
+    {
+      "id": "comparison-failed-helper-cumulative",
+      "status": "unrun",
+      "retrospective": true,
+      "source_sha": "3131f9ac7f6807eccb2ab68f027f1d98d3db3661",
+      "implement": "grok",
+      "review": "cursor-local"
+    }
+  ],
+  "repetitions": 2,
+  "trial_count": 24,
+  "planned_identities": 24,
+  "ordering": {
+    "seed": 43,
+    "algorithm": "mulberry32-fisher-yates-grouped-by-case-rep-then-approach-positions",
+    "first_matched_group": "same-case-and-rep-all-four-arms"
+  },
+  "deadline": {
+    "entire_trial_ms": 3600000,
+    "max_corrections": 3
+  },
+  "paid_ceiling_usd": 25,
+  "live_jobs": "not_implemented",
+  "execution_identity": {
+    "bound_in": "external_execution_manifest",
+    "host_placeholders_forbidden": true,
+    "candidate_sha_not_tracked_here": true
+  },
+  "freeze_thresholds": {
+    "candidate_accepted": "6/6",
+    "task_median_native_output_per_accepted_vs_native_max": 0.5,
+    "task_median_native_output_per_accepted_vs_published_342_max": 0.75,
+    "astra_own_output_decreases_vs_published_342": true,
+    "median_turnaround_vs_native_max": 2,
+    "native_overhead_vs_direct_max": 1.25,
+    "failed_attempts_in_numerator": true,
+    "missing_primary_evidence": "inconclusive",
+    "paid_ceiling_usd": 25,
+    "max_corrections": 3,
+    "entire_trial_deadline_ms": 3600000,
+    "turnaround_reduction": "median of per-trial candidate/native wall ratios paired by case_id and rep; not the ratio of summed wall durations",
+    "native_overhead_reduction": "median of 3 task ratios of candidate native_output_per_accepted / direct native_output_per_accepted",
+    "astra_own_output_reduction": "count gpt-6-astra native output once from host-usage-report.v1 by_model; helpers excluded unless observed as Astra"
+  },
+  "accounting": {
+    "failed_attempts_in_numerator": true,
+    "missing_primary_evidence": "inconclusive",
+    "reuse_offline_comparator_parsing": true,
+    "task_median_not_pooled": true,
+    "helpers_in_total_not_astra_unless_astra": true,
+    "all_four_approaches_required": true,
+    "routes_bound_per_case": true,
+    "turnaround_reduction": "median of per-trial candidate/native wall ratios paired by case_id and rep; not the ratio of summed wall durations",
+    "native_overhead_reduction": "median of 3 task ratios of candidate native_output_per_accepted / direct native_output_per_accepted",
+    "astra_own_output_reduction": "count gpt-6-astra native output once from host-usage-report.v1 by_model; helpers excluded unless observed as Astra"
+  },
+  "safeguards": {
+    "public_mcp_tools": [
+      "status",
+      "delegate",
+      "task",
+      "tasks",
+      "cancel"
+    ],
+    "do_not_run_release_gate": true,
+    "do_not_publish": true,
+    "do_not_mutate_baseline_or_candidate_outside_worktree": true,
+    "no_live_jobs_in_helper": true
+  }
+}

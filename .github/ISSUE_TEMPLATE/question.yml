@@ -1,0 +1,25 @@
+name: Question or workflow
+description: Ask for help or share a useful workflow. Discussions is not enabled on this repository.
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub Discussions is not enabled for this repository, so questions use Issues.
+
+        For bugs, use the Bug report form. For vulnerabilities, use the private [Security](https://github.com/ajhcs/Codex-Co-Engineer/security/advisories/new) route.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question or workflow
+      description: What you are trying to do, where you are stuck, or a small workflow others can try.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Useful context (optional)
+      description: Version, host, chosen provider, or a short redacted excerpt. No credentials or private paths.
+    validations:
+      required: false

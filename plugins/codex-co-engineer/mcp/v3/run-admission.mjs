@@ -47,6 +47,13 @@ import {
   validateRunIdentityV1,
   validateWorkspaceIdentityV1,
 } from './protected-identity.mjs';
+import { projectAdmissionUsageLedgerV1 } from './admission-usage.mjs';
+import {
+  compactOwnedCorrectionFollowV1,
+  compactOwnedCorrectionLineageV1,
+  ownedCorrectionPolicyV1,
+  assertOwnedCorrectionBudgetV1,
+} from './owned-delegation.mjs';
 
 export const RUN_ADMISSION_SCHEMA_ID = 'codex-co-engineer.run-admission.v1';
 export const RUN_ADMISSION_VERSION = 1;
@@ -93,7 +100,7 @@ export const RUN_ADMISSION_DEPENDENCIES = capturedFreeze([
   'verifyRepository', 'prepareWorkspace', 'cleanupWorkspace', 'createSession',
   'dispatchPrompt', 'inspectLane', 'reconnectLane', 'replyAttention', 'cancelLane',
   'inspectWorkspace', 'buildHandoff', 'verifyRun', 'clock', 'sleep', 'compile',
-  'loadRecord', 'persistRecord', 'waitForProgress',
+  'loadRecord', 'persistRecord', 'waitForProgress', 'reserveRevision',
 ]);
 const MAX_PROVIDER_RESULT_BYTES = 8 * 1024;
 
@@ -583,6 +590,31 @@ function validatePersistedRecord(record, runId) {
           'Persisted workspace identity is invalid.');
       }
     }
+    if (capturedHasOwn(lane, 'correction_follow') && lane.correction_follow != null) {
+      try {
+        lane.correction_follow = compactOwnedCorrectionFollowV1(
+          lane.correction_follow,
+          `persisted_run.lanes[${index}].correction_follow`,
+        );
+      } catch (error) {
+        if (error instanceof RunContractV1Error) {
+          admissionError('durable_state_mismatch', `persisted_run.lanes[${index}].correction_follow`,
+            'Persisted correction follow is invalid.');
+        }
+        throw error;
+      }
+    }
+  }
+  if (capturedHasOwn(record, 'correction') && record.correction != null) {
+    try {
+      record.correction = compactOwnedCorrectionLineageV1(record.correction, 'persisted_run.correction');
+    } catch (error) {
+      if (error instanceof RunContractV1Error) {
+        admissionError('durable_state_mismatch', 'persisted_run.correction',
+          'Persisted correction lineage is invalid.');
+      }
+      throw error;
+    }
   }
   if (seen.size !== assignments.length) {
     admissionError('durable_state_mismatch', 'persisted_run.lanes',
@@ -752,7 +784,13 @@ function boundedHandoff(value, fallback) {
   return freezeData(candidate);
 }
 
-function laneReceipt(lane) {
+function laneReceipt(lane, compiled) {
+  const assignment = Array.isArray(compiled?.assignments)
+    ? compiled.assignments.find((entry) => entry?.assignment_id === lane.assignment_id)
+    : null;
+  const head = typeof lane.handoff?.current_head === 'string'
+    ? lane.handoff.current_head.toLowerCase()
+    : null;
   return {
     assignment_id: lane.assignment_id,
     task_id: lane.task_id,
@@ -760,6 +798,9 @@ function laneReceipt(lane) {
     model: lane.model,
     role: lane.role,
     access: lane.access,
+    write_scope: Array.isArray(assignment?.write_scope)
+      ? [...assignment.write_scope]
+      : (Array.isArray(lane.write_scope) ? [...lane.write_scope] : []),
     required: lane.required,
     phase: lane.phase,
     status: laneStatus(lane.phase),
@@ -780,9 +821,14 @@ function laneReceipt(lane) {
     provider_run_identity_digest: lane.provider_run_identity?.digest ?? null,
     workspace_identity_digest: lane.workspace_identity?.digest ?? null,
     workspace_identity: lane.workspace_identity ?? null,
+    request_idempotency_key: compiled?.request_idempotency_key ?? null,
+    head,
+    clean: typeof lane.handoff?.clean === 'boolean' ? lane.handoff.clean : null,
+    artifact_refs: Array.isArray(lane.artifact_refs) ? lane.artifact_refs : [],
     error: lane.error ?? null,
     recovery_classification: lane.recovery_classification ?? null,
     handoff: lane.handoff ?? null,
+    ...(lane.correction_follow ? { correction_follow: lane.correction_follow } : {}),
   };
 }
 
@@ -796,18 +842,20 @@ function receipt(record, extras = {}) {
     schema: RUN_ADMISSION_SCHEMA_ID,
     version: RUN_ADMISSION_VERSION,
     run_id: record.run_id,
+    persisted: true,
     phase: record.phase,
     status: record.phase,
     revision: record.revision,
     cursor: String(record.revision),
     objective: record.compiled.objective,
     base_sha: record.compiled.git.base_sha,
+    request_idempotency_key: record.compiled.request_idempotency_key ?? null,
     git: {
       base_sha: record.compiled.git.base_sha,
       digest: record.compiled.git_identity.digest,
     },
     assignment_count: record.lanes.length,
-    lanes: record.lanes.map(laneReceipt),
+    lanes: record.lanes.map((lane) => laneReceipt(lane, record.compiled)),
     consent: record.consent_request
       ? { status: record.consent_status, request: record.consent_request }
       : {
@@ -830,6 +878,8 @@ function receipt(record, extras = {}) {
     // are immutable snapshots, while later cancellation/reconciliation still
     // needs to update the record's counters.
     telemetry: { ...record.telemetry },
+    usage_ledger: projectAdmissionUsageLedgerV1(record),
+    ...(record.correction ? { correction: record.correction } : {}),
     ...extras,
   });
 }
@@ -929,6 +979,13 @@ function createDefaultDependencies(overrides) {
     compile: compileRunRequestV1,
     loadRecord: async () => null,
     persistRecord: async () => {},
+    reserveRevision: async () => {
+      admissionError(
+        'revision_reservation_unavailable',
+        'reserveRevision',
+        'Revision admission requires an atomic reservation.',
+      );
+    },
   };
   for (const key of RUN_ADMISSION_DEPENDENCIES) {
     if (capturedHasOwn(overrides ?? {}, key)) {
@@ -993,12 +1050,13 @@ export function createRunAdmissionRuntime(overrides = {}) {
     record.updated_at = nowIso(injected.clock);
   }
 
-  function makeRecord(compiled) {
+  function makeRecord(compiled, correction = null) {
     return {
       schema: RUN_ADMISSION_SCHEMA_ID,
       version: RUN_ADMISSION_VERSION,
       run_id: compiled.run_id,
       compiled,
+      ...(correction ? { correction } : {}),
       phase: 'validating',
       revision: 0,
       created_at: nowIso(injected.clock),
@@ -1729,6 +1787,9 @@ export function createRunAdmissionRuntime(overrides = {}) {
   async function submitRunRequest(request, options = {}) {
     const compiled = await injected.compile(request, options.compile_options ?? {});
     const { runId } = validateCompiled(compiled);
+    const correction = capturedHasOwn(options, 'correction') && options.correction != null
+      ? compactOwnedCorrectionLineageV1(options.correction, 'correction')
+      : null;
     return enqueue(runId, async () => {
       const existing = await loadRecord(runId);
       if (existing) {
@@ -1737,7 +1798,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
         }
         return receipt(existing, { idempotent: true });
       }
-      const record = makeRecord(compiled);
+      const record = makeRecord(compiled, correction);
       records.set(runId, record);
       bump(record);
       await persist(record);
@@ -1745,6 +1806,96 @@ export function createRunAdmissionRuntime(overrides = {}) {
       await persist(record);
       if (!consented) return receipt(record);
       return admit(record);
+    });
+  }
+
+  async function submitOwnedRevision(producerRunId, derived, options = {}) {
+    assertRunId(producerRunId, 'producer_run_id');
+    if (!derived || typeof derived !== 'object' || Array.isArray(derived)) {
+      admissionError('invalid_type', 'correction', 'Owned revision derivation is invalid.');
+    }
+    const identity = derived.identity;
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+      || typeof identity.run_id !== 'string'
+      || typeof identity.assignment_id !== 'string'
+      || typeof identity.digest !== 'string') {
+      admissionError('invalid_format', 'correction', 'Owned revision identity is incomplete.');
+    }
+    assertRunId(identity.run_id, 'owned_revision.run_id');
+    if (!isAssignmentId(identity.assignment_id)) {
+      admissionError('invalid_format', 'owned_revision.assignment_id', 'assignment_id is not valid.');
+    }
+    const correction = compactOwnedCorrectionLineageV1(derived.correction, 'correction');
+    const follow = compactOwnedCorrectionFollowV1({
+      child_run_id: identity.run_id,
+      child_assignment_id: identity.assignment_id,
+      identity_digest: identity.digest,
+    }, 'correction_follow');
+    if (identity.run_id === producerRunId) {
+      admissionError('run_identity_conflict', 'owned_revision.run_id',
+        'A correction child cannot reuse the producer run identity.');
+    }
+    return enqueue(producerRunId, async () => {
+      const producer = await loadRecord(producerRunId);
+      if (!producer) admissionError('revision_producer_not_found', 'run_id',
+        'The named producer assignment is not known.');
+      const lane = producer.lanes.find((entry) => entry.assignment_id === correction.producer_assignment_id);
+      if (!lane || correction.producer_run_id !== producer.run_id) {
+        admissionError('revision_producer_not_found', 'revision.assignment_id',
+          'The named producer assignment is not known.');
+      }
+      const existingFollow = lane.correction_follow
+        ? compactOwnedCorrectionFollowV1(lane.correction_follow, 'correction_follow')
+        : null;
+      if (existingFollow && existingFollow.identity_digest !== follow.identity_digest) {
+        admissionError('revision_child_exists', 'revision',
+          `Feedback was not applied. Inspect correction child ${existingFollow.child_run_id}; this producer already consumed its correction slot.`);
+      }
+      const expected = assertOwnedCorrectionBudgetV1(ownedCorrectionPolicyV1({
+        run_id: producer.run_id,
+        assignment_id: correction.producer_assignment_id,
+        ...(producer.correction ? { correction: producer.correction } : {}),
+      }));
+      if (correction.round !== expected.round
+        || correction.limit !== expected.limit
+        || correction.original_run_id !== expected.original_run_id
+        || correction.original_assignment_id !== expected.original_assignment_id) {
+        admissionError('durable_state_mismatch', 'correction',
+          'Derived correction lineage does not match the producer round policy.');
+      }
+      const reservation = await injected.reserveRevision(producerRunId, lane.assignment_id, follow);
+      if (reservation.reserved !== true) {
+        const reservedFollow = compactOwnedCorrectionFollowV1(reservation.follow, 'correction_follow');
+        if (reservedFollow.identity_digest !== follow.identity_digest
+          || reservedFollow.child_run_id !== follow.child_run_id
+          || reservedFollow.child_assignment_id !== follow.child_assignment_id) {
+          admissionError('revision_child_exists', 'revision',
+            `Feedback was not applied. Inspect correction child ${reservedFollow.child_run_id}; this producer already consumed its correction slot.`);
+        }
+        const child = await loadRecord(reservedFollow.child_run_id);
+        if (!child) admissionError('revision_admission_pending', 'revision',
+          `Correction ${reservedFollow.child_run_id} is reserved but its receipt is unavailable; inspect before starting new work.`);
+        return inspectRun({ run_id: child.run_id });
+      }
+      lane.correction_follow = follow;
+      bump(producer);
+      await persist(producer);
+      try {
+        return await submitRunRequest(derived.run_request, { ...options, correction });
+      } catch (error) {
+        const child = await loadRecord(identity.run_id);
+        if (!child) {
+          delete lane.correction_follow;
+          bump(producer);
+          try {
+            await persist(producer);
+            await reservation.release();
+          } catch {
+            // Keep the fail-closed reservation rather than masking the original error.
+          }
+        }
+        throw error;
+      }
     });
   }
 
@@ -1972,6 +2123,7 @@ export function createRunAdmissionRuntime(overrides = {}) {
 
   return capturedFreeze({
     submitRunRequest,
+    submitOwnedRevision,
     inspectRun,
     resumeRun,
     replyRun,

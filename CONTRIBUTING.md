@@ -1,9 +1,17 @@
 # Contributing
 
-Thanks for helping improve Codex-Co-Engineer. The project is intentionally a
-thin trusted supervisor for Grok, Cursor Local, Cursor Cloud, and DeepSeek
-Harness (DSH). Keep provider capabilities intact and avoid rebuilding a
-second sandbox, target-attestation layer, daemon, or policy engine.
+Thanks for helping improve Codex-Co-Engineer. Documentation fixes, examples,
+compatibility reports, reproductions, tests, and code are all welcome. You do
+not need to start with a large provider change.
+
+**Good first contributions** live in [docs/contributor-tasks.md](docs/contributor-tasks.md).
+Report problems and ask questions through [SUPPORT.md](SUPPORT.md). The
+[roadmap](docs/roadmap.md) separates the 3.4.3 adoption package from later work.
+
+The project is intentionally a thin trusted supervisor for Grok, Cursor Local,
+Cursor Cloud, and DeepSeek Harness (DSH). Keep provider capabilities intact and
+avoid rebuilding a second sandbox, target-attestation layer, daemon, or policy
+engine.
 
 ## Before opening a pull request
 
@@ -16,6 +24,14 @@ That scope uses `KillMode=control-group` only for descendant cleanup; it is
 not a sandbox or capability restriction. `npm run setup:check` validates the
 CLI/worktree dependencies, while the release/live acceptance validates this
 host boundary.
+
+Focused fixture check (no paid provider required):
+
+```bash
+node --no-warnings --test plugins/codex-co-engineer/test/r1-final-decision-card.test.mjs
+```
+
+Broader local verification before a larger change:
 
 ```bash
 node --version
@@ -94,3 +110,7 @@ release inventory check, MCP Inspector preflight, ACPX provenance/reproducible
 checks, and package-inventory review. Update `CHANGELOG.md` for
 user-visible behavior. Codex reviews and merges the release PR only after
 those checks and any explicit live acceptance are complete.
+
+Agent-assisted drafts are welcome when the submitter owns the complete diff,
+reviews it, and states briefly what was checked. Prefer the pull request
+template's short disclosure over lengthy attestations.

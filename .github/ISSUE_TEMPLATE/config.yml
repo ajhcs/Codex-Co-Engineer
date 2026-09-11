@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ajhcs/Codex-Co-Engineer/security/advisories/new
+    about: Private vulnerability reports only. Do not open a public issue for undisclosed security problems. See SECURITY.md.
+  - name: Support overview
+    url: https://github.com/ajhcs/Codex-Co-Engineer/blob/main/SUPPORT.md
+    about: Where to ask questions, report problems, and what helps maintainers.

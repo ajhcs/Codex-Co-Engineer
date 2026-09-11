@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "bundle": "acpx-runtime.mjs",
-  "bundle_sha512": "sha512-x+vqruKkvLflf6Ef/8NmXfN2X2+3M7o9sVdI/YTWejlphXSGUlLNIpv+BylInQkep8fq9Z9HO79vjny+0zJM6g==",
+  "bundle_sha512": "sha512-7PlHWX7vbzSOhQcmdKNHC9HuR62+1zUFqMidizfS8fqOfxNoK4jrVUDdY2Z7xiSzIAxMZ6cBwXgLsRVOtru1fA==",
   "exports": [
     "createAcpRuntime",
     "createAgentRegistry",
@@ -17,7 +17,7 @@
   },
   "hardening_overlay": {
     "path": "tools/acpx-vendor/src/hardening-overlay.mjs",
-    "sha512": "sha512-gCOwrvbgkEVhuvT28X+mPkaeOpnGOgyrVf3K1RtGOP2Pz7XTRob5jN4dC0tvJjahf+wTVy6AQwx9/bCU+vqM6g==",
+    "sha512": "sha512-0nt3d5bylj7/g/ghBzkHmTPfsk1RnT8NzRnutpHCyst3n7eLnTlT/vkejXdPFoqdwo+9735qbZamYl0CveGHDA==",
     "application": "append_after_upstream_bundle"
   },
   "bundled_packages": [

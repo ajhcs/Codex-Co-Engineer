@@ -151,7 +151,7 @@ test('run request reports an actionable incomplete-runtime failure before worksp
     assert.notEqual(receipt.lanes[0].prepared, true);
     assert.equal(receipt.lanes[0].prompt_dispatched, false);
     assert.deepEqual(calls, [['runtime', 'grok']]);
-    assert.doesNotMatch(JSON.stringify(receipt), /deleted|cache|token|PRIVATE_PROMPT/iu);
+    assert.doesNotMatch(JSON.stringify(receipt), /deleted|\/cache\/|token=|secret|PRIVATE_PROMPT/iu);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

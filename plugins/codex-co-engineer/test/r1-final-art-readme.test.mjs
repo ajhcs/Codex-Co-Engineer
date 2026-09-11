@@ -291,7 +291,7 @@ test('optional absent slots have no images and public README has no art-QA prose
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
   const slotContract = await readFile(path.join(REPO, 'docs', 'readme-image-slot-contract.md'), 'utf8');
   const bounds = {
-    'multi-lane-run': 'If you have no saved profile',
+    'multi-lane-run': '### Continue, answer, or cancel',
     'grouped-attention': 'That answer is chatting',
     'verified-final-decision': 'If a required assignment fails',
   };
@@ -328,16 +328,16 @@ test('README does not autoplay audio and does not embed a GitHub video player', 
   assert.doesNotMatch(readme, /Optional silent architecture animation/u);
 });
 
-test('package and marketplace stay on 3.4.2 with the five-tool catalog', async () => {
+test('package and marketplace stay on 3.4.3 with the five-tool catalog', async () => {
   const plugin = JSON.parse(await readFile(path.join(ROOT, '.codex-plugin', 'plugin.json'), 'utf8'));
   const marketplace = JSON.parse(
     await readFile(path.join(REPO, '.agents', 'plugins', 'marketplace.json'), 'utf8'),
   );
   const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
   const readme = await readFile(path.join(REPO, 'README.md'), 'utf8');
-  assert.equal(plugin.version, '3.4.2');
-  assert.equal(marketplace.plugins[0].version, '3.4.2');
-  assert.equal(packageJson.version, '3.4.2');
+  assert.equal(plugin.version, '3.4.3');
+  assert.equal(marketplace.plugins[0].version, '3.4.3');
+  assert.equal(packageJson.version, '3.4.3');
   assert.match(readme, /The catalog remains exactly `status`, `delegate`, `task`, `tasks`, and\s+`cancel`/u);
   for (const tool of FIVE_TOOLS) {
     assert.match(readme, new RegExp(`\`${tool}\``, 'u'));

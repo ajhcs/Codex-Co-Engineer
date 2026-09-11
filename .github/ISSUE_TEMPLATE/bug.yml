@@ -1,0 +1,81 @@
+name: Bug report
+description: Something did not work as expected.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. A short description of what you tried and what happened is enough to start. You do not need a technical diagnosis.
+
+        Security issues belong on the private [Security](https://github.com/ajhcs/Codex-Co-Engineer/security/advisories/new) route, not in a public issue. See [SECURITY.md](https://github.com/ajhcs/Codex-Co-Engineer/blob/main/SECURITY.md).
+  - type: textarea
+    id: attempt
+    attributes:
+      label: What did you try?
+      description: What you asked for or which steps you followed.
+      placeholder: Asked Codex to use Grok Co-Engineer to review the latest change…
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+      description: The outcome you saw, including any error text you are comfortable sharing.
+      placeholder: The run stayed preparing, or Codex reported a missing local boundary…
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Co-Engineer version (optional)
+      description: Public package or release tag if you know it (for example 3.4.2).
+      placeholder: 3.4.2
+    validations:
+      required: false
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host (optional)
+      options:
+        - Codex CLI
+        - Codex Desktop or another Codex host
+        - Unsure / other
+      default: 2
+    validations:
+      required: false
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider involved (optional)
+      options:
+        - None / not sure
+        - Grok
+        - Cursor Local
+        - Cursor Cloud
+        - Muse (DSH)
+        - More than one
+      default: 0
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead? (optional)
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction notes (optional)
+      description: Smallest steps that reproduce the problem. Synthetic or redacted data only.
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence (optional)
+      description: Paste only sanitized excerpts. Do not include credentials, private paths, full prompts, or private repository contents.
+      placeholder: Sanitized status excerpt or failure category…
+    validations:
+      required: false

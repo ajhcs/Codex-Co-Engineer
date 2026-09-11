@@ -266,12 +266,13 @@ Muse. Codex does not invent a default router.
 
 ## Authentication
 
-Authenticate Grok and Cursor Local with their normal CLIs. DSH Muse and DSH
-Ox Alpha use the owner-only OpenRouter key, and Cursor Cloud uses its normal
-API key. Credentials
-must not be placed in MCP arguments, prompts, receipts, fixtures, or
-Git. Provider login state persists in the provider's normal user
-configuration between Codex tasks.
+Authenticate Grok and Cursor Local with their normal CLIs. For Grok, run
+`grok login`, or `grok login --device-auth` when a browser is unavailable.
+Grok first-outcome work uses subscription login; no API key is required.
+DSH Muse and DSH Ox Alpha use the owner-only OpenRouter key, and Cursor Cloud
+uses its normal API key. Credentials must not be placed in MCP arguments,
+prompts, receipts, fixtures, or Git. Provider login state persists in the
+provider's normal user configuration between Codex tasks.
 
 ## State and retention
 

@@ -7,7 +7,9 @@
 [![Node.js 24+](https://img.shields.io/badge/Node.js-24%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Install](#install-and-authentication) · [Try it](#your-first-delegation) · [Providers](#provider-choices) · [Release notes](docs/releases/v3.4.2.md) · [Troubleshooting](#troubleshooting)
+[Install](#install-and-authentication) · [Try it](#your-first-delegation) · [Providers](#provider-choices) · [Release notes](docs/releases/v3.4.3.md) · [Troubleshooting](#troubleshooting)
+
+[Report a problem](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=bug.yml) · [Suggest an improvement](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=feature.yml) · [Ask or share a workflow](https://github.com/ajhcs/Codex-Co-Engineer/issues/new?template=question.yml) · [Contribute](CONTRIBUTING.md)
 
 Ask Codex to bring in **Grok, Cursor, or Muse** for implementation, investigation,
 or a second opinion. Co-Engineer prepares isolated workspaces, coordinates up to
@@ -36,9 +38,12 @@ Choose a provider, describe the work, and keep talking in the same Codex task.
 | Avoid repeated setup decisions | Existing provider choices and optional remembered repository/provider approval |
 | Review before integrating | Retained branches, output, and handoffs for Codex to inspect |
 
-**New in 3.4.2:** simpler launches, reusable consent, more reliable provider
-completion and cleanup, and concise Grok results. Read the
-[detailed release notes](docs/releases/v3.4.2.md) for compatibility and limits.
+**New in 3.4.3:** external ownership through bounded corrections, truthful
+result evidence, deadline-governed ACP turns, and the onboarding / contributor
+package. Automated checks and independent code review passed. Measured workload
+reduction, clean-agent onboarding, and refreshed native-host acceptance remain
+unverified; no savings claim is made. Read the [detailed release notes](docs/releases/v3.4.3.md)
+and historical [3.4.2 notes](docs/releases/v3.4.2.md) for compatibility and limits.
 
 ## Install and authentication
 
@@ -54,34 +59,50 @@ Install the CLI and account access for **only the providers you plan to use**.
 The provider table below separates these requirements. Co-Engineer does not
 install or sign you into Grok or Cursor.
 
-### 2. Install the release
-
-Run these commands from the directory where you keep your projects:
+### 2. Install 3.4.3
 
 ```bash
-git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
-cd Codex-Co-Engineer
+git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.3
+cd Codex-Co-Engineer-3.4.3
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Keep this clone: it is the registered local marketplace source. Setup installs
-pinned ACPX, Cursor SDK, and DSH dependencies globally and creates key-free DSH
-configuration. It preserves existing compatible configuration and reports
-incompatible profiles instead of overwriting them. Use a user-writable npm global
-prefix on your `PATH`; a Node version manager is one way to provide it.
+### 3. Keep installation identity consistent
 
-`setup:check` checks Node/Python prerequisites, installed dependencies, and DSH configuration. Provider login
-and the running MCP process's Linux boundary are checked separately by `status`.
-The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
+The public release keeps the marketplace identity `codex-co-engineer`.
+Keep the clone as its registered marketplace source. Finish or cancel active
+runs before replacing an installed version. For an existing installation,
+remove `codex-co-engineer@codex-co-engineer` with `codex plugin remove` before
+adding it again from the new source. Preserve provider login files and durable
+task state.
 
-### 3. Connect your chosen provider
+If older open projects still use that public marketplace identity, use a
+distinct local marketplace wrapper outside the tracked release, with the
+unchanged plugin name and exact released plugin bytes. Remove/re-add alone is
+not sufficient: opening an older project can replace the same-name cache again.
+Do not rename the shipped marketplace manifest to solve a local collision.
+Prefer a clean Codex environment for onboarding. See the
+[release notes](docs/releases/v3.4.3.md) for upgrade details and qualification
+limits.
+
+Setup installs pinned ACPX, Cursor SDK, and DSH dependencies globally and creates
+key-free DSH configuration. It preserves existing compatible configuration and
+reports incompatible profiles instead of overwriting them. Use a user-writable
+npm global prefix on your `PATH`; a Node version manager is one way to provide it.
+
+`setup:check` checks Node/Python prerequisites, installed dependencies, and DSH
+configuration. Provider login and the running MCP process's Linux boundary are
+checked separately by `status`. The worktree tool is bundled; no separate
+`worktree-bootstrap` installation is needed.
+
+### 4. Connect your chosen provider
 
 | Provider | One-time authentication | Runs where? |
 | --- | --- | --- |
-| **Grok** | Install [Grok Build](https://docs.x.ai/build/cli), then run `grok login` | Local managed worktree |
+| **Grok** | Install [Grok Build](https://docs.x.ai/build/overview), then run `grok login` (or `grok login --device-auth` when a browser is unavailable). Subscription login only; no API key is required for a Grok first outcome. | Local managed worktree |
 | **Cursor Local** | Install [Cursor CLI](https://cursor.com/docs/cli/installation), then run `cursor-agent login` | Local managed worktree |
 | **Cursor Cloud** | Configure `CURSOR_API_KEY` or an owner-only key file; see [configuration](docs/configuration.md#cursor-cloud) | Cursor's remote environment |
 | **Muse** | From this clone, run `plugins/codex-co-engineer/bin/set-model-api-key` to save your OpenRouter key | Local DSH managed worktree |
@@ -90,9 +111,9 @@ Muse defaults to **Muse Spark 1.3 Contributor, XHigh, through OpenRouter**.
 Provider credentials stay in normal login state, environment variables, or
 owner-only key files. Never paste them into task prompts or MCP arguments.
 
-### 4. Start a new Codex session
+### 5. Start a new Codex session
 
-Ask:
+For a first route, use **one** provider. Grok is the default walkthrough:
 
 > Show Co-Engineer status, then use Grok Co-Engineer to review the latest change.
 
@@ -111,6 +132,11 @@ new decision. [Inspect or revoke remembered access](plugins/codex-co-engineer/RE
 </details>
 
 ## Your first delegation
+
+Start with [one provider and a small useful outcome](docs/co-engineer-quickstart.md).
+The [copyable example](examples/first-outcome/) in the 3.4.3 source includes a
+fixed local acceptance check. It is also available directly from the
+[v3.4.3 tag](https://github.com/ajhcs/Codex-Co-Engineer/tree/v3.4.3/examples/first-outcome).
 
 > Use Grok Co-Engineer to review the authentication changes. Report actionable findings.
 
@@ -136,8 +162,8 @@ acknowledgement is not a completed review.
 Independent assignments stay isolated. Assign work that can proceed independently;
 ask for a review of the resulting changes after the implementation is available.
 
-If you have no saved profile and do not name a provider, Codex asks which one to
-use. It does not silently choose a different provider or model.
+If neither your provider preferences nor a named provider resolves the choice,
+Codex asks which one to use. It does not silently choose a different provider or model.
 
 ### Continue, answer, or cancel
 
@@ -151,7 +177,9 @@ use. It does not silently choose a different provider or model.
 
 One grouped decision covers every assignment that asked; unaffected assignments
 can keep working. That answer is chatting with the existing run, not a new launch.
-Chatting requires an existing run. Starting new work remains an explicit delegation.
+Chatting requires an existing run. Ask for a correction to a reviewed candidate
+to return the findings to its external owner. Unrelated new work remains an
+explicit delegation.
 
 <!-- README_ART_SLOT: verified-final-decision -->
 
@@ -169,6 +197,26 @@ It does not describe an incomplete run as a verified result.
 ![Conceptual illustration of a required assignment that failed or stayed unresolved, with no verified candidate claimed.](docs/assets/co-engineer-3.4.0/final/derived/failure-unresolved.jpg)
 
 </details>
+
+## Autonomous engineering ownership
+
+The revision operation and result reporting require 3.4.3 or newer.
+The budgeted comparison cohort and remaining host qualification stay open;
+see the [release notes](docs/releases/v3.4.3.md) and [scope and roadmap](docs/roadmap.md).
+
+Give Grok or Cursor the complete bounded assignment: relevant preparation,
+implementation, meaningful checks, and requested corrections. Use an independent
+external review where useful; Codex retains final review and integration authority.
+Co-Engineer derives revision identities and concise candidate evidence so the
+lead agent can make decisions without rebuilding routine dispatch paperwork.
+
+Provider preferences are explicit and preserve a directly selected provider.
+They do not infer subscription balances or silently replace an active worker.
+The [autonomous ownership guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/references/autonomous-ownership.md)
+explains how this reduces coordination work for Astra and other capable agents.
+Measure total native-agent work per accepted result, including any native helpers.
+Read the [actual development correction case](docs/demos/ownership-deadline.md),
+[result and usage guide](docs/run-results.md), and [comparison protocol](benchmarks/).
 
 ## Provider choices
 
@@ -192,27 +240,21 @@ The [model-role guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/
 separates practical suggestions from official model documentation. Co-Engineer
 does not change your Codex model, reasoning effort, or experimental settings.
 
-## Upgrade to 3.4.2
+## Upgrade to 3.4.3
 
-Finish or cancel active runs first. In a **clean existing source clone**:
+Finish or cancel active runs first. Preserve dirty development checkouts and
+use a clean clone of `v3.4.3`, following the installation instructions above.
+Keep the registered source and local marketplace identity consistent; older
+open projects with the same identity can replace the shared plugin cache.
+Use a distinct local wrapper when required, preserving the public manifest and
+exact released plugin bytes.
 
-```bash
-git fetch origin tag v3.4.2
-git switch --detach v3.4.2
-npm --prefix plugins/codex-co-engineer run setup
-codex plugin remove codex-co-engineer@codex-co-engineer
-codex plugin add codex-co-engineer@codex-co-engineer
-npm --prefix plugins/codex-co-engineer run setup:check
-```
-
-Start a new Codex session, then check Co-Engineer status. Keep your local changes
-if the source clone is dirty; use a separate clean release clone instead of
-resetting it. If your marketplace uses a different name, use the installed
-identity shown by `codex plugin list`.
-
-Existing task receipts and provider accounts are retained. Users with a direct
-Meta Muse profile must migrate to OpenRouter; see the
-[upgrade notes](docs/releases/v3.4.2.md#upgrading).
+Start a new Codex session, then check Co-Engineer status. Use the identity from
+`codex plugin list` if it differs. Verify project-scoped discovery and installed
+file persistence after a connection restart. Existing task receipts and provider
+accounts are retained. Direct Meta Muse profiles require the unchanged
+OpenRouter migration; see the [upgrade notes](docs/releases/v3.4.3.md#upgrading)
+and historical [3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
 
 ## Troubleshooting
 
@@ -222,7 +264,7 @@ Meta Muse profile must migrate to OpenRouter; see the
 | Local provider is unavailable | Ask for Co-Engineer status; inspect `local_boundary` and the named missing dependency |
 | Setup reports an incompatible Muse profile | Follow the OpenRouter migration in the release notes; keep a backup of your configuration |
 | Repeated repository-sharing prompts | Choose remembered access; confirm the provider and repository origin have not changed |
-| Installed files disappear or an old version returns | Check for another local marketplace using the same identity; use a distinct marketplace name for development candidates |
+| Installed files disappear or an old version returns | Check for another local marketplace using the same identity; when older open projects share the public identity, use a distinct local marketplace wrapper outside the tracked candidate (unchanged plugin name and exact tested bytes), verify `plugin/list` after a connection restart, or use a separate clean Codex environment |
 | Cursor Cloud cannot see a commit | Push the exact SHA and make the branch visible through an open PR or the default branch |
 | No extra panel appears | Continue in the conversation; the CLI workflow is complete without an optional host UI |
 
@@ -256,11 +298,13 @@ single-task calls and full run envelopes remain supported.
 | [Plugin reference](plugins/codex-co-engineer/README.md) | Installed-package setup, authentication, and API examples |
 | [Configuration](docs/configuration.md) | Providers, credentials, profiles, and host variables |
 | [Contributing](CONTRIBUTING.md) | Local commands, compatibility, and review expectations |
+| [Support](SUPPORT.md) and [starter tasks](docs/contributor-tasks.md) | Reports, questions, examples, and approachable contributions |
+| [Showcase preparation](docs/showcase.md) | A source-backed demonstration and current distribution limits |
 | [Release process](docs/release.md) | Exact-candidate qualification and publication |
 
 Co-Engineer keeps coordination compact, but token parity with native subagents
 has not been established. The [efficiency guide](docs/efficient-dogfood.md) explains
 what to measure. Licensed under [MIT](LICENSE).
 
-Historical [3.4.0 notes](docs/releases/v3.4.0.md) and historical
-3.3.0 notes in [the release archive](docs/releases/v3.3.0.md) remain available.
+Historical [3.4.2 notes](docs/releases/v3.4.2.md), [3.4.0 notes](docs/releases/v3.4.0.md),
+and historical 3.3.0 notes in [the release archive](docs/releases/v3.3.0.md) remain available.

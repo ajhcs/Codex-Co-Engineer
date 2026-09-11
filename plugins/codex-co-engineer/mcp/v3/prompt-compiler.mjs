@@ -732,3 +732,114 @@ export function parseChildEnvelopeV1(envelopeText) {
     envelope_text: envelopeText,
   });
 }
+
+const CORRECTION_PROMPT_PREFIX = 'This is a fresh correction workspace already at the reviewed commit. Implementation and all commits must occur in the current assigned working directory. Original run, assignment, and repository paths are lineage and reference, not navigation. Inspect pwd and Git identity and report a mismatch instead of seeking the producer worktree. Preserve the provider, model, write scope, access, and capabilities. Do not recreate worktrees, receipts, or lifecycle paperwork. Implement only the requested correction.';
+
+function correctionScopeSection(writeScope, access) {
+  const readOnly = access === 'read_only' || access === 'read';
+  if (readOnly) return 'Write access: read-only; no write scope.';
+  if (!Array.isArray(writeScope) || writeScope.length === 0) {
+    return 'Write scope: none.';
+  }
+  return ['Write scope:', ...writeScope.map((pattern) => `- ${pattern}`)].join('\n');
+}
+
+function correctionAcceptanceSection(acceptance, requiredEvidence) {
+  const lines = ['Acceptance constraints:'];
+  if (Array.isArray(acceptance) && acceptance.length > 0) {
+    for (const entry of acceptance) {
+      if (typeof entry === 'string' && entry.length > 0) {
+        lines.push(`- ${entry}`);
+        continue;
+      }
+      if (!entry || typeof entry !== 'object') continue;
+      const commandId = typeof entry.command_id === 'string' ? entry.command_id : null;
+      if (commandId) lines.push(`- ${commandId}`);
+    }
+  } else {
+    lines.push('- none specified');
+  }
+  if (Array.isArray(requiredEvidence) && requiredEvidence.length > 0) {
+    lines.push(`Required evidence: ${requiredEvidence.filter((kind) => typeof kind === 'string').join(', ')}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build the opaque assignment.prompt for an owned correction. The child
+ * envelope template is unchanged; this text is framed as the prompt block.
+ */
+export function compileOwnedCorrectionPromptV1({
+  producer_run_id: producerRunId,
+  producer_assignment_id: producerAssignmentId,
+  feedback,
+  write_scope: writeScope,
+  provider,
+  model,
+  access,
+  capabilities,
+  objective,
+  original_prompt: originalPrompt,
+  acceptance,
+  required_evidence: requiredEvidence,
+  expected_head: expectedHead,
+} = {}) {
+  if (typeof producerAssignmentId !== 'string' || !ASSIGNMENT_ID_PATTERN.test(producerAssignmentId)) {
+    fail('invalid_format', 'producer_assignment_id', 'A correction prompt requires the exact producer assignment_id.');
+  }
+  assertBoundedText(feedback, {
+    min: 1,
+    max: PROMPT_MAX_BYTES,
+    path: 'feedback',
+    label: 'feedback',
+  });
+  const identityLine = typeof producerRunId === 'string'
+    ? `Producer: ${producerRunId}/${producerAssignmentId}`
+    : `Producer assignment: ${producerAssignmentId}`;
+  const reviewedHead = typeof expectedHead === 'string' && SHA40_PATTERN.test(expectedHead)
+    ? `Reviewed HEAD: ${expectedHead}`
+    : null;
+  const executionParts = [];
+  if (typeof provider === 'string') {
+    executionParts.push(`Execution remains ${provider}${typeof model === 'string' ? `/${model}` : ''}.`);
+  } else {
+    executionParts.push('Execution remains the producer provider and model.');
+  }
+  if (typeof access === 'string') executionParts.push(`Access remains ${access}.`);
+  if (Array.isArray(capabilities) && capabilities.length > 0) {
+    executionParts.push(`Capabilities remain ${capabilities.join(', ')}.`);
+  }
+  const originalObjective = typeof objective === 'string' && objective.length > 0 ? objective : '';
+  const originalAssignment = typeof originalPrompt === 'string' && originalPrompt.length > 0 ? originalPrompt : '';
+  const lineage = typeof producerRunId === 'string'
+    ? `Correction lineage: fresh owned revision of ${producerRunId}/${producerAssignmentId}.`
+    : `Correction lineage: fresh owned revision of ${producerAssignmentId}.`;
+  const prompt = [
+    CORRECTION_PROMPT_PREFIX,
+    identityLine,
+    ...(reviewedHead ? [reviewedHead] : []),
+    executionParts.join(' '),
+    correctionScopeSection(writeScope, access),
+    ...(originalObjective ? ['Original objective:', originalObjective] : []),
+    ...(originalAssignment ? ['Original assignment:', originalAssignment] : []),
+    correctionAcceptanceSection(acceptance, requiredEvidence),
+    lineage,
+    'Feedback:',
+    feedback,
+  ].join('\n');
+  const promptBytes = utf8ByteLength(prompt);
+  if (promptBytes > PROMPT_MAX_BYTES) {
+    fail(
+      'bounded_context_overflow',
+      'prompt',
+      `The derived correction prompt is ${promptBytes} bytes and cannot preserve original constraints within the ${PROMPT_MAX_BYTES}-byte assignment bound.`,
+    );
+  }
+  assertBoundedText(prompt, {
+    min: PROMPT_MIN_BYTES,
+    max: PROMPT_MAX_BYTES,
+    path: 'prompt',
+    label: 'owned correction prompt',
+  });
+  return prompt;
+}

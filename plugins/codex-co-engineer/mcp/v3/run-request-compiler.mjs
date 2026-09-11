@@ -55,6 +55,10 @@ import {
 } from './run-manifest.mjs';
 import { parseRunManifestV1 } from './run-policy.mjs';
 import {
+  parseDelegationPreferencesV1,
+  resolveAssignmentPreferenceV1,
+} from './delegation-preferences.mjs';
+import {
   assertDirectJsonClosure,
   assertNotProxy,
   assertPlainObject,
@@ -70,7 +74,7 @@ const REALPATH = nodeRealpath;
 export const RUN_REQUEST_SCHEMA_ID = 'codex-co-engineer.run-request.v1';
 export const RUN_REQUEST_VERSION = 1;
 export const RUN_REQUEST_ALLOWED_KEYS = capturedFreeze([
-  'run_id', 'repo', 'objective', 'base_sha', 'assignments',
+  'run_id', 'repo', 'objective', 'base_sha', 'assignments', 'preferences',
 ]);
 export const RUN_REQUEST_ASSIGNMENT_ALLOWED_KEYS = capturedFreeze([
   'assignment_id', 'provider', 'model', 'role', 'access', 'prompt',
@@ -245,20 +249,25 @@ function assertAssignmentShape(value, index) {
   rejectUnknownKeys(value, ASSIGNMENT_KEY_SET, field);
 }
 
-function normalizeAssignment(value, index, baseSha) {
+function normalizeAssignment(value, index, baseSha, preferences) {
   const field = `run_request.assignments[${index}]`;
   assertAssignmentShape(value, index);
   const assignmentId = readRequired(value, 'assignment_id', `${field}.assignment_id`);
   if (typeof assignmentId !== 'string' || !isAssignmentId(assignmentId)) {
     compilerError('invalid_format', `${field}.assignment_id`, 'assignment_id is not valid.');
   }
-  const provider = readRequired(value, 'provider', `${field}.provider`);
-  if (typeof provider !== 'string' || !isKnownProvider(provider)) {
-    compilerError('unknown_provider', `${field}.provider`, `provider must be one of ${knownProvidersJoined()}.`);
-  }
   const role = readRequired(value, 'role', `${field}.role`);
   if (typeof role !== 'string' || !isKnownRole(role)) {
     compilerError('unknown_role', `${field}.role`, 'role must be implement, review, or verify.');
+  }
+  const selection = resolveAssignmentPreferenceV1({
+    role,
+    provider: readOptional(value, 'provider', `${field}.provider`),
+    model: readOptional(value, 'model', `${field}.model`),
+  }, preferences, field);
+  const provider = selection.provider;
+  if (typeof provider !== 'string' || !isKnownProvider(provider)) {
+    compilerError('unknown_provider', `${field}.provider`, `provider must be one of ${knownProvidersJoined()}.`);
   }
   const requestedAccess = readOptional(value, 'access', `${field}.access`);
   const access = requestedAccess === undefined
@@ -285,7 +294,7 @@ function normalizeAssignment(value, index, baseSha) {
   }
   const model = normalizeModel(
     provider,
-    readOptional(value, 'model', `${field}.model`),
+    selection.model,
     `${field}.model`,
   );
   const requestedScope = readOptional(value, 'write_scope', `${field}.write_scope`);
@@ -310,6 +319,7 @@ function normalizeAssignment(value, index, baseSha) {
     required: required ?? true,
     provider,
     model,
+    selection_source: selection.source,
     ...(requestedScope !== undefined ? { requested_write_scope: [...requestedScope] } : {}),
     capabilities,
     ...(startingRef !== undefined ? { starting_ref: startingRef } : {}),
@@ -474,6 +484,7 @@ function makePublicSummary(compiled) {
       task_id: assignment.task_id,
       provider: assignment.provider,
       model: assignment.model,
+      selection_source: assignment.selection_source,
       role: assignment.role,
       access: assignment.access,
       required: assignment.required,
@@ -506,6 +517,10 @@ export async function compileRunRequestV1(request, options = {}) {
     label: 'run_request.objective',
   });
   const requestedBaseSha = normalizeBaseSha(readOptional(request, 'base_sha', 'run_request.base_sha'));
+  const preferences = parseDelegationPreferencesV1(
+    readOptional(request, 'preferences', 'run_request.preferences'),
+    'run_request.preferences',
+  );
   const rawAssignments = readRequired(request, 'assignments', 'run_request.assignments');
   assertArray(rawAssignments, 'run_request.assignments', MIN_ASSIGNMENTS, MAX_ASSIGNMENTS);
   const observed = typeof options.observeGit === 'function'
@@ -542,7 +557,7 @@ export async function compileRunRequestV1(request, options = {}) {
   const normalized = [];
   const seenIds = new Set();
   for (let index = 0; index < rawAssignments.length; index += 1) {
-    const assignment = normalizeAssignment(rawAssignments[index], index, git.base_sha);
+    const assignment = normalizeAssignment(rawAssignments[index], index, git.base_sha, preferences);
     if (seenIds.has(assignment.assignment_id)) {
       compilerError('duplicate_assignment_id', `run_request.assignments[${index}].assignment_id`, 'Assignment IDs must be unique.');
     }
@@ -621,6 +636,7 @@ export async function compileRunRequestV1(request, options = {}) {
       task_id: taskIdFor(runId, assignment.assignment_id, provisionalRequestKey),
       provider: assignment.provider,
       model: assignment.model,
+      selection_source: assignment.selection_source,
       role: assignment.role,
       access: assignment.access,
       required: assignment.required,

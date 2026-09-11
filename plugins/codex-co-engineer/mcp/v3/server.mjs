@@ -94,7 +94,7 @@ const RESPONSE_MODE_PROPERTY = {
 
 const RESPONSE_MODE_HINT = ' Native runs default to bounded structured-first text; text-only run clients may set response_mode="legacy" to encode the same compact semantic receipt fully in text. Use task.run_id with view="diagnostics" for detailed run evidence. Omitted legacy single-task calls retain full compatible text.';
 
-const SERVER_INSTRUCTIONS = 'Use delegate.run_request for one bounded run, then task.run_id with the returned cursor for status or waits; use task.run_reply for one same-session decision, tasks.run_id for aggregate waits, and cancel.run_id to cancel. Use task_id for expanded task diagnostics or legacy single-task calls.';
+const SERVER_INSTRUCTIONS = 'Use delegate.run_request for one bounded run, then task.run_id with the returned cursor for status or waits; use task.run_reply for one same-session decision, task.revision for a bounded producer correction, tasks.run_id for aggregate waits, and cancel.run_id to cancel. Optional run_request.preferences reuse provider ownership by role; exact assignment provider/model win. Use task_id for expanded task diagnostics or legacy single-task calls.';
 
 const RUN_TOOL_OUTPUT_SCHEMA = {
   type: 'object',
@@ -209,6 +209,40 @@ const TOOLS = [
             repo: { type: 'string', description: 'Canonical absolute Git worktree path.' },
             objective: { type: 'string', minLength: 1, maxLength: 4096 },
             base_sha: { type: 'string', pattern: '^[0-9a-f]{40}$', description: 'Optional exact local base SHA; omitted means the observed clean HEAD.' },
+            preferences: {
+              type: 'object',
+              additionalProperties: false,
+              description: 'Optional reusable provider ownership by role. Omitted assignment provider/model fields are filled from the matching role. Exact assignment selections win. Unknown or unavailable preferred providers are reported only when an assignment would use them; unused unknown role preferences are ignored.',
+              properties: {
+                implement: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['provider'],
+                  properties: {
+                    provider: { type: 'string' },
+                    model: { type: 'string', maxLength: 128 },
+                  },
+                },
+                review: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['provider'],
+                  properties: {
+                    provider: { type: 'string' },
+                    model: { type: 'string', maxLength: 128 },
+                  },
+                },
+                verify: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['provider'],
+                  properties: {
+                    provider: { type: 'string' },
+                    model: { type: 'string', maxLength: 128 },
+                  },
+                },
+              },
+            },
             assignments: {
               type: 'array',
               minItems: 1,
@@ -216,10 +250,10 @@ const TOOLS = [
               items: {
                 type: 'object',
                 additionalProperties: false,
-                required: ['assignment_id', 'provider', 'role', 'prompt'],
+                required: ['assignment_id', 'role', 'prompt'],
                 properties: {
                   assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
-                  provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'] },
+                  provider: { type: 'string', enum: ['grok', 'cursor-local', 'cursor-cloud', 'dsh'], description: 'Optional when a matching run_request.preferences role entry fills it. Exact values win over preferences.' },
                   model: { type: 'string', maxLength: 128, description: 'Optional exact model override; otherwise the closed provider default is derived.' },
                   role: { type: 'string', enum: ['implement', 'review', 'verify'] },
                   access: { type: 'string', enum: ['write', 'writer', 'read', 'read_only'], description: 'Optional explicit access. Omitted access is derived from role: implement means writer; review and verify mean read_only.' },
@@ -277,7 +311,7 @@ const TOOLS = [
     title: TOOL_METADATA.task.title,
     annotations: TOOL_METADATA.task.annotations,
     outputSchema: RUN_TOOL_OUTPUT_SCHEMA,
-    description: `Inspect or wait on one bounded native run using run_id and its returned cursor. Native run_request calls return the compact coordination receipt by default. Use view=diagnostics for the detailed run receipt; view=compact explicitly selects the normal compact run projection. task_id remains the compatible 3.2.1 path and uses event_cursor for expanded lane progress and diagnostics. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
+    description: `Inspect or wait on one bounded native run using run_id and its returned cursor. Native run_request calls return the compact coordination receipt by default. Use view=diagnostics for the detailed run receipt; view=compact explicitly selects the normal compact run projection. Optional revision derives a fresh bounded correction from a completed, clean, exactly identified producer while preserving provider, model, and write scope. task_id remains the compatible 3.2.1 path and uses event_cursor for expanded lane progress and diagnostics. wait_until=terminal waits for a terminal or needs-attention state without waking on routine text. Optional reply delivers a same-session answer exactly once. Optional extend_* records an audited deadline extension. Disconnecting this waiter does not stop provider work. Unsolicited stdio callbacks across assistant turns are not available.${RESPONSE_MODE_HINT}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -385,6 +419,18 @@ const TOOLS = [
             },
           ],
         },
+        revision: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['assignment_id', 'feedback', 'expected_head', 'expected_idempotency_key'],
+          description: 'Derive a new bounded correction assignment from a completed, clean producer. Preserves provider, model, write scope, and original assignment context. Uses the public producer request identity, exact per-assignment HEAD, and a fresh revision identity. Never replays an active, uncertain, dirty, uninspectable, or unfinal producer. Same expected head, identity, and feedback are idempotent.',
+          properties: {
+            assignment_id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
+            feedback: { type: 'string', minLength: 1, maxLength: 4096 },
+            expected_head: { type: 'string', pattern: '^[0-9a-f]{40}$', description: 'Exact current producer HEAD. Stale values fail closed.' },
+            expected_idempotency_key: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$', description: 'Exact producer request identity.' },
+          },
+        },
       },
       allOf: [
         {
@@ -393,6 +439,19 @@ const TOOLS = [
           else: { required: ['task_id'] },
         },
         { not: { required: ['run_id', 'task_id'] } },
+        {
+          if: { required: ['revision'] },
+          then: {
+            required: ['run_id', 'revision'],
+            not: {
+              anyOf: [
+                { required: ['attention'] },
+                { required: ['run_reply'] },
+                { required: ['task_id'] },
+              ],
+            },
+          },
+        },
       ],
       additionalProperties: false,
     },

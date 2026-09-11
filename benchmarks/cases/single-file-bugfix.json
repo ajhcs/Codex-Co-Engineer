@@ -1,0 +1,30 @@
+{
+  "schema": "codex-co-engineer.benchmark-case.v1",
+  "id": "single-file-bugfix",
+  "input_digest": "54bd89a12cdbb1a66e662467f71d96bfc5e596bafced30f6a0c715c68a71d368",
+  "base_sha": "df49c63059159a79646258358850bef0590ca583",
+  "title": "Repair an off-by-one in a sum helper",
+  "summary": "Make inclusiveRangeSum(start, end) include the end bound and keep the frozen unit check green.",
+  "comparable": {
+    "host_model": "codex-default",
+    "host_settings": { "reasoning": "default", "sandbox": "workspace-write" },
+    "provider_configuration": { "implement": "grok", "review": null }
+  },
+  "inputs": {
+    "files": {
+      "sum.mjs": "export function inclusiveRangeSum(start, end) {\n  let total = 0;\n  for (let value = start; value < end; value += 1) total += value;\n  return total;\n}\n",
+      "sum.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { inclusiveRangeSum } from './sum.mjs';\n\ntest('inclusive range includes the end bound', () => {\n  assert.equal(inclusiveRangeSum(1, 4), 10);\n});\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "unit",
+        "command": ["node", "--test", "sum.test.mjs"],
+        "expect_exit": 0
+      }
+    ],
+    "required_files": ["sum.mjs", "sum.test.mjs"],
+    "forbidden_paths": []
+  }
+}

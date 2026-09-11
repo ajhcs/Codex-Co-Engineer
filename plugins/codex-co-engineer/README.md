@@ -8,13 +8,36 @@ eight independent assignments and returns their results for Codex to inspect.
 You decide what ships.
 
 [Quickstart](docs/co-engineer-quickstart.md) · [Configuration](docs/configuration.md) ·
-[Troubleshooting](docs/co-engineer-troubleshooting.md) · [3.4.2 release notes](docs/releases/v3.4.2.md)
+[Troubleshooting](docs/co-engineer-troubleshooting.md) · [3.4.3 release notes](docs/releases/v3.4.3.md)
 
 > Use Grok Co-Engineer to review the latest change. Report actionable findings.
 
 Speak naturally; you do not need tool payloads, a profile, or another manager
-for an ordinary launch. A separate host panel is optional. The CLI conversation
-is a complete workflow. The stable plugin and MCP identifier is `codex-co-engineer`.
+for an ordinary launch. A separate host panel is optional. Use an interactive
+Codex conversation that can present the normal repository-sharing consent. The stable plugin and MCP identifier is `codex-co-engineer`.
+
+## Complete engineering assignments
+
+The revision operation and result reporting below are available in 3.4.3.
+Automated checks and independent code review passed. Measured workload
+reduction, clean-agent onboarding, and refreshed native-host acceptance remain
+unverified; no savings claim is made here.
+
+Grok and Cursor can own preparation, implementation, meaningful checks, and
+requested corrections. Tell Codex your provider preferences once in the task;
+it can reuse them for eligible assignments while you retain final control.
+Co-Engineer returns concise candidate evidence and supports bounded revisions
+without rebuilding dispatch details. An explicit provider choice takes priority.
+
+The [autonomous ownership guide](skills/delegate-to-co-engineer/references/autonomous-ownership.md)
+explains coordination for Astra and other autonomous agents. Compare total
+native-agent work per accepted result, including native helpers; provider
+readiness does not establish a subscription balance.
+See the [result guide](docs/run-results.md) and the public repository’s
+[contribution guide](https://github.com/ajhcs/Codex-Co-Engineer/blob/main/CONTRIBUTING.md),
+[support routes](https://github.com/ajhcs/Codex-Co-Engineer/blob/main/SUPPORT.md),
+and the
+[first-outcome example](https://github.com/ajhcs/Codex-Co-Engineer/tree/v3.4.3/examples/first-outcome).
 
 ## Install and authentication
 
@@ -27,18 +50,36 @@ is a complete workflow. The stable plugin and MCP identifier is `codex-co-engine
 
 The worktree tool is bundled; no separate `worktree-bootstrap` installation is needed.
 
-### Install from a release clone
+### Install 3.4.3
 
 ```bash
-git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git
-cd Codex-Co-Engineer
+git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.3
+cd Codex-Co-Engineer-3.4.3
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Keep the clone as the registered marketplace source. Setup installs pinned ACPX
+### Upgrading an existing installation
+
+The public release keeps the marketplace identity `codex-co-engineer`.
+Keep the clone as its registered marketplace source. Finish or cancel active
+runs before replacing an installed version. For an existing installation,
+remove `codex-co-engineer@codex-co-engineer` with `codex plugin remove` before
+adding it again from the new source. Preserve provider login files and durable
+task state.
+
+If older open projects still use that public marketplace identity, use a
+distinct local marketplace wrapper outside the tracked release, with the
+unchanged plugin name and exact released plugin bytes. Remove/re-add alone is
+not sufficient: opening an older project can replace the same-name cache again.
+Do not rename the shipped marketplace manifest to solve a local collision.
+Prefer a clean Codex environment for onboarding. See the
+[release notes](docs/releases/v3.4.3.md) for upgrade details and qualification
+limits.
+
+Setup installs pinned ACPX
 0.13.0, Cursor SDK 1.0.28, and the DSH 0.1.0-rc.7 composition globally. Use a
 user-writable npm global prefix on your `PATH`; a Node version manager is one
 way to provide it. Setup creates key-free DSH profiles and owner-only session
@@ -51,7 +92,7 @@ commands are `npm run setup` and `npm run setup:check`.
 
 | Route | Authentication |
 | --- | --- |
-| Grok | Install the official Grok Build CLI, then `grok login` |
+| Grok | Install the official [Grok Build](https://docs.x.ai/build/overview) CLI, then `grok login` (or `grok login --device-auth` when a browser is unavailable). Subscription login only; no API key is required for a Grok first outcome. |
 | Cursor Local | Install Cursor CLI, then `cursor-agent login` |
 | Cursor Cloud | `CURSOR_API_KEY`, `CURSOR_API_KEY_FILE`, or its owner-only key file |
 | Muse / DSH | From the clone, run `plugins/codex-co-engineer/bin/set-model-api-key` for OpenRouter |
@@ -64,27 +105,27 @@ never include credentials in prompts or tool arguments. See
 
 ### Verify and start
 
-Start a new Codex session and ask: **Show Co-Engineer status.** Then name a
+Start a new Codex session. For a first route, use **one** provider—Grok is the
+default walkthrough—and ask: **Show Co-Engineer status.** Then name that
 provider and describe its first assignment. Setup checks dependencies and DSH
 profiles; the live `status` tool checks provider readiness and the MCP process's
 local Linux boundary. Setup does not install or authenticate Grok or Cursor.
 
 ### Upgrade
 
-Finish or cancel active runs, then update your clean registered source clone:
+Finish or cancel active runs first. Preserve dirty development checkouts and
+use a clean clone of `v3.4.3`, following the installation instructions above.
+Keep the registered source and local marketplace identity consistent; older
+open projects with the same identity can replace the shared plugin cache.
+Use a distinct local wrapper when required, preserving the public manifest and
+exact released plugin bytes.
 
-```bash
-git fetch origin tag v3.4.2
-git switch --detach v3.4.2
-npm --prefix plugins/codex-co-engineer run setup
-codex plugin remove codex-co-engineer@codex-co-engineer
-codex plugin add codex-co-engineer@codex-co-engineer
-npm --prefix plugins/codex-co-engineer run setup:check
-```
-
-Restart the Codex session. Use the identity from `codex plugin list` if your
-marketplace name differs. Preserve dirty source clones and existing task state.
-Direct Meta Muse profiles need the [OpenRouter migration](docs/releases/v3.4.2.md#upgrading).
+Start a new Codex session, then check Co-Engineer status. Use the identity from
+`codex plugin list` if it differs. Verify project-scoped discovery and installed
+file persistence after a connection restart. Existing task receipts and provider
+accounts are retained. Direct Meta Muse profiles require the unchanged
+OpenRouter migration; see the [upgrade notes](docs/releases/v3.4.3.md#upgrading)
+and historical [3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
 
 ## Execution and safety model
 
@@ -151,13 +192,21 @@ are visible to that process.
 **Where should I run setup?**
 From this package directory (`plugins/codex-co-engineer` in a clone), or
 with `npm --prefix plugins/codex-co-engineer run setup` from the
-repository root. The copy/paste plugin registration from the repository root
-is:
+repository root. Registration from the repository root uses the stable
+marketplace identity `codex-co-engineer` for both 3.4.2 and 3.4.3:
 
 ```bash
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 ```
+
+Prefer a clean Codex installation for onboarding. A separate clean
+environment remains valid for clean onboarding. If older open projects still
+use the public marketplace identity, finish or cancel active runs, then create a
+distinct local marketplace wrapper outside the tracked candidate with the
+unchanged plugin name and exact tested plugin bytes. Remove/re-add alone is not
+sufficient because opening an older project can replace the same-name cache
+again. Historical notes alone do not preserve the current host gate.
 
 **A managed worktree appeared without a receipt.**
 Do not guess or delete it. Inspect `git worktree list` and
@@ -235,7 +284,7 @@ keep exact 3.2.1 single-task behavior. Run wait is a bounded
 `decision_or_attention` wait. See
 [the run tool API](docs/run-tool-api.md).
 
-For a bounded 3.4.2 run, `delegate` accepts the small semantic
+For a bounded 3.4.3 run, `delegate` accepts the small semantic
 `run_request` body. The server derives the clean Git identity, provider
 model, task/workspace/dispatch identities, prompt and manifest digests, and
 managed-workspace policy. Do not construct the legacy full `run` envelope or

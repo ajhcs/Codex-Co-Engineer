@@ -5,7 +5,7 @@ The authoritative gate runs once against one exact clean local candidate:
 ```sh
 release-gate plan --repo "$PWD"
 release-gate run --repo "$PWD" \
-  --receipt /tmp/codex-co-engineer-v3.4.2-release-gate.json
+  --receipt /tmp/codex-co-engineer-v3.4.3-release-gate.json
 ```
 
 The package supports Node.js 24 and newer. The release gate is intentionally
@@ -66,11 +66,22 @@ After the provider-free gate passes:
 
 ## Local release installation identity
 
-Use a distinct local marketplace name for an unpublished release candidate when
-an open project still contains an older plugin under the public marketplace name.
-Keep the plugin name and tested plugin bytes unchanged. Remove the conflicting
-installed identity through the supported plugin CLI; preserve any dirty source
-checkout instead of changing its version label or replacing its files.
+The public release candidate keeps the stable marketplace identity
+`codex-co-engineer` in `.agents/plugins/marketplace.json`. Do not rename the
+shipped marketplace to solve a local install collision, invent unsupported
+install flags, or silently modify tracked manifests during installation.
+
+Prefer a clean Codex installation for candidate qualification and onboarding.
+A separate clean Codex environment remains valid for clean onboarding.
+
+When older open projects still use that public marketplace identity, create a
+distinct local marketplace wrapper outside the tracked candidate. Keep the
+plugin name and the exact tested plugin bytes unchanged; only the local wrapper
+marketplace identity differs. Finish or cancel active runs first. Remove/re-add
+alone is not sufficient: opening an older project with the same
+marketplace/plugin identity can replace the shared cache again. Preserve any
+dirty source checkout instead of changing its version label or replacing its
+files.
 
 Codex can refresh installed local plugins when listing project marketplaces.
 A project source with the same marketplace/plugin identity can replace the
@@ -79,10 +90,12 @@ An existing MCP process then retains paths into the removed version.
 
 After installation, verify the actual project-scoped `plugin/list` operation for
 open development checkouts: the candidate must remain installed and enabled,
-its complete file inventory must match the qualified source, and old identities
-must remain uninstalled. Repeat the inventory check after the host connection
-restarts, then run native provider acceptance. CLI marketplace listing alone
-and a successful check immediately after copying files do not prove persistence.
+its complete file inventory must match the qualified source, and stale
+installations must remain uninstalled. Repeat the inventory check after the host
+connection restarts, then run native provider acceptance. CLI marketplace
+listing alone and a successful check immediately after copying files do not prove
+persistence. Historical release notes alone do not preserve the current host
+gate.
 
 ## Native run acceptance
 
@@ -106,6 +119,65 @@ fallback is useful diagnostic evidence, but it does not pass this acceptance.
 Record the tested commit and whether other provider routes were exercised.
 The lifecycle ownership decision is
 [ADR 0002](adr/0002-native-run-lifecycle.md).
+
+## Additional 3.4.3 candidate evidence
+
+Keep every existing requirement above. The new result and comparison fixtures
+are provider-free; they do not establish paid evaluation results or replace
+live acceptance. The local gate and CI both run the comparison fixture suite
+and the provider-free trial-usage and qualification unit stages. Historical
+qualification fixtures require full Git history so CI can read pinned commits.
+
+For ownership changes, retain evidence of a completed producer, independent
+review, specific feedback, a corrected candidate, and Codex's acceptance.
+Exercise the successful revision, exhausted correction limit, stale head,
+concurrent repeated request, missing lifecycle proof, and timeout after partial
+output. Inspect revision lineage again after restart. Prove deadline extensions
+against both the old and extended deadline with concurrent sessions.
+
+The [development case study](demos/ownership-deadline.md) records real work;
+it identifies the installed coordinator and the limit of each check. Before a
+release showcase, capture actual use on the qualified host and label elapsed
+time and any compression. Do not present a scripted walkthrough or fixture
+comparison as live provider evidence. Fresh-user installation observations
+should record the chosen provider, host class, tested version, first successful
+outcome or failing step, and time to that result; keep private diagnostics local.
+
+### Required 3.4.3 evaluation cohort
+
+Before treating the candidate as evaluation-complete, run the matched
+comparison under these rules. Missing evidence is inconclusive, not a pass.
+Do not claim human-validation of agent onboarding.
+
+1. **Budget.** Cap TOTAL API/Cloud spend at **$25** with an enforceable cap or a
+   bounded maximum cost checked before dispatch. Do not dispatch paid work beyond
+   the cap.
+2. **Design.** Four approaches — native Codex, published 3.4.2, candidate
+   3.4.3, and direct delegation — times **three** representative retrospective
+   tasks times **two** repetitions = **24** trials. Use the seed43 case set and
+   bind exact source identities.
+3. **Accounting.** Record complete parent, helpers, reasoning, and compaction
+   usage. Count every attempt, correction, and native helper. Cap owned
+   corrections at **three** rounds. Enforce a **1-hour** total trial deadline.
+4. **Gate thresholds (all required).**
+   - Candidate: **6/6** accepted.
+   - Median task-level native output per accepted result: **≤ 50%** of native
+     and **≤ 75%** of published 3.4.2.
+   - Astra's own output decreases relative to published 3.4.2; native helpers
+     do not satisfy this threshold.
+   - Median wall clock: **≤ 2×** native.
+   - Native overhead versus direct: **≤ 1.25×**.
+5. **Onboarding.** Collect clean-environment agent onboarding evidence for the
+   candidate install path. Do not claim that a human validated the agent
+   onboarding path.
+
+Follow the [benchmark protocol](../benchmarks/) for materialization and
+analysis. Link [PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) for
+the candidate path and for actual measurements when retained. Parent tip
+`c50550e` is historical development evidence; an external execution manifest
+binds the final integrated candidate SHA after integration. Synthetic fixtures
+and this checklist do not establish savings. Missing usage stays unknown in the
+[result report](run-results.md).
 
 ## Handoff and cleanup
 
@@ -133,9 +205,10 @@ opened. Never create an empty PR.
 
 ## Authorized GitHub publication
 
-The release body is [releases/v3.4.2.md](releases/v3.4.2.md). Preserve all historical
-release notes, including [3.4.0](releases/v3.4.0.md). Documentation changes alone
-are not publication authorization; an explicit maintainer release instruction is.
+The release body is [releases/v3.4.3.md](releases/v3.4.3.md). Preserve all historical
+release notes, including [3.4.2](releases/v3.4.2.md) and [3.4.0](releases/v3.4.0.md).
+Documentation changes alone are not publication authorization; an explicit
+maintainer release instruction is.
 
 1. Fetch public main and reconcile it into the candidate. Both the published
    baseline and the accepted local fixes must be ancestors of the release.
@@ -147,8 +220,8 @@ are not publication authorization; an explicit maintainer release instruction is
 5. Merge the reviewed branch, capture the exact resulting main SHA, and verify
    that its tree matches the qualified candidate. If content changed, qualify
    the new candidate before tagging.
-6. Create `v3.4.2` at that reviewed main SHA and publish the body from
-   `docs/releases/v3.4.2.md`. Verify the remote tag, release body, source download,
+6. Create `v3.4.3` at that reviewed main SHA and publish the body from
+   `docs/releases/v3.4.3.md`. Verify the remote tag, release body, source download,
    and tag-based installation instructions after publication.
 
 The public release includes source and documentation. Never attach owner-only

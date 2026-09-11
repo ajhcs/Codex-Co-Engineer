@@ -72,11 +72,18 @@ import {
   cancelSupervisorSameSessionReplyV1,
 } from './run-tool-adapter.mjs';
 import { createRunAdmissionRuntime } from './run-admission.mjs';
+import { RunContractV1Error } from './run-manifest.mjs';
 import { createRunAdmissionStore } from './run-admission-store.mjs';
 import {
   compileRunRequestV1,
   RUN_REQUEST_DEFAULT_MODELS,
 } from './run-request-compiler.mjs';
+import {
+  assertOwnedRevisionProducerV1,
+  deriveOwnedRevisionRequestV1,
+  parseOwnedRevisionRequestV1,
+  projectOwnedProducerCandidateV1,
+} from './owned-delegation.mjs';
 import { loadReadinessSnapshot, saveReadinessSnapshot } from './readiness-snapshot.mjs';
 import { buildGitIdentityV1, buildWorkspaceIdentityV1 } from './protected-identity.mjs';
 import { assertRuntimeEntrypoints } from './runtime-entrypoints.mjs';
@@ -2358,8 +2365,101 @@ function createSupervisorRunAdmissionRuntime(options = {}) {
     })),
     loadRecord: options.loadRecord ?? admissionStore.load,
     persistRecord: options.persistRecord ?? admissionStore.save,
+    // Custom persistence must supply its own atomic reservation. Do not mix a
+    // second disk store, and never fall back to an always-success reservation.
+    reserveRevision: options.reserveRevision ?? (
+      options.loadRecord || options.persistRecord
+        ? async () => {
+          throw new RunContractV1Error(
+            'revision_reservation_unavailable',
+            'reserveRevision',
+            'Revision admission requires an atomic reservation.',
+          );
+        }
+        : admissionStore.reserveRevision
+    ),
   };
-  return createRunAdmissionRuntime(simpleDeps);
+  const runtime = createRunAdmissionRuntime(simpleDeps);
+  const loadRecord = simpleDeps.loadRecord;
+  const inspectWorkspace = simpleDeps.inspectWorkspace;
+  async function reviseRun(request, reviseOptions = {}) {
+    const runId = request?.run_id;
+    const revision = parseOwnedRevisionRequestV1(request?.revision, 'revision');
+    let record = await loadRecord(runId);
+    if (!record) {
+      throw new RunContractV1Error(
+        'revision_producer_not_found',
+        'run_id',
+        'The named producer assignment is not known.',
+      );
+    }
+    await runtime.inspectRun({ run_id: runId });
+    record = await loadRecord(runId);
+    const assignment = record.compiled?.assignments?.find((entry) => entry.assignment_id === revision.assignment_id);
+    const lane = record.lanes?.find((entry) => entry.assignment_id === revision.assignment_id);
+    if (!assignment || !lane) {
+      throw new RunContractV1Error(
+        'revision_producer_not_found',
+        'revision.assignment_id',
+        'The named producer assignment is not known.',
+      );
+    }
+    let workspace;
+    try {
+      workspace = await inspectWorkspace({
+        root,
+        run_id: runId,
+        assignment_id: revision.assignment_id,
+        task_id: lane.task_id,
+        workspace: lane.workspace,
+      });
+    } catch {
+      workspace = null;
+    }
+    const producer = projectOwnedProducerCandidateV1({ record, assignment, lane, workspace });
+    assertOwnedRevisionProducerV1(producer, revision);
+    if (typeof lane.task_id !== 'string' || lane.task_id.length === 0) {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; a missing task is not a completed producer.',
+      );
+    }
+    let task;
+    try {
+      ({ task } = await readTask(root, lane.task_id));
+    } catch {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; a missing task is not a completed producer.',
+      );
+    }
+    if (!task || typeof task !== 'object' || Array.isArray(task)
+      || task.id !== lane.task_id
+      || task.run_id !== record.run_id
+      || task.assignment_id !== assignment.assignment_id) {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+      );
+    }
+    const classified = classifySupervisorTerminalReceipt(task);
+    if (classified.projected_status !== 'completed' && classified.projected_status !== 'succeeded') {
+      throw new RunContractV1Error(
+        'revision_lifecycle_unfinal',
+        'revision',
+        'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+      );
+    }
+    const derived = deriveOwnedRevisionRequestV1(producer, revision);
+    return runtime.submitOwnedRevision(record.run_id, derived, reviseOptions);
+  }
+  return Object.freeze({
+    ...runtime,
+    reviseRun,
+  });
 }
 
 const AUTHENTICATION_FAILURE_PATTERN = /not signed in|not authenticated|log ?in required|unauthori[sz]ed/iu;
@@ -2946,6 +3046,7 @@ export async function createSupervisorRunToolAdapter(options = {}) {
       admissionStore: options.admissionStore,
       loadRecord: options.loadRecord,
       persistRecord: options.persistRecord,
+      reserveRevision: options.reserveRevision,
       waitForProgress: options.waitForProgress,
     });
   return createRunToolAdapter({

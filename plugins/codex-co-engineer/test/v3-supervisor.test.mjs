@@ -1192,3 +1192,483 @@ test('invokeRunTool preserves omitted 3.2.1 mode and R-TRUTH lifecycle authority
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function makeGitRepo(prefix) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
+  await run('git', ['-C', dir, 'init']);
+  await run('git', ['-C', dir, 'config', 'user.email', 'worker@example.com']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'Worker']);
+  await writeFile(path.join(dir, 'README.md'), 'owned revision fixture\n');
+  await run('git', ['-C', dir, 'add', '.']);
+  await run('git', ['-C', dir, 'commit', '-m', 'init']);
+  const { stdout } = await run('git', ['-C', dir, 'rev-parse', 'HEAD']);
+  return { dir, head: String(stdout).trim().toLowerCase() };
+}
+
+function worktreeKey(runId, assignmentId) {
+  return `${runId}:${assignmentId}`;
+}
+
+async function createOwnedRevisionHarness(options = {}) {
+  const repo = await makeGitRepo('co-engineer-owned-src-');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'co-engineer-owned-rev-'));
+  const worktrees = new Map();
+  const dispatchCalls = [];
+  const createdTasks = new Set();
+  let inspectStatus = options.inspectStatus ?? 'completed';
+  const createTerminalTask = options.createTerminalTask !== false;
+  const dispatchResult = options.dispatchResult ?? {
+    dispatched: true,
+    confidence: 'authoritative',
+    cursor: '1',
+  };
+  const records = new Map();
+  const customPersist = options.customPersist === true;
+  const adapter = await createSupervisorRunToolAdapter({
+    root,
+    inProcess: true,
+    requestConsent: async () => ({ approved: true }),
+    providerReady: async () => ({ ready: true }),
+    processBoundaryReady: async () => ({ ready: true }),
+    verifyRepository: async () => ({ verified: true }),
+    ...(customPersist ? {
+      loadRecord: async (runId) => (records.has(runId) ? JSON.parse(records.get(runId)) : null),
+      persistRecord: async (record) => { records.set(record.run_id, JSON.stringify(record)); },
+      ...(typeof options.reserveRevision === 'function'
+        ? { reserveRevision: options.reserveRevision }
+        : {}),
+    } : {}),
+    prepareWorkspace: async ({ run_id: runId, assignment, git }) => {
+      const dest = path.join(root, 'worktrees', `${runId}-${assignment.assignment_id}`);
+      await mkdir(path.dirname(dest), { recursive: true });
+      await run('git', ['-C', git.repository_path, 'worktree', 'add', '--detach', dest, git.base_sha]);
+      worktrees.set(worktreeKey(runId, assignment.assignment_id), dest);
+      worktrees.set(assignment.assignment_id, dest);
+      return {
+        prepared: true,
+        workspace: {
+          task: assignment.task_id,
+          worktree_path: dest,
+          branch: 'main',
+          start_sha: git.base_sha,
+        },
+      };
+    },
+    dispatchPrompt: async ({ run_id: runId, assignment, git }) => {
+      dispatchCalls.push({
+        run_id: runId,
+        assignment_id: assignment.assignment_id,
+        provider: assignment.provider,
+        model: assignment.model,
+        write_scope: [...assignment.write_scope],
+        access: assignment.access,
+        prompt: assignment.prompt,
+        base_sha: git.base_sha,
+      });
+      return dispatchResult;
+    },
+    inspectLane: async ({ run_id: runId, assignment_id: assignmentId, task_id: taskId }) => {
+      const worktree = worktrees.get(worktreeKey(runId, assignmentId)) ?? worktrees.get(assignmentId);
+      if (inspectStatus !== 'completed' || typeof worktree !== 'string') {
+        return { status: inspectStatus, cursor: '1' };
+      }
+      const candidatePath = path.join(worktree, 'src', 'slice.txt');
+      try {
+        await readFile(candidatePath);
+      } catch {
+        await mkdir(path.dirname(candidatePath), { recursive: true });
+        await writeFile(candidatePath, 'producer candidate\n');
+        await run('git', ['-C', worktree, 'add', '.']);
+        await run('git', ['-C', worktree, 'commit', '-m', 'producer candidate']);
+      }
+      if (createTerminalTask && typeof taskId === 'string' && !createdTasks.has(taskId)) {
+        await createTask({
+          root,
+          prompt: 'completed producer',
+          record: {
+            id: taskId,
+            status: 'completed',
+            provider: 'grok',
+            run_id: runId,
+            assignment_id: assignmentId,
+            cwd: worktree,
+            cleanup: { status: 'normal', boundary: 'released', lock: 'released' },
+          },
+        });
+        createdTasks.add(taskId);
+      }
+      const [{ stdout: headOut }, { stdout: statusOut }] = await Promise.all([
+        run('git', ['-C', worktree, 'rev-parse', 'HEAD']),
+        run('git', ['-C', worktree, 'status', '--porcelain=v1', '--untracked-files=all']),
+      ]);
+      return {
+        status: 'completed',
+        cursor: '1',
+        workspace_inspection: {
+          current_head: String(headOut).trim().toLowerCase(),
+          clean: String(statusOut).trim() === '',
+          changed_files: [],
+          commits: [],
+        },
+      };
+    },
+  });
+  return {
+    adapter,
+    repo,
+    root,
+    worktrees,
+    dispatchCalls,
+    setInspectStatus(status) { inspectStatus = status; },
+    request() {
+      return {
+        run_id: options.run_id ?? 'vale-hardening',
+        repo: repo.dir,
+        objective: 'Implement the social ingestion slice and keep unit tests green.',
+        assignments: [{
+          assignment_id: 'social-implementation',
+          provider: 'grok',
+          role: 'implement',
+          access: 'write',
+          write_scope: ['src/**'],
+          prompt: 'Implement the social ingestion slice. Acceptance: keep node --test green.',
+          expected_duration_ms: 60_000,
+        }],
+      };
+    },
+    async close() {
+      await rm(root, { recursive: true, force: true });
+      await rm(repo.dir, { recursive: true, force: true });
+    },
+  };
+}
+
+function revisionFromPacket(packet, assignmentId, feedback) {
+  const producer = packet.producers.find((entry) => entry.assignment_id === assignmentId);
+  return {
+    assignment_id: assignmentId,
+    feedback,
+    expected_head: producer.head,
+    expected_idempotency_key: producer.request_idempotency_key,
+  };
+}
+
+test('supervisor owned revision dispatches from the public packet and rejects unsafe inputs', async () => {
+  const harness = await createOwnedRevisionHarness();
+  try {
+    const originalBase = harness.repo.head;
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    assert.equal(submitted.phase, 'running');
+    const completed = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    assert.equal(completed.phase, 'completed');
+    assert.equal(completed.coordination.next_action.action, 'review');
+    const candidateHead = completed.coordination.producers[0].head;
+    assert.match(candidateHead, /^[0-9a-f]{40}$/u);
+    assert.notEqual(candidateHead, originalBase);
+    assert.match(completed.coordination.request_idempotency_key, /^sha256:[0-9a-f]{64}$/u);
+    assert.equal(completed.coordination.git.head, null);
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix the failing unit tests without widening scope.');
+    const [first, concurrent] = await Promise.all([
+      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+    ]);
+    assert.equal(concurrent.run_id, first.run_id);
+    const producerDispatches = harness.dispatchCalls.filter((entry) => entry.run_id === submitted.run_id);
+    const correctionDispatches = harness.dispatchCalls.filter((entry) => entry.run_id === first.run_id);
+    assert.equal(producerDispatches.length, 1);
+    assert.equal(correctionDispatches.length, 1);
+    assert.equal(correctionDispatches[0].base_sha, candidateHead);
+    assert.notEqual(correctionDispatches[0].base_sha, originalBase);
+    assert.equal(correctionDispatches[0].provider, 'grok');
+    assert.equal(correctionDispatches[0].model, 'grok-4');
+    assert.deepEqual(correctionDispatches[0].write_scope, ['src/**']);
+    assert.match(correctionDispatches[0].prompt, /Implement the social ingestion slice/u);
+    assert.match(correctionDispatches[0].prompt, /keep unit tests green/u);
+    assert.match(correctionDispatches[0].prompt, /Fix the failing unit tests/u);
+    assert.match(correctionDispatches[0].prompt, /fresh owned revision/u);
+    assert.equal(first.correction.lineage, 'owned_revision');
+    assert.equal(first.correction.reviewed_head, candidateHead);
+    assert.equal(concurrent.correction.lineage, 'owned_revision');
+    const correctionWorkspace = harness.worktrees.get(worktreeKey(first.run_id, 'social-implementation'));
+    assert.equal(typeof correctionWorkspace, 'string');
+    const { stdout: correctionHeadOut } = await run('git', ['-C', correctionWorkspace, 'rev-parse', 'HEAD']);
+    assert.equal(String(correctionHeadOut).trim().toLowerCase(), candidateHead);
+    const inspected = await harness.adapter.dispatch('task', { run_id: first.run_id });
+    assert.equal(inspected.correction.lineage, 'owned_revision');
+    assert.equal(inspected.correction.reviewed_head, candidateHead);
+    assert.equal(inspected.correction.producer_run_id, submitted.run_id);
+    assert.equal(inspected.correction.original_run_id, submitted.run_id);
+    assert.equal(inspected.correction.round, 1);
+    assert.equal(inspected.correction.limit, 3);
+  } finally {
+    await harness.close();
+  }
+});
+
+test('owned revision does not dispatch dirty, stale, missing, active, uncertain, or unfinal producers', async () => {
+  const dirty = await createOwnedRevisionHarness({ run_id: 'vale-dirty' });
+  try {
+    const submitted = await dirty.adapter.dispatch('delegate', { run_request: dirty.request() });
+    const completed = await dirty.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await writeFile(path.join(dirty.worktrees.get('social-implementation'), 'dirty.txt'), 'dirty\n');
+    await assert.rejects(
+      dirty.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_producer_dirty',
+    );
+    assert.equal(dirty.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 0);
+  } finally {
+    await dirty.close();
+  }
+
+  const stale = await createOwnedRevisionHarness({ run_id: 'vale-stale' });
+  try {
+    const submitted = await stale.adapter.dispatch('delegate', { run_request: stale.request() });
+    const completed = await stale.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    const worktree = stale.worktrees.get('social-implementation');
+    await writeFile(path.join(worktree, 'stale.txt'), 'stale\n');
+    await run('git', ['-C', worktree, 'add', '.']);
+    await run('git', ['-C', worktree, 'commit', '-m', 'stale']);
+    await assert.rejects(
+      stale.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_producer_stale',
+    );
+  } finally {
+    await stale.close();
+  }
+
+  const missing = await createOwnedRevisionHarness({ run_id: 'vale-missing' });
+  try {
+    const submitted = await missing.adapter.dispatch('delegate', { run_request: missing.request() });
+    const completed = await missing.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await rm(missing.worktrees.get('social-implementation'), { recursive: true, force: true });
+    await assert.rejects(
+      missing.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_workspace_uninspectable',
+    );
+  } finally {
+    await missing.close();
+  }
+
+  const active = await createOwnedRevisionHarness({
+    run_id: 'vale-active',
+    inspectStatus: 'running',
+  });
+  try {
+    const submitted = await active.adapter.dispatch('delegate', { run_request: active.request() });
+    assert.equal(submitted.phase, 'running');
+    await assert.rejects(
+      active.adapter.dispatch('task', {
+        run_id: submitted.run_id,
+        revision: {
+          assignment_id: 'social-implementation',
+          feedback: 'Fix tests.',
+          expected_head: active.repo.head,
+          expected_idempotency_key: submitted.coordination.request_idempotency_key,
+        },
+      }),
+      (error) => error.code === 'revision_producer_active',
+    );
+  } finally {
+    await active.close();
+  }
+
+  const uncertain = await createOwnedRevisionHarness({
+    run_id: 'vale-uncertain',
+    dispatchResult: { dispatched: true, confidence: 'uncertain', cursor: '1' },
+  });
+  try {
+    const submitted = await uncertain.adapter.dispatch('delegate', { run_request: uncertain.request() });
+    await uncertain.adapter.dispatch('task', { run_id: submitted.run_id });
+    await assert.rejects(
+      uncertain.adapter.dispatch('task', {
+        run_id: submitted.run_id,
+        revision: {
+          assignment_id: 'social-implementation',
+          feedback: 'Fix tests.',
+          expected_head: uncertain.repo.head,
+          expected_idempotency_key: submitted.coordination.request_idempotency_key,
+        },
+      }),
+      (error) => error.code === 'revision_producer_active',
+    );
+  } finally {
+    await uncertain.close();
+  }
+
+  const unfinal = await createOwnedRevisionHarness({ run_id: 'vale-unfinal' });
+  try {
+    const submitted = await unfinal.adapter.dispatch('delegate', { run_request: unfinal.request() });
+    const completed = await unfinal.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await updateTask(unfinal.root, completed.lanes[0].task_id, {
+      cleanup: { status: 'pending', boundary: 'unknown', lock: 'unknown' },
+    });
+    await assert.rejects(
+      unfinal.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_lifecycle_unfinal',
+    );
+  } finally {
+    await unfinal.close();
+  }
+
+  const missingTask = await createOwnedRevisionHarness({
+    run_id: 'vale-missing-task',
+    createTerminalTask: false,
+  });
+  try {
+    const submitted = await missingTask.adapter.dispatch('delegate', { run_request: missingTask.request() });
+    const completed = await missingTask.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await assert.rejects(
+      missingTask.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_lifecycle_unfinal',
+    );
+    assert.equal(missingTask.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 0);
+  } finally {
+    await missingTask.close();
+  }
+});
+
+test('supervisor correction rounds stay bounded, follow one child, and retain lineage after restart', async () => {
+  const harness = await createOwnedRevisionHarness({ run_id: 'vale-bounded' });
+  try {
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    const original = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    const firstRevision = revisionFromPacket(original.coordination, 'social-implementation', 'Fix the failing unit tests without widening scope.');
+    const first = await harness.adapter.dispatch('task', { run_id: submitted.run_id, revision: firstRevision });
+    assert.equal(first.correction.round, 1);
+    assert.equal(first.correction.original_run_id, submitted.run_id);
+    const firstDone = await harness.adapter.dispatch('task', { run_id: first.run_id });
+    assert.equal(firstDone.phase, 'completed');
+    assert.equal(firstDone.correction.round, 1);
+
+    await assert.rejects(harness.adapter.dispatch('task', {
+      run_id: submitted.run_id,
+      revision: revisionFromPacket(original.coordination, 'social-implementation', 'A different correction against the original.'),
+    }), error => error.code === 'revision_child_exists'
+      && error.message.includes(first.run_id)
+      && error.message.includes('Feedback was not applied'));
+    const repeated = await harness.adapter.dispatch('task', {
+      run_id: submitted.run_id, revision: firstRevision,
+    });
+    assert.equal(repeated.run_id, first.run_id);
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id === first.run_id).length, 1);
+
+    const secondRevision = revisionFromPacket(firstDone.coordination, 'social-implementation', 'Keep the tests green after the first correction.');
+    const second = await harness.adapter.dispatch('task', { run_id: first.run_id, revision: secondRevision });
+    assert.equal(second.correction.round, 2);
+    assert.equal(second.correction.original_run_id, submitted.run_id);
+    const secondDone = await harness.adapter.dispatch('task', { run_id: second.run_id });
+
+    const thirdRevision = revisionFromPacket(secondDone.coordination, 'social-implementation', 'Final bounded correction.');
+    const third = await harness.adapter.dispatch('task', { run_id: second.run_id, revision: thirdRevision });
+    assert.equal(third.correction.round, 3);
+    assert.equal(third.correction.limit, 3);
+    const thirdDone = await harness.adapter.dispatch('task', { run_id: third.run_id });
+    assert.equal(thirdDone.phase, 'completed');
+    assert.equal(thirdDone.coordination.next_action.action, 'review');
+    assert.equal(thirdDone.coordination.available_actions.includes('revision'), false);
+    assert.equal(thirdDone.coordination.available_actions.includes('resubmit'), true);
+
+    const correctionDispatches = harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id);
+    assert.equal(correctionDispatches.length, 3);
+    await assert.rejects(
+      harness.adapter.dispatch('task', {
+        run_id: third.run_id,
+        revision: revisionFromPacket(thirdDone.coordination, 'social-implementation', 'This exceeds the fixed ceiling.'),
+      }),
+      (error) => error.code === 'revision_budget_exhausted'
+        && /submit a new bounded assignment/u.test(error.message),
+    );
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 3);
+
+    const restarted = await createSupervisorRunToolAdapter({
+      root: harness.root,
+      inProcess: true,
+      requestConsent: async () => ({ approved: true }),
+      providerReady: async () => ({ ready: true }),
+      processBoundaryReady: async () => ({ ready: true }),
+      verifyRepository: async () => ({ verified: true }),
+    });
+    const inspected = await restarted.dispatch('task', { run_id: third.run_id });
+    assert.equal(inspected.correction.round, 3);
+    assert.equal(inspected.correction.limit, 3);
+    assert.equal(inspected.correction.original_run_id, submitted.run_id);
+    assert.equal(inspected.correction.producer_run_id, second.run_id);
+    assert.equal(inspected.correction.reviewed_head, secondDone.coordination.producers[0].head);
+    const inspectedOriginal = await restarted.dispatch('task', { run_id: submitted.run_id });
+    assert.equal(inspectedOriginal.coordination.next_action.action, 'inspect');
+    assert.equal(inspectedOriginal.coordination.next_action.run_id, first.run_id);
+  } finally {
+    await harness.close();
+  }
+});
+
+function createMemoryRevisionReservation() {
+  const reservations = new Map();
+  return async function reserveRevision(producerRunId, assignmentId, follow) {
+    const key = `${producerRunId}\0${assignmentId}`;
+    const existing = reservations.get(key);
+    if (existing) return { reserved: false, follow: existing.follow };
+    const reservationId = `${producerRunId}:${assignmentId}:${follow.identity_digest}`;
+    reservations.set(key, { follow, reservationId });
+    return {
+      reserved: true,
+      follow,
+      release: async () => {
+        const current = reservations.get(key);
+        if (!current || current.reservationId !== reservationId) {
+          throw Object.assign(new Error('Correction reservation changed.'), { code: 'run_store_record_changed' });
+        }
+        reservations.delete(key);
+      },
+    };
+  };
+}
+
+test('supervisor custom persistence without reservation fails closed for revision', async () => {
+  const harness = await createOwnedRevisionHarness({
+    run_id: 'vale-custom-unreserved',
+    customPersist: true,
+  });
+  try {
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    const completed = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix tests.');
+    await assert.rejects(
+      harness.adapter.dispatch('task', { run_id: submitted.run_id, revision }),
+      (error) => error.code === 'revision_reservation_unavailable',
+    );
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+test('supervisor custom persistence with explicit reservation still admits one correction', async () => {
+  const harness = await createOwnedRevisionHarness({
+    run_id: 'vale-custom-reserved',
+    customPersist: true,
+    reserveRevision: createMemoryRevisionReservation(),
+  });
+  try {
+    const submitted = await harness.adapter.dispatch('delegate', { run_request: harness.request() });
+    const completed = await harness.adapter.dispatch('task', { run_id: submitted.run_id });
+    const revision = revisionFromPacket(completed.coordination, 'social-implementation', 'Fix the failing unit tests.');
+    const child = await harness.adapter.dispatch('task', { run_id: submitted.run_id, revision });
+    assert.equal(child.correction.round, 1);
+    await assert.rejects(
+      harness.adapter.dispatch('task', {
+        run_id: submitted.run_id,
+        revision: revisionFromPacket(completed.coordination, 'social-implementation', 'Different feedback.'),
+      }),
+      (error) => error.code === 'revision_child_exists',
+    );
+    assert.equal(harness.dispatchCalls.filter((entry) => entry.run_id !== submitted.run_id).length, 1);
+  } finally {
+    await harness.close();
+  }
+});

@@ -1,0 +1,89 @@
+{
+  "schema": "codex-co-engineer.qualification-case.v1",
+  "id": "comparison-failed-helper-cumulative",
+  "title": "Count failed attempts, helpers, and compatible cumulative snapshots",
+  "summary": "Failed attempts remain in the usage-per-accepted numerator, helpers are not double-counted, mixed providers stay grouped, and cumulative snapshots cannot overwrite a terminal failure.",
+  "input_digest": "9be19e0d868d479738abc089ad32d57d93133cc9471e209d92316041cb6bcfdd",
+  "check_digest": "39f76e2d2e7e18bf2e50fe41a4a62e6862055048585805f712851344d0355b9f",
+  "source_sha": "3131f9ac7f6807eccb2ab68f027f1d98d3db3661",
+  "retrospective": true,
+  "status": "unrun",
+  "implement": "grok",
+  "review": "cursor-local",
+  "allowlist": [
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/assignment-manifest.mjs",
+      "git_sha256": "b8b90746b059cea51933757b82334db64054fc5525f3d03692f23dc39d52470b",
+      "bytes": 14355
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/contract.mjs",
+      "git_sha256": "7ec33962e8ed30fbaf628a128ca56bcc907f9d032f909950d394a99cd086970a",
+      "bytes": 4187
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/grammar.mjs",
+      "git_sha256": "8b80015d521b7a39e8a1df41d489eb791d3ce6d2f8b05eea3e9c699a5b81da66",
+      "bytes": 5842
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/identity.mjs",
+      "git_sha256": "80382e0d552f0979859f1bb919b4ceae481743c49213e199e1891b7baab7ede5",
+      "bytes": 26760
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/prompt-compiler.mjs",
+      "git_sha256": "82b33f2d086e002999a386ef659fc182d2ec22c578578f03b888f294dd18537d",
+      "bytes": 38404
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/repo-path-matcher.mjs",
+      "git_sha256": "25ffd90555229733e90ede629ec2cf4aad728ee3377e1402eb5f7488f6e87df9",
+      "bytes": 31089
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-manifest.mjs",
+      "git_sha256": "2ed6861654ab629cf5c1756cc3747feba45c047063fee4088973248bd55b4b44",
+      "bytes": 46207
+    },
+    {
+      "path": "plugins/codex-co-engineer/mcp/v3/run-policy.mjs",
+      "git_sha256": "aeed773fbff6b96ffdbf08555001a644aadf846155366325944360a9a6702948",
+      "bytes": 6727
+    },
+    {
+      "path": "scripts/compare-coengineer-runs.mjs",
+      "git_sha256": "9db2557d38845899c55cb7f876913b23e29070caa22374f610aa87031995108d",
+      "bytes": 18871
+    }
+  ],
+  "overlay": {
+    "files": {
+      "TASK.md": "# Failed, helper, and cumulative comparison accounting\n\nThis retrospective task uses a bounded pre-fix snapshot of public repository\nsource. Repair the historical modules at their original paths so the frozen\nchecks in `checks/failed-helper-cumulative.test.mjs` pass.\n\nDo not edit the check file, this prompt, or recorded identity. Do not copy\nlater corrected sources, Git history, or other trial outputs into the\nworkspace.\n\nRequired behavior:\n\n- Count every attempt, including failed attempts, corrections, and native\n  helpers. Failed attempts remain in the usage-per-accepted numerator.\n- If any trial in the arm is missing `accepted`, usage-per-accepted and the\n  acceptance rate stay unknown until coverage is complete. Zero accepted is\n  not zero cost.\n- Unknown metrics stay unknown. Missing primary evidence is inconclusive, not\n  measured zero.\n- `elapsed_ms` is the sum of attempt durations. `wall_elapsed_ms` is trial\n  wall time and is not that sum.\n- When native helpers are recorded separately, the parent must set\n  `native_parent_excludes_helpers: true`. Helper usage is added once.\n- Duplicate `attempt_id` values are compatible cumulative snapshots only when\n  kind, provider/model, and terminal outcome stay consistent, sequence\n  increases, and usage is monotone. A later snapshot cannot turn a terminal\n  failure into acceptance or move reported usage onto another model.\n- Provider tokens and cost stay grouped by provider and model. Mixed\n  provider/model totals are unknown/non-comparable, not one blended number.\n- An arm cannot mix `coengineer_source` identities.\n\nAcceptance is the frozen command\n`node --test checks/failed-helper-cumulative.test.mjs`.\n",
+      "checks/failed-helper-cumulative.test.mjs": "import assert from 'node:assert/strict';\nimport { createHash } from 'node:crypto';\nimport test from 'node:test';\n\nimport { canonicalJsonStringify } from '../plugins/codex-co-engineer/mcp/v3/identity.mjs';\nimport {\n  compareTrials,\n  parseTrial,\n} from '../scripts/compare-coengineer-runs.mjs';\n\nconst CASE_SCHEMA = 'codex-co-engineer.benchmark-case.v1';\nconst TRIAL_SCHEMA = 'codex-co-engineer.benchmark-trial.v1';\nconst BASE_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';\nconst CANDIDATE_COMMIT = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';\nconst OTHER_COMMIT = 'cccccccccccccccccccccccccccccccccccccccc';\nconst INPUT_DIGEST_DOMAIN = 'codex-co-engineer.benchmark-input.v1';\n\nfunction settings() {\n  return { reasoning: 'high', sandbox: 'workspace-write' };\n}\n\nfunction metric(value, source = 'host_measured') {\n  return {\n    value,\n    source,\n    trust: source === 'provider_report' ? 'provider_untrusted' : 'host_authoritative',\n  };\n}\n\nfunction unknownMetric() {\n  return { value: null, source: 'unknown', trust: 'unknown' };\n}\n\nfunction frozenCase() {\n  const files = { 'TASK.md': '# accounting\\n' };\n  const acceptance = { checks: [{ id: 'unit' }] };\n  return {\n    schema: CASE_SCHEMA,\n    id: 'accounting-case',\n    title: 'accounting',\n    summary: 'failed helper cumulative accounting',\n    base_sha: BASE_SHA,\n    input_digest: createHash('sha256')\n      .update(INPUT_DIGEST_DOMAIN, 'utf8')\n      .update('\\n', 'utf8')\n      .update(canonicalJsonStringify({ files, acceptance }), 'utf8')\n      .digest('hex'),\n    comparable: {\n      host_model: 'recorded-host-model',\n      host_settings: settings(),\n      provider_configuration: { implement: 'grok', review: 'cursor-local' },\n    },\n    inputs: { files },\n    acceptance,\n  };\n}\n\nfunction trial(overrides = {}) {\n  const arm = overrides.arm ?? 'candidate-3.4.3';\n  const caseRecord = frozenCase();\n  return {\n    schema: TRIAL_SCHEMA,\n    trial_id: overrides.trial_id ?? 'trial-one',\n    case_id: 'accounting-case',\n    arm,\n    base_sha: BASE_SHA,\n    input_digest: caseRecord.input_digest,\n    coengineer_source: arm === 'native-codex'\n      ? { kind: 'native', value: 'native-codex' }\n      : { kind: 'git_commit', value: CANDIDATE_COMMIT },\n    host_model: 'recorded-host-model',\n    host_settings: settings(),\n    provider_configuration: arm === 'native-codex'\n      ? { implement: 'native' }\n      : { implement: 'grok', review: 'cursor-local' },\n    accepted: true,\n    wall_elapsed_ms: metric(1000),\n    attempts: [{\n      attempt_id: 'attempt-one',\n      kind: 'initial',\n      outcome: 'accepted',\n      usage: { native_input_tokens: metric(10), elapsed_ms: metric(1000) },\n    }],\n    ...overrides,\n  };\n}\n\nfunction armRow(trials, arm = 'candidate-3.4.3') {\n  const comparison = compareTrials([frozenCase()], trials);\n  return comparison.cases[0].arms[arm];\n}\n\ntest('failed attempts remain in the usage-per-accepted numerator', () => {\n  const row = armRow([trial({\n    trial_id: 'fail-then-pass',\n    accepted: true,\n    attempts: [\n      {\n        attempt_id: 'first',\n        kind: 'initial',\n        outcome: 'failed',\n        usage: { native_input_tokens: metric(10), elapsed_ms: metric(1000) },\n      },\n      {\n        attempt_id: 'second',\n        kind: 'correction',\n        outcome: 'accepted',\n        usage: { native_input_tokens: metric(15), elapsed_ms: metric(2000) },\n      },\n    ],\n  })]);\n  assert.equal(row.accepted_count, 1);\n  assert.equal(row.failed_attempt_count, 1);\n  assert.equal(row.correction_count, 1);\n  assert.equal(row.usage.native_input_tokens.value, 25);\n  assert.equal(row.usage_per_accepted_result.native_input_tokens.value, 25);\n  assert.equal(row.usage_per_accepted_result.native_input_tokens.numerator, 25);\n  assert.match(String(row.usage_per_accepted_result.native_input_tokens.reason), /failed/u);\n});\n\ntest('mixed known and unknown acceptance leaves usage-per-accepted unknown', () => {\n  const missing = structuredClone(trial({ trial_id: 'missing-accept' }));\n  delete missing.accepted;\n  missing.attempts = [{\n    attempt_id: 'maybe',\n    kind: 'initial',\n    outcome: 'uncertain',\n    usage: { native_input_tokens: metric(7) },\n  }];\n  const compared = armRow([\n    trial({ trial_id: 'known-accept' }),\n    missing,\n  ]);\n  assert.equal(compared.accepted_count, 1);\n  assert.equal(compared.usage.native_input_tokens.value, 17);\n  const per = compared.usage_per_accepted_result.native_input_tokens;\n  assert.equal(per.value, null);\n  assert.equal(per.reason, 'incomplete_acceptance_coverage');\n  assert.equal(per.numerator, 17);\n  assert.equal(compared.acceptance_rate.value, null);\n});\n\ntest('zero acceptance is not zero cost and unknown is not measured zero', () => {\n  const row = armRow([trial({\n    trial_id: 'zero-accept',\n    accepted: false,\n    attempts: [{\n      attempt_id: 'only',\n      kind: 'initial',\n      outcome: 'failed',\n      usage: {\n        native_input_tokens: metric(9),\n        native_output_tokens: unknownMetric(),\n      },\n    }],\n  })]);\n  assert.equal(row.accepted_count, 0);\n  assert.equal(row.usage.native_input_tokens.value, 9);\n  assert.equal(row.usage_per_accepted_result.native_input_tokens.value, null);\n  assert.equal(row.usage_per_accepted_result.native_input_tokens.reason, 'zero_accepted_not_zero_cost');\n  assert.equal(row.usage.native_output_tokens.value, null);\n  assert.equal(row.usage.native_output_tokens.source, 'unknown');\n  assert.notEqual(row.usage.native_output_tokens.value, 0);\n});\n\ntest('native helpers are counted once and parent usage must exclude them', () => {\n  assert.throws(() => parseTrial(trial({\n    trial_id: 'parent-plus-helper',\n    attempts: [\n      {\n        attempt_id: 'parent',\n        kind: 'initial',\n        outcome: 'accepted',\n        usage: { native_input_tokens: metric(11), elapsed_ms: metric(600) },\n      },\n      {\n        attempt_id: 'helper',\n        kind: 'native_helper',\n        outcome: 'accepted',\n        usage: { native_helper_calls: metric(1), native_input_tokens: metric(4), elapsed_ms: metric(200) },\n      },\n    ],\n  })), (error) => error.code === 'identity_mismatch');\n\n  const row = armRow([trial({\n    trial_id: 'excluded-parent',\n    native_parent_excludes_helpers: true,\n    wall_elapsed_ms: metric(800),\n    attempts: [\n      {\n        attempt_id: 'parent',\n        kind: 'initial',\n        outcome: 'accepted',\n        usage: { native_input_tokens: metric(11), elapsed_ms: metric(600) },\n      },\n      {\n        attempt_id: 'helper',\n        kind: 'native_helper',\n        outcome: 'accepted',\n        usage: { native_helper_calls: metric(1), native_input_tokens: metric(4), elapsed_ms: metric(200) },\n      },\n    ],\n  })]);\n  assert.equal(row.native_helper_count, 1);\n  assert.equal(row.usage.native_input_tokens.value, 15);\n  assert.equal(row.usage.elapsed_ms.value, 800);\n  assert.equal(row.usage.elapsed_ms.role, 'attempt_duration_sum');\n  assert.equal(row.usage.wall_elapsed_ms.value, 800);\n  assert.equal(row.usage.wall_elapsed_ms.role, 'trial_wall_elapsed');\n});\n\ntest('elapsed_ms is attempt sum and wall_elapsed_ms is trial wall time', () => {\n  const row = armRow([trial({\n    trial_id: 'wall-vs-sum',\n    wall_elapsed_ms: metric(4000),\n    attempts: [\n      {\n        attempt_id: 'first',\n        kind: 'initial',\n        outcome: 'failed',\n        usage: { elapsed_ms: metric(1000) },\n      },\n      {\n        attempt_id: 'second',\n        kind: 'correction',\n        outcome: 'accepted',\n        usage: { elapsed_ms: metric(2500) },\n      },\n    ],\n  })]);\n  assert.equal(row.usage.elapsed_ms.value, 3500);\n  assert.equal(row.usage.elapsed_ms.role, 'attempt_duration_sum');\n  assert.equal(row.usage.wall_elapsed_ms.value, 4000);\n  assert.equal(row.usage.wall_elapsed_ms.role, 'trial_wall_elapsed');\n  assert.notEqual(row.usage.wall_elapsed_ms.value, row.usage.elapsed_ms.value);\n});\n\ntest('duplicate attempt IDs keep the latest compatible cumulative snapshot', () => {\n  const ok = parseTrial(trial({\n    trial_id: 'cumulative-ok',\n    attempts: [\n      {\n        attempt_id: 'same',\n        kind: 'initial',\n        outcome: 'failed',\n        sequence: 1,\n        usage: { native_input_tokens: metric(10) },\n      },\n      {\n        attempt_id: 'same',\n        kind: 'initial',\n        outcome: 'failed',\n        sequence: 2,\n        usage: { native_input_tokens: metric(18) },\n      },\n    ],\n  }));\n  assert.equal(ok.attempts.length, 1);\n  assert.equal(ok.attempts[0].usage.native_input_tokens.value, 18);\n\n  assert.throws(() => parseTrial(trial({\n    trial_id: 'flip-terminal',\n    attempts: [\n      {\n        attempt_id: 'same',\n        kind: 'initial',\n        outcome: 'failed',\n        sequence: 1,\n        usage: { native_input_tokens: metric(10) },\n      },\n      {\n        attempt_id: 'same',\n        kind: 'initial',\n        outcome: 'accepted',\n        sequence: 2,\n        usage: { native_input_tokens: metric(18) },\n      },\n    ],\n  })), (error) => error.code === 'incompatible_snapshot' || error.code === 'duplicate_attempt_id');\n\n  assert.throws(() => parseTrial(trial({\n    trial_id: 'move-model',\n    attempts: [\n      {\n        attempt_id: 'provider-attempt',\n        sequence: 1,\n        kind: 'initial',\n        outcome: 'unfinal',\n        provider: 'grok',\n        model: 'model-a',\n        usage: { provider_output_tokens: metric(20, 'provider_report') },\n      },\n      {\n        attempt_id: 'provider-attempt',\n        sequence: 2,\n        kind: 'initial',\n        outcome: 'unfinal',\n        provider: 'grok',\n        model: 'model-b',\n        usage: { provider_output_tokens: metric(20, 'provider_report') },\n      },\n    ],\n  })), (error) => error.code === 'incompatible_snapshot' || error.code === 'duplicate_attempt_id');\n});\n\ntest('mixed providers keep groups and make aggregate tokens non-comparable', () => {\n  const row = armRow([trial({\n    trial_id: 'two-providers',\n    attempts: [\n      {\n        attempt_id: 'grok-arm',\n        kind: 'initial',\n        outcome: 'completed_unaccepted',\n        provider: 'grok',\n        model: 'grok-4',\n        usage: { provider_input_tokens: metric(40, 'provider_report') },\n      },\n      {\n        attempt_id: 'cursor-arm',\n        kind: 'correction',\n        outcome: 'accepted',\n        provider: 'cursor-local',\n        model: 'composer',\n        usage: { provider_input_tokens: metric(15, 'provider_report') },\n      },\n    ],\n  })]);\n  const grouped = row.usage.provider_input_tokens;\n  assert.equal(grouped.value, null);\n  assert.equal(grouped.reason, 'mixed_providers_non_comparable');\n  assert.equal(grouped.groups.length, 2);\n});\n\ntest('an arm cannot mix coengineer_source identities', () => {\n  assert.throws(() => compareTrials([frozenCase()], [\n    trial({\n      trial_id: 'build-a',\n      coengineer_source: { kind: 'git_commit', value: CANDIDATE_COMMIT },\n    }),\n    trial({\n      trial_id: 'build-b',\n      coengineer_source: { kind: 'git_commit', value: OTHER_COMMIT },\n    }),\n  ]), (error) => error.code === 'mixed_candidate_identity');\n});\n"
+    }
+  },
+  "acceptance": {
+    "checks": [
+      {
+        "id": "unit",
+        "command": [
+          "node",
+          "--test",
+          "checks/failed-helper-cumulative.test.mjs"
+        ],
+        "expect_exit": 0
+      }
+    ],
+    "required_files": [
+      "TASK.md",
+      "checks/failed-helper-cumulative.test.mjs",
+      "scripts/compare-coengineer-runs.mjs"
+    ],
+    "forbidden_paths": [
+      "TASK.md",
+      "checks/failed-helper-cumulative.test.mjs"
+    ]
+  },
+  "base_sha": "cc1ba8a94906ce7e1fb62a52e8bc151f91dc7793"
+}

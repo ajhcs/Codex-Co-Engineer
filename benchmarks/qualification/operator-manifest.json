@@ -1,0 +1,287 @@
+{
+  "schema": "codex-co-engineer.qualification-manifest.v1",
+  "version": 1,
+  "status": "unrun",
+  "title": "Operator schedule for 3.4.3 retrospective qualification",
+  "note": "All 24 trials are unrun retrospective cases. Do not treat this manifest as measured evidence. Candidate and published SHAs are bound in the external execution manifest, not here.",
+  "assignments": {
+    "acp-deadline-concurrent-cancel": {
+      "implement": {
+        "provider": "cursor-local"
+      },
+      "review": {
+        "provider": "grok"
+      }
+    },
+    "run-result-outcome-acceptance": {
+      "implement": {
+        "provider": "grok"
+      },
+      "review": {
+        "provider": "cursor-local"
+      }
+    },
+    "comparison-failed-helper-cumulative": {
+      "implement": {
+        "provider": "grok"
+      },
+      "review": {
+        "provider": "cursor-local"
+      }
+    }
+  },
+  "paid_ceiling_usd": 25,
+  "live_jobs": "not_implemented",
+  "ordering": {
+    "seed": 43,
+    "algorithm": "mulberry32-fisher-yates-grouped-by-case-rep-then-approach-positions",
+    "trial_count": 24
+  },
+  "schedule": [
+    {
+      "trial_id": "comparison-failed-helper-cumulative-published-3-4-2-r1",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "published-3.4.2",
+      "rep": 1,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-direct-delegation-r1",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "direct-delegation",
+      "rep": 1,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-native-codex-r1",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "native-codex",
+      "rep": 1,
+      "implement": "native",
+      "review": null,
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-candidate-3-4-3-r1",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "candidate-3.4.3",
+      "rep": 1,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-published-3-4-2-r2",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "published-3.4.2",
+      "rep": 2,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-candidate-3-4-3-r2",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "candidate-3.4.3",
+      "rep": 2,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-native-codex-r2",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "native-codex",
+      "rep": 2,
+      "implement": "native",
+      "review": null,
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-direct-delegation-r2",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "direct-delegation",
+      "rep": 2,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-published-3-4-2-r1",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "published-3.4.2",
+      "rep": 1,
+      "implement": "cursor-local",
+      "review": "grok",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-native-codex-r1",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "native-codex",
+      "rep": 1,
+      "implement": "native",
+      "review": null,
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-candidate-3-4-3-r1",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "candidate-3.4.3",
+      "rep": 1,
+      "implement": "cursor-local",
+      "review": "grok",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-direct-delegation-r1",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "direct-delegation",
+      "rep": 1,
+      "implement": "cursor-local",
+      "review": "grok",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-direct-delegation-r1",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "direct-delegation",
+      "rep": 1,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-candidate-3-4-3-r1",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "candidate-3.4.3",
+      "rep": 1,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-native-codex-r1",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "native-codex",
+      "rep": 1,
+      "implement": "native",
+      "review": null,
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "run-result-outcome-acceptance-published-3-4-2-r1",
+      "case_id": "run-result-outcome-acceptance",
+      "arm": "published-3.4.2",
+      "rep": 1,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-native-codex-r2",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "native-codex",
+      "rep": 2,
+      "implement": "native",
+      "review": null,
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-published-3-4-2-r2",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "published-3.4.2",
+      "rep": 2,
+      "implement": "cursor-local",
+      "review": "grok",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-direct-delegation-r2",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "direct-delegation",
+      "rep": 2,
+      "implement": "cursor-local",
+      "review": "grok",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "acp-deadline-concurrent-cancel-candidate-3-4-3-r2",
+      "case_id": "acp-deadline-concurrent-cancel",
+      "arm": "candidate-3.4.3",
+      "rep": 2,
+      "implement": "cursor-local",
+      "review": "grok",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-candidate-3-4-3-r2",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "candidate-3.4.3",
+      "rep": 2,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-published-3-4-2-r2",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "published-3.4.2",
+      "rep": 2,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-direct-delegation-r2",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "direct-delegation",
+      "rep": 2,
+      "implement": "grok",
+      "review": "cursor-local",
+      "status": "unrun",
+      "retrospective": true
+    },
+    {
+      "trial_id": "comparison-failed-helper-cumulative-native-codex-r2",
+      "case_id": "comparison-failed-helper-cumulative",
+      "arm": "native-codex",
+      "rep": 2,
+      "implement": "native",
+      "review": null,
+      "status": "unrun",
+      "retrospective": true
+    }
+  ],
+  "unrun_case_ids": [
+    "acp-deadline-concurrent-cancel",
+    "run-result-outcome-acceptance",
+    "comparison-failed-helper-cumulative"
+  ]
+}

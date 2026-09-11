@@ -91,6 +91,13 @@ import {
 import { createRunScheduler } from './run-scheduler.mjs';
 import { openRunStore } from './run-store.mjs';
 import { boundProviderResult, utf8Head } from './compact-task.mjs';
+import { inspectDelegationPreferencesV1 } from './delegation-preferences.mjs';
+import {
+  parseOwnedRevisionRequestV1,
+  OWNED_REVISION_REQUEST_KEYS,
+} from './owned-delegation.mjs';
+import { projectRunCoordinationResponseV1 } from './run-coordination-response.mjs';
+import { projectRunResultEvidenceV1 } from './run-result-evidence.mjs';
 import { projectExperience } from './response.mjs';
 import {
   assertDirectJsonClosure,
@@ -117,7 +124,7 @@ export const PUBLIC_MCP_CATALOG = capturedFreeze([
   'status', 'delegate', 'task', 'tasks', 'cancel',
 ]);
 export const RUN_TOOL_OPERATIONS = capturedFreeze([
-  'submit', 'status', 'wait', 'attention', 'reply', 'cancel', 'cleanup',
+  'submit', 'status', 'wait', 'attention', 'reply', 'revision', 'cancel', 'cleanup',
 ]);
 export const RUN_TOOL_MODES = capturedFreeze(['legacy', 'run']);
 export const ADDITIVE_WAIT_UNTIL = 'decision_or_attention';
@@ -128,7 +135,7 @@ export const WAIT_UNTIL_VALUES = capturedFreeze([
 export const ADDITIVE_STATUS_KEYS = capturedFreeze(['run_id']);
 export const ADDITIVE_DELEGATE_KEYS = capturedFreeze(['run', 'run_request']);
 export const ADDITIVE_TASK_KEYS = capturedFreeze([
-  'run_id', 'assignment_id', 'attention', 'run_reply',
+  'run_id', 'assignment_id', 'attention', 'run_reply', 'revision',
 ]);
 export const ADDITIVE_TASKS_KEYS = capturedFreeze(['run_id']);
 export const ADDITIVE_CANCEL_KEYS = capturedFreeze([
@@ -156,11 +163,12 @@ export const ATTENTION_REQUEST_KEYS = capturedFreeze(['expected_revision', 'item
 export const RUN_REPLY_KEYS = capturedFreeze([
   'approval_ref', 'batch_id', 'expected_revision', 'reply', 'request_consent',
 ]);
+export const REVISION_REQUEST_KEYS = OWNED_REVISION_REQUEST_KEYS;
 export const RUN_TOOL_RECEIPT_KEYS = capturedFreeze([
   'assignment_count', 'attention', 'audience', 'candidate', 'checks',
   'cleanup', 'complete_candidate_blocked', 'decision_or_attention',
   'dispatch_uncertain_assignment_ids', 'dispatched_assignment_ids',
-  'consent', 'cursor', 'error', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
+  'consent', 'coordination', 'cursor', 'error', 'result_evidence', 'experience', 'handoff', 'lanes', 'mode', 'operation', 'phase',
   'revision',
   'remote_mutated', 'run_id', 'schema', 'side_effects', 'status', 'tool',
   'undispatched_assignment_ids', 'version', 'wait_until', 'waited_ms', 'wake',
@@ -311,6 +319,17 @@ const CONTENT_FREE = capturedFreeze({
   unknown_provider: 'The provider is not an accepted four-slot registry entry.',
   unknown_tool: 'The public catalog remains status, delegate, task, tasks, cancel.',
   simple_runtime_unavailable: 'The 3.4.2 simple run runtime is unavailable.',
+  preferred_provider_unavailable: 'The preferred provider is unknown or unavailable; supply an explicit provider.',
+  revision_producer_active: 'A revision requires a completed, certain producer.',
+  revision_producer_dirty: 'A revision requires a clean producer worktree.',
+  revision_producer_stale: 'expected_head does not match the exact producer HEAD.',
+  revision_identity_mismatch: 'expected_idempotency_key does not match the producer request identity.',
+  revision_producer_not_found: 'The named producer assignment is not known.',
+  revision_unsupported: 'Owned revision requires the supervisor reviseRun capability.',
+  revision_workspace_unsupported: 'Remote candidate revision is not supported; a local inspectable HEAD is required.',
+  revision_workspace_uninspectable: 'A revision requires a fresh successful workspace inspection.',
+  revision_lifecycle_unfinal: 'A revision requires proven terminal lifecycle; unresolved cleanup is not a completed producer.',
+  bounded_context_overflow: 'The derived correction prompt cannot preserve original constraints within the assignment bound.',
 });
 
 export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
@@ -345,6 +364,17 @@ export const RUN_TOOL_ADAPTER_ERROR_CODES = capturedFreeze([
   'unknown_provider',
   'unknown_tool',
   'simple_runtime_unavailable',
+  'preferred_provider_unavailable',
+  'revision_producer_active',
+  'revision_producer_dirty',
+  'revision_producer_stale',
+  'revision_identity_mismatch',
+  'revision_producer_not_found',
+  'revision_unsupported',
+  'revision_workspace_unsupported',
+  'revision_workspace_uninspectable',
+  'revision_lifecycle_unfinal',
+  'bounded_context_overflow',
 ]);
 
 const ADAPTER_DEPENDENCY_KEYS = capturedFreeze([
@@ -760,14 +790,16 @@ function resolveOperation(tool, args) {
   if (tool === 'task') {
     const hasAttention = capturedHasOwn(args, 'attention');
     const hasReply = capturedHasOwn(args, 'run_reply');
+    const hasRevision = capturedHasOwn(args, 'revision');
     const waitUntil = waitUntilValue(args);
-    const flagged = [hasAttention, hasReply, waitUntil === ADDITIVE_WAIT_UNTIL]
+    const flagged = [hasAttention, hasReply, hasRevision, waitUntil === ADDITIVE_WAIT_UNTIL]
       .filter(Boolean).length;
     if (flagged > 1) {
       failAdapter('mixed_run_operation', 'task', CONTENT_FREE.mixed_run_operation);
     }
     if (hasAttention) return 'attention';
     if (hasReply) return 'reply';
+    if (hasRevision) return 'revision';
     if (waitUntil === ADDITIVE_WAIT_UNTIL || capturedHasOwn(args, 'wait_ms')) return 'wait';
     return 'status';
   }
@@ -1210,6 +1242,15 @@ function compactOverflowReceipt(compact, simpleResponseCap) {
     ...(compact.error?.code ? { error: { code: utf8Head(compact.error.code, 128) } } : {}),
     ...(compact.result !== undefined ? { result_omitted: true } : {}),
     ...(compact.candidate ? { candidate: compact.candidate } : {}),
+    ...(compact.result_evidence ? { result_evidence: {
+      label: compact.result_evidence.label,
+      assignment_result: compact.result_evidence.assignment_result,
+      codex_accepted: compact.result_evidence.codex_accepted,
+      unresolved: compact.result_evidence.unresolved,
+      next_decision: compact.result_evidence.next_decision,
+      text: utf8Head(compact.result_evidence.text, 384),
+      detail: 'diagnostics',
+    } } : {}),
     ...(compact.blockers ? { blockers: compact.blockers } : {}),
     diagnostics: {
       view: 'diagnostics',
@@ -1246,6 +1287,7 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
   const cleanupBlocked = cleanupNeedsAttention(receipt, unconfirmed);
   const attention = receipt.attention;
   const attentionRequired = attention?.status === 'open'
+    || attention?.status === 'blocked'
     || lanes.some((lane) => lane.status === 'needs_attention');
   const candidate = compactSemanticCandidate(runtimeReceipt, receipt.candidate);
   const verification = runtimeReceipt?.verification?.authority === 'p35'
@@ -1267,6 +1309,8 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
     revision: receipt.revision,
     assignment_count: receipt.assignment_count,
     authoritative_required_dispatch: receipt.authoritative_required_dispatch === true,
+    ...(runtimeReceipt?.persisted === false ? { persisted: false } : {}),
+    ...(runtimeReceipt?.correction ? { correction: sanitizeModelFacing(runtimeReceipt.correction) } : {}),
     lanes,
     ...(attentionRequired || attention?.status === 'reply_committed' || attention?.status === 'resolved'
       ? { attention }
@@ -1278,6 +1322,8 @@ function projectSemanticRunReceipt(receipt, runtimeReceipt, {
       ? { result_truncated: true }
       : {}),
     ...(candidate ? { candidate } : {}),
+    coordination: projectRunCoordinationResponseV1(runtimeReceipt),
+    ...(receipt.result_evidence ? { result_evidence: receipt.result_evidence } : {}),
     ...(verification ? { verification } : {}),
     ...(receipt.operation === 'wait' ? {
       wait_until: receipt.wait_until,
@@ -1351,6 +1397,46 @@ function compactProviderResult(result, taskId) {
   };
 }
 
+function preferenceAttentionReceipt(runId, request, preferenceView) {
+  void request;
+  const items = ARRAY_IS_ARRAY(preferenceView?.attention?.items)
+    ? preferenceView.attention.items
+    : [];
+  return {
+    schema: 'codex-co-engineer.run-admission.v1',
+    version: 1,
+    run_id: runId,
+    persisted: false,
+    phase: 'not_admitted',
+    status: 'not_admitted',
+    revision: 0,
+    cursor: '0',
+    assignment_count: 0,
+    lanes: [],
+    complete_candidate_blocked: true,
+    error: {
+      code: 'preferred_provider_unavailable',
+      message: CONTENT_FREE.preferred_provider_unavailable,
+    },
+    attention: {
+      status: 'blocked',
+      code: 'preferred_provider_unavailable',
+      next_action: 'supply_explicit_provider',
+      items,
+      wake: false,
+    },
+    consent: null,
+    admission: null,
+    dispatched_assignment_ids: [],
+    undispatched_assignment_ids: [],
+    dispatch_uncertain_assignment_ids: [],
+    authoritative_required_dispatch: false,
+    already_terminal: false,
+    telemetry: null,
+    cleanup: null,
+  };
+}
+
 function malformedRuntimeReceipt(runId) {
   return {
     schema: 'codex-co-engineer.run-admission.v1',
@@ -1383,6 +1469,11 @@ function malformedRuntimeReceipt(runId) {
 function isRuntimeReceipt(value, expectedRunId) {
   if (value === undefined || value === null || typeof value !== 'object'
     || ARRAY_IS_ARRAY(value) || IS_PROXY(value)) return false;
+  if (value.persisted === false) {
+    if (typeof value.run_id !== 'string'
+      || (typeof expectedRunId === 'string' && value.run_id !== expectedRunId)) return false;
+    return typeof value.phase === 'string' || typeof value.status === 'string';
+  }
   if (typeof value.run_id !== 'string'
     || (typeof expectedRunId === 'string' && value.run_id !== expectedRunId)) return false;
   if (!ARRAY_IS_ARRAY(value.lanes)
@@ -1531,6 +1622,24 @@ function projectReceipt(tool, operation, runtimeReceipt, projectLaneTask, classi
     already_terminal: runtimeReceipt?.already_terminal === true,
     error: sanitizeModelFacing(runtimeReceipt?.error ?? null),
     telemetry: sanitizeModelFacing(runtimeReceipt?.telemetry ?? null),
+    ...(runtimeReceipt?.correction ? { correction: sanitizeModelFacing(runtimeReceipt.correction) } : {}),
+    ...(simpleAdmission && runtimeReceipt.persisted !== false && runtimeReceipt.usage_ledger != null
+      && runtimeReceipt.lanes.length > 0 ? {
+      result_evidence: projectRunResultEvidenceV1(JSON.parse(JSON.stringify({
+        schema: runtimeReceipt.schema, run_id: runtimeReceipt.run_id,
+        phase: runtimeReceipt.phase, base_sha: runtimeReceipt.base_sha,
+        lanes: runtimeReceipt.lanes.map(lane => ({
+          assignment_id: lane.assignment_id, provider: lane.provider, role: lane.role,
+          required: lane.required, status: lane.status, phase: lane.phase,
+          prompt_dispatched: lane.prompt_dispatched,
+          dispatch_confidence: lane.dispatch_confidence, task_final: lane.task_final,
+          clean: lane.clean ?? lane.handoff?.clean, head: lane.head,
+        })),
+        usage_ledger: runtimeReceipt.usage_ledger,
+      })), {
+        view: view === 'diagnostics' ? 'detail' : 'summary',
+      }),
+    } : {}),
     ...(operation === 'wait' ? {
       wait_until: capturedIncludes(WAIT_UNTIL_VALUES, runtimeReceipt?.wait_until)
         ? runtimeReceipt.wait_until
@@ -1863,9 +1972,16 @@ export function createRunToolAdapter(dependencies) {
           base_sha: parsed.context.base_sha,
           digest: null,
         });
-        counters.submit += 1;
-        runtimeReceipt = await simpleRuntime.submitRunRequest(parsed.simpleRequest, { signal });
-        simpleRunIds.add(parsed.runId);
+        const preferenceView = inspectDelegationPreferencesV1(parsed.simpleRequest);
+        if (preferenceView.attention) {
+          runtimeReceipt = preferenceAttentionReceipt(
+            parsed.runId, parsed.simpleRequest, preferenceView,
+          );
+        } else {
+          counters.submit += 1;
+          runtimeReceipt = await simpleRuntime.submitRunRequest(parsed.simpleRequest, { signal });
+          simpleRunIds.add(parsed.runId);
+        }
       } else {
       if (parsed.catalogSnapshot !== null && parsed.catalogSnapshot !== undefined) {
         pendingRunCatalogSnapshots.set(parsed.runId, parsed.catalogSnapshot);
@@ -2022,6 +2138,25 @@ export function createRunToolAdapter(dependencies) {
         assignment_ids: assignmentIds,
         cleanup: operation === 'cleanup',
       }));
+    } else if (operation === 'revision') {
+      if (simpleRuntime === null) {
+        failAdapter('simple_runtime_unavailable', 'revision', CONTENT_FREE.simple_runtime_unavailable);
+      }
+      const runId = requireRunId(args);
+      requestedRunId = runId;
+      const revision = parseOwnedRevisionRequestV1(
+        quarantineObject(ownDataValue(args, 'revision', 'revision'), 'revision', REVISION_REQUEST_KEYS),
+        'revision',
+      );
+      if (typeof simpleRuntime.reviseRun !== 'function') {
+        failAdapter('revision_unsupported', 'revision', CONTENT_FREE.revision_unsupported);
+      }
+      counters.submit += 1;
+      runtimeReceipt = await simpleRuntime.reviseRun({ run_id: runId, revision }, { signal });
+      if (typeof runtimeReceipt?.run_id === 'string') {
+        simpleRunIds.add(runtimeReceipt.run_id);
+        requestedRunId = runtimeReceipt.run_id;
+      }
     } else {
       failAdapter('unknown_operation', 'tool', CONTENT_FREE.unknown_operation);
     }

@@ -1,10 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createRunAdmissionStore } from '../mcp/v3/run-admission-store.mjs';
 
 import { compileRunRequestV1 } from '../mcp/v3/run-request-compiler.mjs';
 import {
   createRunAdmissionRuntime,
 } from '../mcp/v3/run-admission.mjs';
+import {
+  compactOwnedCorrectionFollowV1,
+  OWNED_CORRECTION_ROUND_LIMIT,
+  OWNED_DELEGATION_SCHEMA_ID,
+  OWNED_DELEGATION_VERSION,
+} from '../mcp/v3/owned-delegation.mjs';
 
 const BASE_SHA = 'a'.repeat(40);
 const OBSERVED = Object.freeze({
@@ -917,3 +927,371 @@ for (const code of ['provider_billing_required', 'authentication_required', 'pro
     assert.equal(calls.dispatch.length, 2, 'each original lane is dispatched only once');
   });
 }
+
+function writerRequest(runId, overrides = {}) {
+  return request({
+    run_id: runId,
+    assignments: [{
+      assignment_id: 'lane-one',
+      provider: 'grok',
+      role: 'implement',
+      access: 'write',
+      write_scope: ['src/one/**'],
+      prompt: overrides.prompt ?? 'Implement lane one.',
+      expected_duration_ms: 60_000,
+    }],
+  });
+}
+
+function digestFor(label) {
+  const hex = Buffer.from(label.padEnd(32, '0')).toString('hex').slice(0, 64).padEnd(64, '0');
+  return `sha256:${hex}`;
+}
+
+function derivedRevision({
+  producerRunId,
+  childRunId,
+  round,
+  originalRunId = producerRunId,
+  digest = digestFor(childRunId),
+  prompt = 'Correct lane one.',
+}) {
+  return {
+    identity: {
+      schema: OWNED_DELEGATION_SCHEMA_ID,
+      version: OWNED_DELEGATION_VERSION,
+      digest,
+      run_id: childRunId,
+      assignment_id: 'lane-one',
+      producer_run_id: producerRunId,
+      producer_assignment_id: 'lane-one',
+    },
+    correction: {
+      schema: OWNED_DELEGATION_SCHEMA_ID,
+      version: OWNED_DELEGATION_VERSION,
+      lineage: 'owned_revision',
+      producer_run_id: producerRunId,
+      producer_assignment_id: 'lane-one',
+      reviewed_head: BASE_SHA,
+      original_run_id: originalRunId,
+      original_assignment_id: 'lane-one',
+      round,
+      limit: OWNED_CORRECTION_ROUND_LIMIT,
+    },
+    run_request: writerRequest(childRunId, { prompt }),
+  };
+}
+
+function createMemoryRevisionReservation() {
+  const reservations = new Map();
+  return async function reserveRevision(producerRunId, assignmentId, followInput) {
+    const follow = compactOwnedCorrectionFollowV1(followInput);
+    const key = `${producerRunId}\0${assignmentId}`;
+    const existing = reservations.get(key);
+    if (existing) return { reserved: false, follow: existing.follow };
+    const reservationId = `${producerRunId}:${assignmentId}:${follow.identity_digest}`;
+    reservations.set(key, { follow, reservationId });
+    return {
+      reserved: true,
+      follow,
+      release: async () => {
+        const current = reservations.get(key);
+        if (!current || current.reservationId !== reservationId) {
+          throw Object.assign(new Error('Correction reservation changed.'), { code: 'run_store_record_changed' });
+        }
+        reservations.delete(key);
+      },
+    };
+  };
+}
+
+function correctionDependencies(overrides = {}) {
+  const store = new Map();
+  const dispatches = [];
+  const rest = { ...overrides };
+  const omitReservation = rest.reserveRevision === null;
+  if (omitReservation) delete rest.reserveRevision;
+  const { dependencies } = baseDependencies({
+    requestConsent: async () => ({ status: 'approved' }),
+    inspectLane: async () => ({ status: 'completed', cursor: '1' }),
+    persistRecord: async (record) => {
+      store.set(record.run_id, JSON.stringify(record));
+    },
+    loadRecord: async (runId) => {
+      const text = store.get(runId);
+      return text ? JSON.parse(text) : null;
+    },
+    dispatchPrompt: async ({ run_id: runId, assignment }) => {
+      dispatches.push({ run_id: runId, assignment_id: assignment.assignment_id });
+      return { dispatched: true, confidence: 'authoritative', cursor: '1' };
+    },
+    ...(omitReservation ? {} : { reserveRevision: createMemoryRevisionReservation() }),
+    ...rest,
+  });
+  return { dependencies, store, dispatches };
+}
+
+test('owned revision admits one child, stays idempotent, and does not branch on different feedback', async () => {
+  const { dependencies, dispatches } = correctionDependencies();
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const original = await runtime.submitRunRequest(writerRequest('correction-root'));
+  await runtime.inspectRun({ run_id: original.run_id });
+  const derived = derivedRevision({
+    producerRunId: original.run_id,
+    childRunId: 'rev-round-one',
+    round: 1,
+  });
+  const [first, concurrent] = await Promise.all([
+    runtime.submitOwnedRevision(original.run_id, derived),
+    runtime.submitOwnedRevision(original.run_id, derived),
+  ]);
+  assert.equal(concurrent.run_id, first.run_id);
+  assert.equal(first.correction.round, 1);
+  assert.equal(first.correction.original_run_id, original.run_id);
+  assert.equal(first.correction.limit, 3);
+  const producer = await runtime.inspectRun({ run_id: original.run_id });
+  assert.equal(producer.lanes[0].correction_follow.child_run_id, first.run_id);
+  const branched = derivedRevision({
+    producerRunId: original.run_id,
+    childRunId: 'rev-round-branch',
+    round: 1,
+    digest: digestFor('rev-round-branch'),
+    prompt: 'A different correction.',
+  });
+  await assert.rejects(runtime.submitOwnedRevision(original.run_id, branched), error =>
+    error.code === 'revision_child_exists' && error.message.includes(first.run_id)
+      && error.message.includes('Feedback was not applied'));
+  assert.equal(dispatches.filter((entry) => entry.run_id !== original.run_id).length, 1);
+});
+
+test('successive corrections persist lineage and exhaust before another dispatch', async () => {
+  const { dependencies, dispatches, store } = correctionDependencies();
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const original = await runtime.submitRunRequest(writerRequest('correction-chain'));
+  await runtime.inspectRun({ run_id: original.run_id });
+
+  const firstDerived = derivedRevision({
+    producerRunId: original.run_id,
+    childRunId: 'rev-chain-one',
+    round: 1,
+  });
+  const first = await runtime.submitOwnedRevision(original.run_id, firstDerived);
+  await runtime.inspectRun({ run_id: first.run_id });
+
+  const secondDerived = derivedRevision({
+    producerRunId: first.run_id,
+    childRunId: 'rev-chain-two',
+    round: 2,
+    originalRunId: original.run_id,
+  });
+  const second = await runtime.submitOwnedRevision(first.run_id, secondDerived);
+  await runtime.inspectRun({ run_id: second.run_id });
+
+  const thirdDerived = derivedRevision({
+    producerRunId: second.run_id,
+    childRunId: 'rev-chain-three',
+    round: 3,
+    originalRunId: original.run_id,
+  });
+  const third = await runtime.submitOwnedRevision(second.run_id, thirdDerived);
+  const completedThird = await runtime.inspectRun({ run_id: third.run_id });
+  assert.equal(completedThird.correction.round, 3);
+  assert.equal(completedThird.correction.original_run_id, original.run_id);
+  const beforeExhaustion = dispatches.filter((entry) => entry.run_id !== original.run_id).length;
+  assert.equal(beforeExhaustion, 3);
+
+  const fourthDerived = derivedRevision({
+    producerRunId: third.run_id,
+    childRunId: 'rev-chain-four',
+    round: 3,
+    originalRunId: original.run_id,
+  });
+  await assert.rejects(
+    runtime.submitOwnedRevision(third.run_id, fourthDerived),
+    (error) => error.code === 'revision_budget_exhausted',
+  );
+  assert.equal(dispatches.filter((entry) => entry.run_id !== original.run_id).length, beforeExhaustion);
+
+  const restarted = createRunAdmissionRuntime(dependencies);
+  const inspected = await restarted.inspectRun({ run_id: third.run_id });
+  assert.equal(inspected.correction.round, 3);
+  assert.equal(inspected.correction.limit, 3);
+  assert.equal(inspected.correction.original_run_id, original.run_id);
+  assert.equal(inspected.correction.producer_run_id, second.run_id);
+  const restartedProducer = await restarted.inspectRun({ run_id: second.run_id });
+  assert.equal(restartedProducer.lanes[0].correction_follow.child_run_id, third.run_id);
+  assert.equal(store.has(third.run_id), true);
+});
+
+test('failed pre-admission attempts do not consume a round; admitted failures do not replenish', async () => {
+  let compileShouldFail = true;
+  const { dependencies, dispatches } = correctionDependencies({
+    compile: async (value, options) => {
+      if (compileShouldFail && value?.run_id === 'rev-failed-first') {
+        throw Object.assign(new Error('compile failed'), { code: 'bounded_context_overflow' });
+      }
+      return makeCompiled(value, options);
+    },
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const original = await runtime.submitRunRequest(writerRequest('correction-fail'));
+  await runtime.inspectRun({ run_id: original.run_id });
+  const failedAttempt = derivedRevision({
+    producerRunId: original.run_id,
+    childRunId: 'rev-failed-first',
+    round: 1,
+  });
+  await assert.rejects(
+    runtime.submitOwnedRevision(original.run_id, failedAttempt),
+    (error) => error.code === 'bounded_context_overflow',
+  );
+  const producerAfterFailure = await runtime.inspectRun({ run_id: original.run_id });
+  assert.equal(producerAfterFailure.lanes[0].correction_follow, undefined);
+
+  compileShouldFail = false;
+  const admitted = derivedRevision({
+    producerRunId: original.run_id,
+    childRunId: 'rev-failed-second',
+    round: 1,
+    digest: digestFor('rev-failed-second'),
+  });
+  const child = await runtime.submitOwnedRevision(original.run_id, admitted);
+  assert.equal(child.correction.round, 1);
+  const branch = derivedRevision({
+    producerRunId: original.run_id,
+    childRunId: 'rev-failed-branch',
+    round: 1,
+    digest: digestFor('rev-failed-branch'),
+    prompt: 'Another correction after admission.',
+  });
+  await assert.rejects(runtime.submitOwnedRevision(original.run_id, branch), error =>
+    error.code === 'revision_child_exists' && error.message.includes(child.run_id));
+  assert.equal(dispatches.filter((entry) => entry.run_id !== original.run_id).length, 1);
+});
+
+test('separate durable runtimes admit only one correction and repeated input inspects that child', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-revision-race-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const durable = createRunAdmissionStore(root);
+  const { dependencies, dispatches } = correctionDependencies({
+    loadRecord: durable.load, persistRecord: durable.save, reserveRevision: durable.reserveRevision,
+  });
+  const first = createRunAdmissionRuntime(dependencies);
+  const secondStore = createRunAdmissionStore(root);
+  const second = createRunAdmissionRuntime({ ...dependencies, loadRecord: secondStore.load,
+    persistRecord: secondStore.save, reserveRevision: secondStore.reserveRevision });
+  const original = await first.submitRunRequest(writerRequest('durable-correction-race'));
+  await first.inspectRun({ run_id: original.run_id });
+  await second.inspectRun({ run_id: original.run_id }); // Independent stale cache, same durable producer.
+  const a = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-durable-one', round: 1 });
+  const b = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-durable-two', round: 1 });
+  const replies = await Promise.allSettled([
+    first.submitOwnedRevision(original.run_id, a), second.submitOwnedRevision(original.run_id, b),
+  ]);
+  assert.equal(replies.filter(r => r.status === 'fulfilled').length, 1);
+  const failure = replies.find(r => r.status === 'rejected').reason;
+  assert.ok(['revision_child_exists', 'revision_admission_pending'].includes(failure.code));
+  assert.equal(dispatches.filter(row => row.run_id !== original.run_id).length, 1);
+  const winner = replies.find(r => r.status === 'fulfilled').value;
+  const repeated = await createRunAdmissionRuntime(dependencies).submitOwnedRevision(
+    original.run_id, winner.run_id === a.identity.run_id ? a : b,
+  );
+  assert.equal(repeated.run_id, winner.run_id);
+  assert.equal(repeated.correction.round, 1);
+  assert.equal(dispatches.filter(row => row.run_id !== original.run_id).length, 1);
+});
+
+test('durable reservation releases only a proven pre-admission failure', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-revision-release-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const durable = createRunAdmissionStore(root);
+  let rejectCompile = true;
+  const { dependencies } = correctionDependencies({
+    loadRecord: durable.load, persistRecord: durable.save, reserveRevision: durable.reserveRevision,
+    compile: async request => {
+      if (request.run_id === 'rev-durable-fail' && rejectCompile) throw Object.assign(new Error('compile'), { code: 'bounded_context_overflow' });
+      return makeCompiled(request);
+    },
+    providerReady: async ({ run_id }) => ({ ready: run_id !== 'rev-durable-fail' }),
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const producer = await runtime.submitRunRequest(writerRequest('durable-release-root'));
+  await runtime.inspectRun({ run_id: producer.run_id });
+  const derived = derivedRevision({ producerRunId: producer.run_id, childRunId: 'rev-durable-fail', round: 1 });
+  await assert.rejects(runtime.submitOwnedRevision(producer.run_id, derived), { code: 'bounded_context_overflow' });
+  assert.equal((await readdir(durable.directory)).filter(name => name.endsWith('.revision.json')).length, 0);
+  rejectCompile = false;
+  const admitted = await runtime.submitOwnedRevision(producer.run_id, derived);
+  assert.equal(admitted.phase, 'failed');
+  assert.equal((await readdir(durable.directory)).filter(name => name.endsWith('.revision.json')).length, 1);
+  const other = derivedRevision({ producerRunId: producer.run_id, childRunId: 'rev-durable-replacement', round: 1 });
+  await assert.rejects(runtime.submitOwnedRevision(producer.run_id, other), { code: 'revision_child_exists' });
+});
+
+test('an abandoned durable reservation never automatically replays provider work', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-revision-pending-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const durable = createRunAdmissionStore(root);
+  const { dependencies, dispatches } = correctionDependencies({
+    loadRecord: durable.load, persistRecord: durable.save, reserveRevision: durable.reserveRevision,
+  });
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const producer = await runtime.submitRunRequest(writerRequest('durable-pending-root'));
+  await runtime.inspectRun({ run_id: producer.run_id });
+  const derived = derivedRevision({ producerRunId: producer.run_id, childRunId: 'rev-durable-pending', round: 1 });
+  await durable.reserveRevision(producer.run_id, 'lane-one', {
+    child_run_id: derived.identity.run_id, child_assignment_id: 'lane-one', identity_digest: derived.identity.digest,
+  });
+  await assert.rejects(runtime.submitOwnedRevision(producer.run_id, derived), { code: 'revision_admission_pending' });
+  assert.equal(dispatches.filter(row => row.run_id !== producer.run_id).length, 0);
+});
+
+test('custom persistence with explicit atomic reservation admits only one concurrent correction', async () => {
+  const reserveRevision = createMemoryRevisionReservation();
+  const { dependencies, dispatches } = correctionDependencies({ reserveRevision });
+  const first = createRunAdmissionRuntime(dependencies);
+  const second = createRunAdmissionRuntime(dependencies);
+  const original = await first.submitRunRequest(writerRequest('custom-correction-race'));
+  await first.inspectRun({ run_id: original.run_id });
+  await second.inspectRun({ run_id: original.run_id });
+  const a = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-custom-one', round: 1 });
+  const b = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-custom-two', round: 1 });
+  const replies = await Promise.allSettled([
+    first.submitOwnedRevision(original.run_id, a),
+    second.submitOwnedRevision(original.run_id, b),
+  ]);
+  assert.equal(replies.filter((row) => row.status === 'fulfilled').length, 1);
+  const failure = replies.find((row) => row.status === 'rejected').reason;
+  assert.ok(['revision_child_exists', 'revision_admission_pending'].includes(failure.code));
+  assert.equal(dispatches.filter((row) => row.run_id !== original.run_id).length, 1);
+});
+
+test('custom persistence without atomic reservation fails closed instead of double-admitting', async () => {
+  const { dependencies, dispatches } = correctionDependencies({ reserveRevision: null });
+  const first = createRunAdmissionRuntime(dependencies);
+  const second = createRunAdmissionRuntime(dependencies);
+  const original = await first.submitRunRequest(writerRequest('custom-correction-unreserved'));
+  await first.inspectRun({ run_id: original.run_id });
+  await second.inspectRun({ run_id: original.run_id });
+  const a = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-unreserved-one', round: 1 });
+  const b = derivedRevision({ producerRunId: original.run_id, childRunId: 'rev-unreserved-two', round: 1 });
+  await assert.rejects(first.submitOwnedRevision(original.run_id, a), { code: 'revision_reservation_unavailable' });
+  const replies = await Promise.allSettled([
+    first.submitOwnedRevision(original.run_id, a),
+    second.submitOwnedRevision(original.run_id, b),
+  ]);
+  assert.equal(replies.filter((row) => row.status === 'fulfilled').length, 0);
+  assert.equal(replies.every((row) => row.reason?.code === 'revision_reservation_unavailable'), true);
+  assert.equal(dispatches.filter((row) => row.run_id !== original.run_id).length, 0);
+});
+
+test('ordinary non-revision runtimes remain usable without a reservation seam', async () => {
+  const { dependencies, calls } = baseDependencies({
+    requestConsent: async () => ({ approved: true }),
+  });
+  assert.equal(Object.hasOwn(dependencies, 'reserveRevision'), false);
+  const runtime = createRunAdmissionRuntime(dependencies);
+  const submitted = await runtime.submitRunRequest(request({ run_id: 'ordinary-no-reserve' }));
+  assert.equal(submitted.phase, 'running');
+  assert.deepEqual(calls.dispatch, ['lane-one', 'lane-two']);
+});

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, mkdir, readFile, readdir } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -31,6 +31,7 @@ async function fixture(extra = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-'));
   const cwd = path.join(root, 'worktree');
   await mkdir(cwd);
+  const timeoutMs = extra.timeoutMs ?? 5_000;
   await createTask({
     root,
     prompt: extra.prompt ?? 'review this repository',
@@ -42,10 +43,98 @@ async function fixture(extra = {}) {
       cwd,
       agent_argv: extra.agentArgv ?? [process.execPath, FAKE_AGENT, '--mode', extra.mode ?? 'normal'],
       ...(extra.cliArgv ? { cli_argv: extra.cliArgv } : {}),
-      timeout_ms: extra.timeoutMs ?? 5_000,
+      timeout_ms: timeoutMs,
+      deadline_at: extra.deadlineAt ?? new Date(Date.now() + timeoutMs).toISOString(),
     },
   });
   return { root, cwd, taskId: extra.id ?? 'task-1' };
+}
+
+/** Minimal ACP agent used only by deadline-extension / timeout-truth tests. */
+async function writeDeadlineAgent(root, behavior) {
+  const agentPath = path.join(root, `deadline-agent-${behavior}.mjs`);
+  await writeFile(agentPath, `import { createInterface } from 'node:readline';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+const behavior = ${JSON.stringify(behavior)};
+function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
+function response(id, result) { send({ jsonrpc: '2.0', id, result }); }
+const pending = new Map();
+async function handle(message) {
+  const { id, method, params = {} } = message;
+  if (method === 'initialize') {
+    return response(id, {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+    });
+  }
+  if (method === 'notifications/initialized' || method === 'initialized') return;
+  if (method === 'session/new') return response(id, { sessionId: 'deadline-session' });
+  if (method === 'session/close') {
+    await writeFile(join(process.cwd(), '.acpx-fake-close.json'), JSON.stringify(params) + '\\n');
+    return response(id, {});
+  }
+  if (method === 'session/cancel') {
+    if (behavior === 'hostile' || behavior === 'partial-hostile') return;
+    for (const [promptId, entry] of pending) {
+      if (entry.timer) clearTimeout(entry.timer);
+      response(promptId, { stopReason: 'cancelled' });
+      pending.delete(promptId);
+    }
+    return;
+  }
+  if (method === 'session/prompt') {
+    send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'partial-before-timeout' },
+        },
+      },
+    });
+    if (behavior === 'extend-complete') {
+      const timer = setTimeout(() => {
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '+done-after-extend' },
+            },
+          },
+        });
+        response(id, { stopReason: 'end_turn' });
+        pending.delete(id);
+      }, 1_500);
+      pending.set(id, { timer });
+      return;
+    }
+    if (behavior === 'slow-cooperative') {
+      const timer = setTimeout(() => {
+        response(id, { stopReason: 'end_turn' });
+        pending.delete(id);
+      }, 2_000);
+      pending.set(id, { timer });
+      return;
+    }
+    pending.set(id, {});
+    return;
+  }
+}
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+process.stdin.resume();
+input.on('line', (line) => {
+  try { handle(JSON.parse(line)); } catch { /* ignore malformed frames */ }
+});
+process.once('SIGTERM', () => process.exit(0));
+process.once('SIGINT', () => process.exit(0));
+`);
+  return agentPath;
 }
 
 async function withFakeAcpx(mode, callback, options = {}) {
@@ -772,4 +861,175 @@ test('title-only ACP questions persist and continue the real worker session', as
     controller.abort();
     await running?.catch(() => {});
   }
+});
+
+test('deadline extension lets an ACP turn finish after the original deadline', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-extend-'));
+  const cwd = path.join(root, 'worktree');
+  await mkdir(cwd);
+  const agent = await writeDeadlineAgent(root, 'extend-complete');
+  const now = Date.now();
+  const taskId = 'deadline-extend-complete';
+  await createTask({
+    root,
+    prompt: 'finish after extension',
+    record: {
+      id: taskId,
+      status: 'accepted',
+      provider: 'grok',
+      cwd,
+      agent_argv: [process.execPath, agent],
+      timeout_ms: 700,
+      deadline_at: new Date(now + 700).toISOString(),
+    },
+  });
+  setTimeout(() => {
+    updateTask(root, taskId, {
+      deadline_at: new Date(Date.now() + 2_500).toISOString(),
+      timeout_ms: 2_500,
+      deadline_source: 'extended',
+      deadline_extensions: [{ reason: 'provider still making progress', at: new Date().toISOString() }],
+    }).catch(() => {});
+  }, 250);
+  const terminal = await runAcpTask({ root, taskId });
+  assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.result, 'partial-before-timeout+done-after-extend');
+  assert.equal(terminal.prompt_dispatched, true);
+  assert.equal(terminal.cleanup.acp_close, 'closed');
+});
+
+test('extended deadline expiry times out instead of completing with partial text', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-expire-'));
+  const cwd = path.join(root, 'worktree');
+  await mkdir(cwd);
+  const agent = await writeDeadlineAgent(root, 'partial-hostile');
+  const now = Date.now();
+  const taskId = 'deadline-extend-expire';
+  await createTask({
+    root,
+    prompt: 'expire at the new deadline',
+    record: {
+      id: taskId,
+      status: 'accepted',
+      provider: 'grok',
+      cwd,
+      agent_argv: [process.execPath, agent],
+      timeout_ms: 500,
+      deadline_at: new Date(now + 500).toISOString(),
+    },
+  });
+  setTimeout(() => {
+    updateTask(root, taskId, {
+      deadline_at: new Date(Date.now() + 800).toISOString(),
+      timeout_ms: 800,
+      deadline_source: 'extended',
+    }).catch(() => {});
+  }, 200);
+  const started = Date.now();
+  await assert.rejects(
+    runAcpTask({ root, taskId }),
+    (error) => error.code === 'timeout',
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 700, `expected expiry near the extended deadline, got ${elapsed}ms`);
+  assert.ok(elapsed < 2_500, `deadline watch should not wait on the original fixed turn timer drain (${elapsed}ms)`);
+  const { task } = await readTask(root, taskId);
+  assert.equal(task.status, 'timeout');
+  assert.notEqual(task.status, 'completed');
+  assert.equal(task.prompt_dispatched, true);
+  assert.equal(task.cleanup.acp_close, 'closed');
+});
+
+test('partial agent text before timeout cannot create a false success', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-partial-'));
+  const cwd = path.join(root, 'worktree');
+  await mkdir(cwd);
+  const agent = await writeDeadlineAgent(root, 'partial-hostile');
+  const taskId = 'partial-timeout-truth';
+  await createTask({
+    root,
+    prompt: 'partial then hang',
+    record: {
+      id: taskId,
+      status: 'accepted',
+      provider: 'grok',
+      cwd,
+      agent_argv: [process.execPath, agent],
+      timeout_ms: 600,
+      deadline_at: new Date(Date.now() + 600).toISOString(),
+    },
+  });
+  await assert.rejects(
+    runAcpTask({ root, taskId }),
+    (error) => error.code === 'timeout',
+  );
+  const { task } = await readTask(root, taskId);
+  assert.equal(task.status, 'timeout');
+  assert.equal(task.result ?? null, null);
+  const events = await readFile(path.join(root, 'tasks', taskId, 'events.jsonl'), 'utf8');
+  assert.match(events, /partial-before-timeout/u);
+  assert.match(events, /"status":"timeout"/u);
+  assert.doesNotMatch(events, /"status":"completed"/u);
+});
+
+test('explicit cancellation is distinct from deadline timeout', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'co-engineer-v3-acp-cancel-'));
+  const cwd = path.join(root, 'worktree');
+  await mkdir(cwd);
+  const agent = await writeDeadlineAgent(root, 'slow-cooperative');
+  const taskId = 'explicit-cancel';
+  await createTask({
+    root,
+    prompt: 'cancel me',
+    record: {
+      id: taskId,
+      status: 'accepted',
+      provider: 'grok',
+      cwd,
+      agent_argv: [process.execPath, agent],
+      timeout_ms: 5_000,
+      deadline_at: new Date(Date.now() + 5_000).toISOString(),
+    },
+  });
+  const controller = new AbortController();
+  const running = runAcpTask({ root, taskId, signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  controller.abort();
+  await assert.rejects(running, (error) => error.code === 'cancelled');
+  const { task } = await readTask(root, taskId);
+  assert.equal(task.status, 'cancelled');
+  assert.equal(task.prompt_dispatched, true);
+  assert.equal(task.cleanup.acp_close, 'closed');
+  const events = await readFile(path.join(root, 'tasks', taskId, 'events.jsonl'), 'utf8');
+  assert.match(events, /"status":"cancelled"/u);
+  assert.doesNotMatch(events, /"status":"timeout"/u);
+});
+
+test('accepted-prompt ACP tasks do not replay through a second startTurn', async () => {
+  const value = await fixture({ id: 'no-replay-after-dispatch', timeoutMs: 3_000 });
+  await updateTask(value.root, value.taskId, {
+    status: 'running',
+    transport: 'acp',
+    prompt_dispatched: true,
+    dispatch_evidence: 'authoritative',
+    acp_session_id: 'already-dispatched-session',
+  });
+  await assert.rejects(
+    runAcpTask({ root: value.root, taskId: value.taskId }),
+    (error) => error.code === 'transport_lost',
+  );
+  const reconnect = await reconnectAcpTask({
+    root: value.root,
+    taskId: value.taskId,
+    runtimeFactory: async () => ({
+      ensureSession: async () => ({ backendSessionId: 'already-dispatched-session' }),
+      getStatus: async () => ({}),
+      startTurn: () => {
+        throw new Error('startTurn must not run during reconnect');
+      },
+      close: async () => {},
+    }),
+  });
+  assert.equal(reconnect.reconnected, true);
+  assert.equal(reconnect.prompt_replayed, false);
 });

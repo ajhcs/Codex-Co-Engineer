@@ -1,4 +1,4 @@
-export const VERSION = '3.4.2';
+export const VERSION = '3.4.3';
 export const DURATION_MARGIN = 1.20;
 export const MIN_DURATION_MS = 1_000;
 export const MAX_EXPECTED_DURATION_MS = 86_400_000;
@@ -107,6 +107,9 @@ export function providerCapabilities(provider) {
     notes: 'Unknown provider.',
   });
 }
+
+export const MAX_REVISION_FEEDBACK_BYTES = 4_096;
+export const MIN_REVISION_FEEDBACK_BYTES = 1;
 
 export function mcpPendingCallReport() {
   return Object.freeze({
