@@ -25,14 +25,15 @@ providers selectively.
 
 Start a **new** Codex session after the plugin add. Any extra Co-Engineer
 panel is optional, feature-detected, and host-specific. If this host has no
-panel, keep talking in Codex CLI. That headless path is complete.
+panel, use the interactive Codex CLI with normal repository-sharing consent.
+Non-interactive evaluation did not complete that consent path; it is not
+validated as an unattended onboarding route.
 
 ## 2. One useful first outcome
 
-From a **3.4.3 candidate / PR43** source clone (not current `main` or published
-`v3.4.2`), copy `examples/first-outcome` into a clean Git repository (see that
-folder's README). Then ask Codex with your chosen provider—Grok is the default
-first route:
+From the **v3.4.3** source clone, copy `examples/first-outcome` into a clean
+Git repository (see that folder's README). Then ask Codex with your chosen
+provider—Grok is the default first route:
 
 > Use Grok Co-Engineer to implement `lib/summarize-checks.cjs` so
 > `node summarize-checks.mjs` summarizes named check JSON (passed / failed /
@@ -97,7 +98,7 @@ For multi-provider recipes, **review the resulting immutable candidate**. Do
 not run a dependent review concurrently against the shared base while writers
 are still producing it.
 
-The 3.4.3 candidate adds provider preferences and `task.revision`.
+Version 3.4.3 adds provider preferences and `task.revision`.
 Published 3.4.2 uses explicit fresh assignments for completed-candidate fixes.
 
 Provider preferences on a run request reuse ownership **for that request** by

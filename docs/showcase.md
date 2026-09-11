@@ -1,6 +1,7 @@
 # OpenAI showcase preparation
 
-Status: a development case study and submission draft for the 3.4.3 candidate.
+Status: a development case study and submission draft for 3.4.3. Publication
+does not complete the remaining qualification described in the [release notes](releases/v3.4.3.md).
 This is not a published release, submitted listing, or claim of OpenAI endorsement.
 
 ## The story

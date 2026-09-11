@@ -1,7 +1,8 @@
 # Roadmap
 
-Status: 3.4.3 candidate under review; no publication or fresh-install
-qualification is claimed. See the [release requirements](release.md).
+Status: 3.4.3 is published with partial qualification. Measured benefit,
+clean-agent onboarding, and refreshed native-host acceptance remain open.
+See the [release notes](releases/v3.4.3.md) and [release requirements](release.md).
 
 This roadmap distinguishes the **3.4.3 adoption and ownership package** from
 later ideas. It is not a usage forecast, adoption claim, or endorsement.
@@ -15,7 +16,7 @@ later ideas. It is not a usage forecast, adoption claim, or endorsement.
 | Onboarding | A short first-success path: host compatibility, one chosen provider, and a tiny public example under `examples/first-outcome`. |
 | Contribution and evaluation package | Issue forms, PR template, `SUPPORT.md`, welcoming contributor guide, starter tasks, frozen comparison cases and an offline analyzer that includes native helpers, corrections, and failed attempts. |
 
-## Evidence before release and showcase
+## Remaining qualification and showcase evidence
 
 The [development case](demos/ownership-deadline.md) records actual implementation,
 review, correction, and Codex acceptance of a specific fix. Complete the existing

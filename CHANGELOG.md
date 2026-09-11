@@ -2,14 +2,15 @@
 
 ## [Unreleased]
 
-## [3.4.3] - UNRELEASED
+## [3.4.3] - 2026-09-11
 
-Candidate pending verification. Public
-[PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43) parent tip `c50550e`
-is historical development evidence from that PR; an external execution manifest
-binds the final integrated candidate SHA after integration. No released or
-savings claim; link that PR for actual measurements when collected. Existing
-release and host acceptance gates still apply.
+Published at the maintainer's direction with partial qualification. Independent
+code review, real owned corrections, Astra acceptance, the automated release
+gate, and GitHub CI passed. Measured benefit, clean-agent onboarding, refreshed
+native-host acceptance, and Desktop wait/recovery evidence remain incomplete.
+No savings claim is made. See [PR43](https://github.com/ajhcs/Codex-Co-Engineer/pull/43)
+and the [release notes](docs/releases/v3.4.3.md) for retained failures and limits;
+existing qualification requirements remain unchanged.
 
 ### Added
 
@@ -37,6 +38,10 @@ release and host acceptance gates still apply.
   producer across server processes, and retain lineage through restart.
 
 ### Fixed
+
+- Settle ACP results after persistent-client finalization so immediate runtime
+  close can clean up agents and descendants; retain a deterministic ordering
+  regression and the independently reviewed correction history.
 
 - Point public Grok install docs at the official Grok Build overview and
   document `grok login` / `grok login --device-auth` subscription login for

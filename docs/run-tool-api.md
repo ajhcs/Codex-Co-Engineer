@@ -1,6 +1,6 @@
 # Run tool API
 
-The 3.4.3 candidate additions are role preferences, candidate revisions, and
+The 3.4.3 additions are role preferences, candidate revisions, and
 compact result/usage evidence. Published 3.4.2 does not expose those additions.
 
 Co-Engineer keeps the five-tool MCP catalog. Submit, status, wait, attention,

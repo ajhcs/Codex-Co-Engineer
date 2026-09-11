@@ -38,10 +38,11 @@ Choose a provider, describe the work, and keep talking in the same Codex task.
 | Avoid repeated setup decisions | Existing provider choices and optional remembered repository/provider approval |
 | Review before integrating | Retained branches, output, and handoffs for Codex to inspect |
 
-**New in 3.4.3 (candidate):** external ownership through bounded corrections,
-truthful result evidence, deadline-governed ACP turns, and the onboarding /
-contributor package. This candidate is pending verification; it does not claim
-published savings. Read the [detailed release notes](docs/releases/v3.4.3.md)
+**New in 3.4.3:** external ownership through bounded corrections, truthful
+result evidence, deadline-governed ACP turns, and the onboarding / contributor
+package. Automated checks and independent code review passed. Measured workload
+reduction, clean-agent onboarding, and refreshed native-host acceptance remain
+unverified; no savings claim is made. Read the [detailed release notes](docs/releases/v3.4.3.md)
 and historical [3.4.2 notes](docs/releases/v3.4.2.md) for compatibility and limits.
 
 ## Install and authentication
@@ -58,62 +59,34 @@ Install the CLI and account access for **only the providers you plan to use**.
 The provider table below separates these requirements. Co-Engineer does not
 install or sign you into Grok or Cursor.
 
-### 2. Install published 3.4.2 (stable)
-
-The public `v3.4.3` tag is absent. Use this **stable** path for the released
-plugin. It does **not** include the 3.4.3 candidate onboarding example or
-ownership/revision package.
+### 2. Install 3.4.3
 
 ```bash
-git clone --branch v3.4.2 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.2
-cd Codex-Co-Engineer-3.4.2
+git clone --branch v3.4.3 --single-branch https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-3.4.3
+cd Codex-Co-Engineer-3.4.3
 npm --prefix plugins/codex-co-engineer run setup
 codex plugin marketplace add "$PWD"
 codex plugin add codex-co-engineer@codex-co-engineer
 npm --prefix plugins/codex-co-engineer run setup:check
 ```
 
-Keep this clone as the registered **stable** marketplace source
-(`codex-co-engineer`). Full compatibility notes remain in the
-[3.4.2 release notes](docs/releases/v3.4.2.md).
+### 3. Keep installation identity consistent
 
-### 3. Install the 3.4.3 candidate from public PR43
+The public release keeps the marketplace identity `codex-co-engineer`.
+Keep the clone as its registered marketplace source. Finish or cancel active
+runs before replacing an installed version. For an existing installation,
+remove `codex-co-engineer@codex-co-engineer` with `codex plugin remove` before
+adding it again from the new source. Preserve provider login files and durable
+task state.
 
-The public candidate keeps the **stable** marketplace identity
-`codex-co-engineer` in the shipped marketplace manifest. Prefer a **clean Codex
-installation** (no existing Co-Engineer marketplace/plugin) so registration does
-not collide with published 3.4.2. A separate clean Codex environment remains
-valid for clean onboarding. If older open projects still use that public
-marketplace identity, finish or cancel active runs, then create a distinct local
-marketplace wrapper outside the tracked candidate with the unchanged plugin name
-and exact tested plugin bytes. Remove/re-add alone is not sufficient because
-opening an older project can replace the same-name cache again. Do not rename
-the shipped marketplace manifest or invent install flags to work around a local
-collision. Historical notes alone do not preserve the current host gate.
-
-This tree carries the candidate package (including `examples/first-outcome`);
-current `main` and published `v3.4.2` do not.
-
-```bash
-git clone https://github.com/ajhcs/Codex-Co-Engineer.git Codex-Co-Engineer-pr43
-cd Codex-Co-Engineer-pr43
-git fetch origin pull/43/head:pr-43
-git switch --detach pr-43
-# Capture git identity for qualification evidence (do not invent a SHA):
-git rev-parse HEAD
-git remote get-url origin
-git status --short
-npm --prefix plugins/codex-co-engineer run setup
-codex plugin marketplace add "$PWD"
-codex plugin add codex-co-engineer@codex-co-engineer
-npm --prefix plugins/codex-co-engineer run setup:check
-```
-
-Equivalent branch checkout: `codex/coengineer-autonomous-ownership-20260910`.
-Parent tip `c50550e0a12e6ce8f7564d0e384f52c205640ce5` is **historical development
-evidence** from public PR43 qualification; an external execution manifest binds
-the final integrated candidate SHA after integration. Do not treat a local HEAD
-written into docs as that final SHA.
+If older open projects still use that public marketplace identity, use a
+distinct local marketplace wrapper outside the tracked release, with the
+unchanged plugin name and exact released plugin bytes. Remove/re-add alone is
+not sufficient: opening an older project can replace the same-name cache again.
+Do not rename the shipped marketplace manifest to solve a local collision.
+Prefer a clean Codex environment for onboarding. See the
+[release notes](docs/releases/v3.4.3.md) for upgrade details and qualification
+limits.
 
 Setup installs pinned ACPX, Cursor SDK, and DSH dependencies globally and creates
 key-free DSH configuration. It preserves existing compatible configuration and
@@ -161,10 +134,9 @@ new decision. [Inspect or revoke remembered access](plugins/codex-co-engineer/RE
 ## Your first delegation
 
 Start with [one provider and a small useful outcome](docs/co-engineer-quickstart.md).
-On the **3.4.3 candidate / PR43** tree, the [copyable example](examples/first-outcome/)
-includes a fixed local acceptance check. That example is **not** on current `main`
-or published `v3.4.2`; use the candidate install above (or the
-[PR43 first-outcome path](https://github.com/ajhcs/Codex-Co-Engineer/tree/codex/coengineer-autonomous-ownership-20260910/examples/first-outcome)).
+The [copyable example](examples/first-outcome/) in the 3.4.3 source includes a
+fixed local acceptance check. It is also available directly from the
+[v3.4.3 tag](https://github.com/ajhcs/Codex-Co-Engineer/tree/v3.4.3/examples/first-outcome).
 
 > Use Grok Co-Engineer to review the authentication changes. Report actionable findings.
 
@@ -228,8 +200,8 @@ It does not describe an incomplete run as a verified result.
 
 ## Autonomous engineering ownership
 
-**3.4.3 candidate.** The revision operation and result reporting require this
-candidate install. Verification and the budgeted comparison cohort remain open;
+The revision operation and result reporting require 3.4.3 or newer.
+The budgeted comparison cohort and remaining host qualification stay open;
 see the [release notes](docs/releases/v3.4.3.md) and [scope and roadmap](docs/roadmap.md).
 
 Give Grok or Cursor the complete bounded assignment: relevant preparation,
@@ -268,46 +240,21 @@ The [model-role guide](plugins/codex-co-engineer/skills/delegate-to-co-engineer/
 separates practical suggestions from official model documentation. Co-Engineer
 does not change your Codex model, reasoning effort, or experimental settings.
 
-## Upgrade to 3.4.2
+## Upgrade to 3.4.3
 
-Finish or cancel active runs first. Prefer a **clean** clone; preserve dirty
-development checkouts. While the public `v3.4.3` tag is absent, published 3.4.2
-remains the stable install; the 3.4.3 candidate uses the same marketplace
-identity from PR43.
-
-**Refresh published 3.4.2 (stable marketplace `codex-co-engineer`):**
-
-```bash
-git fetch origin tag v3.4.2
-git switch --detach v3.4.2
-npm --prefix plugins/codex-co-engineer run setup
-codex plugin remove codex-co-engineer@codex-co-engineer
-codex plugin add codex-co-engineer@codex-co-engineer
-npm --prefix plugins/codex-co-engineer run setup:check
-```
-
-**Refresh the 3.4.3 candidate** (same stable shipped marketplace identity
-`codex-co-engineer`; prefer a clean Codex environment, or a distinct local
-marketplace wrapper outside the tracked candidate when older open projects share
-that identity):
-
-```bash
-git fetch origin pull/43/head:pr-43
-git switch --detach pr-43
-git rev-parse HEAD
-npm --prefix plugins/codex-co-engineer run setup
-codex plugin remove codex-co-engineer@codex-co-engineer
-codex plugin add codex-co-engineer@codex-co-engineer
-npm --prefix plugins/codex-co-engineer run setup:check
-```
+Finish or cancel active runs first. Preserve dirty development checkouts and
+use a clean clone of `v3.4.3`, following the installation instructions above.
+Keep the registered source and local marketplace identity consistent; older
+open projects with the same identity can replace the shared plugin cache.
+Use a distinct local wrapper when required, preserving the public manifest and
+exact released plugin bytes.
 
 Start a new Codex session, then check Co-Engineer status. Use the identity from
-`codex plugin list` if it differs. Verify project-scoped `plugin/list` inventory
-and persistence after a connection restart when older projects share the public
-marketplace identity. Existing task receipts and provider accounts are retained.
-Users with a direct Meta Muse profile must migrate to OpenRouter;
-see the [upgrade notes](docs/releases/v3.4.3.md#upgrading) and historical
-[3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
+`codex plugin list` if it differs. Verify project-scoped discovery and installed
+file persistence after a connection restart. Existing task receipts and provider
+accounts are retained. Direct Meta Muse profiles require the unchanged
+OpenRouter migration; see the [upgrade notes](docs/releases/v3.4.3.md#upgrading)
+and historical [3.4.2 notes](docs/releases/v3.4.2.md#upgrading).
 
 ## Troubleshooting
 

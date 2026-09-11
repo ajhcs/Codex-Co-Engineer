@@ -1,6 +1,6 @@
 # Understand a Co-Engineer result
 
-In the 3.4.3 candidate, ordinary run replies include a compact `result_evidence`
+In 3.4.3, ordinary run replies include a compact `result_evidence`
 view. Ask Codex what finished, what needs review, and which decision comes next.
 Ask for the run's diagnostics when you need the detailed outcome and usage
 report. This uses the existing `task` tool with `view: "diagnostics"`.
