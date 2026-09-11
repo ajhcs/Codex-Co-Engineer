@@ -107,6 +107,47 @@ test('bounds the queued ACP events instead of retaining unbounded output', async
   }
 });
 
+test('retains the persistent ACP client before turn result settles', async () => {
+  const value = await fixture('normal', 3_000);
+  let descendantPid;
+  let agentPid;
+  let closed = false;
+  try {
+    const manager = await value.runtime.getManager();
+    const turn = value.runtime.startTurn({
+      handle: value.handle,
+      text: 'hostile-descendant',
+      mode: 'prompt',
+      requestId: 'retain-before-result',
+      timeoutMs: 3_000,
+    });
+    const result = await turn.result;
+    assert.equal(result.status, 'completed');
+    agentPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
+    descendantPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-descendant.pid'), 'utf8'));
+    // Demonstrates the close race gap: if result settles before retain, the
+    // pending map is empty and runtime.close becomes a no-op kill path.
+    assert.equal(
+      manager.pendingPersistentClients.has(value.handle.acpxRecordId),
+      true,
+      'persistent client must be retained before turn.result resolves',
+    );
+    assert.ok(processAlive(agentPid), 'fixture agent should still be running after retain');
+    assert.ok(processAlive(descendantPid), 'fixture descendant should still be running after retain');
+    await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' });
+    closed = true;
+    assert.equal(await waitForProcessExit(agentPid, 1_000), true);
+    assert.equal(await waitForProcessExit(descendantPid), true);
+  } finally {
+    if (!closed) await value.runtime.close({ handle: value.handle, reason: 'test_cleanup' }).catch(() => {});
+    for (const pid of [descendantPid, agentPid]) {
+      if (pid && processAlive(pid)) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+    }
+  }
+});
+
 test('kills hostile detached ACP descendants during runtime close', async () => {
   const value = await fixture('normal', 3_000);
   let descendantPid;
@@ -114,6 +155,7 @@ test('kills hostile detached ACP descendants during runtime close', async () => 
   let closed = false;
   const originalPath = process.env.PATH;
   try {
+    const manager = await value.runtime.getManager();
     const turn = value.runtime.startTurn({
       handle: value.handle,
       text: 'hostile-descendant',
@@ -125,6 +167,10 @@ test('kills hostile detached ACP descendants during runtime close', async () => 
     assert.equal(result.status, 'completed');
     agentPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-agent.pid'), 'utf8'));
     descendantPid = Number(await readFile(path.join(value.cwd, '.acpx-fake-descendant.pid'), 'utf8'));
+    assert.ok(
+      manager.pendingPersistentClients.has(value.handle.acpxRecordId),
+      'close must observe the retained persistent client',
+    );
     assert.ok(processAlive(agentPid), 'fixture agent should still be running before close');
     assert.ok(processAlive(descendantPid), 'fixture descendant should still be running before close');
     // Linux cleanup must not depend on an external process-list command.
