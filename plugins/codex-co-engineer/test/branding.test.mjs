@@ -168,14 +168,13 @@ test('visitor README leads with the product shot and copy/paste install', async 
     assert.equal(readme.includes(stale), false, stale);
   }
 
-  // Public install stays on the published 3.4.2 tag; the unreleased 3.4.3
-  // candidate is distinguished separately (PR43 path) and must not require a
-  // nonexistent v3.4.3 install tag.
-  assert.match(readme, /git clone --branch v3\.4\.2 --single-branch https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
-  assert.doesNotMatch(readme, /git clone --branch v3\.4\.3/u);
-  assert.doesNotMatch(readme, /git fetch origin tag v3\.4\.3/u);
-  assert.match(readme, /3\.4\.3\s+\(candidate\)|In development for 3\.4\.3|unreleased\s+3\.4\.3\s+candidate/iu);
-  assert.match(readme, /PR43|pull\/43/u);
+  // The copyable install must select the published release, while the
+  // qualification limits stay visible beside its feature description.
+  assert.match(readme, /git clone --branch v3\.4\.3 --single-branch https:\/\/github\.com\/ajhcs\/Codex-Co-Engineer\.git/u);
+  assert.doesNotMatch(readme, /git clone --branch v3\.4\.2/u);
+  assert.doesNotMatch(readme, /git fetch origin pull\/43/u);
+  assert.match(readme, /Measured workload\s+reduction, clean-agent onboarding, and refreshed native-host acceptance remain\s+unverified/iu);
+  assert.match(readme, /no savings claim is made/iu);
   assert.match(readme, /codex plugin marketplace add "\$PWD"/u);
   assert.match(readme, /codex plugin add codex-co-engineer@codex-co-engineer/u);
   assert.match(readme, /npm --prefix plugins\/codex-co-engineer run setup/u);
@@ -202,7 +201,7 @@ test('README information architecture maps safe final-art slots and keeps explic
     '## Install and authentication',
     '## Your first delegation',
     '## Provider choices',
-    '## Upgrade to 3.4.2',
+    '## Upgrade to 3.4.3',
     '## Troubleshooting',
     '## Control and data handling',
     '## For integrators and contributors',
