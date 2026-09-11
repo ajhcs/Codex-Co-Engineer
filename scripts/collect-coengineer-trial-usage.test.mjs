@@ -41,8 +41,18 @@ function line(timestamp, type, payload) {
   return `${JSON.stringify({ timestamp, type, payload })}\n`;
 }
 
-function sessionMeta(id, timestamp = '2026-09-11T09:59:00.000Z') {
-  return line(timestamp, 'session_meta', { id, thread_id: id });
+function sessionMeta(id, timestamp = '2026-09-11T09:59:00.000Z', extras = {}) {
+  return line(timestamp, 'session_meta', { id, thread_id: id, ...extras });
+}
+
+function helperSessionMeta(id, parentThreadId, timestamp = '2026-09-11T09:59:00.000Z') {
+  return sessionMeta(id, timestamp, {
+    source: {
+      subagent: {
+        thread_spawn: { parent_thread_id: parentThreadId },
+      },
+    },
+  });
 }
 
 async function writeSession(root, relative, text) {
@@ -1247,4 +1257,497 @@ test('provider_configuration binds structured provider+model without path leaks'
       session_id: 'parent-session',
     }],
   })), { code: 'unknown_key' });
+});
+
+test('helper token_usage may share proven root session_id with exact child thread_id', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(9, 0, 4, 1);
+    const helperU = usage(6, 0, 3, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('example-parent'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default', effort: 'default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'resp-parent-1',
+        thread_id: 'example-parent',
+        session_id: 'example-parent',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+      line('2026-09-11T10:00:20.000Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        agent_thread_id: 'example-child',
+        agent_path: '/root/helper',
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/helper.jsonl', [
+      helperSessionMeta('example-child', 'example-parent'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default', effort: 'default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-helper-1',
+        thread_id: 'example-child',
+        session_id: 'example-parent',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      sessions: [
+        { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+        {
+          id: 'example-child',
+          role: 'native_helper',
+          path: 'sessions/helper.jsonl',
+          parent_id: 'example-parent',
+          agent_path: '/root/helper',
+        },
+      ],
+      phases: [
+        {
+          attempt_id: 'native-initial',
+          kind: 'initial',
+          outcome: 'completed_unaccepted',
+          sequence: 1,
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:02:00.000Z',
+          session_id: 'example-parent',
+        },
+        {
+          attempt_id: 'native-helper',
+          kind: 'native_helper',
+          outcome: 'accepted',
+          sequence: 2,
+          start: '2026-09-11T10:01:00.000Z',
+          end: '2026-09-11T10:01:30.000Z',
+          session_id: 'example-child',
+        },
+      ],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 4);
+    assert.equal(report.trial.attempts[1].usage.native_output_tokens.value, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('nested helper may share original root session_id across proven ancestry', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(8, 0, 3, 1);
+    const midU = usage(5, 0, 2, 0);
+    const nestedU = usage(4, 0, 2, 1);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('example-parent'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default', effort: 'default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'resp-parent-1',
+        thread_id: 'example-parent',
+        session_id: 'example-parent',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+      line('2026-09-11T10:00:20.000Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        agent_thread_id: 'example-mid',
+        agent_path: '/root/mid',
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/mid.jsonl', [
+      helperSessionMeta('example-mid', 'example-parent'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'mid-model', effort: 'low' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-mid-1',
+        thread_id: 'example-mid',
+        session_id: 'example-parent',
+        usage: midU,
+        thread_token_usage: midU,
+      }),
+      line('2026-09-11T10:01:15.000Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        agent_thread_id: 'example-child',
+        agent_path: '/root/nested',
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/nested.jsonl', [
+      helperSessionMeta('example-child', 'example-mid'),
+      line('2026-09-11T10:01:20.000Z', 'turn_context', { model: 'nested-model', effort: 'low' }),
+      line('2026-09-11T10:01:25.000Z', 'token_usage_record', {
+        response_id: 'resp-nested-1',
+        thread_id: 'example-child',
+        session_id: 'example-parent',
+        usage: nestedU,
+        thread_token_usage: nestedU,
+      }),
+    ].join(''));
+    const report = await collectTrialUsage(baseManifest(caseRecord, {
+      sessions: [
+        { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+        {
+          id: 'example-mid',
+          role: 'native_helper',
+          path: 'sessions/mid.jsonl',
+          parent_id: 'example-parent',
+          agent_path: '/root/mid',
+          expected_model: 'mid-model',
+        },
+        {
+          id: 'example-child',
+          role: 'native_helper',
+          path: 'sessions/nested.jsonl',
+          parent_id: 'example-mid',
+          agent_path: '/root/nested',
+          expected_model: 'nested-model',
+        },
+      ],
+      phases: [
+        {
+          attempt_id: 'native-initial',
+          kind: 'initial',
+          outcome: 'completed_unaccepted',
+          sequence: 1,
+          start: '2026-09-11T10:00:00.000Z',
+          end: '2026-09-11T10:01:00.000Z',
+          session_id: 'example-parent',
+        },
+        {
+          attempt_id: 'native-mid',
+          kind: 'native_helper',
+          outcome: 'accepted',
+          sequence: 2,
+          start: '2026-09-11T10:01:00.000Z',
+          end: '2026-09-11T10:01:20.000Z',
+          session_id: 'example-mid',
+        },
+        {
+          attempt_id: 'native-nested',
+          kind: 'native_helper',
+          outcome: 'accepted',
+          sequence: 3,
+          start: '2026-09-11T10:01:20.000Z',
+          end: '2026-09-11T10:01:30.000Z',
+          session_id: 'example-child',
+        },
+      ],
+    }), { sessionsRoot: root });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.trial.attempts[0].usage.native_output_tokens.value, 3);
+    assert.equal(report.trial.attempts[1].usage.native_output_tokens.value, 2);
+    assert.equal(report.trial.attempts[2].usage.native_output_tokens.value, 2);
+    assert.equal(report.breakdown.attempts[1].by_model[0].model, 'mid-model');
+    assert.equal(report.breakdown.attempts[2].by_model[0].model, 'nested-model');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shared session_id without parent linkage or with wrong ids is rejected', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(4, 0, 2, 1);
+    const helperU = usage(3, 0, 1, 0);
+
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('example-parent'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'resp-parent-1',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+    ].join(''));
+
+    // Missing session_meta parent linkage while claiming shared session_id.
+    await writeSession(root, 'sessions/helper-unproven.jsonl', [
+      sessionMeta('example-child'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-helper-1',
+        thread_id: 'example-child',
+        session_id: 'example-parent',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [
+          { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+          {
+            id: 'example-child',
+            role: 'native_helper',
+            path: 'sessions/helper-unproven.jsonl',
+            parent_id: 'example-parent',
+          },
+        ],
+        phases: [
+          {
+            attempt_id: 'native-initial',
+            kind: 'initial',
+            outcome: 'accepted',
+            sequence: 1,
+            start: '2026-09-11T10:00:00.000Z',
+            end: '2026-09-11T10:01:00.000Z',
+            session_id: 'example-parent',
+          },
+          {
+            attempt_id: 'native-helper',
+            kind: 'native_helper',
+            outcome: 'accepted',
+            sequence: 2,
+            start: '2026-09-11T10:01:00.000Z',
+            end: '2026-09-11T10:01:30.000Z',
+            session_id: 'example-child',
+          },
+        ],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+
+    // Unrelated session_id with otherwise valid parent linkage.
+    await writeSession(root, 'sessions/helper-wrong-session.jsonl', [
+      helperSessionMeta('example-child', 'example-parent'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-helper-2',
+        thread_id: 'example-child',
+        session_id: 'unrelated-session',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [
+          { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+          {
+            id: 'example-child',
+            role: 'native_helper',
+            path: 'sessions/helper-wrong-session.jsonl',
+            parent_id: 'example-parent',
+          },
+        ],
+        phases: [
+          {
+            attempt_id: 'native-initial',
+            kind: 'initial',
+            outcome: 'accepted',
+            sequence: 1,
+            start: '2026-09-11T10:00:00.000Z',
+            end: '2026-09-11T10:01:00.000Z',
+            session_id: 'example-parent',
+          },
+          {
+            attempt_id: 'native-helper',
+            kind: 'native_helper',
+            outcome: 'accepted',
+            sequence: 2,
+            start: '2026-09-11T10:01:00.000Z',
+            end: '2026-09-11T10:01:30.000Z',
+            session_id: 'example-child',
+          },
+        ],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+
+    // Parent thread_id used as child usage thread_id.
+    await writeSession(root, 'sessions/helper-parent-thread.jsonl', [
+      helperSessionMeta('example-child', 'example-parent'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-helper-3',
+        thread_id: 'example-parent',
+        session_id: 'example-parent',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [
+          { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+          {
+            id: 'example-child',
+            role: 'native_helper',
+            path: 'sessions/helper-parent-thread.jsonl',
+            parent_id: 'example-parent',
+          },
+        ],
+        phases: [
+          {
+            attempt_id: 'native-initial',
+            kind: 'initial',
+            outcome: 'accepted',
+            sequence: 1,
+            start: '2026-09-11T10:00:00.000Z',
+            end: '2026-09-11T10:01:00.000Z',
+            session_id: 'example-parent',
+          },
+          {
+            attempt_id: 'native-helper',
+            kind: 'native_helper',
+            outcome: 'accepted',
+            sequence: 2,
+            start: '2026-09-11T10:01:00.000Z',
+            end: '2026-09-11T10:01:30.000Z',
+            session_id: 'example-child',
+          },
+        ],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+
+    // Conflicting parent metadata vs manifest parent_id.
+    await writeSession(root, 'sessions/helper-conflict.jsonl', [
+      helperSessionMeta('example-child', 'not-the-manifest-parent'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-helper-4',
+        thread_id: 'example-child',
+        session_id: 'example-child',
+        usage: helperU,
+        thread_token_usage: helperU,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [
+          { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+          {
+            id: 'example-child',
+            role: 'native_helper',
+            path: 'sessions/helper-conflict.jsonl',
+            parent_id: 'example-parent',
+          },
+        ],
+        phases: [
+          {
+            attempt_id: 'native-initial',
+            kind: 'initial',
+            outcome: 'accepted',
+            sequence: 1,
+            start: '2026-09-11T10:00:00.000Z',
+            end: '2026-09-11T10:01:00.000Z',
+            session_id: 'example-parent',
+          },
+          {
+            attempt_id: 'native-helper',
+            kind: 'native_helper',
+            outcome: 'accepted',
+            sequence: 2,
+            start: '2026-09-11T10:01:00.000Z',
+            end: '2026-09-11T10:01:30.000Z',
+            session_id: 'example-child',
+          },
+        ],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('nested helper claiming root session_id without full ancestry proof is rejected', async () => {
+  const cases = await loadCases(CASES_DIR);
+  const caseRecord = cases.find((entry) => entry.id === 'single-file-bugfix');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ce-host-usage-'));
+  try {
+    const parentU = usage(4, 0, 2, 1);
+    const midU = usage(3, 0, 1, 0);
+    const nestedU = usage(2, 0, 1, 0);
+    await writeSession(root, 'sessions/parent.jsonl', [
+      sessionMeta('example-parent'),
+      line('2026-09-11T10:00:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:00:10.000Z', 'token_usage_record', {
+        response_id: 'resp-parent-1',
+        usage: parentU,
+        thread_token_usage: parentU,
+      }),
+    ].join(''));
+    // Mid helper lacks parent_thread_id, so nested cannot prove root ancestry.
+    await writeSession(root, 'sessions/mid.jsonl', [
+      sessionMeta('example-mid'),
+      line('2026-09-11T10:01:01.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:10.000Z', 'token_usage_record', {
+        response_id: 'resp-mid-1',
+        thread_id: 'example-mid',
+        session_id: 'example-mid',
+        usage: midU,
+        thread_token_usage: midU,
+      }),
+    ].join(''));
+    await writeSession(root, 'sessions/nested.jsonl', [
+      helperSessionMeta('example-child', 'example-mid'),
+      line('2026-09-11T10:01:20.000Z', 'turn_context', { model: 'codex-default' }),
+      line('2026-09-11T10:01:25.000Z', 'token_usage_record', {
+        response_id: 'resp-nested-1',
+        thread_id: 'example-child',
+        session_id: 'example-parent',
+        usage: nestedU,
+        thread_token_usage: nestedU,
+      }),
+    ].join(''));
+    await assert.rejects(
+      () => collectTrialUsage(baseManifest(caseRecord, {
+        sessions: [
+          { id: 'example-parent', role: 'parent', path: 'sessions/parent.jsonl' },
+          {
+            id: 'example-mid',
+            role: 'native_helper',
+            path: 'sessions/mid.jsonl',
+            parent_id: 'example-parent',
+          },
+          {
+            id: 'example-child',
+            role: 'native_helper',
+            path: 'sessions/nested.jsonl',
+            parent_id: 'example-mid',
+          },
+        ],
+        phases: [
+          {
+            attempt_id: 'native-initial',
+            kind: 'initial',
+            outcome: 'accepted',
+            sequence: 1,
+            start: '2026-09-11T10:00:00.000Z',
+            end: '2026-09-11T10:01:00.000Z',
+            session_id: 'example-parent',
+          },
+          {
+            attempt_id: 'native-mid',
+            kind: 'native_helper',
+            outcome: 'accepted',
+            sequence: 2,
+            start: '2026-09-11T10:01:00.000Z',
+            end: '2026-09-11T10:01:20.000Z',
+            session_id: 'example-mid',
+          },
+          {
+            attempt_id: 'native-nested',
+            kind: 'native_helper',
+            outcome: 'accepted',
+            sequence: 3,
+            start: '2026-09-11T10:01:20.000Z',
+            end: '2026-09-11T10:01:30.000Z',
+            session_id: 'example-child',
+          },
+        ],
+      }), { sessionsRoot: root }),
+      { code: 'identity_mismatch' },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

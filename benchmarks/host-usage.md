@@ -67,6 +67,12 @@ Primary evidence is `token_usage_record`:
 - Reject conflicting duplicates
 - When emitted, validate `thread_id` / `session_id` against
   `session_meta` / manifest; cross-session records are rejected
+- Helper rows keep an exact child `thread_id`. A shared root/ancestor
+  `session_id` is accepted only when manifest `parent_id` ancestry and
+  `session_meta.source.subagent.thread_spawn.parent_thread_id` linkage both
+  prove the full chain; nested helpers may share the original root session.
+  Unrelated IDs, conflicting parent metadata, unproven ancestors, and a
+  parent's `thread_id` in child usage are rejected
 - Support optional observed `cache_write_input_tokens`; cache stays separate
   from reasoning, and reasoning remains included in output
 - Carry pre-window model/counters and reconcile in-window deltas to cumulative
