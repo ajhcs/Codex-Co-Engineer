@@ -1,0 +1,5 @@
+default_agents = ["codex"]
+nested = false
+
+[gitignore]
+enabled = false
